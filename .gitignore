@@ -1,0 +1,9 @@
+db/
+db_state/
+pgdata/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.DS_Store
+*.parquet

@@ -1,0 +1,12 @@
+services:
+  veo-audit:
+    image: ghcr.io/${GHCR_OWNER:-zneill}/veo-audit:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./db:/app/db
+    environment:
+      # Override any default from the image here if needed
+      VEO_AUDIT_POLL_INTERVAL: "300"
+      VEO_AUDIT_HEALTH_MAX_AGE: "360"
