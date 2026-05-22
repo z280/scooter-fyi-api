@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}cycles · veo-audit admin{% endblock %}
+{% block content %}
+<h1>Observation cycles</h1>
+<p>Page {{ page }} ({{ page_size }} per page).
+  {% if page > 0 %}<a href="?page={{ page - 1 }}&page_size={{ page_size }}">prev</a>{% endif %}
+  {% if rows|length == page_size %}<a href="?page={{ page + 1 }}&page_size={{ page_size }}">next</a>{% endif %}
+</p>
+<table>
+  <thead><tr>
+    <th>start_ts (UTC)</th><th>cycle_id</th><th>job</th><th>tx</th><th>error preview</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><code>{{ r.start_ts }}</code></td>
+      <td><a href="/admin/cycles/{{ r.cycle_id }}"><code>{{ r.cycle_id[:8] }}…</code></a></td>
+      <td class="status-{{ r.job_status }}">{{ r.job_status }}</td>
+      <td>{{ r.transmission_status or '—' }}</td>
+      <td><code>{{ r.error_preview or '' }}</code></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

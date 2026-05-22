@@ -1,12 +1,70 @@
 services:
-  veo-audit:
-    image: ghcr.io/${GHCR_OWNER:-zneill}/veo-audit:latest
+  denver_spatial_db:
+    image: postgres:15
+    container_name: denver_spatial_db
     restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - max_connections=20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 2560M
+    mem_limit: 2560m
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  pipeline_worker:
+    image: ${WORKER_IMAGE:-ghcr.io/zneill/veo-audit:latest}
+    build:
+      context: .
+    container_name: pipeline_worker
+    restart: unless-stopped
+    depends_on:
+      denver_spatial_db:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: denver_spatial_db
+      POSTGRES_PORT: 5432
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME}
+      SENTRY_DSN: ${SENTRY_DSN}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      AUTH_ALLOWED_GITHUB_ORGS: ${AUTH_ALLOWED_GITHUB_ORGS}
+      SESSION_SECRET: ${SESSION_SECRET}
+      VEO_CONFIG: /app/config.json
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data:ro
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    mem_limit: 1024m
     ports:
       - "8080:8080"
-    volumes:
-      - ./db:/app/db
-    environment:
-      # Override any default from the image here if needed
-      VEO_AUDIT_POLL_INTERVAL: "300"
-      VEO_AUDIT_HEALTH_MAX_AGE: "360"
+
+volumes:
+  pgdata:

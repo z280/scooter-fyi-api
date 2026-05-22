@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}regions ({{ layer }}) · veo-audit admin{% endblock %}
+{% block content %}
+<h1>Regions: <code>{{ layer }}</code></h1>
+<p>Snapshot: <code>{{ snapshot_time or 'none' }}</code></p>
+<table>
+  <thead><tr><th>region_name</th><th>total</th><th>bikes</th><th>scooters</th></tr></thead>
+  <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><code>{{ r.region_name }}</code></td>
+        <td>{{ r.count_total }}</td>
+        <td>{{ r.count_bikes }}</td>
+        <td>{{ r.count_scooters }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

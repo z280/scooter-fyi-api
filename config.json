@@ -1,0 +1,87 @@
+{
+  "gbfs": {
+    "url": "https://cluster-prod.veoride.com/api/shares/name/den/gbfs/free_bike_status",
+    "vehicle_types_url": "https://cluster-prod.veoride.com/api/shares/name/den/gbfs/vehicle_types",
+    "timeout_seconds": 30,
+    "user_agent": "veo-audit/3.2"
+  },
+  "schedule": {
+    "cycle_minutes": 10,
+    "archive_hours": 48
+  },
+  "envelope": {
+    "denver_core": {
+      "lat": [39.600000, 39.900000],
+      "lon": [-105.200000, -104.600000]
+    },
+    "china_glitch": {
+      "lat": [20.000000, 40.000000],
+      "lon": [100.000000, 125.000000]
+    }
+  },
+  "boundaries": [
+    {
+      "region_category": "disadvantaged_areas",
+      "region_type": "v1",
+      "file": "/app/data/v1.json",
+      "name_prefix": "V1_",
+      "name_field": null,
+      "name_strategy": "ordinal"
+    },
+    {
+      "region_category": "disadvantaged_areas",
+      "region_type": "v2",
+      "file": "/app/data/v2.json",
+      "name_prefix": "V2_",
+      "name_field": "GEOID20",
+      "name_strategy": "field"
+    },
+    {
+      "region_category": "council_districts",
+      "region_type": "council_district",
+      "file": "/app/data/CD.geojson",
+      "name_prefix": "CD_",
+      "name_field": "DIST_NUM",
+      "name_strategy": "field",
+      "filter_nonnull_field": "DIST_NUM"
+    },
+    {
+      "region_category": "community_networks",
+      "region_type": "community_network",
+      "file": "/app/data/CN.geojson",
+      "name_prefix": "CN_",
+      "name_field": "CN_NAME",
+      "name_strategy": "field_alnum"
+    },
+    {
+      "region_category": "neighborhoods",
+      "region_type": "neighborhood",
+      "file": "/app/data/NB.geojson",
+      "name_prefix": "NB_",
+      "name_field": "NBHD_NAME",
+      "name_strategy": "field_alnum"
+    }
+  ],
+  "transmission": {
+    "endpoints": []
+  },
+  "cors": {
+    "allowed_origins": [
+      "https://scooter.fyi",
+      "https://www.scooter.fyi",
+      "https://weseeyouveo.com",
+      "https://www.weseeyouveo.com"
+    ]
+  },
+  "r2": {
+    "bucket_name": "veo-audit-archive",
+    "endpoint_template": "https://{account_id}.r2.cloudflarestorage.com"
+  },
+  "auth": {
+    "allowed_github_orgs": [],
+    "callback_url": "http://localhost:8080/admin/auth/callback"
+  },
+  "logging": {
+    "level": "INFO"
+  }
+}

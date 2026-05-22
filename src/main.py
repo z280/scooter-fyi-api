@@ -1,30 +1,105 @@
-import sys
-import threading
+"""FastAPI app entry — mounts routers, sets up CORS, sessions, and schedules jobs."""
 
-from .config import V1_POLY_PATH, V2_POLY_PATH
-from .geometry import PolygonIndex, HAVE_SHAPELY
-from .poll import run_loop, _log
-from .server import run_server
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+
+from .archive import run_archive
+from .api_admin import router as admin_router
+from .api_public import router as public_router
+from .config import load, session_secret
+from .cycle import run_once
+from .pg import run_migrations
+from .sentry import init as sentry_init
+
+log = logging.getLogger("veo")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
-def main() -> None:
-    _log(f"veo-audit starting (shapely={HAVE_SHAPELY})")
-    _log(f"Loading v1 polygon: {V1_POLY_PATH}")
-    _log(f"Loading v2 polygon: {V2_POLY_PATH}")
-
-    try:
-        v1 = PolygonIndex(V1_POLY_PATH)
-        v2 = PolygonIndex(V2_POLY_PATH)
-    except Exception as exc:
-        _log(f"FATAL: failed to load polygons: {exc!r}")
-        sys.exit(2)
-
-    flask_thread = threading.Thread(target=run_server, daemon=True, name="flask")
-    flask_thread.start()
-    _log("HTTP server started")
-
-    run_loop(v1, v2)
+_scheduler: AsyncIOScheduler | None = None
 
 
-if __name__ == "__main__":
-    main()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _scheduler
+    sentry_init()
+    log.info("Running migrations…")
+    applied = run_migrations()
+    log.info("Migrations applied this boot: %s", applied or "(none new)")
+
+    cfg = load()
+    _scheduler = AsyncIOScheduler(timezone="UTC")
+    _scheduler.add_job(
+        run_once,
+        trigger=IntervalTrigger(minutes=cfg.schedule.cycle_minutes),
+        id="ingest_cycle",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+        next_run_time=None,  # first run after one interval; manual /admin trigger possible
+    )
+    _scheduler.add_job(
+        run_archive,
+        trigger=IntervalTrigger(hours=cfg.schedule.archive_hours),
+        id="archive_job",
+        max_instances=1,
+        coalesce=True,
+    )
+    _scheduler.start()
+    log.info(
+        "Scheduler started: ingest every %d min, archive every %d hr",
+        cfg.schedule.cycle_minutes, cfg.schedule.archive_hours,
+    )
+
+    # Trigger the first cycle immediately at startup (offset by 5s so the app
+    # is fully ready). APScheduler's `next_run_time=datetime.now()` would work
+    # but spinning it as a one-shot is cleaner.
+    import asyncio
+    asyncio.get_event_loop().call_later(5, lambda: _scheduler.add_job(run_once, id="boot_cycle", replace_existing=True))
+
+    yield
+
+    log.info("Shutting down scheduler…")
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+
+
+app = FastAPI(title="veo-audit", version="3.2", lifespan=lifespan)
+
+_cfg = load()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(_cfg.cors_origins),
+    allow_methods=["GET"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
+app.add_middleware(SessionMiddleware, secret_key=session_secret(), https_only=False)
+
+app.include_router(public_router)
+app.include_router(admin_router)
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return {
+        "service": "veo-audit",
+        "version": "3.2",
+        "endpoints": [
+            "/health",
+            "/api/v1/snapshots/latest",
+            "/api/v1/spatial-snapshot?layer=…",
+            "/api/v1/analytics/trend?layer=…&name=…&range=7d",
+            "/admin",
+        ],
+    }

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}cycle {{ cycle.cycle_id }}{% endblock %}
+{% block content %}
+<p><a href="/admin/cycles">← all cycles</a></p>
+<h1>Cycle <code>{{ cycle.cycle_id }}</code></h1>
+<table>
+  <tr><th>job_status</th><td class="status-{{ cycle.job_status }}">{{ cycle.job_status }}</td></tr>
+  <tr><th>transmission_status</th><td>{{ cycle.transmission_status or '—' }}</td></tr>
+  <tr><th>start_ts</th><td>{{ cycle.start_ts }}</td></tr>
+  <tr><th>data_received_ts</th><td>{{ cycle.data_received_ts or '—' }}</td></tr>
+  <tr><th>processing_complete_ts</th><td>{{ cycle.processing_complete_ts or '—' }}</td></tr>
+  <tr><th>data_storage_complete_ts</th><td>{{ cycle.data_storage_complete_ts or '—' }}</td></tr>
+  <tr><th>transmission_ts</th><td>{{ cycle.transmission_ts or '—' }}</td></tr>
+  <tr><th>gbfs_last_updated</th><td>{{ cycle.gbfs_last_updated or '—' }}</td></tr>
+  <tr><th>gbfs_payload_sha256</th><td><code>{{ cycle.gbfs_payload_sha256 or '' }}</code></td></tr>
+</table>
+
+<h2>data_json_blob</h2>
+<pre>{{ cycle.data_json_blob }}</pre>
+
+{% if cycle.errors %}
+<h2>errors</h2>
+<pre>{{ cycle.errors }}</pre>
+{% endif %}
+
+<h2>Transmission attempts ({{ tx|length }})</h2>
+<table>
+  <thead><tr><th>name</th><th>url</th><th>method</th><th>status</th><th>ts</th><th>error</th></tr></thead>
+  <tbody>
+    {% for t in tx %}
+      <tr>
+        <td>{{ t.endpoint_name }}</td>
+        <td><code>{{ t.url }}{{ t.path }}</code></td>
+        <td>{{ t.method }}</td>
+        <td>{{ t.http_status_code or '—' }}</td>
+        <td><code>{{ t.ts_transmission }}</code></td>
+        <td><code>{{ t.error_details or '' }}</code></td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Related failures ({{ failures|length }})</h2>
+<table>
+  <thead><tr><th>type</th><th>http</th><th>ts</th><th>details</th></tr></thead>
+  <tbody>
+    {% for f in failures %}
+      <tr>
+        <td>{{ f.failure_type }}</td>
+        <td>{{ f.http_status_code or '—' }}</td>
+        <td><code>{{ f.attempt_time }}</code></td>
+        <td><code>{{ f.error_details or '' }}</code></td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
