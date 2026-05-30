@@ -1,0 +1,17 @@
+
+# Local-dev overrides for docker-compose.yml.
+#
+# Copy this file to docker-compose.override.yml and Docker Compose will
+# automatically merge it on top of docker-compose.yml when you run
+# `docker compose up`. The override file is gitignored, so prod is safe.
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   docker compose up --build pipeline_worker denver_spatial_db
+#
+# (Note: bring up only the two real services — `cloudflared` would fail-loop
+# without a valid CLOUDFLARE_TUNNEL_TOKEN.)
+
+services:
+  pipeline_worker:
+    ports:
+      - "8080:8080"     # expose worker on host for browser/curl access

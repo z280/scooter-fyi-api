@@ -8,3 +8,4 @@ __pycache__/
 .DS_Store
 *.parquet
 *.swp
+docker-compose.override.yml

@@ -64,9 +64,7 @@ services:
           memory: 1024M
     mem_limit: 1024m
     # No host port mapping in production: traffic enters via cloudflared.
-    # For local dev (no tunnel), uncomment:
-    # ports:
-    #   - "8080:8080"
+    # For local dev, copy docker-compose.override.yml.example -> docker-compose.override.yml.
     expose:
       - "8080"
 
