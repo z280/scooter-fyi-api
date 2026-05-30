@@ -85,6 +85,7 @@ class AppConfig:
     boundaries: tuple[BoundaryLayer, ...]
     transmission_endpoints: tuple[TransmissionEndpoint, ...]
     cors_origins: tuple[str, ...]
+    cors_origin_patterns: tuple[str, ...]
     r2: R2Config
     auth: AuthConfig
     log_level: str
@@ -137,6 +138,7 @@ def load() -> AppConfig:
         boundaries=_boundaries(raw["boundaries"]),
         transmission_endpoints=_endpoints(raw["transmission"]["endpoints"]),
         cors_origins=tuple(raw["cors"]["allowed_origins"]),
+        cors_origin_patterns=tuple(raw["cors"].get("allowed_origin_patterns", [])),
         r2=R2Config(**raw["r2"]),
         auth=AuthConfig(
             allowed_github_orgs=tuple(raw["auth"]["allowed_github_orgs"]),

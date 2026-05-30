@@ -90,9 +90,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="veo-audit", version="3.2", lifespan=lifespan)
 
 _cfg = load()
+# Combine pattern entries into a single alternation regex if any exist —
+# FastAPI's CORSMiddleware takes one regex via allow_origin_regex.
+# Exact-match origins continue to work via allow_origins (cheaper than regex).
+_cors_regex: str | None = None
+if _cfg.cors_origin_patterns:
+    _cors_regex = "|".join(f"(?:{p})" for p in _cfg.cors_origin_patterns)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(_cfg.cors_origins),
+    allow_origin_regex=_cors_regex,
     allow_methods=["GET"],
     allow_headers=["*"],
     allow_credentials=False,

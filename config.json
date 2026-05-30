@@ -75,6 +75,9 @@
       "https://www.weseeyouveo.com",
       "https://keepdenverfair.com",
       "https://www.keepdenverfair.com"
+    ],
+    "allowed_origin_patterns": [
+      "^https://[a-z0-9-]+\\.denver-scooter-fyi\\.pages\\.dev$"
     ]
   },
   "r2": {

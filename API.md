@@ -39,6 +39,9 @@ GitHub OAuth and are intended for operators only.
 - `https://keepdenverfair.com`
 - `https://www.keepdenverfair.com`
 
+Plus any URL matching the pattern:
+- `https://<anything>.denver-scooter-fyi.pages.dev` (Cloudflare Pages preview deploys for the denver.scooter.fyi static site)
+
 Other origins receive no CORS header (browser-side XHR will fail).
 Server-side fetches from any origin work fine — CORS only applies to
 browsers.

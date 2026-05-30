@@ -122,6 +122,7 @@ def test_core_totals_match_hand_counts(monkeypatch):
         boundaries=boundaries,
         transmission_endpoints=fake_cfg.transmission_endpoints,
         cors_origins=fake_cfg.cors_origins,
+        cors_origin_patterns=fake_cfg.cors_origin_patterns,
         r2=fake_cfg.r2,
         auth=fake_cfg.auth,
         log_level=fake_cfg.log_level,
