@@ -10,7 +10,7 @@ every 48 hours.
 The original purpose was tracking compliance with Denver RFP §3.0 (30%
 of fleet in Equity Areas) — see `VEO_AUDIT.md` for that history. The
 v3.2 architecture (this README) generalizes the pipeline so any future
-frontend (scooter.fyi, weseeyouveo.com, …) can XHR-poll the public REST
+frontend (scooter.fyi, weseeyouveo.com, keepdenverfair.com, …) can XHR-poll the public REST
 API for live state.
 
 ## Architecture
@@ -133,7 +133,7 @@ all the natural ratios — bikes_denver, scooters_v1, all_devices_v2, etc.
 
 ## Public API
 
-All read-only, CORS-locked to `scooter.fyi` / `weseeyouveo.com`:
+All read-only, CORS-locked to `scooter.fyi` / `weseeyouveo.com` / `keepdenverfair.com`:
 
 | Endpoint | Returns |
 |---|---|

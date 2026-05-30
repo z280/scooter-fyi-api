@@ -34,6 +34,8 @@ GitHub OAuth and are intended for operators only.
 - `https://www.scooter.fyi`
 - `https://weseeyouveo.com`
 - `https://www.weseeyouveo.com`
+- `https://keepdenverfair.com`
+- `https://www.keepdenverfair.com`
 
 Other origins receive no CORS header (browser-side XHR will fail).
 Server-side fetches from any origin work fine — CORS only applies to
