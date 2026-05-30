@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +17,7 @@ from .api_admin import router as admin_router
 from .api_public import router as public_router
 from .config import load, session_https_only, session_secret
 from .cycle import run_once
+from .daily_sla import run_daily as run_daily_sla
 from .pg import run_migrations
 from .sentry import init as sentry_init
 
@@ -55,9 +57,20 @@ async def lifespan(app: FastAPI):
         max_instances=1,
         coalesce=True,
     )
+    # Daily SLA window — runs at 9:00 AM Denver time (DST-aware via
+    # zoneinfo). Computes the just-closed 6–9 AM compliance window.
+    _scheduler.add_job(
+        run_daily_sla,
+        trigger=CronTrigger(hour=9, minute=0, timezone="America/Denver"),
+        id="daily_sla_window",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,   # if worker was down, still run within an hour
+    )
     _scheduler.start()
     log.info(
-        "Scheduler started: ingest every %d min, archive every %d hr",
+        "Scheduler started: ingest every %d min, archive every %d hr, "
+        "daily SLA at 09:00 America/Denver",
         cfg.schedule.cycle_minutes, cfg.schedule.archive_hours,
     )
 

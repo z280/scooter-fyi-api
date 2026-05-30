@@ -6,7 +6,7 @@ CORS is mounted at the app level in src/main.py.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -168,4 +168,104 @@ def analytics_trend(
             }
             for r in rows
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Daily SLA compliance (6 AM-9 AM Denver window)
+# ---------------------------------------------------------------------------
+def _daily_row_to_dict(cur, row) -> dict[str, Any]:
+    if row is None:
+        return {}
+    d = {}
+    for desc, v in zip(cur.description, row):
+        if isinstance(v, datetime):
+            d[desc.name] = v.isoformat()
+        elif isinstance(v, date_cls):
+            d[desc.name] = v.isoformat()
+        elif v is None:
+            d[desc.name] = None
+        else:
+            # NUMERIC comes back as Decimal — make it JSON-safe
+            try:
+                d[desc.name] = float(v)
+            except (TypeError, ValueError):
+                d[desc.name] = v
+    # snapshot_count should stay an int
+    if "snapshot_count" in d and d["snapshot_count"] is not None:
+        d["snapshot_count"] = int(d["snapshot_count"])
+    # booleans should stay booleans (float() above would coerce)
+    for k in ("compliance_v1_pass", "compliance_v2_pass"):
+        if k in d and d[k] is not None:
+            d[k] = bool(d[k])
+    return d
+
+
+@router.get("/api/v1/compliance/daily/latest")
+def daily_compliance_latest() -> dict[str, Any]:
+    """Most recent computed daily SLA window."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM daily_sla_compliance ORDER BY sla_date DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(503, detail="no daily SLA rows computed yet")
+            return _daily_row_to_dict(cur, row)
+
+
+@router.get("/api/v1/compliance/daily")
+def daily_compliance_one(
+    date: str = Query(..., description="Denver-local date, YYYY-MM-DD"),
+) -> dict[str, Any]:
+    """SLA window for a single Denver-local date."""
+    try:
+        d = date_cls.fromisoformat(date)
+    except ValueError as e:
+        raise HTTPException(400, detail=f"bad date format: {e}")
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM daily_sla_compliance WHERE sla_date = %s",
+                (d,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, detail=f"no SLA row for {date}")
+            return _daily_row_to_dict(cur, row)
+
+
+@router.get("/api/v1/compliance/daily/range")
+def daily_compliance_range(
+    start: str = Query(..., description="inclusive start date YYYY-MM-DD"),
+    end: str | None = Query(None, description="inclusive end date; default today"),
+    limit: int = Query(366, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Range of daily SLA rows, ascending."""
+    try:
+        d_start = date_cls.fromisoformat(start)
+        d_end = date_cls.fromisoformat(end) if end else date_cls.today()
+    except ValueError as e:
+        raise HTTPException(400, detail=f"bad date format: {e}")
+    if d_end < d_start:
+        raise HTTPException(400, detail="end < start")
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM daily_sla_compliance
+                WHERE sla_date >= %s AND sla_date <= %s
+                ORDER BY sla_date ASC
+                LIMIT %s
+                """,
+                (d_start, d_end, limit),
+            )
+            rows = [_daily_row_to_dict(cur, r) for r in cur.fetchall()]
+    return {
+        "start": d_start.isoformat(),
+        "end": d_end.isoformat(),
+        "count": len(rows),
+        "rows": rows,
     }

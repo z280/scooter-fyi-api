@@ -275,6 +275,120 @@ GET /api/v1/analytics/trend?layer=neighborhood&name=NB_FivePoints&range=24h
 
 ---
 
+---
+
+### `GET /api/v1/compliance/daily/latest`
+
+Most recent daily 6 AM – 9 AM Denver SLA window. **This is the contractually-correct compliance metric per License Exhibit B** — the every-10-min `/snapshots/latest` value is informational, but the binding SLA is the morning-window daily average. Computed once per day at 9:00 AM Denver time.
+
+**Request:**
+```http
+GET /api/v1/compliance/daily/latest
+```
+
+**Response 200:**
+```json
+{
+  "sla_date": "2026-05-30",
+  "window_start_ts": "2026-05-30T12:00:00+00:00",
+  "window_end_ts": "2026-05-30T15:00:00+00:00",
+  "snapshot_count": 18,
+  "avg_total_devices_denver": 5874.39,
+  "avg_total_devices_v1": 1281.50,
+  "avg_total_devices_v2": 944.22,
+  "avg_total_bike_denver": 4011.06,
+  "avg_total_bike_v1": 847.94,
+  "avg_total_bike_v2": 599.83,
+  "avg_total_scooter_denver": 1863.33,
+  "avg_total_scooter_v1": 433.56,
+  "avg_total_scooter_v2": 344.39,
+  "avg_total_not_in_denver": 11.78,
+  "avg_percent_all_devices_v1": 21.82,
+  "avg_percent_all_devices_v2": 16.07,
+  "avg_percent_all_bikes_v1": 21.14,
+  "avg_percent_all_bikes_v2": 14.95,
+  "avg_percent_all_scooters_v1": 23.27,
+  "avg_percent_all_scooters_v2": 18.48,
+  "avg_percent_bikes_denver": 68.29,
+  "avg_percent_scooters_denver": 31.71,
+  "avg_percent_bikes_v1": 66.16,
+  "avg_percent_scooters_v1": 33.84,
+  "avg_percent_bikes_v2": 63.52,
+  "avg_percent_scooters_v2": 36.48,
+  "compliance_v1_pass": false,
+  "compliance_v2_pass": false,
+  "computed_at": "2026-05-30T15:00:08+00:00"
+}
+```
+
+**Response 503:** No daily row computed yet (first run pending, or pipeline just deployed).
+```json
+{ "detail": "no daily SLA rows computed yet" }
+```
+
+#### Field reference
+
+| Field | Type | Description |
+|---|---|---|
+| `sla_date` | string (date) | Denver-local date the window covers (YYYY-MM-DD). |
+| `window_start_ts` | string | 6:00 AM Denver expressed as UTC. |
+| `window_end_ts` | string | 9:00 AM Denver expressed as UTC. |
+| `snapshot_count` | int | Number of cycles whose `snapshot_time` fell inside the window. Typically 18 (3 hours × 6 cycles/hour). Lower values indicate cycle misses; 0 means no data. |
+| `avg_*` fields | float \| null | Arithmetic mean of the corresponding `snapshot_metadata_core` field across all snapshots in the window. Null when `snapshot_count == 0`. |
+| `compliance_v1_pass` | bool \| null | `avg_percent_all_devices_v1 >= 30`. The primary SLA boolean. Null when no data. |
+| `compliance_v2_pass` | bool \| null | Same for v2. The contractually-binding map (v1 vs v2) is being confirmed with DOTI; track both for now. |
+| `computed_at` | string | UTC timestamp of when this row was computed. |
+
+---
+
+### `GET /api/v1/compliance/daily?date=YYYY-MM-DD`
+
+The daily SLA window for a specific Denver-local date. Useful for history/playback.
+
+**Request:**
+```http
+GET /api/v1/compliance/daily?date=2026-05-30
+```
+
+Returns the same shape as `/api/v1/compliance/daily/latest`. Returns `404` if no row exists for that date (either no data was collected, or backfill hasn't been run).
+
+---
+
+### `GET /api/v1/compliance/daily/range?start=YYYY-MM-DD&end=YYYY-MM-DD&limit=N`
+
+A range of daily SLA windows, ascending by date. Use for compliance dashboards (rolling 30-day, monthly, etc.).
+
+**Query parameters:**
+
+| Name | Type | Required | Default |
+|---|---|---|---|
+| `start` | YYYY-MM-DD | yes | — |
+| `end` | YYYY-MM-DD | no | today |
+| `limit` | int | no | 366 (max 1000) |
+
+**Request:**
+```http
+GET /api/v1/compliance/daily/range?start=2026-05-16&end=2026-05-30
+```
+
+**Response 200:**
+```json
+{
+  "start": "2026-05-16",
+  "end": "2026-05-30",
+  "count": 15,
+  "rows": [
+    { "sla_date": "2026-05-16", "snapshot_count": 11, "avg_percent_all_devices_v1": 19.84, "compliance_v1_pass": false, /* … all other fields … */ },
+    { "sla_date": "2026-05-17", "snapshot_count": 18, "avg_percent_all_devices_v1": 20.71, "compliance_v1_pass": false, /* … */ },
+    /* … */
+  ]
+}
+```
+
+Days without any computed row are simply omitted from `rows` — don't expect dense coverage immediately after deploy or during pipeline outages.
+
+---
+
 ## Layer reference
 
 The five layers, their `region_type` values (used in `layer=` query
@@ -329,6 +443,7 @@ NB_Windsor
 
 ### Compliance gauge ("are we above 30%?")
 
+For an **at-a-glance current reading**, use the every-10-min snapshot:
 ```javascript
 const r = await fetch("https://data.scooter.fyi/api/v1/snapshots/latest");
 const s = await r.json();
@@ -338,6 +453,28 @@ document.querySelector("#gauge").textContent =
   v1Pct === null ? "no data" : `${v1Pct.toFixed(1)}%`;
 document.querySelector("#status").textContent =
   compliant ? "✅ compliant" : "⚠️ below threshold";
+```
+
+For the **contractually-binding daily reading** (License Exhibit B: "Daily deployment average during the 6am-9:00am window"), use the daily SLA endpoint instead:
+```javascript
+const r = await fetch("https://data.scooter.fyi/api/v1/compliance/daily/latest");
+const d = await r.json();
+const v1Pct = d.avg_percent_all_devices_v1;       // 6-9 AM Denver mean
+document.querySelector("#sla-gauge").textContent =
+  v1Pct === null ? "pending" : `${v1Pct.toFixed(1)}% (SLA)`;
+document.querySelector("#sla-date").textContent = `for ${d.sla_date}`;
+document.querySelector("#sla-status").textContent =
+  d.compliance_v1_pass ? "✅ daily SLA met" : "⚠️ daily SLA missed";
+```
+
+For a **rolling compliance dashboard** (e.g. last 30 days):
+```javascript
+const since = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10);
+const r = await fetch(`https://data.scooter.fyi/api/v1/compliance/daily/range?start=${since}`);
+const { rows } = await r.json();
+const passing = rows.filter(d => d.compliance_v1_pass).length;
+const pct = rows.length ? Math.round(passing / rows.length * 100) : 0;
+document.querySelector("#thirty-day").textContent = `${passing} / ${rows.length} days passed (${pct}%)`;
 ```
 
 ### Live choropleth (color neighborhoods by device density)
