@@ -56,8 +56,11 @@ services:
       SESSION_SECRET: ${SESSION_SECRET}
       VEO_CONFIG: /app/config.json
     volumes:
+      # config.json is mounted so prod can swap it without rebuilding the image.
       - ./config.json:/app/config.json:ro
-      - ./data:/app/data:ro
+      # data/ is intentionally NOT mounted — the boundary files are baked into
+      # the image (see Dockerfile). Mounting the host's (empty) ./data dir
+      # here would mask the baked-in files and break boundary loading.
     deploy:
       resources:
         limits:
