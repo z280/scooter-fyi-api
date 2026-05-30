@@ -10,7 +10,7 @@ from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import HTTPException, Request
 from starlette.responses import RedirectResponse
 
-from .config import allowed_github_orgs, oidc_credentials
+from .config import allowed_github_orgs, load, oidc_credentials
 
 log = logging.getLogger(__name__)
 
@@ -48,8 +48,13 @@ def _user_orgs(token: str) -> set[str]:
 async def login(request: Request) -> RedirectResponse:
     if not init_oauth():
         raise HTTPException(503, "Admin auth not configured (missing OIDC_CLIENT_ID/SECRET)")
-    redirect_uri = request.url_for("auth_callback")
-    return await oauth.github.authorize_redirect(request, str(redirect_uri))
+    # Use the explicitly-configured callback URL rather than url_for's dynamic
+    # construction. Behind Cloudflare Tunnel the worker sees http:// internally
+    # even though the user-facing connection is https://, so url_for would
+    # produce a redirect_uri GitHub doesn't recognize. This value must match
+    # the OAuth App's Authorization callback URL exactly.
+    redirect_uri = load().auth.callback_url
+    return await oauth.github.authorize_redirect(request, redirect_uri)
 
 
 async def callback(request: Request) -> RedirectResponse:

@@ -22,4 +22,11 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     VEO_CONFIG=/app/config.json
 
-ENTRYPOINT ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# --proxy-headers + --forwarded-allow-ips="*" so the worker honors
+# X-Forwarded-Proto/For from cloudflared (which sits on the same Docker
+# network, not 127.0.0.1). Without these flags, FastAPI's url_for and
+# request.url.scheme would report "http" even on HTTPS requests, breaking
+# OAuth redirects and any other URL construction.
+ENTRYPOINT ["uvicorn", "src.main:app", \
+            "--host", "0.0.0.0", "--port", "8080", \
+            "--proxy-headers", "--forwarded-allow-ips=*"]
