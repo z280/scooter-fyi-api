@@ -31,7 +31,7 @@ services:
       - "127.0.0.1:5432:5432"
 
   pipeline_worker:
-    image: ${WORKER_IMAGE:-ghcr.io/zneill/veo-audit:latest}
+    image: ${WORKER_IMAGE:-ghcr.io/z280/veo-audit:latest}
     build:
       context: .
     container_name: pipeline_worker
