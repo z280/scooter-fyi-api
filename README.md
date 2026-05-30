@@ -17,7 +17,7 @@ API for live state.
 
 ```
 Veo GBFS feed                                Browser
-     │   every 10 min                              │ https://admin.scooter.fyi
+     │   every 10 min                              │ https://data.scooter.fyi
      ▼                                             ▼
 ┌──────────────────────────┐               ┌────────────────┐
 │  pipeline_worker         │ ◄───────────► │   cloudflared  │   Cloudflare Tunnel
@@ -144,7 +144,7 @@ All read-only, CORS-locked to `scooter.fyi` / `weseeyouveo.com`:
 
 ## Admin panel
 
-At `https://admin.scooter.fyi/admin`, behind GitHub OAuth. Reached via
+At `https://data.scooter.fyi/admin`, behind GitHub OAuth. Reached via
 Cloudflare Tunnel (`cloudflared` sidecar) — the VPS does not expose port
 80 or 443 to the internet. Users must be members of an org in
 `AUTH_ALLOWED_GITHUB_ORGS`. Read-only views:
@@ -196,7 +196,7 @@ Required GitHub Secrets:
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Postgres credentials |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | Cloudflare R2 token scoped to one bucket |
 | `SENTRY_DSN` | optional; blank disables Sentry |
-| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | GitHub OAuth App; callback `https://admin.scooter.fyi/admin/auth/callback` |
+| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | GitHub OAuth App; callback `https://data.scooter.fyi/admin/auth/callback` |
 | `AUTH_ALLOWED_GITHUB_ORGS` | comma-separated, e.g. `z280` |
 | `SESSION_SECRET` | `openssl rand -hex 32` |
 | `CLOUDFLARE_TUNNEL_TOKEN` | from Cloudflare Zero Trust → Networks → Tunnels (see below) |
@@ -225,7 +225,7 @@ edge, so the VPS doesn't expose any ports to the internet.
    public API, e.g. `api.scooter.fyi` → `pipeline_worker:8080`.
 5. GitHub OAuth App → **Settings** → set
    **Authorization callback URL** to
-   `https://admin.scooter.fyi/admin/auth/callback`.
+   `https://data.scooter.fyi/admin/auth/callback`.
 
 Adding/changing routes after the first deploy is a dashboard operation —
 no redeploy needed. Rotating the token does require updating the GitHub
