@@ -22,9 +22,54 @@ from .config import load
 from .cycle import run_once
 from .daily_sla import run_daily
 from .pg import connection, run_migrations
-from .sentry import capture_exception, init as sentry_init
+from .sentry import capture_exception, init as sentry_init, monitor
 
 log = logging.getLogger("veo.cli")
+
+
+# Sentry Cron Monitors — Sentry auto-creates these on first check-in using
+# the schedule embedded below. Match the cron expressions in /app/crontab.
+# checkin_margin = how late a check-in can arrive before counting as missed
+# max_runtime = how long a run can take before Sentry alerts on a stuck job
+_MONITOR_INGEST = {
+    "schedule": {"type": "crontab", "value": "*/10 * * * *"},
+    "timezone": "America/Denver",
+    "checkin_margin": 2,    # minutes
+    "max_runtime": 5,
+    "failure_issue_threshold": 2,   # alert after 2 consecutive failures
+    "recovery_threshold": 1,
+}
+_MONITOR_DAILY_SLA = {
+    "schedule": {"type": "crontab", "value": "0 9 * * *"},
+    "timezone": "America/Denver",
+    "checkin_margin": 10,
+    "max_runtime": 5,
+    "failure_issue_threshold": 1,
+    "recovery_threshold": 1,
+}
+_MONITOR_ARCHIVE = {
+    "schedule": {"type": "crontab", "value": "0 2 * * *"},
+    "timezone": "America/Denver",
+    "checkin_margin": 30,
+    "max_runtime": 30,
+    "failure_issue_threshold": 1,
+    "recovery_threshold": 1,
+}
+
+
+@monitor(slug="ingest_cycle", monitor_config=_MONITOR_INGEST)
+def _cli_ingest_cycle():
+    return run_once()
+
+
+@monitor(slug="daily_sla", monitor_config=_MONITOR_DAILY_SLA)
+def _cli_daily_sla():
+    return run_daily()
+
+
+@monitor(slug="archive_if_due", monitor_config=_MONITOR_ARCHIVE)
+def _cli_archive_if_due():
+    return archive_if_due()
 
 
 def _last_archive_ts() -> datetime | None:
@@ -65,9 +110,9 @@ def archive_if_due() -> dict | None:
 
 
 COMMANDS = {
-    "ingest_cycle":    lambda: run_once(),
-    "archive_if_due":  archive_if_due,
-    "daily_sla":       lambda: run_daily(),
+    "ingest_cycle":    _cli_ingest_cycle,
+    "archive_if_due":  _cli_archive_if_due,
+    "daily_sla":       _cli_daily_sla,
     "migrate":         lambda: run_migrations(),
 }
 

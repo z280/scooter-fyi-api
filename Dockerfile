@@ -27,6 +27,8 @@ COPY sql/ sql/
 COPY src/ src/
 COPY config.json .
 COPY crontab /app/crontab
+COPY scripts/run-scheduler.sh /usr/local/bin/run-scheduler.sh
+RUN chmod +x /usr/local/bin/run-scheduler.sh
 
 EXPOSE 8080
 

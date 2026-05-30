@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}edit crontab · veo-audit admin{% endblock %}
+{% block content %}
+<p><a href="/admin/scheduler">← back to scheduler</a></p>
+<h1>Edit crontab</h1>
+
+<p>Saved changes are validated via <code>supercronic -test</code> before
+being written. The scheduler container picks up changes within ~15 seconds
+via mtime polling — no container restart needed. Each line is a standard
+5-field cron entry plus an optional <code>TZ=…</code> directive at the top.</p>
+
+<p style="font-size: 12px; opacity: 0.7;">source: <code>{{ source }}</code></p>
+
+{% if saved %}
+  <p style="background: #d4edda; color: #155724; padding: 8px 12px; border-radius: 4px;">
+    ✅ Crontab saved. supercronic will pick up the change within ~15 s.
+  </p>
+{% endif %}
+
+{% if error %}
+  <p style="background: #f8d7da; color: #721c24; padding: 8px 12px; border-radius: 4px;">
+    ❌ Validation failed:
+    <br><code style="white-space: pre-wrap;">{{ error }}</code>
+  </p>
+{% endif %}
+
+<form method="post" action="/admin/scheduler/edit">
+  <textarea name="crontab" rows="18" style="width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; padding: 8px; box-sizing: border-box;">{{ crontab }}</textarea>
+  <p style="margin-top: 12px;">
+    <button type="submit" name="action" value="save"
+      style="padding: 6px 16px; background: #2a7; color: white; border: 0; border-radius: 3px; cursor: pointer;">
+      Save
+    </button>
+    <button type="submit" name="action" value="reset"
+      onclick="return confirm('Replace with the image default crontab? Your current edits will be lost.')"
+      style="padding: 6px 16px; background: #888; color: white; border: 0; border-radius: 3px; cursor: pointer; margin-left: 8px;">
+      Reset to default
+    </button>
+  </p>
+</form>
+
+<details style="margin-top: 24px;">
+  <summary>Image default (for reference)</summary>
+  <pre>{{ default_crontab }}</pre>
+</details>
+
+<h2>Available commands</h2>
+<p>Any cron entry should invoke one of these via <code>python -m src.cli &lt;cmd&gt;</code>:</p>
+<ul>
+  <li><code>ingest_cycle</code> — fetch GBFS + compute + write to Postgres</li>
+  <li><code>archive_if_due</code> — flush <code>raw_telemetry_points</code> to R2 only if 48h have elapsed since the last successful archive</li>
+  <li><code>daily_sla</code> — compute today's 6–9 AM Denver compliance window</li>
+  <li><code>migrate</code> — apply any pending SQL migrations (idempotent)</li>
+</ul>
+{% endblock %}

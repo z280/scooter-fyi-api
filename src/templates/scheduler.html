@@ -9,7 +9,9 @@ the crontab below. Container TZ is <code>America/Denver</code>, so the
 9 AM daily SLA job is DST-aware. The ingest job's cadence drifts by 60
 minutes twice a year at DST transitions.</p>
 
-<h2>Active crontab</h2>
+<p style="margin: 16px 0;"><strong>Active crontab</strong> &mdash;
+<a href="/admin/scheduler/edit">edit</a></p>
+<p style="font-size: 12px; opacity: 0.7;">source: <code>{{ crontab_source }}</code></p>
 <pre>{{ crontab or '(crontab file not found)' }}</pre>
 
 <h2>Recent cycle cadence (last 30)</h2>

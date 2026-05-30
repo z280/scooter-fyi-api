@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -172,22 +175,63 @@ def failures(request: Request, user: dict = Depends(auth.require_admin)):
     return _render("failures.html", user=user, rows=rows)
 
 
+# Crontab file locations:
+#   STATE_CRONTAB — the editable copy on the shared volume; what supercronic
+#                   actually executes. /admin/scheduler/edit writes here.
+#   DEFAULT_CRONTAB — the baked-in image default. Used as a fallback display
+#                     and the source for the "Reset to default" button.
+_STATE_CRONTAB = Path(os.environ.get("CRONTAB_STATE_PATH", "/app/state/crontab"))
+_DEFAULT_CRONTAB = Path(os.environ.get("CRONTAB_DEFAULT_PATH", "/app/crontab"))
+
+
+def _read_active_crontab() -> tuple[str, str]:
+    """Return (text, source-label). Prefers the editable state file; falls
+    back to the baked default; finally falls back to the repo file for
+    local dev outside the container."""
+    if _STATE_CRONTAB.exists():
+        return _STATE_CRONTAB.read_text(), str(_STATE_CRONTAB)
+    if _DEFAULT_CRONTAB.exists():
+        return _DEFAULT_CRONTAB.read_text(), str(_DEFAULT_CRONTAB) + " (default; not yet seeded to state)"
+    repo_fallback = Path(__file__).resolve().parents[1] / "crontab"
+    if repo_fallback.exists():
+        return repo_fallback.read_text(), str(repo_fallback) + " (local dev)"
+    return "", "(no crontab file found)"
+
+
+def _validate_crontab(text: str) -> tuple[bool, str]:
+    """Use supercronic's -test flag to validate a proposed crontab.
+    Returns (ok, message). The same image runs in the worker container,
+    so the supercronic binary is on the path."""
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".crontab", delete=False, prefix="proposed-"
+    ) as f:
+        f.write(text)
+        proposed_path = f.name
+    try:
+        result = subprocess.run(
+            ["supercronic", "-test", proposed_path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return True, "valid"
+        return False, (result.stderr or result.stdout or "validation failed").strip()
+    except FileNotFoundError:
+        return False, "supercronic binary not found in worker container"
+    except subprocess.TimeoutExpired:
+        return False, "supercronic -test timed out"
+    finally:
+        try:
+            os.unlink(proposed_path)
+        except OSError:
+            pass
+
+
 @router.get("/scheduler", response_class=HTMLResponse)
 def scheduler_status(request: Request, user: dict = Depends(auth.require_admin)):
-    """Show the active crontab + recent cycle cadence for diagnosing drift.
-
-    Scheduling lives in the supercronic-driven `scheduler` container, not in
-    this process. So we show the crontab file's contents (the authoritative
-    schedule) and the observed cadence from observation_cycles."""
-    crontab_text = ""
-    crontab_path = Path("/app/crontab")
-    if crontab_path.exists():
-        crontab_text = crontab_path.read_text()
-    else:
-        # Local dev fallback — repo-rooted file
-        local_path = Path(__file__).resolve().parents[1] / "crontab"
-        if local_path.exists():
-            crontab_text = local_path.read_text()
+    """Show the active crontab + recent cycle cadence for diagnosing drift."""
+    crontab_text, crontab_source = _read_active_crontab()
 
     # Recent cycles + observed gap (minutes between consecutive start_ts)
     recent = []
@@ -213,7 +257,90 @@ def scheduler_status(request: Request, user: dict = Depends(auth.require_admin))
                     "gap_minutes": round(float(r[2]), 2) if r[2] is not None else None,
                 })
 
-    return _render("scheduler.html", user=user, crontab=crontab_text, recent=recent)
+    return _render(
+        "scheduler.html",
+        user=user,
+        crontab=crontab_text,
+        crontab_source=crontab_source,
+        recent=recent,
+    )
+
+
+@router.get("/scheduler/edit", response_class=HTMLResponse)
+def scheduler_edit_form(
+    request: Request,
+    user: dict = Depends(auth.require_admin),
+    error: str | None = Query(None),
+    saved: bool = Query(False),
+):
+    """Render the textarea editor with current crontab contents."""
+    text, source = _read_active_crontab()
+    default_text = _DEFAULT_CRONTAB.read_text() if _DEFAULT_CRONTAB.exists() else ""
+    return _render(
+        "scheduler_edit.html",
+        user=user,
+        crontab=text,
+        source=source,
+        default_crontab=default_text,
+        error=error,
+        saved=saved,
+    )
+
+
+def _csrf_ok(request: Request) -> bool:
+    """Lightweight CSRF check: the Origin or Referer header on a POST must
+    match this app's own host. Belt-and-suspenders since SameSite=lax
+    already blocks cross-site POSTs, but cheap to add."""
+    host = request.headers.get("host")
+    if not host:
+        return False
+    for header in ("origin", "referer"):
+        v = request.headers.get(header)
+        if v and host in v:
+            return True
+    return False
+
+
+@router.post("/scheduler/edit")
+def scheduler_edit_save(
+    request: Request,
+    crontab: str = Form(...),
+    action: str = Form("save"),
+    user: dict = Depends(auth.require_admin),
+):
+    """Validate via `supercronic -test`, then write to the shared volume.
+    supercronic in the scheduler container picks it up within ~15s via
+    its mtime-poll wrapper."""
+    if not _csrf_ok(request):
+        return RedirectResponse(
+            url="/admin/scheduler/edit?error=" + "cross-site+request+blocked",
+            status_code=303,
+        )
+
+    if action == "reset":
+        if not _DEFAULT_CRONTAB.exists():
+            return RedirectResponse(
+                url="/admin/scheduler/edit?error=default+crontab+not+found",
+                status_code=303,
+            )
+        new_text = _DEFAULT_CRONTAB.read_text()
+    else:
+        new_text = crontab.replace("\r\n", "\n")  # normalize browser line endings
+        if not new_text.endswith("\n"):
+            new_text += "\n"
+
+    ok, msg = _validate_crontab(new_text)
+    if not ok:
+        # URL-encode the error so it survives the redirect
+        from urllib.parse import quote
+        return RedirectResponse(
+            url="/admin/scheduler/edit?error=" + quote(msg)[:500],
+            status_code=303,
+        )
+
+    _STATE_CRONTAB.parent.mkdir(parents=True, exist_ok=True)
+    _STATE_CRONTAB.write_text(new_text)
+    return RedirectResponse(url="/admin/scheduler/edit?saved=1", status_code=303)
 
 
 @router.get("/regions", response_class=HTMLResponse)

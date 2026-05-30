@@ -58,6 +58,9 @@ services:
     volumes:
       # config.json is mounted so prod can swap it without rebuilding the image.
       - ./config.json:/app/config.json:ro
+      # Shared with the scheduler container so /admin/scheduler/edit can
+      # write to the live crontab and supercronic reloads within ~15s.
+      - scheduler_state:/app/state
       # data/ is intentionally NOT mounted — the boundary files are baked into
       # the image (see Dockerfile). Mounting the host's (empty) ./data dir
       # here would mask the baked-in files and break boundary loading.
@@ -71,10 +74,11 @@ services:
     expose:
       - "8080"
 
-  # Cron scheduler: runs supercronic with the baked-in /app/crontab.
-  # Same image as pipeline_worker so the src.cli module + boundary data are
-  # available. Runs independently of the worker process — if uvicorn crashes,
-  # the schedule keeps firing and writing failures to api_failures.
+  # Cron scheduler: runs run-scheduler.sh, which supervises supercronic
+  # against an admin-editable crontab on a shared volume. Same image as
+  # pipeline_worker so the src.cli module + boundary data are available.
+  # The schedule keeps firing even when uvicorn crashes; the worker can
+  # restart freely without resetting cron timing.
   scheduler:
     image: ${WORKER_IMAGE:-ghcr.io/z280/veo-audit:latest}
     build:
@@ -101,7 +105,11 @@ services:
       TZ: America/Denver
     volumes:
       - ./config.json:/app/config.json:ro
-    command: ["supercronic", "-passthrough-logs", "/app/crontab"]
+      # Shared with pipeline_worker so /admin/scheduler/edit can write the
+      # editable crontab. run-scheduler.sh polls its mtime and re-execs
+      # supercronic on change.
+      - scheduler_state:/app/state
+    command: ["/usr/local/bin/run-scheduler.sh"]
     deploy:
       resources:
         limits:
@@ -124,3 +132,4 @@ services:
 
 volumes:
   pgdata:
+  scheduler_state:

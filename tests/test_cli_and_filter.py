@@ -60,3 +60,28 @@ def test_denver_ts_handles_naive_datetime_as_utc():
 def test_denver_ts_handles_none_and_empty():
     assert api_admin._denver_ts(None) == ""
     assert api_admin._denver_ts("") == ""
+
+
+def test_read_active_crontab_falls_back_to_repo_when_container_paths_missing(monkeypatch, tmp_path):
+    # Force the container paths to point at non-existent files so the
+    # repo-fallback branch is exercised.
+    monkeypatch.setattr(api_admin, "_STATE_CRONTAB", tmp_path / "nope" / "state-crontab")
+    monkeypatch.setattr(api_admin, "_DEFAULT_CRONTAB", tmp_path / "nope" / "default-crontab")
+    text, source = api_admin._read_active_crontab()
+    # The repo-fallback resolves to the actual repo's crontab file
+    assert "ingest_cycle" in text
+    assert "local dev" in source
+
+
+def test_validate_crontab_gracefully_handles_missing_supercronic(monkeypatch):
+    # On platforms without supercronic on PATH (developer macOS), the
+    # validator must return False with a clear error rather than crashing.
+    import subprocess as sp
+
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("supercronic")
+
+    monkeypatch.setattr(sp, "run", _raise)
+    ok, msg = api_admin._validate_crontab("*/10 * * * * /bin/true\n")
+    assert ok is False
+    assert "supercronic" in msg.lower()
