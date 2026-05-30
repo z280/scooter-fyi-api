@@ -33,6 +33,7 @@ GitHub OAuth and are intended for operators only.
 - `https://scooter.fyi`
 - `https://www.scooter.fyi`
 - `https://denver.scooter.fyi`
+- `https://denver-scooter-fyi.pages.dev`
 - `https://weseeyouveo.com`
 - `https://www.weseeyouveo.com`
 - `https://keepdenverfair.com`
