@@ -67,7 +67,7 @@ faster than 60s wastes bytes — the data doesn't change.
 | **Percentages** | Floats `0.00` – `100.00`, rounded to 2 decimal places. |
 | **Nullable percentages** | A percentage is `null` when its denominator is 0 (e.g. `percent_bikes_v1` is `null` if no devices are inside v1). Always null-check before formatting. |
 | **Device classification** | `form_factor` is one of `"bicycle"`, `"scooter"`, or `"unknown"`. The 22 core metrics count only `bicycle` and `scooter`; `unknown` devices are excluded from per-form-factor totals but included in `total_devices_*`. |
-| **Spatial filtering** | Devices outside Denver's bounding envelope (e.g. China-factory glitches) are tagged but excluded from all citywide metrics. `total_not_in_denver` exposes the count of excluded devices. |
+| **Spatial filtering** | A device is `denver_core` only if its coordinates fall **inside the actual Denver city polygon** (union of all 78 official neighborhood boundaries). A rough lat/lon bounding box is used as a fast first-pass; final classification uses the polygon. Devices in the bbox but outside the polygon (Aurora, Lakewood, the Veo repair shop, etc.) are tagged `other_outlier` and excluded from all citywide metrics. `total_not_in_denver` exposes the count of excluded devices (China factory glitches + outside-city-limits combined). |
 
 ---
 
@@ -156,7 +156,7 @@ GET /api/v1/snapshots/latest
 |---|---|---|
 | `cycle_id` | string | UUID of this snapshot's observation cycle. Stable per cycle, changes every 10 min. |
 | `snapshot_time` | string | UTC ISO 8601 of when the cycle ran. |
-| `total_devices_denver` | int | All devices (bikes + scooters + unknown form factors) located inside Denver's bounding envelope. |
+| `total_devices_denver` | int | All devices (bikes + scooters + unknown form factors) located **inside the actual Denver city polygon** (union of the 78 official neighborhood boundaries). Excludes devices in the rough bbox but outside the city limits, such as Veo's repair facility. |
 | `total_devices_v1` | int | Devices located inside the **Disadvantaged Areas v1** boundary. |
 | `total_devices_v2` | int | Devices located inside the **Disadvantaged Areas v2** boundary. |
 | `total_bike_denver` | int | `form_factor == "bicycle"` devices inside Denver. |
@@ -165,7 +165,7 @@ GET /api/v1/snapshots/latest
 | `total_scooter_denver` | int | `form_factor == "scooter"` devices inside Denver. |
 | `total_scooter_v1` | int | Scooters inside v1. |
 | `total_scooter_v2` | int | Scooters inside v2. |
-| `total_not_in_denver` | int | Devices reporting coordinates outside the Denver envelope (e.g. factory glitches, devices in transit). Excluded from all `*_denver`/`*_v1`/`*_v2` counts. |
+| `total_not_in_denver` | int | Devices reporting coordinates outside the actual Denver city polygon. Includes both obvious outliers (China factory glitches, devices in transit) and adjacent-jurisdiction false positives (Aurora, Lakewood, repair shops just over the city line). Excluded from all `*_denver`/`*_v1`/`*_v2` counts. |
 | `percent_all_devices_v1` | float \| null | `total_devices_v1 / total_devices_denver * 100`. **This is the primary RFP §3.0 compliance metric — Denver requires ≥30%.** |
 | `percent_all_devices_v2` | float \| null | `total_devices_v2 / total_devices_denver * 100`. |
 | `percent_all_bikes_v1` | float \| null | `total_bike_v1 / total_bike_denver * 100`. |
@@ -486,9 +486,10 @@ GeoJSON FeatureCollection of every device's current position from the
 most recent successfully-completed cycle. Suitable for direct ingestion
 into map libraries (Mapbox GL JS, MapLibre GL JS, Leaflet, OpenLayers).
 
-By default returns **only devices inside the Denver envelope**
-(`spatial_status='denver_core'`) — China-factory glitches and other
-outliers are hidden unless explicitly requested.
+By default returns **only devices inside the actual Denver city polygon**
+(`spatial_status='denver_core'`) — China-factory glitches and devices
+located outside the city limits (Aurora, Lakewood, repair shops) are
+hidden unless explicitly requested.
 
 **Query parameters:**
 

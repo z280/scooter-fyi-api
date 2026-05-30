@@ -101,6 +101,17 @@ def _devices() -> list[TaggedDevice]:
             lat=22.5, lon=114.0, spatial_status="china_glitch",
         )
     )
+    # Repair-shop-style false positive: inside the rough Denver bbox
+    # (39.6-39.9 N, -105.2 to -104.6 E) but well outside the actual city
+    # polygon. Coordinate is ~Centennial / Greenwood Village area, south of
+    # the southern Denver border. Should be re-tagged other_outlier by the
+    # polygon refinement step in compute._refine_spatial_status.
+    devices.append(
+        TaggedDevice(
+            device_id="repair", vehicle_type_id="1", form_factor="scooter",
+            lat=39.6100, lon=-104.8700, spatial_status="denver_core",
+        )
+    )
     return devices
 
 
@@ -144,11 +155,24 @@ def test_core_totals_match_hand_counts(monkeypatch):
     result = compute.run_cycle(cycle_id, payload, snap)
 
     core = result.core_row
-    # We placed 8 denver_core devices; the 1 china_glitch is excluded.
+    # 10 devices total: 8 actually inside the city polygon, 1 china_glitch,
+    # and 1 "repair shop" that's inside the rough bbox but outside the
+    # neighborhood union. Polygon refinement must drop the repair-shop
+    # device from the Denver count.
     assert core["total_devices_denver"] == 8
-    assert core["total_not_in_denver"] == 1
+    assert core["total_not_in_denver"] == 2   # china_glitch + repair shop
     assert core["total_bike_denver"] == 3
     assert core["total_scooter_denver"] == 5
+
+    # The repair-shop device must be flagged 'other_outlier' in the raw rows.
+    repair_row = next(r for r in result.raw_rows if r["device_id"] == "repair")
+    assert repair_row["spatial_status"] == "other_outlier", (
+        "polygon refinement should re-tag the bbox-but-not-city device"
+    )
+    # And the china_glitch tag should survive untouched.
+    china_row = next(r for r in result.raw_rows if r["device_id"] == "x1")
+    assert china_row["spatial_status"] == "china_glitch"
+
     # The percentages should be sane
     assert core["percent_bikes_denver"] is not None
     assert 0 <= core["percent_bikes_denver"] <= 100

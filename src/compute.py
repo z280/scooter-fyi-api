@@ -112,6 +112,47 @@ def _load_boundaries_into_duck(con) -> None:
 
     con.execute("CREATE INDEX IF NOT EXISTS idx_b_geom ON boundaries USING RTREE (geom);")
 
+    # Build the precise Denver city polygon as the union of all neighborhood
+    # polygons. NB covers all of Denver and aligns with the city boundary, so
+    # this is more accurate than the rough bbox envelope from src/ingest.py
+    # (which catches devices in Aurora, Lakewood, the Veo repair shop, etc.).
+    # The bbox check stays as a fast first-pass; this is the precise final word.
+    con.execute(
+        """
+        DROP TABLE IF EXISTS denver_city;
+        CREATE TABLE denver_city AS
+        SELECT ST_Union_Agg(geom) AS geom
+        FROM boundaries
+        WHERE region_type = 'neighborhood';
+        """
+    )
+
+
+def _refine_spatial_status(con) -> int:
+    """Re-classify any point currently tagged 'denver_core' (by the bbox
+    envelope) that is actually outside the Denver city polygon. These get
+    re-tagged 'other_outlier' — they're in the rectangle but not in the
+    actual city (typically: Aurora, Lakewood, repair shops outside city
+    limits). Returns the number of devices re-tagged."""
+    cur = con.execute(
+        """
+        UPDATE points
+        SET spatial_status = 'other_outlier'
+        WHERE spatial_status = 'denver_core'
+          AND NOT EXISTS (
+              SELECT 1 FROM denver_city c WHERE ST_Within(points.geom, c.geom)
+          );
+        """
+    )
+    # DuckDB returns affected row count via the cursor's rowcount-like result
+    try:
+        result = cur.fetchall()
+        if result and result[0]:
+            return int(result[0][0])
+    except Exception:
+        pass
+    return 0
+
 
 # ---------------------------------------------------------------------------
 # Per-cycle compute
@@ -227,6 +268,19 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
         _load_boundaries_into_duck(con)
         _load_points_into_duck(con, ingest.devices, snapshot_time)
 
+        # Refine the bbox-based denver_core tag against the actual city polygon
+        # (union of NB features). Devices in the bbox but outside the polygon
+        # — e.g. the Veo repair shop, parts of Aurora/Lakewood — get re-tagged
+        # other_outlier and excluded from all citywide metrics.
+        _refine_spatial_status(con)
+
+        # Pull corrected statuses back so raw_telemetry_points reflects the
+        # polygon-precise classification, not just the ingest-time bbox tag.
+        corrected_status: dict[str, str] = {
+            row[0]: row[1]
+            for row in con.execute("SELECT device_id, spatial_status FROM points").fetchall()
+        }
+
         # Fetch core summary
         core = con.execute(_core_summary_sql()).fetchone()
         core_cols = [
@@ -261,7 +315,9 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
                 "count_scooters": int(row[5] or 0),
             })
 
-    # Raw rows (no spatial join needed — copy-through)
+    # Raw rows use the polygon-corrected spatial_status from DuckDB; fall back
+    # to the ingest-time tag if the device wasn't loaded into DuckDB (e.g.
+    # missing coords stripped during tagging — shouldn't happen but defensive).
     raw_rows = [
         {
             "cycle_id": str(cycle_id),
@@ -270,7 +326,7 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
             "form_factor": d.form_factor,
             "latitude": d.lat,
             "longitude": d.lon,
-            "spatial_status": d.spatial_status,
+            "spatial_status": corrected_status.get(d.device_id, d.spatial_status),
         }
         for d in ingest.devices
     ]
