@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
+from datetime import datetime, timezone
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -41,21 +43,36 @@ async def lifespan(app: FastAPI):
 
     cfg = load()
     _scheduler = AsyncIOScheduler(timezone="UTC")
+    # Wall-clock-pinned cron schedule: fires at :00, :10, :20, :30, :40, :50
+    # (assuming cycle_minutes=10). Using IntervalTrigger here would re-anchor
+    # the schedule to boot-time on every restart, so a deploy at 14:23 would
+    # cause cycles at 14:33, 14:43, 14:53… instead of the intuitive wall-clock
+    # cadence. CronTrigger is stable across restarts: the next fire is always
+    # the next aligned minute.
     _scheduler.add_job(
         run_once,
-        trigger=IntervalTrigger(minutes=cfg.schedule.cycle_minutes),
+        trigger=CronTrigger(minute=f"*/{cfg.schedule.cycle_minutes}", timezone="UTC"),
         id="ingest_cycle",
         max_instances=1,
-        coalesce=True,
-        misfire_grace_time=120,
-        next_run_time=None,  # first run after one interval; manual /admin trigger possible
+        coalesce=True,         # if multiple fires were missed, only catch up once
+        misfire_grace_time=300,  # tolerate up to 5 min of worker downtime
     )
+    # Archive cadence anchored to a fixed UTC point so restarts don't reset
+    # the 48h timer. APScheduler computes next-fire as
+    # ARCHIVE_ANCHOR + ceil((now - anchor) / interval) * interval, which is
+    # stable across reboots. Without an anchor, every push to main would
+    # reset the timer and the archive would never fire.
+    _archive_anchor = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     _scheduler.add_job(
         run_archive,
-        trigger=IntervalTrigger(hours=cfg.schedule.archive_hours),
+        trigger=IntervalTrigger(
+            hours=cfg.schedule.archive_hours,
+            start_date=_archive_anchor,
+        ),
         id="archive_job",
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=3600,
     )
     # Daily SLA window — runs at 9:00 AM Denver time (DST-aware via
     # zoneinfo). Computes the just-closed 6–9 AM compliance window.
@@ -69,16 +86,20 @@ async def lifespan(app: FastAPI):
     )
     _scheduler.start()
     log.info(
-        "Scheduler started: ingest every %d min, archive every %d hr, "
-        "daily SLA at 09:00 America/Denver",
+        "Scheduler started: ingest at minute */%d UTC (wall-clock pinned), "
+        "archive every %d hr, daily SLA at 09:00 America/Denver",
         cfg.schedule.cycle_minutes, cfg.schedule.archive_hours,
     )
 
-    # Trigger the first cycle immediately at startup (offset by 5s so the app
-    # is fully ready). APScheduler's `next_run_time=datetime.now()` would work
-    # but spinning it as a one-shot is cleaner.
+    # Run one cycle immediately at startup so a fresh deploy doesn't wait up
+    # to cycle_minutes for the first read. Offset 5s so app startup completes
+    # first. `replace_existing=True` keeps repeated restarts from piling up
+    # boot jobs.
     import asyncio
-    asyncio.get_event_loop().call_later(5, lambda: _scheduler.add_job(run_once, id="boot_cycle", replace_existing=True))
+    asyncio.get_event_loop().call_later(
+        5,
+        lambda: _scheduler.add_job(run_once, id="boot_cycle", replace_existing=True),
+    )
 
     yield
 

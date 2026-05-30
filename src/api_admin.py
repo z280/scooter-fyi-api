@@ -148,6 +148,47 @@ def failures(request: Request, user: dict = Depends(auth.require_admin)):
     return _render("failures.html", user=user, rows=rows)
 
 
+@router.get("/scheduler", response_class=HTMLResponse)
+def scheduler_status(request: Request, user: dict = Depends(auth.require_admin)):
+    """Show next-fire-time + recent cycle cadence for diagnosing schedule drift."""
+    from .main import _scheduler  # avoid circular import at module load
+
+    jobs = []
+    if _scheduler is not None:
+        for j in _scheduler.get_jobs():
+            jobs.append({
+                "id": j.id,
+                "trigger": str(j.trigger),
+                "next_run_time": j.next_run_time.isoformat() if j.next_run_time else None,
+            })
+
+    # Recent cycles + observed gap (minutes between consecutive start_ts)
+    recent = []
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    start_ts,
+                    job_status,
+                    EXTRACT(EPOCH FROM start_ts -
+                        LAG(start_ts) OVER (ORDER BY start_ts ASC)) / 60.0
+                        AS gap_minutes
+                FROM observation_cycles
+                ORDER BY start_ts DESC
+                LIMIT 30
+                """,
+            )
+            for r in cur.fetchall():
+                recent.append({
+                    "start_ts": r[0].isoformat() if r[0] else None,
+                    "job_status": r[1],
+                    "gap_minutes": round(float(r[2]), 2) if r[2] is not None else None,
+                })
+
+    return _render("scheduler.html", user=user, jobs=jobs, recent=recent)
+
+
 @router.get("/regions", response_class=HTMLResponse)
 def regions(
     request: Request,
