@@ -3,30 +3,31 @@
 {% block content %}
 <h1>Scheduler</h1>
 
-<h2>Active jobs</h2>
-<table>
-  <thead><tr><th>id</th><th>next_run_time (UTC)</th><th>trigger</th></tr></thead>
-  <tbody>
-    {% for j in jobs %}
-      <tr>
-        <td><code>{{ j.id }}</code></td>
-        <td><code>{{ j.next_run_time or '—' }}</code></td>
-        <td><code>{{ j.trigger }}</code></td>
-      </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<p>The schedule lives in the <code>scheduler</code> container, which runs
+<a href="https://github.com/aptible/supercronic">supercronic</a> against
+the crontab below. Container TZ is <code>America/Denver</code>, so the
+9 AM daily SLA job is DST-aware. The ingest job's cadence drifts by 60
+minutes twice a year at DST transitions.</p>
+
+<h2>Active crontab</h2>
+<pre>{{ crontab or '(crontab file not found)' }}</pre>
 
 <h2>Recent cycle cadence (last 30)</h2>
 <p>The <code>gap_minutes</code> column is minutes between this cycle's
 <code>start_ts</code> and the previous one's. For a healthy 10-min schedule
-this should be ~10.0 with occasional stale_aborted rows.</p>
+this should be ~10.0 with occasional <code>stale_aborted</code> rows.</p>
 <table>
-  <thead><tr><th>start_ts (UTC)</th><th>job_status</th><th>gap_minutes</th></tr></thead>
+  <thead><tr>
+    <th>start_ts (UTC)</th>
+    <th>start_ts (Denver)</th>
+    <th>job_status</th>
+    <th>gap_minutes</th>
+  </tr></thead>
   <tbody>
     {% for r in recent %}
       <tr>
         <td><code>{{ r.start_ts }}</code></td>
+        <td><code>{{ r.start_ts | denver_ts }}</code></td>
         <td class="status-{{ r.job_status }}">{{ r.job_status }}</td>
         <td><code>{{ r.gap_minutes if r.gap_minutes is not none else '—' }}</code></td>
       </tr>

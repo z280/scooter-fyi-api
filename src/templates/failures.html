@@ -3,11 +3,15 @@
 {% block content %}
 <h1>Recent API failures</h1>
 <table>
-  <thead><tr><th>time</th><th>cycle</th><th>type</th><th>http</th><th>details</th></tr></thead>
+  <thead><tr>
+    <th>time (UTC)</th><th>time (Denver)</th>
+    <th>cycle</th><th>type</th><th>http</th><th>details</th>
+  </tr></thead>
   <tbody>
     {% for r in rows %}
       <tr>
         <td><code>{{ r.attempt_time }}</code></td>
+        <td><code>{{ r.attempt_time | denver_ts }}</code></td>
         <td>{% if r.cycle_id %}<a href="/admin/cycles/{{ r.cycle_id }}"><code>{{ r.cycle_id[:8] }}…</code></a>{% else %}—{% endif %}</td>
         <td>{{ r.failure_type }}</td>
         <td>{{ r.http_status_code or '—' }}</td>

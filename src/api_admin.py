@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -20,6 +22,28 @@ _env = Environment(
     loader=FileSystemLoader(str(_TEMPLATE_DIR)),
     autoescape=select_autoescape(["html"]),
 )
+
+_DENVER_TZ = ZoneInfo("America/Denver")
+
+
+def _denver_ts(v) -> str:
+    """Jinja filter: render a UTC datetime (or ISO string, or epoch) as a
+    Denver-local timestamp with timezone abbreviation (MDT or MST)."""
+    if v is None or v == "":
+        return ""
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return v
+    if isinstance(v, (int, float)):
+        v = datetime.fromtimestamp(v, tz=ZoneInfo("UTC"))
+    if v.tzinfo is None:
+        v = v.replace(tzinfo=ZoneInfo("UTC"))
+    return v.astimezone(_DENVER_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+_env.filters["denver_ts"] = _denver_ts
 
 
 def _render(name: str, **ctx) -> HTMLResponse:
@@ -150,17 +174,20 @@ def failures(request: Request, user: dict = Depends(auth.require_admin)):
 
 @router.get("/scheduler", response_class=HTMLResponse)
 def scheduler_status(request: Request, user: dict = Depends(auth.require_admin)):
-    """Show next-fire-time + recent cycle cadence for diagnosing schedule drift."""
-    from .main import _scheduler  # avoid circular import at module load
+    """Show the active crontab + recent cycle cadence for diagnosing drift.
 
-    jobs = []
-    if _scheduler is not None:
-        for j in _scheduler.get_jobs():
-            jobs.append({
-                "id": j.id,
-                "trigger": str(j.trigger),
-                "next_run_time": j.next_run_time.isoformat() if j.next_run_time else None,
-            })
+    Scheduling lives in the supercronic-driven `scheduler` container, not in
+    this process. So we show the crontab file's contents (the authoritative
+    schedule) and the observed cadence from observation_cycles."""
+    crontab_text = ""
+    crontab_path = Path("/app/crontab")
+    if crontab_path.exists():
+        crontab_text = crontab_path.read_text()
+    else:
+        # Local dev fallback — repo-rooted file
+        local_path = Path(__file__).resolve().parents[1] / "crontab"
+        if local_path.exists():
+            crontab_text = local_path.read_text()
 
     # Recent cycles + observed gap (minutes between consecutive start_ts)
     recent = []
@@ -181,12 +208,12 @@ def scheduler_status(request: Request, user: dict = Depends(auth.require_admin))
             )
             for r in cur.fetchall():
                 recent.append({
-                    "start_ts": r[0].isoformat() if r[0] else None,
+                    "start_ts": r[0],
                     "job_status": r[1],
                     "gap_minutes": round(float(r[2]), 2) if r[2] is not None else None,
                 })
 
-    return _render("scheduler.html", user=user, jobs=jobs, recent=recent)
+    return _render("scheduler.html", user=user, crontab=crontab_text, recent=recent)
 
 
 @router.get("/regions", response_class=HTMLResponse)

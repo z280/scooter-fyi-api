@@ -1,0 +1,17 @@
+# veo-audit cron schedule, read by supercronic in the `scheduler` container.
+# Times are in America/Denver (set via TZ env on the scheduler container) so
+# the daily SLA window correctly tracks DST. The 10-min ingest cadence drifts
+# by 60 minutes twice a year at DST transitions — acceptable for a compliance
+# audit; missed cycles are caught by the staleness check on the next firing.
+
+# Ingest: every 10 minutes, wall-clock pinned to :00 :10 :20 :30 :40 :50
+*/10 * * * * cd /app && python -m src.cli ingest_cycle
+
+# Daily SLA window: 9:00 AM Denver, DST-aware. Computes the 6-9 AM window
+# that just closed. Idempotent via ON CONFLICT.
+0 9 * * * cd /app && python -m src.cli daily_sla
+
+# Archive: fires daily at 02:00 AM Denver but only acts if >= 48h elapsed
+# since the last successful upload. Self-gating means we can run this on a
+# daily cron without forcing a 48h cron expression.
+0 2 * * * cd /app && python -m src.cli archive_if_due

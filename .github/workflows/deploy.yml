@@ -107,5 +107,8 @@ jobs:
             docker compose pull
             docker compose up -d --remove-orphans
             sleep 8
+            # Fire one ingest cycle synchronously so /health has data to report,
+            # instead of waiting up to 10 min for supercronic's next tick.
+            docker compose exec -T scheduler python -m src.cli ingest_cycle || true
             # Worker port is internal-only (no host mapping); smoke-test from inside.
             docker compose exec -T pipeline_worker curl -fsS http://localhost:8080/health

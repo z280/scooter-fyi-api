@@ -17,24 +17,38 @@ API for live state.
 
 ```
 Veo GBFS feed                                Browser
-     │   every 10 min                              │ https://data.scooter.fyi
-     ▼                                             ▼
+     ▲                                             │ https://data.scooter.fyi
+     │ */10 min                                    ▼
 ┌──────────────────────────┐               ┌────────────────┐
-│  pipeline_worker         │ ◄───────────► │   cloudflared  │   Cloudflare Tunnel
-│  1.0 GiB RAM cap         │   internal    │   128 MiB cap  │   (TLS at CF edge)
-│                          │   :8080       └────────────────┘
-└──────────────────────────┘                       │ outbound 443
-     │ writes                                      ▼
-     ▼                                       Cloudflare edge
+│  scheduler               │               │   cloudflared  │   Cloudflare Tunnel
+│  supercronic + crontab   │               │   128 MiB cap  │   (TLS at CF edge)
+│  256 MiB cap             │               └────────────────┘
+│  TZ=America/Denver       │                       │ outbound 443
+└──────────────────────────┘                       ▼
+     │ shells `python -m src.cli ...`        Cloudflare edge
+     ▼                                             ▲
+┌──────────────────────────┐                       │
+│  pipeline_worker         │ ◄─────────────────────┘
+│  1.0 GiB RAM cap         │   :8080 (internal only)
+│                          │   FastAPI public API + admin panel
+└──────────────────────────┘
+     │ writes
+     ▼
 ┌──────────────────────────┐
 │  denver_spatial_db       │   vanilla Postgres 15 (no PostGIS)
 │  2.5 GiB RAM cap         │     - source of truth for all persistent state
 │  shared_buffers=2GB      │     - read by public API + admin panel
 └──────────────────────────┘
-     │ every 48 hr
+     │ every 48 hr (gated by last_archive_ts)
      ▼
 Cloudflare R2 (Parquet, ZSTD)   raw_telemetry_points archive
 ```
+
+The `scheduler` and `pipeline_worker` containers share the same image —
+scheduling is just a different entrypoint (`supercronic /app/crontab`)
+that shells out to `python -m src.cli <command>`. The split means the
+HTTP API can crash and restart without disturbing the schedule, and the
+scheduler can crash without taking the API down.
 
 ### Postgres vs DuckDB — which does what
 
@@ -56,8 +70,9 @@ runs natively on the same 12 GiB VPS with a 7.5 GiB sandbox.
 .
 ├── config.json                 non-secret runtime config
 ├── .env.example                env template (secrets ONLY)
-├── docker-compose.yml          two services, hard memory caps
-├── Dockerfile                  python:3.11-slim + FastAPI + DuckDB
+├── docker-compose.yml          four services, hard memory caps
+├── Dockerfile                  python:3.11-slim + FastAPI + DuckDB + supercronic + tini
+├── crontab                     supercronic schedule for the scheduler container
 ├── data/                       baked-in boundary files (5)
 │   ├── v1.json                 Disadvantaged Areas v1 — 34 Polygons
 │   ├── v2.json                 Disadvantaged Areas v2 — 65 Polygons
@@ -66,7 +81,8 @@ runs natively on the same 12 GiB VPS with a 7.5 GiB sandbox.
 │   └── CN.geojson              13 community networks
 ├── sql/001_init.sql            schema, applied idempotently at boot
 ├── src/
-│   ├── main.py                 FastAPI app, lifespan, scheduler wiring
+│   ├── main.py                 FastAPI app, lifespan, migrations
+│   ├── cli.py                  subcommands run by the scheduler container
 │   ├── config.py               loads config.json + env
 │   ├── pg.py                   psycopg pool + migration runner
 │   ├── duck.py                 ephemeral DuckDB session factory
@@ -256,8 +272,9 @@ Enforced via Docker Compose `mem_limit`:
 |---|---|---|
 | `pipeline_worker` | 1.0 GiB | bursts during DuckDB compute (~1 s/cycle) |
 | `denver_spatial_db` | 2.5 GiB | `shared_buffers=2GB`, `max_connections=20` |
+| `scheduler` | 256 MiB | supercronic + each job's transient Python process |
 | `cloudflared` | 128 MiB | tiny — outbound HTTPS tunnel daemon |
 | Native Hermes (host) | 7.5 GiB | enforced via cgroups, **not** by this repo |
 
-Total Docker footprint: ~3.6 GiB on the 12 GiB VPS. The remaining ~0.9 GiB
+Total Docker footprint: ~3.9 GiB on the 12 GiB VPS. The remaining ~0.6 GiB
 headroom absorbs transactional surges and host OS buffers.

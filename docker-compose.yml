@@ -71,6 +71,43 @@ services:
     expose:
       - "8080"
 
+  # Cron scheduler: runs supercronic with the baked-in /app/crontab.
+  # Same image as pipeline_worker so the src.cli module + boundary data are
+  # available. Runs independently of the worker process — if uvicorn crashes,
+  # the schedule keeps firing and writing failures to api_failures.
+  scheduler:
+    image: ${WORKER_IMAGE:-ghcr.io/z280/veo-audit:latest}
+    build:
+      context: .
+    container_name: scheduler
+    restart: unless-stopped
+    depends_on:
+      denver_spatial_db:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: denver_spatial_db
+      POSTGRES_PORT: 5432
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME}
+      SENTRY_DSN: ${SENTRY_DSN}
+      VEO_CONFIG: /app/config.json
+      # supercronic + libc honor TZ; cron entries run in this timezone so the
+      # 9 AM Denver daily_sla job is DST-aware.
+      TZ: America/Denver
+    volumes:
+      - ./config.json:/app/config.json:ro
+    command: ["supercronic", "-passthrough-logs", "/app/crontab"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    mem_limit: 256m
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
