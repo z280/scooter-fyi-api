@@ -188,3 +188,13 @@ def allowed_github_orgs() -> tuple[str, ...]:
 
 def session_secret() -> str:
     return os.environ.get("SESSION_SECRET", "dev-only-do-not-use-in-prod")
+
+
+def session_https_only() -> bool:
+    """Whether the session cookie should have the Secure flag.
+
+    Default True (production runs behind Cloudflare Tunnel = HTTPS).
+    Set SESSION_HTTPS_ONLY=false locally if you need to test the OAuth
+    flow over plain HTTP.
+    """
+    return os.environ.get("SESSION_HTTPS_ONLY", "true").lower() not in ("false", "0", "no")

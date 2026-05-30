@@ -14,7 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .archive import run_archive
 from .api_admin import router as admin_router
 from .api_public import router as public_router
-from .config import load, session_secret
+from .config import load, session_https_only, session_secret
 from .cycle import run_once
 from .pg import run_migrations
 from .sentry import init as sentry_init
@@ -84,7 +84,12 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,
 )
-app.add_middleware(SessionMiddleware, secret_key=session_secret(), https_only=False)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=session_secret(),
+    https_only=session_https_only(),
+    same_site="lax",
+)
 
 app.include_router(public_router)
 app.include_router(admin_router)

@@ -73,6 +73,7 @@ jobs:
           OIDC_CLIENT_SECRET: ${{ secrets.OIDC_CLIENT_SECRET }}
           AUTH_ALLOWED_GITHUB_ORGS: ${{ secrets.AUTH_ALLOWED_GITHUB_ORGS }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
@@ -80,7 +81,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,SENTRY_DSN,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,AUTH_ALLOWED_GITHUB_ORGS,SESSION_SECRET,GH_TOKEN,GH_ACTOR,REPO
+          envs: POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,SENTRY_DSN,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,AUTH_ALLOWED_GITHUB_ORGS,SESSION_SECRET,CLOUDFLARE_TUNNEL_TOKEN,GH_TOKEN,GH_ACTOR,REPO
           script: |
             set -e
             cd /opt/veo-audit
@@ -98,10 +99,13 @@ jobs:
             OIDC_CLIENT_SECRET=$OIDC_CLIENT_SECRET
             AUTH_ALLOWED_GITHUB_ORGS=$AUTH_ALLOWED_GITHUB_ORGS
             SESSION_SECRET=$SESSION_SECRET
+            SESSION_HTTPS_ONLY=true
+            CLOUDFLARE_TUNNEL_TOKEN=$CLOUDFLARE_TUNNEL_TOKEN
             WORKER_IMAGE=ghcr.io/$REPO:latest
             EOF
             echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
             docker compose pull
             docker compose up -d --remove-orphans
             sleep 8
-            curl -fsS http://localhost:8080/health
+            # Worker port is internal-only (no host mapping); smoke-test from inside.
+            docker compose exec -T pipeline_worker curl -fsS http://localhost:8080/health

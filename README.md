@@ -16,17 +16,16 @@ API for live state.
 ## Architecture
 
 ```
-Veo GBFS feed
-     │   every 10 min (APScheduler in pipeline_worker)
-     ▼
-┌──────────────────────────┐
-│  pipeline_worker         │   FastAPI + APScheduler + ephemeral DuckDB
-│  1.0 GiB RAM cap         │     - ingest → envelope-tag → DuckDB compute
-│                          │     - writes results to Postgres
-│                          │     - serves /api/* and /admin/*
-└──────────────────────────┘
-     │ writes
-     ▼
+Veo GBFS feed                                Browser
+     │   every 10 min                              │ https://admin.scooter.fyi
+     ▼                                             ▼
+┌──────────────────────────┐               ┌────────────────┐
+│  pipeline_worker         │ ◄───────────► │   cloudflared  │   Cloudflare Tunnel
+│  1.0 GiB RAM cap         │   internal    │   128 MiB cap  │   (TLS at CF edge)
+│                          │   :8080       └────────────────┘
+└──────────────────────────┘                       │ outbound 443
+     │ writes                                      ▼
+     ▼                                       Cloudflare edge
 ┌──────────────────────────┐
 │  denver_spatial_db       │   vanilla Postgres 15 (no PostGIS)
 │  2.5 GiB RAM cap         │     - source of truth for all persistent state
@@ -145,7 +144,9 @@ All read-only, CORS-locked to `scooter.fyi` / `weseeyouveo.com`:
 
 ## Admin panel
 
-At `/admin`, behind GitHub OAuth. Users must be members of an org in
+At `https://admin.scooter.fyi/admin`, behind GitHub OAuth. Reached via
+Cloudflare Tunnel (`cloudflared` sidecar) — the VPS does not expose port
+80 or 443 to the internet. Users must be members of an org in
 `AUTH_ALLOWED_GITHUB_ORGS`. Read-only views:
 
 - `/admin/cycles` — paginated cycle log with status colors
@@ -158,8 +159,14 @@ At `/admin`, behind GitHub OAuth. Users must be members of an org in
 
 ```bash
 cp .env.example .env
-# minimum: set POSTGRES_PASSWORD; R2/Sentry/OIDC can stay blank
-docker compose up --build
+# Minimum: set POSTGRES_PASSWORD; leave CLOUDFLARE_TUNNEL_TOKEN /
+# R2 / Sentry / OIDC blank. Set SESSION_HTTPS_ONLY=false locally.
+# Also uncomment the `ports: "8080:8080"` block in pipeline_worker
+# so you can reach the worker without a tunnel.
+
+docker compose up --build pipeline_worker denver_spatial_db
+# (skip the cloudflared service — it'll fail without a real token)
+
 curl localhost:8080/health   # 4-key JSON
 curl localhost:8080/api/v1/snapshots/latest   # 503 until first cycle lands (~15s)
 ```
@@ -189,13 +196,40 @@ Required GitHub Secrets:
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Postgres credentials |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | Cloudflare R2 token scoped to one bucket |
 | `SENTRY_DSN` | optional; blank disables Sentry |
-| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | GitHub OAuth App; callback `https://<host>/admin/auth/callback` |
+| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | GitHub OAuth App; callback `https://admin.scooter.fyi/admin/auth/callback` |
 | `AUTH_ALLOWED_GITHUB_ORGS` | comma-separated, e.g. `z280` |
 | `SESSION_SECRET` | `openssl rand -hex 32` |
+| `CLOUDFLARE_TUNNEL_TOKEN` | from Cloudflare Zero Trust → Networks → Tunnels (see below) |
 
 The VPS only needs Docker + a `deploy` user with passwordless sudo and
 the SSH public key in `~/.ssh/authorized_keys`. Everything else (image,
 config, schema) is pushed by the workflow.
+
+### Cloudflare Tunnel setup (one-time, before first deploy)
+
+The `cloudflared` sidecar terminates the admin panel's TLS at Cloudflare's
+edge, so the VPS doesn't expose any ports to the internet.
+
+1. Cloudflare dashboard → **Zero Trust** → **Networks → Tunnels**
+   → **Create a tunnel** → name `veo-audit` → **Save**.
+2. On the "Install connector" page, copy the token from the
+   `cloudflared service install <TOKEN>` command — that's the
+   `CLOUDFLARE_TUNNEL_TOKEN` GitHub Secret. Click **Next**.
+3. **Public Hostnames** → **Add a public hostname**:
+   - **Subdomain:** `admin`
+   - **Domain:** `scooter.fyi`
+   - **Type:** `HTTP`
+   - **URL:** `pipeline_worker:8080`
+   - **Save hostname**.
+4. (Optional) Add a second public hostname for the unauthenticated
+   public API, e.g. `api.scooter.fyi` → `pipeline_worker:8080`.
+5. GitHub OAuth App → **Settings** → set
+   **Authorization callback URL** to
+   `https://admin.scooter.fyi/admin/auth/callback`.
+
+Adding/changing routes after the first deploy is a dashboard operation —
+no redeploy needed. Rotating the token does require updating the GitHub
+Secret and redeploying.
 
 ## Operating tips
 
@@ -222,7 +256,8 @@ Enforced via Docker Compose `mem_limit`:
 |---|---|---|
 | `pipeline_worker` | 1.0 GiB | bursts during DuckDB compute (~1 s/cycle) |
 | `denver_spatial_db` | 2.5 GiB | `shared_buffers=2GB`, `max_connections=20` |
+| `cloudflared` | 128 MiB | tiny — outbound HTTPS tunnel daemon |
 | Native Hermes (host) | 7.5 GiB | enforced via cgroups, **not** by this repo |
 
-Total Docker footprint: 3.5 GiB on the 12 GiB VPS. The 2.0 GiB headroom
-absorbs transactional surges and host OS buffers.
+Total Docker footprint: ~3.6 GiB on the 12 GiB VPS. The remaining ~0.9 GiB
+headroom absorbs transactional surges and host OS buffers.

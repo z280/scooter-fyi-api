@@ -79,7 +79,7 @@
   },
   "auth": {
     "allowed_github_orgs": [],
-    "callback_url": "http://localhost:8080/admin/auth/callback"
+    "callback_url": "https://admin.scooter.fyi/admin/auth/callback"
   },
   "logging": {
     "level": "INFO"
