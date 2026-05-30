@@ -279,6 +279,202 @@ GET /api/v1/analytics/trend?layer=neighborhood&name=NB_FivePoints&range=24h
 
 ---
 
+### `GET /api/v1/boundaries`
+
+Lists every available boundary layer with its feature count, bbox, and
+the GeoJSON URL. Useful as a layer-toggle catalog: hit this once on app
+load to discover what's available, then lazy-load each layer's
+geometry when the user enables it.
+
+**Request:**
+```http
+GET /api/v1/boundaries
+```
+
+**Response 200:**
+```json
+{
+  "layers": [
+    { "region_category": "disadvantaged_areas", "region_type": "v1", "feature_count": 34, "bbox": [-105.0626, 39.6473, -104.7718, 39.7983], "url": "/api/v1/boundaries/v1" },
+    { "region_category": "disadvantaged_areas", "region_type": "v2", "feature_count": 65, "bbox": [-105.0626, 39.6450, -104.7344, 39.7984], "url": "/api/v1/boundaries/v2" },
+    { "region_category": "council_districts", "region_type": "council_district", "feature_count": 11, "bbox": [-105.1100, 39.6143, -104.5995, 39.9142], "url": "/api/v1/boundaries/council_district" },
+    { "region_category": "community_networks", "region_type": "community_network", "feature_count": 13, "bbox": [-105.1100, 39.6143, -104.7344, 39.8274], "url": "/api/v1/boundaries/community_network" },
+    { "region_category": "neighborhoods", "region_type": "neighborhood", "feature_count": 78, "bbox": [-105.1100, 39.6143, -104.5996, 39.9142], "url": "/api/v1/boundaries/neighborhood" }
+  ]
+}
+```
+
+Cached for 1 hour at the edge (`Cache-Control: public, max-age=3600`).
+
+---
+
+### `GET /api/v1/boundaries/{layer}`
+
+Returns the full GeoJSON FeatureCollection for one boundary layer. The
+URL is what `/api/v1/boundaries` advertises.
+
+**Layer values:** `v1`, `v2`, `neighborhood`, `council_district`, `community_network`.
+
+**Example request:**
+```http
+GET /api/v1/boundaries/neighborhood
+```
+
+**Response 200:**
+```json
+{
+  "type": "FeatureCollection",
+  "metadata": {
+    "region_category": "neighborhoods",
+    "region_type": "neighborhood",
+    "feature_count": 78,
+    "bbox": [-105.1100, 39.6143, -104.5996, 39.9142]
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "id": "NB_AthmarPark",
+      "geometry": { "type": "Polygon", "coordinates": [[[ /* ring coords */ ]]] },
+      "properties": {
+        "region_category": "neighborhoods",
+        "region_type": "neighborhood",
+        "region_name": "NB_AthmarPark"
+      }
+    }
+    /* … 77 more … */
+  ]
+}
+```
+
+#### Notes
+
+- **Heavily cached** (`Cache-Control: public, max-age=86400, stale-while-revalidate=604800`) — boundaries change only when the city republishes the polygon files (rare). Safe to fetch once per session.
+- **`id` matches `properties.region_name`** — same convention as `/api/v1/devices/current` and `/api/v1/spatial-snapshot`. Map libraries use top-level `id` for feature-state (click, hover); paint expressions use `["get", "region_name"]` from properties.
+- **Geometry types vary by layer:** v1, v2, community_network, and neighborhood are all `Polygon`; council_district has some `MultiPolygon`. Mapbox/MapLibre/Leaflet handle both transparently.
+- **Approx response sizes (gzip):** v1 ~15 KB, v2 ~70 KB, council_district ~150 KB, community_network ~30 KB, neighborhood ~90 KB.
+- **Joining boundaries with live counts:** the `region_name` in this endpoint is the same key as `/api/v1/spatial-snapshot?layer={layer}.regions` and `/api/v1/analytics/trend?layer={layer}&name={region_name}`. See the choropleth example below.
+
+#### Map rendering example (MapLibre GL JS — outline overlay with layer toggle)
+
+```javascript
+const map = new maplibregl.Map({ /* ... */ });
+const BASE = "https://data.scooter.fyi/api/v1/boundaries";
+
+const layerDefs = [
+  { id: "v1",                 label: "Disadvantaged Areas (v1)",  color: "#e63946" },
+  { id: "v2",                 label: "Disadvantaged Areas (v2)",  color: "#c1121f" },
+  { id: "neighborhood",       label: "Neighborhoods",             color: "#457b9d" },
+  { id: "council_district",   label: "City Council Districts",    color: "#2a9d8f" },
+  { id: "community_network",  label: "City Regions",              color: "#8338ec" },
+];
+
+map.on("load", async () => {
+  for (const def of layerDefs) {
+    map.addSource(`bnd-${def.id}`, { type: "geojson", data: `${BASE}/${def.id}` });
+    map.addLayer({
+      id: `${def.id}-fill`,
+      type: "fill",
+      source: `bnd-${def.id}`,
+      paint: { "fill-color": def.color, "fill-opacity": 0.1 },
+      layout: { visibility: "none" },
+    });
+    map.addLayer({
+      id: `${def.id}-outline`,
+      type: "line",
+      source: `bnd-${def.id}`,
+      paint: { "line-color": def.color, "line-width": 1.5 },
+      layout: { visibility: "none" },
+    });
+  }
+
+  // Toggle UI — built with safe DOM methods, no innerHTML
+  const controls = document.querySelector("#overlay-controls");
+  for (const def of layerDefs) {
+    const label = document.createElement("label");
+    label.style.color = def.color;
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.layer = def.id;
+    input.addEventListener("change", () => {
+      const v = input.checked ? "visible" : "none";
+      map.setLayoutProperty(`${def.id}-fill`, "visibility", v);
+      map.setLayoutProperty(`${def.id}-outline`, "visibility", v);
+    });
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(" " + def.label));
+    controls.appendChild(label);
+  }
+});
+```
+
+#### Choropleth example (color polygons by current device count)
+
+Combines `/api/v1/boundaries/{layer}` (static geometry) with `/api/v1/spatial-snapshot?layer={layer}` (live counts), joined by `region_name`:
+
+```javascript
+async function loadChoropleth(layerType) {
+  const [geo, counts] = await Promise.all([
+    fetch(`https://data.scooter.fyi/api/v1/boundaries/${layerType}`).then(r => r.json()),
+    fetch(`https://data.scooter.fyi/api/v1/spatial-snapshot?layer=${layerType}`).then(r => r.json()),
+  ]);
+
+  // Merge counts into properties so paint expressions can use them
+  for (const feat of geo.features) {
+    const c = counts.regions[feat.properties.region_name] || { total: 0, bikes: 0, scooters: 0 };
+    feat.properties.count_total = c.total;
+    feat.properties.count_bikes = c.bikes;
+    feat.properties.count_scooters = c.scooters;
+  }
+
+  map.getSource("choropleth").setData(geo);
+}
+
+map.addSource("choropleth", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+map.addLayer({
+  id: "choropleth-fill",
+  type: "fill",
+  source: "choropleth",
+  paint: {
+    "fill-color": [
+      "interpolate", ["linear"], ["get", "count_total"],
+      0,   "#f1faee",
+      50,  "#a8dadc",
+      150, "#457b9d",
+      300, "#1d3557",
+    ],
+    "fill-opacity": 0.7,
+  },
+});
+loadChoropleth("neighborhood");
+setInterval(() => loadChoropleth("neighborhood"), 90_000);
+```
+
+#### Leaflet equivalent (outline overlay with layer control)
+
+```javascript
+const map = L.map("map").setView([39.74, -104.99], 11);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+
+const BASE = "https://data.scooter.fyi/api/v1/boundaries";
+const overlays = {};
+for (const def of [
+  { id: "v1", label: "Disadvantaged Areas (v1)", color: "#e63946" },
+  { id: "v2", label: "Disadvantaged Areas (v2)", color: "#c1121f" },
+  { id: "neighborhood", label: "Neighborhoods", color: "#457b9d" },
+  { id: "council_district", label: "City Council Districts", color: "#2a9d8f" },
+  { id: "community_network", label: "City Regions", color: "#8338ec" },
+]) {
+  const geo = await fetch(`${BASE}/${def.id}`).then(r => r.json());
+  overlays[def.label] = L.geoJSON(geo, {
+    style: { color: def.color, weight: 1.5, fillOpacity: 0.1 },
+    onEachFeature: (feat, lyr) => lyr.bindPopup(feat.properties.region_name),
+  });
+}
+L.control.layers({}, overlays, { collapsed: false }).addTo(map);
+```
+
+---
+
 ### `GET /api/v1/devices/current`
 
 GeoJSON FeatureCollection of every device's current position from the

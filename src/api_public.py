@@ -9,8 +9,9 @@ import re
 from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
+from . import boundaries
 from .pg import connection
 
 router = APIRouter()
@@ -169,6 +170,45 @@ def analytics_trend(
             for r in rows
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Boundary geometries (static GeoJSON for map overlays)
+# ---------------------------------------------------------------------------
+# Cache-Control for static boundary responses. Updated only when the
+# baked-in boundary files in data/ change (rebuild + redeploy).
+_BOUNDARIES_CACHE_HEADER = "public, max-age=86400, stale-while-revalidate=604800"
+
+
+@router.get("/api/v1/boundaries")
+def boundaries_list(response: Response) -> dict[str, Any]:
+    """List every available boundary layer with its feature count,
+    bbox, and the URL where its GeoJSON lives."""
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return {"layers": boundaries.list_layers()}
+
+
+@router.get("/api/v1/boundaries/{layer}")
+def boundaries_geojson(layer: str, response: Response) -> dict[str, Any]:
+    """Full GeoJSON FeatureCollection for one boundary layer.
+
+    Direct ingestion into Mapbox/MapLibre/Leaflet/OpenLayers:
+
+        map.addSource("nb", { type: "geojson", data: "/api/v1/boundaries/neighborhood" });
+
+    Layer values: v1, v2, neighborhood, council_district, community_network.
+    """
+    fc = boundaries.get_layer(layer)
+    if fc is None:
+        raise HTTPException(
+            404,
+            detail=(
+                f"unknown layer '{layer}'. Available: "
+                f"{', '.join(l['region_type'] for l in boundaries.list_layers())}"
+            ),
+        )
+    response.headers["Cache-Control"] = _BOUNDARIES_CACHE_HEADER
+    return fc
 
 
 # ---------------------------------------------------------------------------
