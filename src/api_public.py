@@ -172,6 +172,123 @@ def analytics_trend(
 
 
 # ---------------------------------------------------------------------------
+# Current device locations (for map rendering)
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/devices/current")
+def devices_current(
+    form_factor: str | None = Query(
+        None,
+        description='Filter by form_factor. One of "bicycle", "scooter". Default: no filter.',
+    ),
+    spatial_status: str | None = Query(
+        None,
+        description='Filter by spatial_status. One of "denver_core", "china_glitch", "other_outlier". Default behavior depends on include_outliers.',
+    ),
+    include_outliers: bool = Query(
+        False,
+        description="If false (default), only return devices with spatial_status='denver_core'. Set true to include China-factory glitches and other outliers.",
+    ),
+    bbox: str | None = Query(
+        None,
+        description='Comma-separated "min_lon,min_lat,max_lon,max_lat" bounding box filter (WGS84).',
+    ),
+) -> dict[str, Any]:
+    """GeoJSON FeatureCollection of every device's current position,
+    drawn from the most recent successfully-completed observation cycle.
+
+    Suitable for direct ingestion into Mapbox/Leaflet/MapLibre:
+
+        const r = await fetch("/api/v1/devices/current");
+        const geo = await r.json();
+        map.getSource("devices").setData(geo);
+    """
+    # Resolve which cycle to use
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cycle_id, snapshot_time
+                FROM observation_cycles oc
+                JOIN snapshot_metadata_core USING (cycle_id)
+                WHERE oc.job_status = 'complete'
+                ORDER BY snapshot_time DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(503, detail="no completed cycles yet")
+            cycle_id, snapshot_time = row[0], row[1]
+
+            # Build the filter
+            where = ["cycle_id = %s"]
+            params: list[Any] = [cycle_id]
+
+            # Outlier handling: explicit spatial_status overrides include_outliers
+            if spatial_status:
+                where.append("spatial_status = %s")
+                params.append(spatial_status)
+            elif not include_outliers:
+                where.append("spatial_status = 'denver_core'")
+
+            if form_factor:
+                where.append("form_factor = %s")
+                params.append(form_factor)
+
+            if bbox:
+                parts = bbox.split(",")
+                if len(parts) != 4:
+                    raise HTTPException(400, detail="bbox must be 4 comma-separated numbers")
+                try:
+                    min_lon, min_lat, max_lon, max_lat = [float(p) for p in parts]
+                except ValueError as e:
+                    raise HTTPException(400, detail=f"bbox parse error: {e}")
+                where.append(
+                    "longitude BETWEEN %s AND %s AND latitude BETWEEN %s AND %s"
+                )
+                params.extend([min_lon, max_lon, min_lat, max_lat])
+
+            sql = (
+                "SELECT device_id, form_factor, latitude, longitude, spatial_status "
+                "FROM raw_telemetry_points "
+                f"WHERE {' AND '.join(where)} "
+                "ORDER BY device_id"
+            )
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    features = [
+        {
+            "type": "Feature",
+            "id": r[0],
+            "geometry": {"type": "Point", "coordinates": [float(r[3]), float(r[2])]},
+            "properties": {
+                "device_id": r[0],
+                "form_factor": r[1],
+                "spatial_status": r[4],
+            },
+        }
+        for r in rows
+    ]
+
+    return {
+        "type": "FeatureCollection",
+        "metadata": {
+            "cycle_id": str(cycle_id),
+            "snapshot_time": snapshot_time.isoformat(),
+            "device_count": len(features),
+            "filters": {
+                "form_factor": form_factor,
+                "spatial_status": spatial_status,
+                "include_outliers": include_outliers,
+                "bbox": bbox,
+            },
+        },
+        "features": features,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Daily SLA compliance (6 AM-9 AM Denver window)
 # ---------------------------------------------------------------------------
 def _daily_row_to_dict(cur, row) -> dict[str, Any]:

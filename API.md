@@ -279,6 +279,147 @@ GET /api/v1/analytics/trend?layer=neighborhood&name=NB_FivePoints&range=24h
 
 ---
 
+### `GET /api/v1/devices/current`
+
+GeoJSON FeatureCollection of every device's current position from the
+most recent successfully-completed cycle. Suitable for direct ingestion
+into map libraries (Mapbox GL JS, MapLibre GL JS, Leaflet, OpenLayers).
+
+By default returns **only devices inside the Denver envelope**
+(`spatial_status='denver_core'`) — China-factory glitches and other
+outliers are hidden unless explicitly requested.
+
+**Query parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `form_factor` | string | (all) | Filter by `bicycle` or `scooter`. |
+| `spatial_status` | string | (default below) | Filter by `denver_core`, `china_glitch`, or `other_outlier`. Explicit value overrides `include_outliers`. |
+| `include_outliers` | bool | `false` | When true, returns devices regardless of envelope. Ignored if `spatial_status` is set. |
+| `bbox` | string | (none) | `min_lon,min_lat,max_lon,max_lat` WGS84 bounding box. Useful for viewport-level queries. |
+
+**Example request:**
+```http
+GET /api/v1/devices/current?form_factor=scooter
+```
+
+**Response 200:**
+```json
+{
+  "type": "FeatureCollection",
+  "metadata": {
+    "cycle_id": "8f3a2d10-1234-4abc-8def-0123456789ab",
+    "snapshot_time": "2026-05-30T18:30:14+00:00",
+    "device_count": 1868,
+    "filters": {
+      "form_factor": "scooter",
+      "spatial_status": null,
+      "include_outliers": false,
+      "bbox": null
+    }
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "id": "abc123",
+      "geometry": { "type": "Point", "coordinates": [-104.9876, 39.7392] },
+      "properties": {
+        "device_id": "abc123",
+        "form_factor": "scooter",
+        "spatial_status": "denver_core"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "abc124",
+      "geometry": { "type": "Point", "coordinates": [-104.9851, 39.7411] },
+      "properties": {
+        "device_id": "abc124",
+        "form_factor": "scooter",
+        "spatial_status": "denver_core"
+      }
+    }
+    /* … ~1,866 more features … */
+  ]
+}
+```
+
+**Response 503:** No completed cycle yet (very fresh deploy).
+```json
+{ "detail": "no completed cycles yet" }
+```
+
+**Response 400:** Malformed `bbox`.
+
+#### Notes
+
+- `coordinates` is `[longitude, latitude]` per the GeoJSON spec (note: x, y order — not lat/lon).
+- `id` and `properties.device_id` are the same value, duplicated for convenience: GeoJSON `id` is what map libraries use for feature interaction (click handlers, hovers); `properties.device_id` survives projection through layer styles.
+- `device_id` is the upstream Veo `bike_id`, which is **already public via Veo's GBFS feed** — no new privacy exposure.
+- Typical response sizes:
+  - All Denver devices (~5,900 features): ~470 KB JSON, ~95 KB gzip
+  - Filtered to scooters (~1,870 features): ~150 KB / ~32 KB gzip
+  - bbox-filtered (downtown ~500 features): ~40 KB / ~10 KB gzip
+- Recommended polling: **60–120 seconds**. The upstream cycle only fires every 10 minutes, so faster polling wastes bytes.
+- For viewport-aware rendering, pass `bbox` to keep response sizes small. The server-side filter is index-backed and cheap.
+
+#### Map rendering example (MapLibre GL JS)
+
+```javascript
+const map = new maplibregl.Map({ /* ... */ });
+
+map.on("load", async () => {
+  map.addSource("devices", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({
+    id: "scooters",
+    type: "circle",
+    source: "devices",
+    filter: ["==", ["get", "form_factor"], "scooter"],
+    paint: { "circle-radius": 4, "circle-color": "#e63946" },
+  });
+  map.addLayer({
+    id: "bikes",
+    type: "circle",
+    source: "devices",
+    filter: ["==", ["get", "form_factor"], "bicycle"],
+    paint: { "circle-radius": 4, "circle-color": "#1d4ed8" },
+  });
+
+  async function refresh() {
+    const r = await fetch("https://data.scooter.fyi/api/v1/devices/current");
+    const geo = await r.json();
+    map.getSource("devices").setData(geo);
+    document.querySelector("#count").textContent =
+      `${geo.metadata.device_count} devices · ${new Date(geo.metadata.snapshot_time).toLocaleTimeString()}`;
+  }
+  refresh();
+  setInterval(refresh, 90_000);
+});
+```
+
+#### Viewport-aware variant (Leaflet)
+
+```javascript
+async function refresh() {
+  const b = map.getBounds();
+  const bbox = `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+  const r = await fetch(`https://data.scooter.fyi/api/v1/devices/current?bbox=${bbox}`);
+  const geo = await r.json();
+  layer.clearLayers();
+  L.geoJSON(geo, {
+    pointToLayer: (feat, latlng) =>
+      L.circleMarker(latlng, {
+        radius: 4,
+        color: feat.properties.form_factor === "scooter" ? "#e63946" : "#1d4ed8",
+      }),
+  }).addTo(layer);
+}
+map.on("moveend", refresh);
+refresh();
+```
+
+---
+
 ### `GET /api/v1/compliance/daily/latest`
 
 Most recent daily 6 AM – 9 AM Denver SLA window. **This is the contractually-correct compliance metric per License Exhibit B** — the every-10-min `/snapshots/latest` value is informational, but the binding SLA is the morning-window daily average. Computed once per day at 9:00 AM Denver time.
