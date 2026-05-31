@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .api_admin import router as admin_router
 from .api_private import router as private_router
 from .api_public import router as public_router
+from .api_reports import router as reports_router
 from .config import load, session_https_only, session_secret
 from .map_auth import router as map_auth_router
 from .pg import run_migrations
@@ -76,6 +77,7 @@ app.include_router(public_router)
 app.include_router(admin_router)
 app.include_router(map_auth_router)
 app.include_router(private_router)
+app.include_router(reports_router)
 
 
 @app.get("/", include_in_schema=False)

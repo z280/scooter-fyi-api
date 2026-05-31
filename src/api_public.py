@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 
 from . import boundaries
 from .pg import connection
+from .quality import compute_quality_designation
 
 router = APIRouter()
 
@@ -260,19 +261,20 @@ def devices_current(
                 raise HTTPException(503, detail="no completed cycles yet")
             cycle_id, snapshot_time = row[0], row[1]
 
-            # Build the filter
-            where = ["cycle_id = %s"]
+            # Build the filter. All predicates prefix `r.` so they compose
+            # with the EXISTS subquery on negative_reports below.
+            where = ["r.cycle_id = %s"]
             params: list[Any] = [cycle_id]
 
             # Outlier handling: explicit spatial_status overrides include_outliers
             if spatial_status:
-                where.append("spatial_status = %s")
+                where.append("r.spatial_status = %s")
                 params.append(spatial_status)
             elif not include_outliers:
-                where.append("spatial_status = 'denver_core'")
+                where.append("r.spatial_status = 'denver_core'")
 
             if form_factor:
-                where.append("form_factor = %s")
+                where.append("r.form_factor = %s")
                 params.append(form_factor)
 
             if bbox:
@@ -284,17 +286,36 @@ def devices_current(
                 except ValueError as e:
                     raise HTTPException(400, detail=f"bbox parse error: {e}")
                 where.append(
-                    "longitude BETWEEN %s AND %s AND latitude BETWEEN %s AND %s"
+                    "r.longitude BETWEEN %s AND %s AND r.latitude BETWEEN %s AND %s"
                 )
                 params.extend([min_lon, max_lon, min_lat, max_lat])
 
+            # has_negative_report: true iff there's a report against THIS
+            # vehicle_identifier in the SAME h3_10 cell, ≤24h old. The
+            # row becomes "stale" (false here) the moment the scooter
+            # moves to a different h3_10, even though the report row
+            # remains queryable from /api/v1/private/reports.
             sql = (
-                "SELECT device_id, form_factor, latitude, longitude, spatial_status, "
-                "       vehicle_identifier, is_disabled, is_reserved, "
-                "       current_range_meters, propulsion_type "
-                "FROM raw_telemetry_points "
+                "SELECT r.device_id, r.form_factor, r.latitude, r.longitude, r.spatial_status, "
+                "       r.vehicle_identifier, r.is_disabled, r.is_reserved, "
+                "       r.current_range_meters, r.propulsion_type, "
+                "       r.h3_8_index, r.h3_9_index, r.h3_10_index, "
+                "       r.range_percentile_by_type, r.range_rank_unique_by_type, "
+                "       r.range_rank_all_by_type, r.range_rank_all_devices, "
+                "       r.range_rank_h3_8_peers, r.range_rank_h3_9_peers, "
+                "       r.range_rank_h3_10_peers, "
+                "       EXISTS ("
+                "           SELECT 1 FROM negative_reports nr "
+                "           WHERE nr.vehicle_identifier = r.vehicle_identifier "
+                "             AND nr.h3_10_index = r.h3_10_index "
+                "             AND nr.reported_at >= NOW() - INTERVAL '24 hours'"
+                "       ) AS has_negative_report, "
+                "       r.max_range_meters_for_type, "
+                "       ds.number_failed_starts, ds.first_observed_at_location "
+                "FROM raw_telemetry_points r "
+                "LEFT JOIN device_state ds USING (vehicle_identifier) "
                 f"WHERE {' AND '.join(where)} "
-                "ORDER BY device_id"
+                "ORDER BY r.device_id"
             )
             cur.execute(sql, params)
             rows = cur.fetchall()
@@ -302,8 +323,18 @@ def devices_current(
     # vehicle_plate is deliberately not selected — see src/identity.py for the
     # public/private identifier split. Only vehicle_identifier (the hash) goes
     # over an unauthenticated wire.
-    features = [
-        {
+    features = []
+    for r in rows:
+        quality = compute_quality_designation(
+            current_range_meters=r[8],
+            max_range_meters_for_type=r[21],
+            is_disabled=r[6],
+            is_reserved=r[7],
+            number_failed_starts=r[22],
+            first_observed_at_location=r[23],
+            has_negative_report=bool(r[20]),
+        )
+        features.append({
             "type": "Feature",
             "id": r[0],
             "geometry": {"type": "Point", "coordinates": [float(r[3]), float(r[2])]},
@@ -316,10 +347,20 @@ def devices_current(
                 "is_reserved": r[7],
                 "current_range_meters": r[8],
                 "propulsion_type": r[9],
+                "h3_8_index": int(r[10]) if r[10] is not None else None,
+                "h3_9_index": int(r[11]) if r[11] is not None else None,
+                "h3_10_index": int(r[12]) if r[12] is not None else None,
+                "range_percentile_by_type": r[13],
+                "range_rank_unique_by_type": r[14],
+                "range_rank_all_by_type": r[15],
+                "range_rank_all_devices": r[16],
+                "range_rank_h3_8_peers": r[17],
+                "range_rank_h3_9_peers": r[18],
+                "range_rank_h3_10_peers": r[19],
+                "has_negative_report": bool(r[20]),
+                "quality_designation": quality,
             },
-        }
-        for r in rows
-    ]
+        })
 
     return {
         "type": "FeatureCollection",

@@ -14,6 +14,7 @@ from .config import BoundaryLayer, load
 from .duck import session
 from .ingest import IngestPayload, TaggedDevice
 from .pg import connection
+from .ranking import compute_range_rankings
 
 log = logging.getLogger(__name__)
 
@@ -318,6 +319,7 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
     # Raw rows use the polygon-corrected spatial_status from DuckDB; fall back
     # to the ingest-time tag if the device wasn't loaded into DuckDB (e.g.
     # missing coords stripped during tagging — shouldn't happen but defensive).
+    rankings = compute_range_rankings(ingest.devices)
     raw_rows = [
         {
             "cycle_id": str(cycle_id),
@@ -329,10 +331,15 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
             "spatial_status": corrected_status.get(d.device_id, d.spatial_status),
             "vehicle_plate": d.vehicle_plate,
             "vehicle_identifier": d.vehicle_identifier,
+            "h3_8_index": d.h3_8_index,
+            "h3_9_index": d.h3_9_index,
+            "h3_10_index": d.h3_10_index,
             "is_disabled": d.is_disabled,
             "is_reserved": d.is_reserved,
             "current_range_meters": d.current_range_meters,
             "propulsion_type": d.propulsion_type,
+            "max_range_meters_for_type": d.max_range_meters_for_type,
+            **rankings.get(d.device_id, {}),
         }
         for d in ingest.devices
     ]
@@ -400,7 +407,13 @@ def write_to_postgres(result: ComputeResult) -> None:
                     "(cycle_id, snapshot_time, device_id, form_factor, "
                     " latitude, longitude, spatial_status, vehicle_plate, "
                     " vehicle_identifier, is_disabled, is_reserved, "
-                    " current_range_meters, propulsion_type) FROM STDIN"
+                    " current_range_meters, propulsion_type, "
+                    " max_range_meters_for_type, "
+                    " h3_8_index, h3_9_index, h3_10_index, "
+                    " range_percentile_by_type, range_rank_unique_by_type, "
+                    " range_rank_all_by_type, range_rank_all_devices, "
+                    " range_rank_h3_8_peers, range_rank_h3_9_peers, "
+                    " range_rank_h3_10_peers) FROM STDIN"
                 ) as copy:
                     for r in result.raw_rows:
                         copy.write_row([
@@ -410,5 +423,14 @@ def write_to_postgres(result: ComputeResult) -> None:
                             r["vehicle_identifier"], r["is_disabled"],
                             r["is_reserved"], r["current_range_meters"],
                             r["propulsion_type"],
+                            r["max_range_meters_for_type"],
+                            r["h3_8_index"], r["h3_9_index"], r["h3_10_index"],
+                            r.get("range_percentile_by_type"),
+                            r.get("range_rank_unique_by_type"),
+                            r.get("range_rank_all_by_type"),
+                            r.get("range_rank_all_devices"),
+                            r.get("range_rank_h3_8_peers"),
+                            r.get("range_rank_h3_9_peers"),
+                            r.get("range_rank_h3_10_peers"),
                         ])
         conn.commit()

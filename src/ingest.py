@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+import h3
 import httpx
 
 from .config import load
@@ -35,6 +36,7 @@ class UpstreamError(Exception):
 class VehicleType:
     form_factor: str
     propulsion_type: str | None = None
+    max_range_meters: int | None = None  # from GBFS vehicle_types.json
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,10 @@ class TaggedDevice:
     is_reserved: bool | None = None
     current_range_meters: int | None = None
     propulsion_type: str | None = None
+    max_range_meters_for_type: int | None = None  # per-type rated max from vehicle_types
+    h3_8_index: int | None = None    # H3 v4 cell IDs at three resolutions
+    h3_9_index: int | None = None    # (signed-bigint-safe — see sql/006)
+    h3_10_index: int | None = None
 
 
 # rental_uris.android/.ios deep-links embed the visible plate, e.g.
@@ -71,6 +77,16 @@ def _extract_vehicle_plate(rental_uris: Any) -> str | None:
         if m:
             return m.group(1)
     return None
+
+
+def _h3_cells(lat: float, lon: float) -> tuple[int, int, int]:
+    """Compute (h3_8, h3_9, h3_10) cell IDs as ints for a lat/lon. H3 v4
+    returns strings; we convert to int for BIGINT-friendly storage."""
+    return (
+        int(h3.latlng_to_cell(lat, lon, 8), 16),
+        int(h3.latlng_to_cell(lat, lon, 9), 16),
+        int(h3.latlng_to_cell(lat, lon, 10), 16),
+    )
 
 
 @dataclass(frozen=True)
@@ -127,9 +143,15 @@ def fetch_gbfs() -> tuple[dict[str, Any], dict[str, VehicleType]]:
                     vid = str(vt.get("vehicle_type_id"))
                     ff = vt.get("form_factor")
                     if vid and ff:
+                        try:
+                            mr = vt.get("max_range_meters")
+                            max_range = int(mr) if mr is not None else None
+                        except (TypeError, ValueError):
+                            max_range = None
                         vt_map[vid] = VehicleType(
                             form_factor=ff,
                             propulsion_type=vt.get("propulsion_type"),
+                            max_range_meters=max_range,
                         )
         except (httpx.HTTPError, json.JSONDecodeError, ValueError) as e:
             log.warning("vehicle_types lookup failed, using fallback map: %s", e)
@@ -208,10 +230,12 @@ def tag_envelope(payload: dict[str, Any], vt_map: dict[str, VehicleType]) -> Ing
         vt_key = str(vt_id) if vt_id is not None else None
         form_factor = "unknown"
         propulsion_type: str | None = None
+        max_range_for_type: int | None = None
         if vt_key and vt_key in vt_map:
             vt = vt_map[vt_key]
             form_factor = vt.form_factor
             propulsion_type = vt.propulsion_type
+            max_range_for_type = vt.max_range_meters
         elif b.get("form_factor"):
             form_factor = str(b["form_factor"])
 
@@ -231,6 +255,7 @@ def tag_envelope(payload: dict[str, Any], vt_map: dict[str, VehicleType]) -> Ing
             current_range_meters = None
 
         plate = _extract_vehicle_plate(b.get("rental_uris"))
+        h3_8, h3_9, h3_10 = _h3_cells(lat, lon)
         tagged.append(
             TaggedDevice(
                 device_id=device_id,
@@ -245,6 +270,10 @@ def tag_envelope(payload: dict[str, Any], vt_map: dict[str, VehicleType]) -> Ing
                 is_reserved=is_reserved,
                 current_range_meters=current_range_meters,
                 propulsion_type=propulsion_type,
+                max_range_meters_for_type=max_range_for_type,
+                h3_8_index=h3_8,
+                h3_9_index=h3_9,
+                h3_10_index=h3_10,
             )
         )
 
