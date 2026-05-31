@@ -327,6 +327,12 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
             "latitude": d.lat,
             "longitude": d.lon,
             "spatial_status": corrected_status.get(d.device_id, d.spatial_status),
+            "vehicle_plate": d.vehicle_plate,
+            "vehicle_identifier": d.vehicle_identifier,
+            "is_disabled": d.is_disabled,
+            "is_reserved": d.is_reserved,
+            "current_range_meters": d.current_range_meters,
+            "propulsion_type": d.propulsion_type,
         }
         for d in ingest.devices
     ]
@@ -392,12 +398,17 @@ def write_to_postgres(result: ComputeResult) -> None:
                 with cur.copy(
                     "COPY raw_telemetry_points "
                     "(cycle_id, snapshot_time, device_id, form_factor, "
-                    " latitude, longitude, spatial_status) FROM STDIN"
+                    " latitude, longitude, spatial_status, vehicle_plate, "
+                    " vehicle_identifier, is_disabled, is_reserved, "
+                    " current_range_meters, propulsion_type) FROM STDIN"
                 ) as copy:
                     for r in result.raw_rows:
                         copy.write_row([
                             r["cycle_id"], r["snapshot_time"], r["device_id"],
                             r["form_factor"], r["latitude"], r["longitude"],
-                            r["spatial_status"],
+                            r["spatial_status"], r["vehicle_plate"],
+                            r["vehicle_identifier"], r["is_disabled"],
+                            r["is_reserved"], r["current_range_meters"],
+                            r["propulsion_type"],
                         ])
         conn.commit()

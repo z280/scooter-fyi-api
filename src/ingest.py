@@ -9,12 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from .config import load
+from .identity import hash_plate
 from .pg import connection
 
 log = logging.getLogger(__name__)
@@ -30,13 +32,45 @@ class UpstreamError(Exception):
 
 
 @dataclass(frozen=True)
+class VehicleType:
+    form_factor: str
+    propulsion_type: str | None = None
+
+
+@dataclass(frozen=True)
 class TaggedDevice:
-    device_id: str
+    device_id: str                           # rotating GBFS bike_id
     vehicle_type_id: str | None
     form_factor: str
     lat: float
     lon: float
     spatial_status: str  # denver_core | china_glitch | other_outlier
+    vehicle_plate: str | None = None         # raw plate from rental_uris (INTERNAL)
+    vehicle_identifier: str | None = None    # sha256(plate)[:16] — public-safe stable ID
+    is_disabled: bool | None = None
+    is_reserved: bool | None = None
+    current_range_meters: int | None = None
+    propulsion_type: str | None = None
+
+
+# rental_uris.android/.ios deep-links embed the visible plate, e.g.
+#   "https://gmjc.adj.st/?adj_t=5vyf0nr&number=1025543"
+# That `number` is the only persistent device identifier the GBFS spec allows
+# for dockless fleets — `bike_id` itself MUST rotate per trip.
+_NUMBER_RE = re.compile(r"[?&]number=([^&]+)")
+
+
+def _extract_vehicle_plate(rental_uris: Any) -> str | None:
+    if not isinstance(rental_uris, dict):
+        return None
+    for key in ("android", "ios", "web"):
+        uri = rental_uris.get(key)
+        if not isinstance(uri, str):
+            continue
+        m = _NUMBER_RE.search(uri)
+        if m:
+            return m.group(1)
+    return None
 
 
 @dataclass(frozen=True)
@@ -50,12 +84,12 @@ class IngestPayload:
 # ---------------------------------------------------------------------------
 # HTTP fetch
 # ---------------------------------------------------------------------------
-def fetch_gbfs() -> tuple[dict[str, Any], dict[str, str]]:
+def fetch_gbfs() -> tuple[dict[str, Any], dict[str, VehicleType]]:
     """Fetch free_bike_status + vehicle_types in a single client session.
 
-    Returns (free_bike_status_json, {vehicle_type_id: form_factor}).
+    Returns (free_bike_status_json, {vehicle_type_id: VehicleType}).
     The vehicle_types lookup is best-effort: failure falls back to the
-    canonical {"1": "scooter", "3": "bicycle"} mapping.
+    canonical {"1": scooter, "3": bicycle} mapping with no propulsion data.
     """
     cfg = load().gbfs
     headers = {"User-Agent": cfg.user_agent}
@@ -81,7 +115,10 @@ def fetch_gbfs() -> tuple[dict[str, Any], dict[str, str]]:
         except json.JSONDecodeError as e:
             raise UpstreamError("malformed_payload", f"GBFS non-JSON: {e}") from e
 
-        vt_map: dict[str, str] = {"1": "scooter", "3": "bicycle"}
+        vt_map: dict[str, VehicleType] = {
+            "1": VehicleType(form_factor="scooter"),
+            "3": VehicleType(form_factor="bicycle"),
+        }
         try:
             vt_resp = client.get(cfg.vehicle_types_url)
             if vt_resp.status_code < 400:
@@ -90,7 +127,10 @@ def fetch_gbfs() -> tuple[dict[str, Any], dict[str, str]]:
                     vid = str(vt.get("vehicle_type_id"))
                     ff = vt.get("form_factor")
                     if vid and ff:
-                        vt_map[vid] = ff
+                        vt_map[vid] = VehicleType(
+                            form_factor=ff,
+                            propulsion_type=vt.get("propulsion_type"),
+                        )
         except (httpx.HTTPError, json.JSONDecodeError, ValueError) as e:
             log.warning("vehicle_types lookup failed, using fallback map: %s", e)
 
@@ -131,7 +171,7 @@ def is_stale(this_last_updated: int | None, this_sha: str) -> bool:
 # ---------------------------------------------------------------------------
 # Envelope tagging
 # ---------------------------------------------------------------------------
-def tag_envelope(payload: dict[str, Any], vt_map: dict[str, str]) -> IngestPayload:
+def tag_envelope(payload: dict[str, Any], vt_map: dict[str, VehicleType]) -> IngestPayload:
     cfg = load()
     bikes = payload.get("data", {}).get("bikes", []) or []
     last_updated = payload.get("last_updated")
@@ -167,11 +207,30 @@ def tag_envelope(payload: dict[str, Any], vt_map: dict[str, str]) -> IngestPaylo
         vt_id = b.get("vehicle_type_id")
         vt_key = str(vt_id) if vt_id is not None else None
         form_factor = "unknown"
+        propulsion_type: str | None = None
         if vt_key and vt_key in vt_map:
-            form_factor = vt_map[vt_key]
+            vt = vt_map[vt_key]
+            form_factor = vt.form_factor
+            propulsion_type = vt.propulsion_type
         elif b.get("form_factor"):
             form_factor = str(b["form_factor"])
 
+        # is_disabled / is_reserved: GBFS spec says both REQUIRED bools, but
+        # be defensive — fall back to None rather than coercing missing.
+        is_disabled = b.get("is_disabled")
+        is_reserved = b.get("is_reserved")
+        if not isinstance(is_disabled, bool):
+            is_disabled = None
+        if not isinstance(is_reserved, bool):
+            is_reserved = None
+
+        rng = b.get("current_range_meters")
+        try:
+            current_range_meters = int(rng) if rng is not None else None
+        except (TypeError, ValueError):
+            current_range_meters = None
+
+        plate = _extract_vehicle_plate(b.get("rental_uris"))
         tagged.append(
             TaggedDevice(
                 device_id=device_id,
@@ -180,6 +239,12 @@ def tag_envelope(payload: dict[str, Any], vt_map: dict[str, str]) -> IngestPaylo
                 lat=lat,
                 lon=lon,
                 spatial_status=status,
+                vehicle_plate=plate,
+                vehicle_identifier=hash_plate(plate),
+                is_disabled=is_disabled,
+                is_reserved=is_reserved,
+                current_range_meters=current_range_meters,
+                propulsion_type=propulsion_type,
             )
         )
 

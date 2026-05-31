@@ -289,7 +289,9 @@ def devices_current(
                 params.extend([min_lon, max_lon, min_lat, max_lat])
 
             sql = (
-                "SELECT device_id, form_factor, latitude, longitude, spatial_status "
+                "SELECT device_id, form_factor, latitude, longitude, spatial_status, "
+                "       vehicle_identifier, is_disabled, is_reserved, "
+                "       current_range_meters, propulsion_type "
                 "FROM raw_telemetry_points "
                 f"WHERE {' AND '.join(where)} "
                 "ORDER BY device_id"
@@ -297,6 +299,9 @@ def devices_current(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
+    # vehicle_plate is deliberately not selected — see src/identity.py for the
+    # public/private identifier split. Only vehicle_identifier (the hash) goes
+    # over an unauthenticated wire.
     features = [
         {
             "type": "Feature",
@@ -306,6 +311,11 @@ def devices_current(
                 "device_id": r[0],
                 "form_factor": r[1],
                 "spatial_status": r[4],
+                "vehicle_identifier": r[5],
+                "is_disabled": r[6],
+                "is_reserved": r[7],
+                "current_range_meters": r[8],
+                "propulsion_type": r[9],
             },
         }
         for r in rows
