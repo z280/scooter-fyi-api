@@ -13,3 +13,5 @@ os.environ.setdefault("VEO_CONFIG", str(ROOT / "config.json"))
 os.environ.setdefault("POSTGRES_USER", "test")
 os.environ.setdefault("POSTGRES_PASSWORD", "test")
 os.environ.setdefault("POSTGRES_DB", "test")
+# Deterministic salt for hash_plate() — tests assert exact output.
+os.environ.setdefault("VEHICLE_IDENTIFIER_SALT", "pytest-fixed-salt")

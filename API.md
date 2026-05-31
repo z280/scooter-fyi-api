@@ -528,7 +528,12 @@ GET /api/v1/devices/current?form_factor=scooter
       "properties": {
         "device_id": "abc123",
         "form_factor": "scooter",
-        "spatial_status": "denver_core"
+        "spatial_status": "denver_core",
+        "vehicle_identifier": "8c4a1f0d2e9b7a35",
+        "is_disabled": false,
+        "is_reserved": false,
+        "current_range_meters": 45293,
+        "propulsion_type": "electric"
       }
     },
     {
@@ -538,13 +543,32 @@ GET /api/v1/devices/current?form_factor=scooter
       "properties": {
         "device_id": "abc124",
         "form_factor": "scooter",
-        "spatial_status": "denver_core"
+        "spatial_status": "denver_core",
+        "vehicle_identifier": "1b6e2d44a991f070",
+        "is_disabled": false,
+        "is_reserved": true,
+        "current_range_meters": 38110,
+        "propulsion_type": "electric"
       }
     }
     /* … ~1,866 more features … */
   ]
 }
 ```
+
+#### Feature property reference
+
+| Field | Type | Description |
+|---|---|---|
+| `device_id` | string | The upstream Veo `bike_id` from GBFS `free_bike_status`. **Rotates per trip** by GBFS spec mandate — do not treat as stable. |
+| `form_factor` | string | `"bicycle"`, `"scooter"`, or `"unknown"`. |
+| `spatial_status` | string | `"denver_core"`, `"china_glitch"`, or `"other_outlier"`. |
+| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. The salt is a server-side secret, so the identifier is **not directly reversible** to the physical plate by anyone but us. A motivated researcher with the GBFS feed can still join our public output to plates by **position** correlation, but the trivial hash-lookup attack is closed. May be null if the upstream payload omits a plate. |
+| `is_disabled` | bool \| null | `true` when the scooter is out of service (low battery, mechanical fault, impound). Disabled devices still count toward fleet totals because they occupy space. |
+| `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
+| `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. Pair with `propulsion_type` and the per-type `max_range_meters` to derive battery % — pedal-bike (`"human"`) entries have no battery. |
+| `propulsion_type` | string \| null | `"electric"`, `"electric_assist"` (pedal-assist), or `"human"` (pedal-only). Splits the `form_factor: "bicycle"` bucket into throttle e-bikes vs pedal-assist vs acoustic. |
+
 
 **Response 503:** No completed cycle yet (very fresh deploy).
 ```json

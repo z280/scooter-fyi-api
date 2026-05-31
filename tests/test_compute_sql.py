@@ -136,6 +136,8 @@ def test_core_totals_match_hand_counts(monkeypatch):
         cors_origin_patterns=fake_cfg.cors_origin_patterns,
         r2=fake_cfg.r2,
         auth=fake_cfg.auth,
+        map_auth=fake_cfg.map_auth,
+        device_tracking=fake_cfg.device_tracking,
         log_level=fake_cfg.log_level,
     )
     monkeypatch.setattr(src.config, "load", lambda: patched)

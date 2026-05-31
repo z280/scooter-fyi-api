@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import psycopg
 
-from . import compute, ingest, transmit
+from . import compute, device_state, ingest, transmit
 from .pg import connection
 from .sentry import capture_exception, set_cycle_tag
 
@@ -123,6 +123,16 @@ def run_once() -> str | None:
 
         # ----- write ---------------------------------------------------------
         compute.write_to_postgres(result)
+
+        # Update per-scooter persistent state + history. Isolated try/except:
+        # state-tracking is a derived layer, not load-bearing for the core
+        # snapshot. A failure here shouldn't fail the cycle.
+        try:
+            device_state.update_for_cycle(cycle_id, snapshot_time, tagged.devices)
+        except Exception as e:  # noqa: BLE001
+            log.exception("device_state update failed for cycle %s", cycle_id)
+            capture_exception(e)
+
         _set_status(
             cycle_id,
             data_storage_complete_ts=_now(),
