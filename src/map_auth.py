@@ -118,28 +118,6 @@ def _user_profile(token: str) -> dict[str, Any]:
         return r.json()
 
 
-@router.get("/map-auth/{system}", include_in_schema=False)
-async def map_auth_initiate(system: str, request: Request, return_: str | None = None):
-    # FastAPI strips trailing underscore from query params — `return_` here
-    # means the literal `?return=...`. Aliased below to keep the API natural.
-    return_url = request.query_params.get("return") or return_
-    if not return_url:
-        raise HTTPException(400, "missing required ?return=... parameter")
-    if system not in _KNOWN_SYSTEMS:
-        raise HTTPException(404, f"unknown system '{system}' (known: {sorted(_KNOWN_SYSTEMS)})")
-    _validate_return_url(return_url)
-    if not _init_oauth():
-        raise HTTPException(503, "map auth not configured (missing MAP_OIDC_CLIENT_ID/SECRET)")
-
-    # Stash intent in the session — survives the GitHub round-trip.
-    request.session["map_auth_pending"] = {
-        "system": system,
-        "return_url": return_url,
-    }
-    callback = load().map_auth.callback_url
-    return await _oauth.github_map.authorize_redirect(request, callback)
-
-
 @router.get("/map-auth/callback", include_in_schema=False)
 async def map_auth_callback(request: Request):
     if not _init_oauth():
@@ -208,6 +186,31 @@ async def map_auth_callback(request: Request):
     sep = "&" if "#" in return_url else "#"
     redirect_to = f"{return_url}{sep}token={raw}&expires={expires_at.isoformat()}"
     return RedirectResponse(url=redirect_to, status_code=302)
+
+
+# NOTE: this wildcard route must stay AFTER /map-auth/callback above —
+# Starlette matches in registration order, so declaring {system} first would
+# shadow the literal /map-auth/callback path and break the OAuth bounce-back.
+@router.get("/map-auth/{system}", include_in_schema=False)
+async def map_auth_initiate(system: str, request: Request, return_: str | None = None):
+    # FastAPI strips trailing underscore from query params — `return_` here
+    # means the literal `?return=...`. Aliased below to keep the API natural.
+    return_url = request.query_params.get("return") or return_
+    if not return_url:
+        raise HTTPException(400, "missing required ?return=... parameter")
+    if system not in _KNOWN_SYSTEMS:
+        raise HTTPException(404, f"unknown system '{system}' (known: {sorted(_KNOWN_SYSTEMS)})")
+    _validate_return_url(return_url)
+    if not _init_oauth():
+        raise HTTPException(503, "map auth not configured (missing MAP_OIDC_CLIENT_ID/SECRET)")
+
+    # Stash intent in the session — survives the GitHub round-trip.
+    request.session["map_auth_pending"] = {
+        "system": system,
+        "return_url": return_url,
+    }
+    callback = load().map_auth.callback_url
+    return await _oauth.github_map.authorize_redirect(request, callback)
 
 
 @router.post("/map-auth/logout", include_in_schema=False)
