@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from .identity import hash_plate
 from .map_auth_dep import MapUser, require_map_user
 from .pg import connection
+from .quality import compute_quality_designation
 
 log = logging.getLogger(__name__)
 
@@ -99,7 +100,15 @@ def private_devices_current(
                        r.is_disabled, r.is_reserved, r.current_range_meters,
                        r.propulsion_type,
                        ds.first_observed_at_location, ds.number_failed_starts,
-                       ds.first_ever_observed_at
+                       ds.first_ever_observed_at,
+                       r.h3_8_index, r.h3_9_index, r.h3_10_index,
+                       r.max_range_meters_for_type,
+                       EXISTS (
+                           SELECT 1 FROM negative_reports nr
+                           WHERE nr.vehicle_identifier = r.vehicle_identifier
+                             AND nr.h3_10_index = r.h3_10_index
+                             AND nr.reported_at >= NOW() - INTERVAL '24 hours'
+                       ) AS has_negative_report
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
                 WHERE {' AND '.join(where)}
@@ -108,8 +117,18 @@ def private_devices_current(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
-    features = [
-        {
+    features = []
+    for r in rows:
+        quality = compute_quality_designation(
+            current_range_meters=r[9],
+            max_range_meters_for_type=r[17],
+            is_disabled=r[7],
+            is_reserved=r[8],
+            number_failed_starts=int(r[12]) if r[12] is not None else None,
+            first_observed_at_location=r[11],
+            has_negative_report=bool(r[18]),
+        )
+        features.append({
             "type": "Feature",
             "id": r[5],  # vehicle_identifier as the GeoJSON id — stable across cycles
             "geometry": {"type": "Point", "coordinates": [float(r[3]), float(r[2])]},
@@ -126,10 +145,14 @@ def private_devices_current(
                 "first_observed_at_location": r[11].isoformat() if r[11] else None,
                 "number_failed_starts": int(r[12]) if r[12] is not None else None,
                 "first_ever_observed_at": r[13].isoformat() if r[13] else None,
+                "h3_8_index": int(r[14]) if r[14] is not None else None,
+                "h3_9_index": int(r[15]) if r[15] is not None else None,
+                "h3_10_index": int(r[16]) if r[16] is not None else None,
+                "max_range_meters_for_type": r[17],
+                "has_negative_report": bool(r[18]),
+                "quality_designation": quality,
             },
-        }
-        for r in rows
-    ]
+        })
 
     return {
         "type": "FeatureCollection",

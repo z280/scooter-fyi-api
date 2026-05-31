@@ -129,11 +129,13 @@ def update_for_cycle(
                         snapshot_time,    # first_ever_observed_at
                         snapshot_time,    # last_observed_at
                         str(cycle_id),
+                        d.h3_8_index, d.h3_9_index, d.h3_10_index,
                     ))
                     new_history_rows.append((
                         vid, d.vehicle_plate, str(cycle_id), snapshot_time,
                         d.lat, d.lon, d.spatial_status, d.form_factor,
                         d.device_id, 0,
+                        d.h3_8_index, d.h3_9_index, d.h3_10_index,
                     ))
                     continue
 
@@ -155,15 +157,22 @@ def update_for_cycle(
                         snapshot_time,    # new first_observed_at_location
                         snapshot_time,    # last_observed_at
                         str(cycle_id),
+                        d.h3_8_index, d.h3_9_index, d.h3_10_index,
                         vid,
                     ))
                     new_history_rows.append((
                         vid, d.vehicle_plate, str(cycle_id), snapshot_time,
                         d.lat, d.lon, d.spatial_status, d.form_factor,
                         d.device_id, 0,
+                        d.h3_8_index, d.h3_9_index, d.h3_10_index,
                     ))
                 elif d.device_id != prev_device_id:
-                    # FAILED_START — same spot, new bike_id
+                    # FAILED_START — same spot, new bike_id. We deliberately
+                    # do NOT update the stored h3 cells here: the scooter
+                    # hasn't moved enough to trip the threshold, so its
+                    # "current location" cells are unchanged. (GPS drift
+                    # could otherwise cause noisy h3_10 flips on every
+                    # failed start.)
                     stats.failed_starts += 1
                     failed_start_updates.append((
                         d.device_id, d.spatial_status, d.form_factor,
@@ -185,8 +194,9 @@ def update_for_cycle(
                         current_lat, current_lon, current_spatial_status,
                         current_form_factor, first_observed_at_location,
                         number_failed_starts, first_ever_observed_at,
-                        last_observed_at, last_cycle_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        last_observed_at, last_cycle_id,
+                        current_h3_8_index, current_h3_9_index, current_h3_10_index
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     new_state_rows,
                 )
@@ -204,7 +214,10 @@ def update_for_cycle(
                         first_observed_at_location = %s,
                         number_failed_starts = 0,
                         last_observed_at = %s,
-                        last_cycle_id = %s
+                        last_cycle_id = %s,
+                        current_h3_8_index = %s,
+                        current_h3_9_index = %s,
+                        current_h3_10_index = %s
                     WHERE vehicle_identifier = %s
                     """,
                     moved_updates,
@@ -269,8 +282,9 @@ def update_for_cycle(
                     INSERT INTO device_history (
                         vehicle_identifier, vehicle_plate, cycle_id, snapshot_time,
                         lat, lon, spatial_status, form_factor,
-                        device_id_observed, dwell_failed_starts
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        device_id_observed, dwell_failed_starts,
+                        h3_8_index, h3_9_index, h3_10_index
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     new_history_rows,
                 )

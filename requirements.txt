@@ -11,3 +11,5 @@ python-multipart==0.0.12
 sentry-sdk[fastapi]==2.18.0
 boto3==1.35.65
 pyarrow==18.1.0
+h3==4.1.2
+

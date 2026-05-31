@@ -568,6 +568,27 @@ GET /api/v1/devices/current?form_factor=scooter
 | `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
 | `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. Pair with `propulsion_type` and the per-type `max_range_meters` to derive battery % — pedal-bike (`"human"`) entries have no battery. |
 | `propulsion_type` | string \| null | `"electric"`, `"electric_assist"` (pedal-assist), or `"human"` (pedal-only). Splits the `form_factor: "bicycle"` bucket into throttle e-bikes vs pedal-assist vs acoustic. |
+| `h3_8_index` / `h3_9_index` / `h3_10_index` | int \| null | [Uber H3](https://h3geo.org/) hexagonal cell IDs at resolutions 8 (~750m wide), 9 (~210m), and 10 (~75m). 64-bit integers. Same value across resolutions for stationary devices; change when the scooter moves. Useful for spatial aggregation client-side. |
+| `range_percentile_by_type` | string \| null | One of `"0"`, `"25"`, `"50"`, `"75"`. Which quartile of unique `current_range_meters` values **within the same `form_factor`** this scooter falls into. `"75"` = top quartile (most range). |
+| `range_rank_unique_by_type` | string \| null | `"x/y"` where `x` is the rank of this scooter's range value among the `y` *distinct* range values within its form_factor (ascending; ties share a position). |
+| `range_rank_all_by_type` | string \| null | `"x/y"` where `y` is the count of scooters of this form_factor and `x` is this scooter's rank ascending (1 = lowest range). **Ties get the highest position in the tied group**: 20 scooters tied for the top range in a fleet of 100 all show `"100/100"`. |
+| `range_rank_all_devices` | string \| null | Same as above but `y` = all eligible scooters across types. |
+| `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
+| `has_negative_report` | bool | `true` when ≥1 citizen-submitted report has been filed against this `vehicle_identifier` at this exact `h3_10_index` cell within the last 24h. Becomes `false` automatically when the scooter moves to a different h3_10 cell. Submit reports via `POST /api/v1/reports`. |
+| `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, and active negative reports. `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
+
+#### Public write endpoints
+
+| Endpoint | Body | Purpose |
+|---|---|---|
+| `POST /api/v1/reports` | `{vehicle_identifier?\|vehicle_plate?, report_lat, report_lon, problem_tags[], problem_description?, h3_*_index?}` | Submit a negative report. Server computes its own h3 cells from `report_lat`/`report_lon`. At least one of `vehicle_identifier` or `vehicle_plate` is required. Returns `{id, reported_at, vehicle_identifier, h3_10_index}`. |
+| `POST /api/v1/quality-feedback` | `{vehicle_identifier, h3_10_index, polarity, designation_observed?, comment?}` | Positive or negative feedback on our `quality_designation`. `polarity` is `"positive"` or `"negative"`. Returns `{id, feedback_at}`. |
+
+**Anti-abuse:** these endpoints are currently public with no rate-limit
+or CAPTCHA. Before any public-launch marketing push we'll add per-IP
+rate limits and consensus surfacing (a report only flips
+`has_negative_report` to `true` once N independent reporters file it).
+Until then, treat the public report flow as best-effort.
 
 
 **Response 503:** No completed cycle yet (very fresh deploy).

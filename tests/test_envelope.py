@@ -157,6 +157,29 @@ def test_hash_plate_raises_when_salt_unset(monkeypatch):
         identity.hash_plate("1025543")
 
 
+def test_h3_indexes_computed_for_each_device(vt_map):
+    p = _payload(
+        {"bike_id": "h3a", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "1"},
+        {"bike_id": "h3b", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "1"},  # same spot
+        {"bike_id": "h3c", "lat": 39.75, "lon": -104.98, "vehicle_type_id": "1"},  # different spot
+    )
+    out = ingest.tag_envelope(p, vt_map)
+    by_id = {d.device_id: d for d in out.devices}
+    # All three resolutions populated as BIGINT-safe ints
+    for d in out.devices:
+        assert isinstance(d.h3_8_index, int)
+        assert isinstance(d.h3_9_index, int)
+        assert isinstance(d.h3_10_index, int)
+        assert -(1 << 63) <= d.h3_10_index < (1 << 63), "h3 index must fit signed bigint"
+    # Same point → same cell at every resolution
+    a, b = by_id["h3a"], by_id["h3b"]
+    assert (a.h3_8_index, a.h3_9_index, a.h3_10_index) == (b.h3_8_index, b.h3_9_index, b.h3_10_index)
+    # Different points → different h3_10 cells (~75m hexagons; the test deltas
+    # are ~1.1 km, well above one cell's edge)
+    c = by_id["h3c"]
+    assert a.h3_10_index != c.h3_10_index
+
+
 def test_payload_hash_is_stable(vt_map):
     p = _payload(
         {"bike_id": "a", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "1"},
