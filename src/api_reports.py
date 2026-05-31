@@ -32,6 +32,7 @@ import h3
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 
+from .client_ip import real_client_ip
 from .identity import hash_plate
 from .map_auth_dep import MapUser, require_map_user
 from .pg import connection
@@ -74,8 +75,8 @@ class NegativeReportIn(BaseModel):
 # ---------------------------------------------------------------------------
 @router.post("/api/v1/reports")
 def submit_report(
+    request: Request,
     payload: NegativeReportIn = Body(...),
-    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Accept a citizen-submitted negative report. Public, no auth.
 
@@ -83,10 +84,8 @@ def submit_report(
     cannot read other reports through this endpoint — that's behind
     map-auth at /api/v1/private/reports.
     """
-    # Resolve identity. If the caller supplied plate, hash it. If they
-    # supplied identifier, leave plate null (we'll backfill from
-    # device_state if we know it). If both supplied and they disagree,
-    # prefer the plate (it's the ground truth) but log the mismatch.
+    # Resolve identity. Plate is ground truth; if both are given and
+    # they disagree, prefer plate and log the mismatch.
     plate = payload.vehicle_plate
     ident = payload.vehicle_identifier
     if plate:
@@ -97,27 +96,49 @@ def submit_report(
                 plate, ident, computed,
             )
         ident = computed
-    elif ident:
-        # Best-effort plate backfill from device_state. Optional — a
-        # report against an identifier we've never seen is still valid.
+
+    # Look up the device in device_state. We want two things from this row:
+    #   1. plate backfill (when the caller only gave us an identifier)
+    #   2. the SCOOTER'S current h3 cells — these are what we'll store as
+    #      the canonical h3_*_index on the report row. Reason: the
+    #      has_negative_report flag on /devices/current matches the
+    #      device's CURRENT h3 against the report's h3, so storing the
+    #      reporter's clicked-location h3 would make the flag silently
+    #      fail any time the reporter stood ≥75 m from the scooter
+    #      (one res-10 cell). Anchoring to the scooter's actual position
+    #      makes "report sticks until scooter moves" work as advertised.
+    device_h3_8 = device_h3_9 = device_h3_10 = None
+    if ident:
         with connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT vehicle_plate FROM device_state WHERE vehicle_identifier = %s",
+                    """
+                    SELECT vehicle_plate,
+                           current_h3_8_index, current_h3_9_index, current_h3_10_index
+                    FROM device_state WHERE vehicle_identifier = %s
+                    """,
                     (ident,),
                 )
                 row = cur.fetchone()
                 if row:
-                    plate = row[0]
+                    if not plate:
+                        plate = row[0]
+                    device_h3_8, device_h3_9, device_h3_10 = row[1], row[2], row[3]
 
-    # Server-side h3 (authoritative). Caller-supplied values are accepted
-    # for compatibility but discarded.
-    h3_8 = int(h3.latlng_to_cell(payload.report_lat, payload.report_lon, 8), 16)
-    h3_9 = int(h3.latlng_to_cell(payload.report_lat, payload.report_lon, 9), 16)
-    h3_10 = int(h3.latlng_to_cell(payload.report_lat, payload.report_lon, 10), 16)
+    # Anchor h3 to the scooter's position when we know it; otherwise fall
+    # back to the reporter's clicked position. (For a brand-new
+    # identifier we've never observed, the reporter's location is the
+    # only signal we have.) Server-side computation either way — any
+    # caller-supplied h3_*_index values on the payload are discarded.
+    if device_h3_10 is not None:
+        h3_8, h3_9, h3_10 = int(device_h3_8), int(device_h3_9), int(device_h3_10)
+    else:
+        h3_8 = int(h3.latlng_to_cell(payload.report_lat, payload.report_lon, 8), 16)
+        h3_9 = int(h3.latlng_to_cell(payload.report_lat, payload.report_lon, 9), 16)
+        h3_10 = int(h3.latlng_to_cell(payload.report_lat, payload.report_lon, 10), 16)
 
-    ip = request.client.host if request and request.client else None
-    ua = request.headers.get("user-agent") if request else None
+    ip = real_client_ip(request)
+    ua = request.headers.get("user-agent")
 
     with connection() as conn:
         with conn.cursor() as cur:
@@ -143,8 +164,9 @@ def submit_report(
         conn.commit()
 
     log.info(
-        "report received id=%d vehicle_identifier=%s tags=%s",
+        "report received id=%d vehicle_identifier=%s tags=%s anchored=%s",
         new_id, ident, payload.problem_tags,
+        "device" if device_h3_10 is not None else "reporter",
     )
     return {
         "id": int(new_id),
@@ -254,14 +276,14 @@ class QualityFeedbackIn(BaseModel):
 
 @router.post("/api/v1/quality-feedback")
 def submit_quality_feedback(
+    request: Request,
     payload: QualityFeedbackIn = Body(...),
-    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Accept positive/negative feedback on a quality_designation. Public.
 
     Returns the persisted record's `id` and `feedback_at`."""
-    ip = request.client.host if request and request.client else None
-    ua = request.headers.get("user-agent") if request else None
+    ip = real_client_ip(request)
+    ua = request.headers.get("user-agent")
 
     with connection() as conn:
         with conn.cursor() as cur:
