@@ -53,7 +53,14 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
       AUTH_ALLOWED_GITHUB_ORGS: ${AUTH_ALLOWED_GITHUB_ORGS}
+      MAP_OIDC_CLIENT_ID: ${MAP_OIDC_CLIENT_ID}
+      MAP_OIDC_CLIENT_SECRET: ${MAP_OIDC_CLIENT_SECRET}
+      MAP_AUTH_ALLOWED_GITHUB_ORGS: ${MAP_AUTH_ALLOWED_GITHUB_ORGS}
       SESSION_SECRET: ${SESSION_SECRET}
+      # Required: HMAC key for vehicle_identifier. Lose this and every
+      # previously-emitted identifier becomes orphaned. Treat like a DB
+      # encryption key — back up out of repo.
+      VEHICLE_IDENTIFIER_SALT: ${VEHICLE_IDENTIFIER_SALT}
       VEO_CONFIG: /app/config.json
     volumes:
       # config.json is mounted so prod can swap it without rebuilding the image.
@@ -99,6 +106,10 @@ services:
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
       R2_BUCKET_NAME: ${R2_BUCKET_NAME}
       SENTRY_DSN: ${SENTRY_DSN}
+      # Required: matches pipeline_worker — the scheduler runs ingest_cycle
+      # which calls hash_plate(), so it MUST have the same salt or every
+      # cycle aborts with a salt-missing RuntimeError.
+      VEHICLE_IDENTIFIER_SALT: ${VEHICLE_IDENTIFIER_SALT}
       VEO_CONFIG: /app/config.json
       # supercronic + libc honor TZ; cron entries run in this timezone so the
       # 9 AM Denver daily_sla job is DST-aware.
