@@ -108,7 +108,8 @@ def private_devices_current(
                            WHERE nr.vehicle_identifier = r.vehicle_identifier
                              AND nr.h3_10_index = r.h3_10_index
                              AND nr.reported_at >= NOW() - INTERVAL '24 hours'
-                       ) AS has_negative_report
+                       ) AS has_negative_report,
+                       ds.max_observed_range_meters, ds.max_observed_range_at
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
                 WHERE {' AND '.join(where)}
@@ -151,6 +152,8 @@ def private_devices_current(
                 "max_range_meters_for_type": r[17],
                 "has_negative_report": bool(r[18]),
                 "quality_designation": quality,
+                "max_observed_range_meters": r[19],
+                "max_observed_range_at": r[20].isoformat() if r[20] else None,
             },
         })
 
@@ -202,7 +205,8 @@ def private_devices_lookup(
                        current_lat, current_lon, current_spatial_status,
                        current_form_factor, first_observed_at_location,
                        number_failed_starts, first_ever_observed_at,
-                       last_observed_at, last_cycle_id
+                       last_observed_at, last_cycle_id,
+                       max_observed_range_meters, max_observed_range_at
                 FROM device_state
                 WHERE vehicle_identifier = %s
                 """,
@@ -225,6 +229,8 @@ def private_devices_lookup(
         "first_ever_observed_at": row[9].isoformat() if row[9] else None,
         "last_observed_at": row[10].isoformat() if row[10] else None,
         "last_cycle_id": str(row[11]) if row[11] else None,
+        "max_observed_range_meters": row[12],
+        "max_observed_range_at": row[13].isoformat() if row[13] else None,
     }
 
 
@@ -325,4 +331,63 @@ def private_device_history(
         "stop_count": len(stops),
         "viewed_by": user.login,
         "stops": stops,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/private/devices/max-ranges
+# ---------------------------------------------------------------------------
+# Sorted dump of every tracked device by the highest current_range_meters
+# it has ever reported, descending. Used to separate the pedal/2nd-seat
+# bicycles (larger battery, higher achievable charge) from the smaller-
+# battery model — the public GBFS feed does not distinguish them. Run the
+# system for a few days after deploying this column, then inspect the head
+# of this list for the high-battery cluster.
+@router.get("/api/v1/private/devices/max-ranges")
+def private_devices_max_ranges(
+    user: MapUser = Depends(require_map_user),
+    form_factor: str | None = Query(None),
+    limit: int = Query(5000, ge=1, le=20000),
+) -> dict[str, Any]:
+    where = ["max_observed_range_meters IS NOT NULL"]
+    params: list[Any] = []
+    if form_factor:
+        where.append("current_form_factor = %s")
+        params.append(form_factor)
+    params.append(limit)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT vehicle_identifier, vehicle_plate, current_form_factor,
+                       max_observed_range_meters, max_observed_range_at,
+                       first_ever_observed_at, last_observed_at
+                FROM device_state
+                WHERE {' AND '.join(where)}
+                ORDER BY max_observed_range_meters DESC NULLS LAST,
+                         vehicle_identifier
+                LIMIT %s
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+
+    devices = [
+        {
+            "vehicle_identifier": r[0],
+            "vehicle_plate": r[1],
+            "form_factor": r[2],
+            "max_observed_range_meters": r[3],
+            "max_observed_range_at": r[4].isoformat() if r[4] else None,
+            "first_ever_observed_at": r[5].isoformat() if r[5] else None,
+            "last_observed_at": r[6].isoformat() if r[6] else None,
+        }
+        for r in rows
+    ]
+    return {
+        "viewed_by": user.login,
+        "filters": {"form_factor": form_factor},
+        "device_count": len(devices),
+        "devices": devices,
     }

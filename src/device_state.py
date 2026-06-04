@@ -121,6 +121,10 @@ def update_for_cycle(
                 if vid not in prior:
                     # NEW device — first observation ever
                     stats.new_devices += 1
+                    # max_observed_range_{meters,at} seed: only set if this
+                    # first sighting reported a charge level. Otherwise leave
+                    # NULL so a later cycle with a real value becomes the seed.
+                    seed_max_at = snapshot_time if d.current_range_meters is not None else None
                     new_state_rows.append((
                         vid, d.vehicle_plate, d.device_id, d.lat, d.lon,
                         d.spatial_status, d.form_factor,
@@ -130,6 +134,8 @@ def update_for_cycle(
                         snapshot_time,    # last_observed_at
                         str(cycle_id),
                         d.h3_8_index, d.h3_9_index, d.h3_10_index,
+                        d.current_range_meters,  # max_observed_range_meters
+                        seed_max_at,             # max_observed_range_at
                     ))
                     new_history_rows.append((
                         vid, d.vehicle_plate, str(cycle_id), snapshot_time,
@@ -195,10 +201,35 @@ def update_for_cycle(
                         current_form_factor, first_observed_at_location,
                         number_failed_starts, first_ever_observed_at,
                         last_observed_at, last_cycle_id,
-                        current_h3_8_index, current_h3_9_index, current_h3_10_index
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        current_h3_8_index, current_h3_9_index, current_h3_10_index,
+                        max_observed_range_meters, max_observed_range_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     new_state_rows,
+                )
+
+            # max-observed-range tracker: a single batch UPDATE for every
+            # already-existing device that reported a charge this cycle. Only
+            # bumps the stored max when the current reading is strictly higher
+            # (or no prior max exists), and stamps the observation time so we
+            # know when the peak was set. NEW devices were seeded above.
+            range_updates = [
+                (d.current_range_meters, snapshot_time, d.vehicle_identifier)
+                for d in eligible
+                if d.current_range_meters is not None
+                and d.vehicle_identifier in prior
+            ]
+            if range_updates:
+                cur.executemany(
+                    """
+                    UPDATE device_state SET
+                        max_observed_range_meters = %s,
+                        max_observed_range_at     = %s
+                    WHERE vehicle_identifier = %s
+                      AND (max_observed_range_meters IS NULL
+                           OR %s > max_observed_range_meters)
+                    """,
+                    [(r[0], r[1], r[2], r[0]) for r in range_updates],
                 )
 
             if moved_updates:
