@@ -17,5 +17,8 @@ ALTER TABLE device_state
     ADD COLUMN IF NOT EXISTS max_observed_range_meters  INTEGER,
     ADD COLUMN IF NOT EXISTS max_observed_range_at      TIMESTAMPTZ;
 
+-- Includes vehicle_identifier as the tie-breaker so the ranking endpoint's
+-- ORDER BY (max_observed_range_meters DESC, vehicle_identifier) is fully
+-- satisfied by an index scan — no extra sort step even at the 20k LIMIT cap.
 CREATE INDEX IF NOT EXISTS idx_device_state_max_observed_range
-    ON device_state (max_observed_range_meters DESC NULLS LAST);
+    ON device_state (max_observed_range_meters DESC NULLS LAST, vehicle_identifier);

@@ -338,10 +338,11 @@ def private_device_history(
 # /api/v1/private/devices/max-ranges
 # ---------------------------------------------------------------------------
 # Sorted dump of every tracked device by the highest current_range_meters
-# it has ever reported. Used to separate the pedal/2nd-seat bicycles (larger
-# battery, higher achievable charge) from the smaller-battery model — the
-# public GBFS feed does not distinguish them. Run the system for a few days
-# after deploying this column, then inspect the tail of this list.
+# it has ever reported, descending. Used to separate the pedal/2nd-seat
+# bicycles (larger battery, higher achievable charge) from the smaller-
+# battery model — the public GBFS feed does not distinguish them. Run the
+# system for a few days after deploying this column, then inspect the head
+# of this list for the high-battery cluster.
 @router.get("/api/v1/private/devices/max-ranges")
 def private_devices_max_ranges(
     user: MapUser = Depends(require_map_user),
