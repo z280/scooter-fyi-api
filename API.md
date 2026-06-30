@@ -720,14 +720,14 @@ GET /api/v1/compliance/daily/latest
 
 | Field | Type | Description |
 |---|---|---|
-| `sla_date` | string (date) | Denver-local date the window covers (YYYY-MM-DD). |
-| `window_start_ts` | string | 6:00 AM Denver expressed as UTC. |
-| `window_end_ts` | string | 9:00 AM Denver expressed as UTC. |
+| `sla_date` | string (date) \| null | Denver-local date the window covers (YYYY-MM-DD). `null` in the pending response. |
+| `window_start_ts` | string \| null | 6:00 AM Denver expressed as UTC. `null` in the pending response. |
+| `window_end_ts` | string \| null | 9:00 AM Denver expressed as UTC. `null` in the pending response. |
 | `snapshot_count` | int | Number of cycles whose `snapshot_time` fell inside the window. Typically 18 (3 hours × 6 cycles/hour). Lower values indicate cycle misses; 0 means no data. |
 | `avg_*` fields | float \| null | Arithmetic mean of the corresponding `snapshot_metadata_core` field across all snapshots in the window. Null when `snapshot_count == 0`. |
 | `compliance_v1_pass` | bool \| null | `avg_percent_all_devices_v1 >= 30`. The primary SLA boolean. Null when no data. |
 | `compliance_v2_pass` | bool \| null | Same for v2. The contractually-binding map (v1 vs v2) is being confirmed with DOTI; track both for now. |
-| `computed_at` | string | UTC timestamp of when this row was computed. |
+| `computed_at` | string \| null | UTC timestamp of when this row was computed. `null` in the pending response. |
 
 ---
 
