@@ -124,8 +124,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 6144M
-    mem_limit: 6144m
+          memory: 2048M
+    mem_limit: 2048m
 
   cloudflared:
     image: cloudflare/cloudflared:latest
