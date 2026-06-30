@@ -711,9 +711,9 @@ GET /api/v1/compliance/daily/latest
 }
 ```
 
-**Response 503:** No daily row computed yet (first run pending, or pipeline just deployed).
+**Response 200 (pending):** No daily row computed yet (first run pending, or pipeline just deployed). Returns the same shape with every field nulled and `snapshot_count: 0`, so the gauge can render a "pending" state without special-casing a non-2xx status. The `avg_*` and `compliance_*` fields are `null` (not absent), matching the field reference below.
 ```json
-{ "detail": "no daily SLA rows computed yet" }
+{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null … */ "compliance_v1_pass": null, "compliance_v2_pass": null, "computed_at": null }
 ```
 
 #### Field reference

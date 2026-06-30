@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from . import boundaries
+from .daily_sla import _AVG_FIELDS
 from .pg import connection
 from .quality import compute_quality_designation
 
@@ -409,9 +410,39 @@ def _daily_row_to_dict(cur, row) -> dict[str, Any]:
     return d
 
 
+def _empty_daily_payload() -> dict[str, Any]:
+    """The 'pending' shape for /latest before any daily SLA row exists.
+
+    Mirrors the persisted row's keys with null values (snapshot_count 0) so
+    the front-end compliance gauge can render a 'pending' state. The
+    documented gauge does `v1Pct === null ? "pending" : v1Pct.toFixed(1)`
+    (API.md → Common patterns), which only works if the field is present
+    and null — a 503 / `{detail}` body leaves it `undefined` and the gauge
+    crashes on `.toFixed()`.
+    """
+    payload: dict[str, Any] = {
+        "sla_date": None,
+        "window_start_ts": None,
+        "window_end_ts": None,
+        "snapshot_count": 0,
+    }
+    for f in _AVG_FIELDS:
+        payload[f"avg_{f}"] = None
+    payload["compliance_v1_pass"] = None
+    payload["compliance_v2_pass"] = None
+    payload["computed_at"] = None
+    return payload
+
+
 @router.get("/api/v1/compliance/daily/latest")
 def daily_compliance_latest() -> dict[str, Any]:
-    """Most recent computed daily SLA window."""
+    """Most recent computed daily SLA window.
+
+    Returns a null-filled 'pending' payload (HTTP 200) when no row has been
+    computed yet — right after a deploy, or before the 9:00 AM Denver job
+    first runs — so the front-end gauge degrades to a 'pending' state
+    instead of erroring on a 503 it doesn't expect.
+    """
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -419,7 +450,7 @@ def daily_compliance_latest() -> dict[str, Any]:
             )
             row = cur.fetchone()
             if not row:
-                raise HTTPException(503, detail="no daily SLA rows computed yet")
+                return _empty_daily_payload()
             return _daily_row_to_dict(cur, row)
 
 
