@@ -16,7 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .api_admin import router as admin_router
+from .api_auth import router as auth_router
 from .api_private import router as private_router
+from .api_profile import router as profile_router
 from .api_public import router as public_router
 from .api_reports import router as reports_router
 from .config import load, session_https_only, session_secret
@@ -59,10 +61,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=list(_cfg.cors_origins),
     allow_origin_regex=_cors_regex,
-    # GET for read-only data, POST for /map-auth/logout. Bearer tokens travel
-    # in Authorization (covered by allow_headers="*"), not cookies — so
-    # allow_credentials stays false.
-    allow_methods=["GET", "POST"],
+    # GET for reads, POST for auth/reports, PUT for /api/v1/profile, DELETE
+    # for /api/v1/rides. Bearer tokens travel in Authorization (covered by
+    # allow_headers="*"), not cookies — so allow_credentials stays false.
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
     allow_credentials=False,
 )
@@ -78,6 +80,8 @@ app.include_router(admin_router)
 app.include_router(map_auth_router)
 app.include_router(private_router)
 app.include_router(reports_router)
+app.include_router(auth_router)
+app.include_router(profile_router)
 
 
 @app.get("/", include_in_schema=False)
