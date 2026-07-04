@@ -2,24 +2,28 @@
 
 GBFS rotates `bike_id` per trip. Veo embeds a stable visible plate (e.g.
 "1025543") in `rental_uris.android/.ios` as `&number=...`. That plate is
-printed on the side of the scooter — observable by any human walking
-past one — but exposing it directly via our public API would let an
-attacker map our API identifiers to physical plates without ever
-touching the GBFS feed. To prevent that lookup we surface only a keyed
-hash.
+printed on the side of the scooter and in its QR code. We key all
+cross-cycle state (device_state, device_history, negative_reports) on an
+HMAC of the plate rather than the plate itself.
 
 The hash is HMAC-SHA256 keyed by VEHICLE_IDENTIFIER_SALT, truncated to
 16 hex characters (64 bits — at ~8k devices, collision probability is
 ≈ 2e-12, negligible).
 
 PRIVACY MODEL --------------------------------------------------------
-With the salt set:
-  * Casual scrapers see opaque 16-char strings.
-  * Anyone with our public API alone cannot reverse identifier → plate.
-  * Anyone with GBFS access can still join our API to plates via
-    position correlation (same lat/lon at same time), but cannot do the
-    trivial hash-comparison join.
-  * Only our system can directly resolve identifier ↔ plate.
+As of API_REQUIREMENTS.md §1.1 the raw plate is ALSO exposed on the
+public /api/v1/devices/current endpoint (it's painted on the vehicle —
+not sensitive — and the frontend needs it for "Unlock in Veo" deep
+links). The identifier therefore no longer conceals the plate for a
+device's *current* position. What it still does:
+  * Serves as the stable primary key across all state/history tables —
+    plates could be re-painted or re-issued; the HMAC namespace is ours.
+  * Keeps the *history* boundary: per-device position history and dwell
+    trails are only queryable by identifier via the authenticated
+    /api/v1/private/* endpoints, and public report submission accepts
+    the identifier so reporters never need to transmit a plate.
+  * Only our system can resolve identifier ↔ plate offline (bulk joins
+    against historical archives still require the salt).
 
 The salt is LOAD-BEARING and REQUIRED. There is no dev fallback: a
 missing env var is a startup error, not a silent degradation. Treat the

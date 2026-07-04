@@ -43,10 +43,12 @@ def private_devices_current(
     bbox: str | None = Query(None),
 ) -> dict[str, Any]:
     """Same shape as /api/v1/devices/current, plus:
-       * vehicle_plate          (raw, never in public endpoint)
-       * first_observed_at_location  (from device_state)
-       * number_failed_starts        (from device_state)
        * first_ever_observed_at      (from device_state)
+       * max_observed_range_meters / max_observed_range_at
+
+    (vehicle_plate, number_failed_starts, and first_observed_at_location
+    were private-only until API_REQUIREMENTS.md §1.1/§1.2 promoted them
+    to the public endpoint; they remain here for compatibility.)
 
     Devices without a vehicle_identifier are omitted (we can't track
     them across cycles, so the extra fields would be null anyway).

@@ -47,6 +47,26 @@ N/A OVERRIDES (any of these forces N/A and skips all other rules):
     is_disabled is True
     is_reserved is True
     current_range_meters is None
+
+RELIABILITY TIER (API_REQUIREMENTS.md §1.2)
+-------------------------------------------
+`compute_reliability_tier` collapses the failure signals into a single
+public field answering "will this scooter actually unlock?" — distinct
+from quality_designation, which is dominated by battery range. Rules,
+evaluated in order (first match wins):
+
+    high_risk : has_negative_report
+              | number_failed_starts ≥ 2
+              | number_failed_starts == 1 AND dwell ≥ 24h
+              | dwell ≥ 96h                       (ghost-scooter idle)
+    unknown   : device never state-tracked (no plate → both inputs None)
+              | quality_designation == "N/A"     (disabled/reserved/rangeless)
+    ok        : everything else
+
+A single failed start with short dwell stays "ok" — one bike_id rotation
+can be a rebalancing scan, not a rider failure. Dwell counters reset when
+the scooter moves (see src/device_state.py), so both inputs are naturally
+scoped to the current location — that's the "recent window".
 """
 
 from __future__ import annotations
@@ -72,6 +92,11 @@ _DAYLIGHT_SOFT_HOURS = 6.0
 # Daylight window in Denver local time.
 _DAY_START_HOUR = 8
 _DAY_END_HOUR = 20
+
+# Reliability-tier thresholds (see module docstring).
+_RELIABILITY_FS_HARD = 2           # failed starts that alone mean high_risk
+_RELIABILITY_FS_DWELL_HOURS = 24.0 # 1 failed start + this much dwell
+_RELIABILITY_IDLE_HOURS = 96.0     # dwell alone (ghost scooter)
 
 
 def _baseline_tier(range_m: int, max_range_m: int | None) -> str:
@@ -160,3 +185,34 @@ def compute_quality_designation(
                 tier = _knock_down(tier, 1)
 
     return tier
+
+
+def compute_reliability_tier(
+    *,
+    number_failed_starts: int | None,
+    first_observed_at_location: datetime | None,
+    quality_designation: str,
+    has_negative_report: bool,
+    now: datetime | None = None,
+) -> str:
+    """Return "ok", "unknown", or "high_risk". Rules in module docstring."""
+    fs = number_failed_starts or 0
+    if first_observed_at_location is not None:
+        now = now or datetime.now(timezone.utc)
+        dwell_hours = (now - first_observed_at_location).total_seconds() / 3600.0
+    else:
+        dwell_hours = 0.0
+
+    if has_negative_report or fs >= _RELIABILITY_FS_HARD:
+        return "high_risk"
+    if fs == 1 and dwell_hours >= _RELIABILITY_FS_DWELL_HOURS:
+        return "high_risk"
+    if dwell_hours >= _RELIABILITY_IDLE_HOURS:
+        return "high_risk"
+
+    if number_failed_starts is None and first_observed_at_location is None:
+        return "unknown"  # never state-tracked (upstream payload had no plate)
+    if quality_designation == "N/A":
+        return "unknown"
+
+    return "ok"
