@@ -144,11 +144,22 @@ attribution, and supporter features.
 
 ### 4.1 Stripe webhook
 
-- `POST /webhooks/stripe` — verify the Stripe signature; handle
-  `checkout.session.completed` (Payment Link, pay-what-you-want): read
-  `client_reference_id` (account id), set `supporter: true`, store amount
-  + timestamp. Handle refund events by clearing the flag only on full
-  refund.
+- `POST /webhooks/stripe` — verify the Stripe signature.
+- **Recurring plan (current):** a single fixed-price monthly subscription
+  with a 30-day free trial (Payment Links can't do pay-what-you-want on
+  recurring prices, only one-time). Handle `checkout.session.completed`
+  (mode=subscription: link `client_reference_id` → the Stripe
+  subscription/customer id) plus `customer.subscription.created/updated`
+  (status/trial_end/current_period_end) and `customer.subscription.deleted`
+  (cancellation). `supporter: true` while status is `trialing` or `active`
+  — a trial counts as supporter access, no payment required yet. Event
+  ordering between the checkout and subscription events isn't guaranteed;
+  both sides upsert by `stripe_subscription_id` (see `src/stripe_webhook.py`
+  docstring).
+- **One-time Payment Link (legacy):** still honored for anyone who
+  supported that way before the switch — `checkout.session.completed`
+  (mode=payment) sets `supporter: true` and stores amount + timestamp;
+  `charge.refunded` clears it only on full refund.
 - No other Stripe surface needed — no products API, no customer portal in
   v1.
 

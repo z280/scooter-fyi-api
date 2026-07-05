@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Privacy Policy — scooter.fyi</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         margin: 0; padding: 0; background: #f7f7f7; color: #222; line-height: 1.55; }
+  header { background: #1a1a1a; color: #eee; padding: 20px 24px; }
+  header a { color: #9cf; text-decoration: none; margin-right: 18px; font-size: 14px; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 24px 64px; background: white; }
+  h1 { margin-top: 0; }
+  h2 { margin-top: 2em; border-top: 1px solid #e2e2e2; padding-top: 1em; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid #e2e2e2; text-align: left;
+           vertical-align: top; font-size: 14px; }
+  th { background: #ececec; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px;
+         background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+  .updated { color: #666; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <a href="/legal/terms-of-service">Terms of Service</a>
+  <a href="/legal/privacy-policy">Privacy Policy</a>
+</header>
+<main>
+<h1>Privacy Policy</h1>
+<p class="updated">Last updated: July 5, 2026</p>
+
+<p>This Privacy Policy explains how <strong>Mile High Technology
+Consulting, LLC</strong>, doing business as <strong>"scooter.fyi"</strong>
+("Company," "we," "us," or "our"), collects, uses, and retains
+information in connection with scooter.fyi, including
+denver.scooter.fyi (the "Service").</p>
+
+<p>The retention figures below are also published in machine-readable
+form at <code>GET /api/v1/meta/privacy</code>; that live endpoint is the
+enforced source of truth — if this document and the API response ever
+disagree, the API reflects what the code actually does.</p>
+
+<h2>1. Information we collect</h2>
+<p><strong>You don't need an account to use the map.</strong> The public
+map, device data, and compliance metrics are available anonymously. We
+collect personal information only when you choose to create an account,
+submit a report, or subscribe.</p>
+<table>
+<tr><th>Category</th><th>What we collect</th><th>Why</th></tr>
+<tr><td>Account</td><td>Email address (via Google Sign-In or a one-time
+emailed link), rate-plan preference, theme, favorites</td>
+<td>Sign-in, personalizing the cost ticker, remembering your
+preferences</td></tr>
+<tr><td>Sessions</td><td>A hashed bearer token, issuing IP address, user
+agent</td><td>Keeping you signed in; detecting abuse</td></tr>
+<tr><td>Reports</td><td>Device failure reports, missed-discount reports,
+optional receipt images, optional GPS coordinates you provide</td>
+<td>Building the public compliance/reliability dataset</td></tr>
+<tr><td>Ride history (Premium only)</td><td>Ride start/end time,
+duration, distance, estimated cost, route polyline</td>
+<td>The supporter ride-log feature — opt-in, deletable by you at any
+time</td></tr>
+<tr><td>Payment</td><td>Handled entirely by Stripe; we receive a
+transaction/subscription reference and amount, never your card
+number</td><td>Billing the Premium subscription</td></tr>
+<tr><td>Technical</td><td>IP address on requests, standard server
+logs</td><td>Rate limiting, abuse prevention, debugging</td></tr>
+</table>
+<p>We do not use tracking cookies or cross-site advertising pixels. Your
+session token is stored in your browser's local storage, not a
+third-party cookie.</p>
+
+<h2>2. How we use information</h2>
+<ul>
+<li>Operate the Service (sign-in, sessions, the cost ticker, ride
+history).</li>
+<li>Build and publish the public compliance dataset — device reports and
+discount reports feed <strong>aggregate, anonymized</strong> public
+statistics (the regional reports summary and the monthly CSV export).
+Aggregate publications never include your identity, IP address, or
+email.</li>
+<li>Detect and prevent abuse (rate limiting, fraud in reports or
+payments).</li>
+<li>Bill your Premium subscription, if you have one.</li>
+<li>Respond to support requests.</li>
+</ul>
+<p>We do not sell your personal information, and we do not share it with
+third parties for their own marketing purposes.</p>
+
+<h2>3. Who we share information with</h2>
+<p>We use a small number of service providers to operate the Service,
+each processing data only as needed to perform their function:</p>
+<table>
+<tr><th>Provider</th><th>Purpose</th><th>What they see</th></tr>
+<tr><td>Google (Identity Services)</td><td>Sign-in</td><td>Your Google
+account email, only if you use "Sign in with Google"</td></tr>
+<tr><td>Postmark</td><td>Sending magic-link sign-in emails</td>
+<td>Your email address, transactional email content</td></tr>
+<tr><td>Stripe</td><td>Payment processing</td><td>Payment/billing
+details for the Premium subscription — we never receive or store your
+card number</td></tr>
+<tr><td>Cloudflare</td><td>Hosting, CDN, tunnel, and private object
+storage (receipt images)</td><td>Network-level request metadata; receipt
+images in a private, non-public bucket</td></tr>
+<tr><td>Sentry</td><td>Error monitoring</td><td>Application error
+reports, which may incidentally include request metadata</td></tr>
+</table>
+<p>We may also disclose information if required by law, or to protect
+the rights, property, or safety of the Service, our users, or the
+public.</p>
+
+<h2>4. Data retention</h2>
+<table>
+<tr><th>Data</th><th>Retention</th><th>Detail</th></tr>
+<tr><td>Sessions</td><td>30 days idle (rider) / 24 hours (admin)</td>
+<td>Bearer tokens are stored hashed (SHA-256). Rider sessions slide 30
+days from last refresh; admin sessions are fixed at 24 hours.
+Revoked/expired rows are pruned after 30 days.</td></tr>
+<tr><td>Magic-link tokens</td><td>15 minutes</td><td>Single-use, stored
+hashed, burned on redemption; unused tokens are pruned within a
+day.</td></tr>
+<tr><td>Receipt images</td><td>18 months</td><td>Stored in a private
+bucket, fully re-encoded on upload to strip EXIF/GPS/camera metadata.
+Deleted automatically after 18 months; the report record itself is kept
+(without the image) for the audit history.</td></tr>
+<tr><td>Ride history</td><td>Until you delete it</td><td>Route polylines
+are the most sensitive data we hold. Deleting a ride (or all your rides)
+is an immediate, permanent hard delete — no soft-delete, no backup
+retention, never reused for analytics.</td></tr>
+<tr><td>Reports (device/discount)</td><td>Indefinite, aggregated</td>
+<td>Kept as the audit evidence base. Public aggregates and the CSV
+export never include reporter identity — only an authenticated yes/no
+signal contributes to the aggregate.</td></tr>
+<tr><td>Accounts</td><td>Until you ask us to delete it</td><td>Email us
+at the address below to delete your account and associated
+preferences.</td></tr>
+</table>
+
+<h2>5. Your choices and rights</h2>
+<ul>
+<li><strong>Access/export:</strong> your ride history is available via
+<code>GET /api/v1/rides/export</code> in your account.</li>
+<li><strong>Delete rides:</strong> <code>DELETE /api/v1/rides/:id</code>
+or <code>DELETE /api/v1/rides</code> at any time — immediate and
+irreversible.</li>
+<li><strong>Delete your account:</strong> email us (below); we don't yet
+have self-serve account deletion.</li>
+<li><strong>Cancel Premium:</strong> cancel your subscription any time;
+billing stops at the end of the current period.</li>
+<li>We do not sell personal information, so there is nothing to opt out
+of in that sense.</li>
+</ul>
+<p>If you're in a jurisdiction with statutory data-subject rights (e.g.
+CCPA/CPRA, GDPR), contact us and we'll do our best to honor equivalent
+requests even where not strictly required, given the size of this
+project.</p>
+
+<h2>6. Security</h2>
+<p>Session tokens and magic-link tokens are stored hashed, never in
+plaintext. All traffic is served over HTTPS. Receipt images live in a
+private storage bucket that is never publicly readable. No system is
+perfectly secure; if you discover a vulnerability, please report it to
+us directly before disclosing it publicly.</p>
+
+<h2>7. Children's privacy</h2>
+<p>The Service is not directed at children under 13, and we do not
+knowingly collect personal information from children under 13. If you
+believe a child has provided us personal information, contact us and we
+will delete it.</p>
+
+<h2>8. Changes to this policy</h2>
+<p>We may update this Privacy Policy from time to time. Material changes
+will be reflected by updating the "Last updated" date above.</p>
+
+<h2>9. Contact</h2>
+<p>
+Mile High Technology Consulting, LLC ("scooter.fyi")<br />
+Email: <a href="mailto:mhtc@z280.com">mhtc@z280.com</a>
+</p>
+<p>See also our <a href="/legal/terms-of-service">Terms of Service</a>.</p>
+</main>
+</body>
+</html>
