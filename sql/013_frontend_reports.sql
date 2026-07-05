@@ -33,9 +33,17 @@ CREATE INDEX IF NOT EXISTS idx_device_reports_live_lookup
     ON device_reports (vehicle_identifier, h3_10_index, reported_at DESC);
 CREATE INDEX IF NOT EXISTS idx_device_reports_reported_at
     ON device_reports (reported_at DESC);
--- Dedupe probe: identical (vehicle, type, reporter) within 30 min.
-CREATE INDEX IF NOT EXISTS idx_device_reports_dedupe
-    ON device_reports (vehicle_identifier, report_type, reported_at DESC);
+-- Dedupe probe: identical (vehicle, type, reporter) within 30 min. The
+-- app queries this as two mutually-exclusive shapes (authenticated:
+-- account_id = ?; anonymous: account_id IS NULL AND reporter_ip = ?), so
+-- one index covers the authenticated case and a partial index covers the
+-- anonymous case — a single index on (vehicle, type, reported_at) alone
+-- would still have to scan+filter every recent row for that vehicle/type.
+CREATE INDEX IF NOT EXISTS idx_device_reports_dedupe_auth
+    ON device_reports (vehicle_identifier, report_type, account_id, reported_at DESC);
+CREATE INDEX IF NOT EXISTS idx_device_reports_dedupe_anon
+    ON device_reports (vehicle_identifier, report_type, reporter_ip, reported_at DESC)
+    WHERE account_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS discount_reports (
     id                   BIGSERIAL PRIMARY KEY,

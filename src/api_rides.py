@@ -121,9 +121,16 @@ def list_rides(
     params: list[Any] = [user.account_id]
     if before:
         try:
-            params.append(datetime.fromisoformat(before.replace("Z", "+00:00")))
+            parsed = datetime.fromisoformat(before.replace("Z", "+00:00"))
         except ValueError as e:
             raise HTTPException(400, f"bad before timestamp: {e}")
+        if parsed.tzinfo is None:
+            # A naive datetime compared against TIMESTAMPTZ is ambiguous —
+            # psycopg would assume the server's local timezone, which is
+            # not necessarily what the client meant. Require an explicit
+            # offset (Z or +HH:MM) instead of silently guessing.
+            raise HTTPException(400, "before must include a timezone (e.g. trailing Z)")
+        params.append(parsed)
         where.append("started_at < %s")
     params.append(limit)
 

@@ -114,6 +114,20 @@ def archive_if_due() -> dict | None:
 _RECEIPT_RETENTION_MONTHS = 18
 
 
+def _months_ago(dt: datetime, months: int) -> datetime:
+    """Subtract calendar months, not `months * 30` days — that shortcut
+    under-counts by up to ~9 days over 18 months and would delete receipts
+    before the documented retention actually elapses."""
+    total_months = dt.year * 12 + (dt.month - 1) - months
+    year, month = divmod(total_months, 12)
+    month += 1
+    # Clamp day-of-month for the rare case a shorter target month can't
+    # hold it (e.g. Aug 31 - 18mo -> Feb 31 doesn't exist -> Feb 28/29).
+    import calendar
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
 def cleanup_receipts() -> dict:
     """Purge receipt images older than the documented 18-month retention.
 
@@ -123,7 +137,7 @@ def cleanup_receipts() -> dict:
     """
     from .receipts import ReceiptError, delete_receipt
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=_RECEIPT_RETENTION_MONTHS * 30)
+    cutoff = _months_ago(datetime.now(timezone.utc), _RECEIPT_RETENTION_MONTHS)
     deleted = failed = 0
     with connection() as conn:
         with conn.cursor() as cur:

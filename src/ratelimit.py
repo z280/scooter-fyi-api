@@ -48,6 +48,17 @@ def enforce(
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(seconds=window_seconds)
 
+    # Serialize check+insert for this (bucket, key): without this,
+    # concurrent requests can both observe count < limit and both insert,
+    # temporarily exceeding the configured cap. pg_advisory_xact_lock
+    # auto-releases at COMMIT/ROLLBACK — no separate unlock call needed —
+    # and only ever blocks two callers sharing the same bucket/key, so it
+    # doesn't serialize unrelated rate-limit checks against each other.
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"{bucket}:{key}",),
+    )
+
     cur.execute(
         "DELETE FROM rate_limit_events WHERE bucket = %s AND key = %s AND at < %s",
         (bucket, key, now - _PRUNE_AFTER),

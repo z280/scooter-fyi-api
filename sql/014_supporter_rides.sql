@@ -2,8 +2,11 @@
 --
 -- supporter_payments: one row per completed Stripe Checkout (Payment Link,
 -- pay-what-you-want). accounts.supporter is derived: TRUE iff the account
--- has >= 1 non-refunded payment. stripe_session_id is UNIQUE so webhook
--- retries are idempotent.
+-- has >= 1 non-refunded payment. stripe_session_id is NOT NULL + UNIQUE so
+-- webhook retries are idempotent — Postgres allows multiple NULLs in a
+-- UNIQUE column, which would silently defeat ON CONFLICT DO NOTHING for
+-- any malformed event; the app layer also refuses to insert without one
+-- (src/stripe_webhook.py), this is the schema-level backstop.
 --
 -- rides: supporter-logged ride history. Route polylines are the most
 -- sensitive data this system holds — DELETE endpoints are HARD deletes,
@@ -13,7 +16,7 @@
 CREATE TABLE IF NOT EXISTS supporter_payments (
     id                     BIGSERIAL PRIMARY KEY,
     account_id             BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    stripe_session_id      TEXT UNIQUE,
+    stripe_session_id      TEXT NOT NULL UNIQUE,
     stripe_payment_intent  TEXT,
     amount_cents           INTEGER,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),

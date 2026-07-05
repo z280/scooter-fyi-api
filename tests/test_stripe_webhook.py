@@ -8,7 +8,11 @@ import time
 
 import pytest
 
-from src.stripe_webhook import StripeSignatureError, verify_stripe_signature
+from src.stripe_webhook import (
+    StripeSignatureError,
+    _handle_checkout_completed,
+    verify_stripe_signature,
+)
 
 SECRET = "whsec_test_secret"
 BODY = b'{"type":"checkout.session.completed"}'
@@ -63,3 +67,24 @@ def test_malformed_header_rejected():
         verify_stripe_signature(BODY, "v1=deadbeef", SECRET)
     with pytest.raises(StripeSignatureError):
         verify_stripe_signature(BODY, "t=notanumber,v1=deadbeef", SECRET)
+
+
+# ---------- _handle_checkout_completed early-exit guards --------------------
+# Both cases below return before touching the database, so no connection
+# fixture is needed — they exercise the review-flagged guards directly.
+def test_checkout_missing_session_id_is_ignored_without_db_write():
+    out = _handle_checkout_completed({"client_reference_id": "1", "payment_status": "paid"})
+    assert out == "ignored_missing_session_id"
+
+
+def test_checkout_unpaid_status_is_ignored_without_db_write():
+    out = _handle_checkout_completed({
+        "id": "cs_test_123", "client_reference_id": "1", "payment_status": "unpaid",
+    })
+    assert out == "ignored_unpaid"
+
+
+def test_checkout_missing_payment_status_is_ignored_without_db_write():
+    """A missing/unrecognized status must NOT be treated as paid."""
+    out = _handle_checkout_completed({"id": "cs_test_123", "client_reference_id": "1"})
+    assert out == "ignored_unpaid"

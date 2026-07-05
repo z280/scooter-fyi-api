@@ -101,15 +101,27 @@ def _recompute_supporter(cur, account_id: int) -> bool:
 
 
 def _handle_checkout_completed(obj: dict[str, Any]) -> str:
+    session_id = obj.get("id")
+    if not session_id:
+        # Never insert a NULL session id — UNIQUE allows multiple NULLs in
+        # Postgres, so a missing id would silently break the idempotency
+        # guarantee retries depend on.
+        log.error("stripe checkout event has no session id: %r", obj)
+        return "ignored_missing_session_id"
+
     ref = obj.get("client_reference_id")
     if not ref or not str(ref).isdigit():
         log.error("stripe checkout %s has unusable client_reference_id=%r",
-                  obj.get("id"), ref)
+                  session_id, ref)
         return "ignored_bad_reference"
     account_id = int(ref)
-    if obj.get("payment_status") not in (None, "paid"):
+    # Require an EXPLICIT "paid" — completed sessions using async payment
+    # methods (e.g. bank debits) can report payment_status="unpaid" at
+    # completion time; treating a missing/unrecognized status as paid
+    # would record a supporter payment before money has actually moved.
+    if obj.get("payment_status") != "paid":
         log.info("stripe checkout %s not paid (%s) — ignoring",
-                 obj.get("id"), obj.get("payment_status"))
+                 session_id, obj.get("payment_status"))
         return "ignored_unpaid"
 
     with connection() as conn:
@@ -117,7 +129,7 @@ def _handle_checkout_completed(obj: dict[str, Any]) -> str:
             cur.execute("SELECT 1 FROM accounts WHERE id = %s", (account_id,))
             if not cur.fetchone():
                 log.error("stripe checkout %s references unknown account %d",
-                          obj.get("id"), account_id)
+                          session_id, account_id)
                 return "ignored_unknown_account"
             cur.execute(
                 """
@@ -126,13 +138,13 @@ def _handle_checkout_completed(obj: dict[str, Any]) -> str:
                 ) VALUES (%s, %s, %s, %s)
                 ON CONFLICT (stripe_session_id) DO NOTHING
                 """,
-                (account_id, obj.get("id"), obj.get("payment_intent"),
+                (account_id, session_id, obj.get("payment_intent"),
                  obj.get("amount_total")),
             )
             _recompute_supporter(cur, account_id)
         conn.commit()
     log.info("supporter payment recorded: account=%d amount=%s session=%s",
-             account_id, obj.get("amount_total"), obj.get("id"))
+             account_id, obj.get("amount_total"), session_id)
     return "recorded"
 
 
