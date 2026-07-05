@@ -93,8 +93,10 @@ runs natively on the same 12 GiB VPS with a 7.5 GiB sandbox.
 │   ├── cycle.py                observation_cycles lifecycle state machine
 │   ├── transmit.py             fanout to downstream endpoints
 │   ├── archive.py              48-hour Parquet → R2 → TRUNCATE
-│   ├── equity_groups.py         registry of tracked equity groups (v1, v2, er1..er6) —
+│   ├── equity_groups.py         registry of tracked equity groups (v1, v2, er1..er6) and
+│   │                            split dimensions (bicycle/scooter, sitting/standing) —
 │   │                            single source of truth for compute.py + daily_sla.py
+│   ├── daily_trips.py           9am daily trip/popularity rollup (trip_events → ranked stats)
 │   ├── api_public.py           4 read-only public REST routes
 │   ├── api_admin.py            GitHub-OAuth-protected admin views
 │   ├── auth.py                 GitHub OAuth + org allowlist
@@ -106,17 +108,23 @@ runs natively on the same 12 GiB VPS with a 7.5 GiB sandbox.
 
 ## Data model
 
-Seven tables in Postgres, all narrow (no 270-column wide schemas):
+Core tables in Postgres, all narrow (no 270-column wide schemas). (This
+list predates the accounts/reports/supporter tables from
+API_REQUIREMENTS.md §2-§4 — see those migrations for the full current
+set; kept here is the original ingest-pipeline core plus trip tracking.)
 
 | Table | Purpose |
 |---|---|
 | `observation_cycles` | Per-cycle UUID lifecycle: start_ts, phase timestamps, job_status, errors, JSONB blob |
 | `api_failures` | Upstream / archive failures with cycle_id FK |
 | `raw_telemetry_points` | Per-device rolling buffer; flushed to R2 every 48h |
-| `snapshot_metadata_core` | The 22 RFP-relevant metrics, plus the same total/percent fields per tracked equity group (v1, v2, er1..er6 — see `src/equity_groups.py`), one row per cycle |
+| `snapshot_metadata_core` | The 22 RFP-relevant metrics, plus the same total/percent fields per tracked equity group **and** per split dimension (bicycle/scooter, sitting/standing — see `src/equity_groups.py`), one row per cycle |
 | `regional_metrics_narrow` | Per-region counts, one row per (cycle, region). Indexed by region_category + region_type + snapshot_time |
 | `transmission_attempts` | One row per downstream POST, with http_status_code |
 | `system_state` | Tiny KV (e.g. `last_archive_ts`) |
+| `trip_events` | One row per detected "successful trip" (a MOVED transition in `device_state.py`) — vehicle, from/to position, distance |
+| `daily_trip_summary` | One row per Denver-local calendar day: total trips, distinct vehicles tripped |
+| `daily_vehicle_trip_counts` | One row per (day, vehicle) with a trip that day: trip count + popularity rank |
 
 ### Boundary taxonomy
 

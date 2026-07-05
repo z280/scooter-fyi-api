@@ -12,7 +12,7 @@ import psycopg
 
 from .config import BoundaryLayer, load
 from .duck import session
-from .equity_groups import TRACKED_GROUPS, core_metric_columns
+from .equity_groups import SPLIT_DIMENSIONS, TRACKED_GROUPS, core_metric_columns
 from .ingest import IngestPayload, TaggedDevice
 from .pg import connection
 from .ranking import compute_range_rankings
@@ -166,6 +166,7 @@ def _load_points_into_duck(con, devices: list[TaggedDevice], snapshot_time: date
         CREATE TABLE points (
             device_id     TEXT NOT NULL,
             form_factor   TEXT NOT NULL,
+            vehicle_use_type TEXT,
             lat           DOUBLE NOT NULL,
             lon           DOUBLE NOT NULL,
             spatial_status TEXT NOT NULL,
@@ -179,25 +180,29 @@ def _load_points_into_duck(con, devices: list[TaggedDevice], snapshot_time: date
 
     # Batched executemany
     rows = [
-        (d.device_id, d.form_factor, d.lat, d.lon, d.spatial_status)
+        (d.device_id, d.form_factor, d.vehicle_use_type, d.lat, d.lon, d.spatial_status)
         for d in devices
     ]
     con.executemany(
-        "INSERT INTO points (device_id, form_factor, lat, lon, spatial_status, geom) "
-        "VALUES (?, ?, ?, ?, ?, ST_Point(?, ?))",
-        [(r[0], r[1], r[2], r[3], r[4], r[3], r[2]) for r in rows],
+        "INSERT INTO points (device_id, form_factor, vehicle_use_type, lat, lon, spatial_status, geom) "
+        "VALUES (?, ?, ?, ?, ?, ?, ST_Point(?, ?))",
+        [(r[0], r[1], r[2], r[3], r[4], r[5], r[4], r[3]) for r in rows],
     )
     con.execute("CREATE INDEX IF NOT EXISTS idx_p_geom ON points USING RTREE (geom);")
 
 
 def _core_summary_sql(groups: tuple[str, ...] = TRACKED_GROUPS) -> str:
     """Generalized over `groups` (today: v1, v2, er1..er6 — see
-    src/equity_groups.py). Each group gets its own device-membership CTE
-    (a device counts once per group even if it straddles multiple of the
-    group's boundary features), three raw totals, and five percentages.
-    A group absent from the DuckDB `boundaries` table (e.g. in a test
-    fixture that only loads a subset of layers) simply yields zero counts
-    — the JOIN just finds no matching boundary rows, not an error.
+    src/equity_groups.py) AND over `SPLIT_DIMENSIONS` (today: form_factor
+    bicycle/scooter, vehicle_use_type sitting/standing). Each group gets
+    its own device-membership CTE (a device counts once per group even if
+    it straddles multiple of the group's boundary features), a device
+    total, and both sides of every split dimension as raw totals plus
+    percentages. A group absent from the DuckDB `boundaries` table (e.g.
+    in a test fixture that only loads a subset of layers) simply yields
+    zero counts — the JOIN just finds no matching boundary rows, not an
+    error. Same for a dimension value absent from `points` (e.g.
+    vehicle_use_type NULL for an unclassifiable device).
 
     The final SELECT list is driven by `core_metric_columns()` — NOT
     hand-ordered here — so its column order is always exactly what
@@ -208,16 +213,23 @@ def _core_summary_sql(groups: tuple[str, ...] = TRACKED_GROUPS) -> str:
     """
     group_ctes = ",\n    ".join(
         f"""{g}_devices AS (
-        SELECT DISTINCT p.device_id, p.form_factor
+        SELECT DISTINCT p.device_id, p.form_factor, p.vehicle_use_type
         FROM d p
         JOIN boundaries b ON b.region_type = '{g}' AND ST_Within(p.geom, b.geom)
     )"""
         for g in groups
     )
+
+    def _dim_total_exprs(g: str, source: str) -> str:
+        return ",\n            ".join(
+            f"(SELECT COUNT(*) FROM {source} WHERE {dim.db_column} = '{dim.value_a}') AS total_{dim.name_a}_{g},\n"
+            f"            (SELECT COUNT(*) FROM {source} WHERE {dim.db_column} = '{dim.value_b}') AS total_{dim.name_b}_{g}"
+            for dim in SPLIT_DIMENSIONS
+        )
+
     group_total_exprs = ",\n            ".join(
         f"(SELECT COUNT(*) FROM {g}_devices) AS total_devices_{g},\n"
-        f"            (SELECT COUNT(*) FROM {g}_devices WHERE form_factor = 'bicycle') AS total_bike_{g},\n"
-        f"            (SELECT COUNT(*) FROM {g}_devices WHERE form_factor = 'scooter') AS total_scooter_{g}"
+        f"            {_dim_total_exprs(g, f'{g}_devices')}"
         for g in groups
     )
 
@@ -226,33 +238,37 @@ def _core_summary_sql(groups: tuple[str, ...] = TRACKED_GROUPS) -> str:
     # the `totals` CTE; percentages are computed here from it.
     exprs: dict[str, str] = {
         "total_devices_denver": "total_devices_denver",
-        "total_bike_denver": "total_bike_denver",
-        "total_scooter_denver": "total_scooter_denver",
         "total_not_in_denver": "total_not_in_denver",
-        "percent_bikes_denver":
-            "ROUND(total_bike_denver::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)",
-        "percent_scooters_denver":
-            "ROUND(total_scooter_denver::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)",
     }
+    for dim in SPLIT_DIMENSIONS:
+        exprs[f"total_{dim.name_a}_denver"] = f"total_{dim.name_a}_denver"
+        exprs[f"total_{dim.name_b}_denver"] = f"total_{dim.name_b}_denver"
+        exprs[f"percent_{dim.percent_name_a}_denver"] = (
+            f"ROUND(total_{dim.name_a}_denver::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)"
+        )
+        exprs[f"percent_{dim.percent_name_b}_denver"] = (
+            f"ROUND(total_{dim.name_b}_denver::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)"
+        )
     for g in groups:
         exprs[f"total_devices_{g}"] = f"total_devices_{g}"
-        exprs[f"total_bike_{g}"] = f"total_bike_{g}"
-        exprs[f"total_scooter_{g}"] = f"total_scooter_{g}"
         exprs[f"percent_all_devices_{g}"] = (
             f"ROUND(total_devices_{g}::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)"
         )
-        exprs[f"percent_all_bikes_{g}"] = (
-            f"ROUND(total_bike_{g}::DOUBLE / NULLIF(total_bike_denver,0) * 100, 2)"
-        )
-        exprs[f"percent_all_scooters_{g}"] = (
-            f"ROUND(total_scooter_{g}::DOUBLE / NULLIF(total_scooter_denver,0) * 100, 2)"
-        )
-        exprs[f"percent_bikes_{g}"] = (
-            f"ROUND(total_bike_{g}::DOUBLE / NULLIF(total_devices_{g},0) * 100, 2)"
-        )
-        exprs[f"percent_scooters_{g}"] = (
-            f"ROUND(total_scooter_{g}::DOUBLE / NULLIF(total_devices_{g},0) * 100, 2)"
-        )
+        for dim in SPLIT_DIMENSIONS:
+            exprs[f"total_{dim.name_a}_{g}"] = f"total_{dim.name_a}_{g}"
+            exprs[f"total_{dim.name_b}_{g}"] = f"total_{dim.name_b}_{g}"
+            exprs[f"percent_all_{dim.percent_name_a}_{g}"] = (
+                f"ROUND(total_{dim.name_a}_{g}::DOUBLE / NULLIF(total_{dim.name_a}_denver,0) * 100, 2)"
+            )
+            exprs[f"percent_all_{dim.percent_name_b}_{g}"] = (
+                f"ROUND(total_{dim.name_b}_{g}::DOUBLE / NULLIF(total_{dim.name_b}_denver,0) * 100, 2)"
+            )
+            exprs[f"percent_{dim.percent_name_a}_{g}"] = (
+                f"ROUND(total_{dim.name_a}_{g}::DOUBLE / NULLIF(total_devices_{g},0) * 100, 2)"
+            )
+            exprs[f"percent_{dim.percent_name_b}_{g}"] = (
+                f"ROUND(total_{dim.name_b}_{g}::DOUBLE / NULLIF(total_devices_{g},0) * 100, 2)"
+            )
 
     select_list = ",\n        ".join(
         f"{exprs[col]} AS {col}" for col in core_metric_columns(groups)
@@ -268,8 +284,7 @@ def _core_summary_sql(groups: tuple[str, ...] = TRACKED_GROUPS) -> str:
             (SELECT COUNT(*) FROM points)                       AS total_devices_all,
             (SELECT COUNT(*) FROM points WHERE spatial_status <> 'denver_core') AS total_not_in_denver,
             (SELECT COUNT(*) FROM d)                             AS total_devices_denver,
-            (SELECT COUNT(*) FROM d WHERE form_factor = 'bicycle') AS total_bike_denver,
-            (SELECT COUNT(*) FROM d WHERE form_factor = 'scooter') AS total_scooter_denver,
+            {_dim_total_exprs('denver', 'd')},
             {group_total_exprs}
     )
     SELECT
@@ -361,6 +376,8 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
             "current_range_meters": d.current_range_meters,
             "propulsion_type": d.propulsion_type,
             "max_range_meters_for_type": d.max_range_meters_for_type,
+            "vehicle_use_type": d.vehicle_use_type,
+            "vehicle_model_name": d.vehicle_model_name,
             **rankings.get(d.device_id, {}),
         }
         for d in ingest.devices
@@ -418,7 +435,8 @@ def write_to_postgres(result: ComputeResult) -> None:
                     " range_percentile_by_type, range_rank_unique_by_type, "
                     " range_rank_all_by_type, range_rank_all_devices, "
                     " range_rank_h3_8_peers, range_rank_h3_9_peers, "
-                    " range_rank_h3_10_peers) FROM STDIN"
+                    " range_rank_h3_10_peers, "
+                    " vehicle_use_type, vehicle_model_name) FROM STDIN"
                 ) as copy:
                     for r in result.raw_rows:
                         copy.write_row([
@@ -437,5 +455,6 @@ def write_to_postgres(result: ComputeResult) -> None:
                             r.get("range_rank_h3_8_peers"),
                             r.get("range_rank_h3_9_peers"),
                             r.get("range_rank_h3_10_peers"),
+                            r["vehicle_use_type"], r["vehicle_model_name"],
                         ])
         conn.commit()

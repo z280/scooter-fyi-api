@@ -322,7 +322,7 @@ def devices_current(
                 "       )) AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
-                "       r.vehicle_plate "
+                "       r.vehicle_use_type, r.vehicle_model_name "
                 "FROM raw_telemetry_points r "
                 "LEFT JOIN device_state ds USING (vehicle_identifier) "
                 f"WHERE {' AND '.join(where)} "
@@ -331,9 +331,11 @@ def devices_current(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
-    # vehicle_plate is public as of API_REQUIREMENTS.md §1.1 — it's painted on
-    # every scooter and needed for "Unlock in Veo" deep links. Position
-    # *history* under a stable identifier stays behind the private endpoints.
+    # vehicle_plate is deliberately NOT selected here — see src/identity.py
+    # for the public/private identifier split. Only vehicle_identifier (the
+    # HMAC) goes over an unauthenticated wire; the raw plate stays behind the
+    # bearer-gated /api/v1/private/* endpoints. (The §1.1 promotion of the
+    # plate to this public endpoint was reverted.)
     features = []
     for r in rows:
         number_failed_starts = int(r[22]) if r[22] is not None else None
@@ -377,10 +379,11 @@ def devices_current(
                 "range_rank_h3_10_peers": r[19],
                 "has_negative_report": bool(r[20]),
                 "quality_designation": quality,
-                "vehicle_plate": r[24],
                 "number_failed_starts": number_failed_starts,
                 "first_observed_at_location": r[23].isoformat() if r[23] else None,
                 "reliability_tier": reliability,
+                "vehicle_use_type": r[24],
+                "vehicle_model_name": r[25],
             },
         })
 

@@ -123,10 +123,15 @@ def _devices() -> list[TaggedDevice]:
         ("b2", "bicycle", 39.7530, -104.9600),
         ("b3", "bicycle", 39.7200, -104.9500),
     ]
+    # Every bicycle in this fixture sits, every scooter stands — same
+    # correlation observed in production so far (see src/ingest.py
+    # _KNOWN_VEHICLE_TYPES), exercising the vehicle_use_type dimension
+    # without needing a use_type/form_factor divergence case here.
     devices = [
         TaggedDevice(
             device_id=did, vehicle_type_id=None, form_factor=ff,
             lat=lat, lon=lon, spatial_status="denver_core",
+            vehicle_use_type="sitting" if ff == "bicycle" else "standing",
         )
         for did, ff, lat, lon in inside
     ]
@@ -134,6 +139,7 @@ def _devices() -> list[TaggedDevice]:
         TaggedDevice(
             device_id="x1", vehicle_type_id="1", form_factor="scooter",
             lat=22.5, lon=114.0, spatial_status="china_glitch",
+            vehicle_use_type="standing",
         )
     )
     # Repair-shop-style false positive: inside the rough Denver bbox
@@ -187,6 +193,13 @@ def test_core_totals_match_hand_counts(monkeypatch):
     assert core["total_not_in_denver"] == 2   # china_glitch + repair shop
     assert core["total_bike_denver"] == 3
     assert core["total_scooter_denver"] == 5
+
+    # vehicle_use_type is a second, independent split — same fixture,
+    # every bicycle sits and every scooter stands, so these mirror the
+    # bike/scooter totals exactly (see equity_groups.SPLIT_DIMENSIONS).
+    assert core["total_sitting_denver"] == 3
+    assert core["total_standing_denver"] == 5
+    assert core["percent_sitting_denver"] == 37.5   # 3/8 * 100
 
     # The repair-shop device must be flagged 'other_outlier' in the raw rows.
     repair_row = next(r for r in result.raw_rows if r["device_id"] == "repair")
