@@ -195,7 +195,7 @@ nearest to a given timestamp).
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `layer` | string | yes | — | One of `v1`, `v2`, `council_district`, `community_network`, `neighborhood`. See [Layer reference](#layer-reference). |
+| `layer` | string | yes | — | One of `v1`, `v2`, `v3`, `v4`, `council_district`, `community_network`, `neighborhood`. See [Layer reference](#layer-reference). |
 | `time` | string | no | latest | ISO 8601 UTC timestamp. Snaps to the most recent snapshot at or before this time. Useful for historical playback. |
 
 **Example request:**
@@ -970,7 +970,7 @@ this, so the published policy and the enforced one can't drift:
 
 ## Layer reference
 
-The five layers, their `region_type` values (used in `layer=` query
+The seven layers, their `region_type` values (used in `layer=` query
 params), and the naming convention for `region_name` (used in the
 trend endpoint and as the keys of `regions` in spatial-snapshot).
 
@@ -978,13 +978,16 @@ trend endpoint and as the keys of `regions` in spatial-snapshot).
 |---|---|---|---|
 | `disadvantaged_areas` | `v1` | 34 | `V1_001`, `V1_002`, … `V1_034` (ordinal, zero-padded to 3 digits) |
 | `disadvantaged_areas` | `v2` | 65 | `V2_080010001001`, `V2_080010002003`, … (US Census Block Group GEOID20) |
+| `disadvantaged_areas` | `v3` | 92 | `V3_080310016034`, `V3_080310021013`, … (US Census Block Group GEOID20) |
+| `disadvantaged_areas` | `v4` | 249 | `V4_080310041102`, `V4_080310041014`, … (US Census Block Group GEOID20) |
 | `council_districts` | `council_district` | 11 | `CD_1`, `CD_2`, … `CD_11` (Denver City Council district numbers) |
 | `community_networks` | `community_network` | 13 | `CN_Central`, `CN_East`, `CN_EastCentral`, `CN_FarNortheast`, `CN_FarSoutheast`, `CN_North`, `CN_Northeast`, `CN_Northwest`, `CN_ParkHill`, `CN_SouthCentral`, `CN_Southeast`, `CN_Southwest`, `CN_West` |
 | `neighborhoods` | `neighborhood` | 78 | `NB_AthmarPark`, `NB_Auraria`, `NB_Baker`, `NB_Barnum`, `NB_CBD`, `NB_CapitolHill`, `NB_CherryCreek`, `NB_FivePoints`, `NB_Highland`, `NB_SloanLake`, `NB_WashingtonPark`, `NB_Westwood`, … (Denver Statistical Neighborhood names with non-alphanumerics stripped) |
 
 ### Notes on the layers
 
-- **v1 vs v2** are two distinct versions of the city's Equity / Opportunity Areas polygon. Both exist because Denver's contract negotiations referenced both; the canonical compliance metric is `percent_all_devices_v1`, but `v2` is tracked in parallel. They are not nested or disjoint — a device can be in both, neither, or one or the other.
+- **v1 vs v2** are two distinct versions of the city's original Equity / Opportunity Areas polygon. Both exist because Denver's contract negotiations referenced both; the canonical compliance metric (`percent_all_devices_v1` on `/api/v1/snapshots/latest`) is computed against `v1` specifically, with `v2` tracked in parallel. They are not nested or disjoint — a device can be in both, neither, or one or the other.
+- **v3 and v4 are provisional candidates** derived from Denver DOTI's newer, authoritative census-block-group Equity Index (`EquityGroupRank`, 1 = highest need): `v3` is `EquityGroupRank ∈ {1, 2}` (92 block groups), `v4` is `EquityGroupRank ∈ {1, 2, 3}` (249 block groups). They exist so the frontend can prototype against real geometry while the compliance-relevant cutoff is confirmed with DOTI. **They currently affect nothing else** — the 22-metric snapshot, the daily SLA compliance window, and `percent_all_devices_v1`/`v2` are computed exclusively from `v1`/`v2` and are untouched by v3/v4. `v3`/`v4` are available today only through the generic layer endpoints (`/api/v1/boundaries/{layer}`, `/api/v1/spatial-snapshot?layer=`, `/api/v1/analytics/trend?layer=`) — expect the specific region_type backing "the" compliance metric to change once DOTI confirms a cutoff, at which point this doc will say so.
 - **At-Large council districts** (Gonzales-Gutierrez and Parady, which cover the entire city) are **excluded** from `council_district` rows to avoid double-counting. Only the 11 numbered districts appear.
 - **Neighborhoods** uses Denver's Statistical Neighborhood Boundaries (DOTI). Spaces and punctuation are stripped from names: `Athmar Park` → `NB_AthmarPark`, `Park Hill` → `NB_ParkHill` (note: there are also separate `NB_NortheastParkHill`, `NB_NorthParkHill`, `NB_SouthParkHill` neighborhoods).
 - **Community Networks** are Denver's 13 official planning regions, broader than neighborhoods.

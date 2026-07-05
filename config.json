@@ -37,6 +37,22 @@
       "name_strategy": "field"
     },
     {
+      "region_category": "disadvantaged_areas",
+      "region_type": "v3",
+      "file": "/app/data/v3.json",
+      "name_prefix": "V3_",
+      "name_field": "GEOID20",
+      "name_strategy": "field"
+    },
+    {
+      "region_category": "disadvantaged_areas",
+      "region_type": "v4",
+      "file": "/app/data/v4.json",
+      "name_prefix": "V4_",
+      "name_field": "GEOID20",
+      "name_strategy": "field"
+    },
+    {
       "region_category": "council_districts",
       "region_type": "council_district",
       "file": "/app/data/CD.geojson",

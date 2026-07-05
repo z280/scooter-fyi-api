@@ -215,6 +215,34 @@ start there.
 | §4 Stripe + rides + badges | Implemented (PR #9): `src/stripe_webhook.py`, `src/api_rides.py`, `src/badges.py`, `sql/014`. |
 | §5 rate limits, env, privacy endpoint | Implemented (PR #9): `src/ratelimit.py`, `src/api_meta.py`, `.env.example`. |
 | Repo rename | Pending — GitHub settings change (`veo-audit` → `scooter-fyi-api`), operator action. |
+| Equity boundary migration (new §1.1a) | In progress — see note below. `v3`/`v4` layers added for frontend prototyping; `v1`/`v2` retirement and the compliance-metric cutoff are still pending a DOTI decision. |
+
+**§1.1a Equity boundary migration note (2026-07-04):** Denver DOTI
+delivered an authoritative, census-block-group-based Equity Index
+(`data/DOTI_Equity_Index_Final.geojson`, 572 block groups, continuous
+`EquityScore` + 6-tier `EquityGroupRank` where 1 = highest need). Analysis
+of the two legacy boundaries against it:
+
+- **`v2`** is built on the *same* census block groups (identical
+  `GEOID20` keys) as the new index — its 65-block-group footprint is a
+  strict superset of the new index's `EquityGroupRank ≤ 1` area (100%
+  overlap) and 70.8% of `EquityGroupRank ≤ 2`. Same lineage, refined
+  scoring.
+- **`v1`** is a hand-drawn, non-census polygon set with no linking
+  identifier at all. Best-case IoU against any rank cutoff is 0.27 — a
+  materially worse and structurally different match.
+
+**Decision: `v1` is being retired; `v2`'s historical series is the one
+being carried forward.** Two new provisional layers were added for
+frontend prototyping while the compliance cutoff is confirmed with
+DOTI: `v3` (`EquityGroupRank ∈ {1,2}`, 92 block groups — closest single
+cumulative-rank match to the historical v1/v2 average footprint by
+area) and `v4` (`EquityGroupRank ∈ {1,2,3}`, 249 block groups). Neither
+is wired into `percent_all_devices_v1`/`v2` or the daily SLA compliance
+window yet — see the Layer reference "Notes on the layers" section in
+API.md. Once DOTI confirms which rank cutoff is contractually
+authoritative, that cutoff becomes the new compliance boundary and `v1`
+is removed from `config.json`/`compute.py` entirely.
 
 **§1.1 QR verification note:** the stored `vehicle_plate` is parsed from
 the `&number=` query param of Veo's own `rental_uris.android/.ios` deep

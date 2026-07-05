@@ -73,9 +73,11 @@ runs natively on the same 12 GiB VPS with a 7.5 GiB sandbox.
 ├── docker-compose.yml          four services, hard memory caps
 ├── Dockerfile                  python:3.11-slim + FastAPI + DuckDB + supercronic + tini
 ├── crontab                     supercronic schedule for the scheduler container
-├── data/                       baked-in boundary files (5)
-│   ├── v1.json                 Disadvantaged Areas v1 — 34 Polygons
-│   ├── v2.json                 Disadvantaged Areas v2 — 65 Polygons
+├── data/                       baked-in boundary files (7)
+│   ├── v1.json                 Disadvantaged Areas v1 — 34 polygons (legacy, being retired)
+│   ├── v2.json                 Disadvantaged Areas v2 — 65 census block groups
+│   ├── v3.json                 Equity Index rank ≤ 2 — 92 census block groups (provisional)
+│   ├── v4.json                 Equity Index rank ≤ 3 — 249 census block groups (provisional)
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
@@ -118,8 +120,10 @@ Seven tables in Postgres, all narrow (no 270-column wide schemas):
 
 | `region_category` | `region_type` | rows |
 |---|---|---|
-| `disadvantaged_areas` | `v1` | 34 polygons |
-| `disadvantaged_areas` | `v2` | 65 polygons |
+| `disadvantaged_areas` | `v1` | 34 polygons (legacy hand-drawn boundary; RFP compliance metric today, being retired — see API_REQUIREMENTS.md §1.1a) |
+| `disadvantaged_areas` | `v2` | 65 census block groups |
+| `disadvantaged_areas` | `v3` | 92 census block groups (DOTI Equity Index, rank ≤ 2 — provisional) |
+| `disadvantaged_areas` | `v4` | 249 census block groups (DOTI Equity Index, rank ≤ 3 — provisional) |
 | `council_districts` | `council_district` | 11 (CD_1…CD_11; At-Large overlays filtered) |
 | `community_networks` | `community_network` | 13 (CN_Central, CN_Southwest, …) |
 | `neighborhoods` | `neighborhood` | 78 (NB_AthmarPark, …) |
