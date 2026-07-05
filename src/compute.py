@@ -12,6 +12,7 @@ import psycopg
 
 from .config import BoundaryLayer, load
 from .duck import session
+from .equity_groups import TRACKED_GROUPS, core_metric_columns
 from .ingest import IngestPayload, TaggedDevice
 from .pg import connection
 from .ranking import compute_range_rankings
@@ -189,21 +190,79 @@ def _load_points_into_duck(con, devices: list[TaggedDevice], snapshot_time: date
     con.execute("CREATE INDEX IF NOT EXISTS idx_p_geom ON points USING RTREE (geom);")
 
 
-def _core_summary_sql() -> str:
-    return """
+def _core_summary_sql(groups: tuple[str, ...] = TRACKED_GROUPS) -> str:
+    """Generalized over `groups` (today: v1, v2, er1..er6 — see
+    src/equity_groups.py). Each group gets its own device-membership CTE
+    (a device counts once per group even if it straddles multiple of the
+    group's boundary features), three raw totals, and five percentages.
+    A group absent from the DuckDB `boundaries` table (e.g. in a test
+    fixture that only loads a subset of layers) simply yields zero counts
+    — the JOIN just finds no matching boundary rows, not an error.
+
+    The final SELECT list is driven by `core_metric_columns()` — NOT
+    hand-ordered here — so its column order is always exactly what
+    `run_cycle()` expects when it zips the (positional) result tuple
+    against that same column list. Hand-maintaining two independently
+    ordered lists is exactly the kind of thing that silently drifts and
+    corrupts a metric one column over.
+    """
+    group_ctes = ",\n    ".join(
+        f"""{g}_devices AS (
+        SELECT DISTINCT p.device_id, p.form_factor
+        FROM d p
+        JOIN boundaries b ON b.region_type = '{g}' AND ST_Within(p.geom, b.geom)
+    )"""
+        for g in groups
+    )
+    group_total_exprs = ",\n            ".join(
+        f"(SELECT COUNT(*) FROM {g}_devices) AS total_devices_{g},\n"
+        f"            (SELECT COUNT(*) FROM {g}_devices WHERE form_factor = 'bicycle') AS total_bike_{g},\n"
+        f"            (SELECT COUNT(*) FROM {g}_devices WHERE form_factor = 'scooter') AS total_scooter_{g}"
+        for g in groups
+    )
+
+    # column_name -> SQL expression, for every column core_metric_columns()
+    # will ask for. Totals/total_not_in_denver pass straight through from
+    # the `totals` CTE; percentages are computed here from it.
+    exprs: dict[str, str] = {
+        "total_devices_denver": "total_devices_denver",
+        "total_bike_denver": "total_bike_denver",
+        "total_scooter_denver": "total_scooter_denver",
+        "total_not_in_denver": "total_not_in_denver",
+        "percent_bikes_denver":
+            "ROUND(total_bike_denver::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)",
+        "percent_scooters_denver":
+            "ROUND(total_scooter_denver::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)",
+    }
+    for g in groups:
+        exprs[f"total_devices_{g}"] = f"total_devices_{g}"
+        exprs[f"total_bike_{g}"] = f"total_bike_{g}"
+        exprs[f"total_scooter_{g}"] = f"total_scooter_{g}"
+        exprs[f"percent_all_devices_{g}"] = (
+            f"ROUND(total_devices_{g}::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)"
+        )
+        exprs[f"percent_all_bikes_{g}"] = (
+            f"ROUND(total_bike_{g}::DOUBLE / NULLIF(total_bike_denver,0) * 100, 2)"
+        )
+        exprs[f"percent_all_scooters_{g}"] = (
+            f"ROUND(total_scooter_{g}::DOUBLE / NULLIF(total_scooter_denver,0) * 100, 2)"
+        )
+        exprs[f"percent_bikes_{g}"] = (
+            f"ROUND(total_bike_{g}::DOUBLE / NULLIF(total_devices_{g},0) * 100, 2)"
+        )
+        exprs[f"percent_scooters_{g}"] = (
+            f"ROUND(total_scooter_{g}::DOUBLE / NULLIF(total_devices_{g},0) * 100, 2)"
+        )
+
+    select_list = ",\n        ".join(
+        f"{exprs[col]} AS {col}" for col in core_metric_columns(groups)
+    )
+
+    return f"""
     WITH d AS (
         SELECT * FROM points WHERE spatial_status = 'denver_core'
     ),
-    v1_devices AS (
-        SELECT DISTINCT p.device_id, p.form_factor
-        FROM d p
-        JOIN boundaries b ON b.region_type = 'v1' AND ST_Within(p.geom, b.geom)
-    ),
-    v2_devices AS (
-        SELECT DISTINCT p.device_id, p.form_factor
-        FROM d p
-        JOIN boundaries b ON b.region_type = 'v2' AND ST_Within(p.geom, b.geom)
-    ),
+    {group_ctes},
     totals AS (
         SELECT
             (SELECT COUNT(*) FROM points)                       AS total_devices_all,
@@ -211,36 +270,10 @@ def _core_summary_sql() -> str:
             (SELECT COUNT(*) FROM d)                             AS total_devices_denver,
             (SELECT COUNT(*) FROM d WHERE form_factor = 'bicycle') AS total_bike_denver,
             (SELECT COUNT(*) FROM d WHERE form_factor = 'scooter') AS total_scooter_denver,
-            (SELECT COUNT(*) FROM v1_devices)                    AS total_devices_v1,
-            (SELECT COUNT(*) FROM v1_devices WHERE form_factor = 'bicycle') AS total_bike_v1,
-            (SELECT COUNT(*) FROM v1_devices WHERE form_factor = 'scooter') AS total_scooter_v1,
-            (SELECT COUNT(*) FROM v2_devices)                    AS total_devices_v2,
-            (SELECT COUNT(*) FROM v2_devices WHERE form_factor = 'bicycle') AS total_bike_v2,
-            (SELECT COUNT(*) FROM v2_devices WHERE form_factor = 'scooter') AS total_scooter_v2
+            {group_total_exprs}
     )
     SELECT
-        total_devices_denver,
-        total_devices_v1,
-        total_devices_v2,
-        total_bike_denver,
-        total_bike_v1,
-        total_bike_v2,
-        total_scooter_denver,
-        total_scooter_v1,
-        total_scooter_v2,
-        total_not_in_denver,
-        ROUND(total_devices_v1::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)  AS percent_all_devices_v1,
-        ROUND(total_devices_v2::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2)  AS percent_all_devices_v2,
-        ROUND(total_bike_v1::DOUBLE / NULLIF(total_bike_denver,0) * 100, 2)        AS percent_all_bikes_v1,
-        ROUND(total_bike_v2::DOUBLE / NULLIF(total_bike_denver,0) * 100, 2)        AS percent_all_bikes_v2,
-        ROUND(total_scooter_v1::DOUBLE / NULLIF(total_scooter_denver,0) * 100, 2)  AS percent_all_scooters_v1,
-        ROUND(total_scooter_v2::DOUBLE / NULLIF(total_scooter_denver,0) * 100, 2)  AS percent_all_scooters_v2,
-        ROUND(total_bike_denver::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2) AS percent_bikes_denver,
-        ROUND(total_scooter_denver::DOUBLE / NULLIF(total_devices_denver,0) * 100, 2) AS percent_scooters_denver,
-        ROUND(total_bike_v1::DOUBLE / NULLIF(total_devices_v1,0) * 100, 2)         AS percent_bikes_v1,
-        ROUND(total_scooter_v1::DOUBLE / NULLIF(total_devices_v1,0) * 100, 2)      AS percent_scooters_v1,
-        ROUND(total_bike_v2::DOUBLE / NULLIF(total_devices_v2,0) * 100, 2)         AS percent_bikes_v2,
-        ROUND(total_scooter_v2::DOUBLE / NULLIF(total_devices_v2,0) * 100, 2)      AS percent_scooters_v2
+        {select_list}
     FROM totals
     """
 
@@ -284,18 +317,7 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
 
         # Fetch core summary
         core = con.execute(_core_summary_sql()).fetchone()
-        core_cols = [
-            "total_devices_denver", "total_devices_v1", "total_devices_v2",
-            "total_bike_denver", "total_bike_v1", "total_bike_v2",
-            "total_scooter_denver", "total_scooter_v1", "total_scooter_v2",
-            "total_not_in_denver",
-            "percent_all_devices_v1", "percent_all_devices_v2",
-            "percent_all_bikes_v1", "percent_all_bikes_v2",
-            "percent_all_scooters_v1", "percent_all_scooters_v2",
-            "percent_bikes_denver", "percent_scooters_denver",
-            "percent_bikes_v1", "percent_scooters_v1",
-            "percent_bikes_v2", "percent_scooters_v2",
-        ]
+        core_cols = core_metric_columns()
         core_row = {
             "cycle_id": str(cycle_id),
             "snapshot_time": snapshot_time,
@@ -354,33 +376,16 @@ def write_to_postgres(result: ComputeResult) -> None:
     core = result.core_row
     with connection() as conn:
         with conn.cursor() as cur:
+            # Built from `core`'s own keys (cycle_id, snapshot_time, plus
+            # every core_metric_columns() name) rather than a hand-listed
+            # column/placeholder pair — the two lists drifting apart is
+            # exactly how a metric silently lands in the wrong column.
+            insert_cols = list(core.keys())
+            placeholders = ", ".join(f"%({c})s" for c in insert_cols)
             cur.execute(
-                """
-                INSERT INTO snapshot_metadata_core (
-                    cycle_id, snapshot_time,
-                    total_devices_denver, total_devices_v1, total_devices_v2,
-                    total_bike_denver, total_bike_v1, total_bike_v2,
-                    total_scooter_denver, total_scooter_v1, total_scooter_v2,
-                    total_not_in_denver,
-                    percent_all_devices_v1, percent_all_devices_v2,
-                    percent_all_bikes_v1, percent_all_bikes_v2,
-                    percent_all_scooters_v1, percent_all_scooters_v2,
-                    percent_bikes_denver, percent_scooters_denver,
-                    percent_bikes_v1, percent_scooters_v1,
-                    percent_bikes_v2, percent_scooters_v2
-                ) VALUES (
-                    %(cycle_id)s, %(snapshot_time)s,
-                    %(total_devices_denver)s, %(total_devices_v1)s, %(total_devices_v2)s,
-                    %(total_bike_denver)s, %(total_bike_v1)s, %(total_bike_v2)s,
-                    %(total_scooter_denver)s, %(total_scooter_v1)s, %(total_scooter_v2)s,
-                    %(total_not_in_denver)s,
-                    %(percent_all_devices_v1)s, %(percent_all_devices_v2)s,
-                    %(percent_all_bikes_v1)s, %(percent_all_bikes_v2)s,
-                    %(percent_all_scooters_v1)s, %(percent_all_scooters_v2)s,
-                    %(percent_bikes_denver)s, %(percent_scooters_denver)s,
-                    %(percent_bikes_v1)s, %(percent_scooters_v1)s,
-                    %(percent_bikes_v2)s, %(percent_scooters_v2)s
-                )
+                f"""
+                INSERT INTO snapshot_metadata_core ({", ".join(insert_cols)})
+                VALUES ({placeholders})
                 """,
                 core,
             )

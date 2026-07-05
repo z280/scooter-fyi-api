@@ -13,8 +13,11 @@ from fastapi import APIRouter, HTTPException, Query, Response
 
 from . import boundaries
 from .daily_sla import _AVG_FIELDS
+from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
 from .pg import connection
 from .quality import compute_quality_designation, compute_reliability_tier
+
+_COMPLIANCE_PASS_COLUMNS = tuple(compliance_pass_column(g) for g in COMPLIANCE_GROUPS)
 
 router = APIRouter()
 
@@ -421,8 +424,10 @@ def _daily_row_to_dict(cur, row) -> dict[str, Any]:
     # snapshot_count should stay an int
     if "snapshot_count" in d and d["snapshot_count"] is not None:
         d["snapshot_count"] = int(d["snapshot_count"])
-    # booleans should stay booleans (float() above would coerce)
-    for k in ("compliance_v1_pass", "compliance_v2_pass"):
+    # booleans should stay booleans (float() above would coerce, e.g.
+    # float(True) == 1.0) — one column per compliance group (v1, v2 only;
+    # er1..er6 are averages-only and have no stored pass/fail boolean).
+    for k in _COMPLIANCE_PASS_COLUMNS:
         if k in d and d[k] is not None:
             d[k] = bool(d[k])
     return d
@@ -446,8 +451,8 @@ def _empty_daily_payload() -> dict[str, Any]:
     }
     for f in _AVG_FIELDS:
         payload[f"avg_{f}"] = None
-    payload["compliance_v1_pass"] = None
-    payload["compliance_v2_pass"] = None
+    for k in _COMPLIANCE_PASS_COLUMNS:
+        payload[k] = None
     payload["computed_at"] = None
     return payload
 
