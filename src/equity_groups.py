@@ -17,22 +17,30 @@ window (`daily_sla_compliance`).
 
 Adding a group here is the wiring that makes `compute.py` compute it and
 `daily_sla.py` average it — but the Postgres columns for it
-(`total_devices_<g>`, `avg_percent_all_devices_<g>`,
-`compliance_<g>_pass`, etc.) must already exist (see sql/015 for
-er1..er6's). Also add a matching entry to config.json's `boundaries`
-list — a group with metric tracking but no boundary geometry just
-computes zero for every count.
+(`total_devices_<g>`, `avg_percent_all_devices_<g>`, etc.) must already
+exist (see sql/015 for er1..er6's). Also add a matching entry to
+config.json's `boundaries` list — a group with metric tracking but no
+boundary geometry just computes zero for every count.
 
 `core_metric_columns()` is the single source of truth for column names
 in BOTH `snapshot_metadata_core` (src/compute.py) and the corresponding
 `avg_*` fields in `daily_sla_compliance` (src/daily_sla.py) — the two
 lists must stay identical since the daily SLA row is a straight average
 over these same snapshot columns.
+
+`COMPLIANCE_GROUPS` is a DELIBERATELY SMALLER subset: only these get a
+`compliance_<g>_pass` boolean. er1..er6 are tracked as raw averages only
+— no individual rank tier is itself a compliance boundary, so no
+pass/fail flag is computed for one. The frontend combines whichever
+er-groups make up a candidate cutoff (e.g. er1 + er2) and computes
+pass/fail itself from the averages; see API_REQUIREMENTS.md §1.1a.
 """
 
 from __future__ import annotations
 
 TRACKED_GROUPS: tuple[str, ...] = ("v1", "v2", "er1", "er2", "er3", "er4", "er5", "er6")
+
+COMPLIANCE_GROUPS: tuple[str, ...] = ("v1", "v2")
 
 
 def core_metric_columns(groups: tuple[str, ...] = TRACKED_GROUPS) -> list[str]:

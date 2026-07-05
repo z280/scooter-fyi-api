@@ -246,21 +246,25 @@ Each group has full metric parity with `v1`/`v2`:
   `percent_all_devices_<g>`, `percent_all_bikes_<g>`,
   `percent_all_scooters_<g>`, `percent_bikes_<g>`, `percent_scooters_<g>`)
   for every `<g>` in `{v1, v2, er1..er6}`, computed every 10-minute cycle.
-- **`daily_sla_compliance`** gets the matching `avg_*` fields plus a
-  `compliance_<g>_pass` boolean (30% threshold, same as `compliance_v1_pass`)
-  for every group, computed in the 6am–9am Denver window.
+- **`daily_sla_compliance`** gets the matching `avg_*` fields for every
+  group in the 6am–9am Denver window. `compliance_<g>_pass` booleans are
+  **only** stored for `v1`/`v2` (`COMPLIANCE_GROUPS` in
+  `src/equity_groups.py`) — no individual `erN` tier is itself a
+  compliance boundary, so there's nothing to pass/fail on its own. The
+  frontend combines whichever `erN` groups make up a candidate cutoff
+  and computes pass/fail itself from the `avg_percent_all_devices_erN`
+  values.
 
 Tracking every rank **individually and atomically** — rather than
 pre-combining into a guessed cutoff like the old `v3`/`v4` did — means
 whatever cutoff DOTI eventually confirms as contractually authoritative
 (e.g. "rank ≤ 2") can be reconstructed retroactively from already-collected
 history (`er1 + er2`) instead of needing the right combination decided in
-advance. **No individual `erN` tier or `compliance_erN_pass` flag is
-itself a confirmed compliance requirement** — `percent_all_devices_v1` /
-`compliance_v1_pass` remain the primary RFP §3.0 metric until DOTI
-confirms otherwise. Once that happens, this note gets replaced with the
-actual migration (retiring `v1`, promoting the confirmed cutoff to "the"
-compliance metric).
+advance. **No individual `erN` tier is itself a confirmed compliance
+requirement** — `percent_all_devices_v1` / `compliance_v1_pass` remain
+the primary RFP §3.0 metric until DOTI confirms otherwise. Once that
+happens, this note gets replaced with the actual migration (retiring
+`v1`, promoting the confirmed cutoff to "the" compliance metric).
 
 **§1.1 QR verification note:** the stored `vehicle_plate` is parsed from
 the `&number=` query param of Veo's own `rental_uris.android/.ios` deep

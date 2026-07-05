@@ -13,11 +13,11 @@ from fastapi import APIRouter, HTTPException, Query, Response
 
 from . import boundaries
 from .daily_sla import _AVG_FIELDS
-from .equity_groups import TRACKED_GROUPS, compliance_pass_column
+from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
 from .pg import connection
 from .quality import compute_quality_designation, compute_reliability_tier
 
-_COMPLIANCE_PASS_COLUMNS = tuple(compliance_pass_column(g) for g in TRACKED_GROUPS)
+_COMPLIANCE_PASS_COLUMNS = tuple(compliance_pass_column(g) for g in COMPLIANCE_GROUPS)
 
 router = APIRouter()
 

@@ -767,15 +767,14 @@ GET /api/v1/compliance/daily/latest
   "avg_percent_all_scooters_er1": 22.15,
   "avg_percent_bikes_er1": 65.30,
   "avg_percent_scooters_er1": 34.70,
-  "compliance_er1_pass": false,
-  /* … the same 8 avg_* fields + compliance_erN_pass, for er2 … er6 … */
+  /* … the same 8 avg_* fields, for er2 … er6 … */
   "computed_at": "2026-05-30T15:00:08+00:00"
 }
 ```
 
 **Response 200 (pending):** No daily row computed yet (first run pending, or pipeline just deployed). Returns the same shape with every field nulled and `snapshot_count: 0`, so the gauge can render a "pending" state without special-casing a non-2xx status. The `avg_*` and `compliance_*` fields are `null` (not absent), matching the field reference below.
 ```json
-{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null, including er1..er6 … */ "compliance_v1_pass": null, "compliance_v2_pass": null, "compliance_er1_pass": null, /* … compliance_er2_pass … compliance_er6_pass … */ "computed_at": null }
+{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null, including er1..er6 … */ "compliance_v1_pass": null, "compliance_v2_pass": null, "computed_at": null }
 ```
 
 #### Field reference
@@ -789,8 +788,13 @@ GET /api/v1/compliance/daily/latest
 | `avg_*` fields | float \| null | Arithmetic mean of the corresponding `snapshot_metadata_core` field across all snapshots in the window, **for every tracked group** (`v1`, `v2`, `er1`–`er6` — see [Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6)). Null when `snapshot_count == 0`. |
 | `compliance_v1_pass` | bool \| null | `avg_percent_all_devices_v1 >= 30`. The primary SLA boolean. Null when no data. |
 | `compliance_v2_pass` | bool \| null | Same for v2. The contractually-binding map (v1 vs v2) is being confirmed with DOTI; track both for now. |
-| `compliance_er1_pass` … `compliance_er6_pass` | bool \| null | Same 30% check applied to each equity-rank tier individually, for comparability and history — **not** a confirmed compliance requirement for any individual tier. Null when no data. |
 | `computed_at` | string \| null | UTC timestamp of when this row was computed. `null` in the pending response. |
+
+**No `compliance_erN_pass` fields.** No individual equity-rank tier is
+itself a compliance boundary, so there's nothing to store a pass/fail
+flag for. Combine whichever `avg_percent_all_devices_erN` values make up
+a candidate cutoff (e.g. `er1 + er2` for a "rank ≤ 2" reading) and
+compute pass/fail client-side.
 
 ---
 

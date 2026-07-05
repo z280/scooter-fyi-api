@@ -3,11 +3,23 @@ daily_sla.py, and api_public.py all key off of."""
 
 from __future__ import annotations
 
-from src.equity_groups import TRACKED_GROUPS, compliance_pass_column, core_metric_columns
+from src.equity_groups import (
+    COMPLIANCE_GROUPS,
+    TRACKED_GROUPS,
+    compliance_pass_column,
+    core_metric_columns,
+)
 
 
 def test_tracked_groups_are_v1_v2_and_six_equity_ranks():
     assert TRACKED_GROUPS == ("v1", "v2", "er1", "er2", "er3", "er4", "er5", "er6")
+
+
+def test_compliance_groups_is_only_v1_v2():
+    """er1..er6 get metric tracking (TRACKED_GROUPS) but no pass/fail
+    boolean — no individual rank tier is itself a compliance boundary."""
+    assert COMPLIANCE_GROUPS == ("v1", "v2")
+    assert set(COMPLIANCE_GROUPS) <= set(TRACKED_GROUPS)
 
 
 def test_core_metric_columns_has_no_duplicates():

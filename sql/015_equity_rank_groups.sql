@@ -1,17 +1,18 @@
 -- Per-equity-rank-group metric tracking: er1..er6 (see src/equity_groups.py
 -- for the group registry, and API_REQUIREMENTS.md §1.1a for why these exist
 -- alongside v1/v2). Each of Denver DOTI's six EquityGroupRank tiers
--- (1 = highest need) gets full parity with v1/v2 in BOTH the per-cycle
--- 22-metric snapshot and the 6am-9am daily SLA compliance window, so a
--- future compliance cutoff can be reconstructed from history (e.g.
+-- (1 = highest need) gets the same total/percent fields as v1/v2 in BOTH
+-- the per-cycle 22-metric snapshot and the 6am-9am daily SLA average, so
+-- a future compliance cutoff can be reconstructed from history (e.g.
 -- rank<=2 = er1 + er2) without having had to guess the combination up
 -- front.
 --
--- compliance_erN_pass mirrors compliance_v1_pass's 30%-threshold check
--- (COMPLIANCE_THRESHOLD in src/daily_sla.py) for comparability against
--- today's contractual metric — it is NOT itself a confirmed compliance
--- requirement for any individual rank tier; that confirmation is still
--- pending from DOTI.
+-- Deliberately NO compliance_erN_pass boolean: no individual rank tier is
+-- itself a compliance boundary, so there's nothing to pass/fail on its
+-- own. The frontend combines whichever er-groups make up a candidate
+-- cutoff and computes pass/fail itself from the avg_percent_all_devices_erN
+-- values below. compliance_v1_pass / compliance_v2_pass (existing columns)
+-- remain the only stored pass/fail flags.
 
 ALTER TABLE snapshot_metadata_core
     ADD COLUMN IF NOT EXISTS total_devices_er1            INTEGER,
@@ -111,10 +112,4 @@ ALTER TABLE daily_sla_compliance
     ADD COLUMN IF NOT EXISTS avg_percent_all_bikes_er6    NUMERIC(5,2),
     ADD COLUMN IF NOT EXISTS avg_percent_all_scooters_er6 NUMERIC(5,2),
     ADD COLUMN IF NOT EXISTS avg_percent_bikes_er6        NUMERIC(5,2),
-    ADD COLUMN IF NOT EXISTS avg_percent_scooters_er6     NUMERIC(5,2),
-    ADD COLUMN IF NOT EXISTS compliance_er1_pass             BOOLEAN,
-    ADD COLUMN IF NOT EXISTS compliance_er2_pass             BOOLEAN,
-    ADD COLUMN IF NOT EXISTS compliance_er3_pass             BOOLEAN,
-    ADD COLUMN IF NOT EXISTS compliance_er4_pass             BOOLEAN,
-    ADD COLUMN IF NOT EXISTS compliance_er5_pass             BOOLEAN,
-    ADD COLUMN IF NOT EXISTS compliance_er6_pass             BOOLEAN;
+    ADD COLUMN IF NOT EXISTS avg_percent_scooters_er6     NUMERIC(5,2);

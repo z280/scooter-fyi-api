@@ -21,7 +21,7 @@ from datetime import date as date_cls, datetime, time, timedelta, timezone
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from .equity_groups import TRACKED_GROUPS, compliance_pass_column, core_metric_columns
+from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column, core_metric_columns
 from .pg import connection
 from .sentry import capture_exception
 
@@ -85,13 +85,12 @@ def compute_for_date(d: date_cls) -> dict:
 
     snapshot_count = int(agg["snapshot_count"] or 0)
 
-    # compliance_<g>_pass for every tracked group, not just v1/v2. Applying
-    # the same 30% threshold to er1..er6 is for comparability while a
-    # DOTI-confirmed cutoff is pending — see sql/015's header note; it is
-    # NOT itself an assertion that any individual rank tier's 30% figure is
-    # a real compliance requirement.
+    # compliance_<g>_pass only for v1/v2 — er1..er6 are raw averages only.
+    # No individual rank tier is itself a compliance boundary; the
+    # frontend combines whichever er-groups make up a candidate cutoff
+    # and computes pass/fail itself from avg_percent_all_devices_erN.
     compliance: dict[str, bool | None] = {}
-    for g in TRACKED_GROUPS:
+    for g in COMPLIANCE_GROUPS:
         pct = agg.get(f"avg_percent_all_devices_{g}")
         compliance[compliance_pass_column(g)] = (
             None if pct is None else (float(pct) >= COMPLIANCE_THRESHOLD)
