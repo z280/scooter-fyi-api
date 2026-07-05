@@ -73,11 +73,11 @@ runs natively on the same 12 GiB VPS with a 7.5 GiB sandbox.
 ├── docker-compose.yml          four services, hard memory caps
 ├── Dockerfile                  python:3.11-slim + FastAPI + DuckDB + supercronic + tini
 ├── crontab                     supercronic schedule for the scheduler container
-├── data/                       baked-in boundary files (7)
+├── data/                       baked-in boundary files (11)
 │   ├── v1.json                 Disadvantaged Areas v1 — 34 polygons (legacy, being retired)
 │   ├── v2.json                 Disadvantaged Areas v2 — 65 census block groups
-│   ├── v3.json                 Equity Index rank ≤ 2 — 92 census block groups (provisional)
-│   ├── v4.json                 Equity Index rank ≤ 3 — 249 census block groups (provisional)
+│   ├── er1.json … er6.json     DOTI Equity Index, one file per exact rank tier
+│   │                           (34 / 58 / 157 / 93 / 114 / 116 block groups)
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
@@ -93,12 +93,14 @@ runs natively on the same 12 GiB VPS with a 7.5 GiB sandbox.
 │   ├── cycle.py                observation_cycles lifecycle state machine
 │   ├── transmit.py             fanout to downstream endpoints
 │   ├── archive.py              48-hour Parquet → R2 → TRUNCATE
+│   ├── equity_groups.py         registry of tracked equity groups (v1, v2, er1..er6) —
+│   │                            single source of truth for compute.py + daily_sla.py
 │   ├── api_public.py           4 read-only public REST routes
 │   ├── api_admin.py            GitHub-OAuth-protected admin views
 │   ├── auth.py                 GitHub OAuth + org allowlist
 │   ├── sentry.py               Sentry SDK init (no-op without DSN)
 │   └── templates/              Jinja templates for /admin
-├── tests/                      pytest — 10 tests, ~60 s
+├── tests/                      pytest
 └── .github/workflows/deploy.yml  build → GHCR → SSH-deploy on push to main
 ```
 
@@ -111,7 +113,7 @@ Seven tables in Postgres, all narrow (no 270-column wide schemas):
 | `observation_cycles` | Per-cycle UUID lifecycle: start_ts, phase timestamps, job_status, errors, JSONB blob |
 | `api_failures` | Upstream / archive failures with cycle_id FK |
 | `raw_telemetry_points` | Per-device rolling buffer; flushed to R2 every 48h |
-| `snapshot_metadata_core` | The 22 RFP-relevant metrics, one row per cycle |
+| `snapshot_metadata_core` | The 22 RFP-relevant metrics, plus the same total/percent fields per tracked equity group (v1, v2, er1..er6 — see `src/equity_groups.py`), one row per cycle |
 | `regional_metrics_narrow` | Per-region counts, one row per (cycle, region). Indexed by region_category + region_type + snapshot_time |
 | `transmission_attempts` | One row per downstream POST, with http_status_code |
 | `system_state` | Tiny KV (e.g. `last_archive_ts`) |
@@ -122,8 +124,7 @@ Seven tables in Postgres, all narrow (no 270-column wide schemas):
 |---|---|---|
 | `disadvantaged_areas` | `v1` | 34 polygons (legacy hand-drawn boundary; RFP compliance metric today, being retired — see API_REQUIREMENTS.md §1.1a) |
 | `disadvantaged_areas` | `v2` | 65 census block groups |
-| `disadvantaged_areas` | `v3` | 92 census block groups (DOTI Equity Index, rank ≤ 2 — provisional) |
-| `disadvantaged_areas` | `v4` | 249 census block groups (DOTI Equity Index, rank ≤ 3 — provisional) |
+| `disadvantaged_areas` | `er1`..`er6` | 34 / 58 / 157 / 93 / 114 / 116 census block groups — DOTI Equity Index, one layer per exact rank tier (er1 = highest need). Partition the scored area; tracked individually (not pre-combined) so a future compliance cutoff can be reconstructed from history. Full metric parity with v1/v2 in both `snapshot_metadata_core` and `daily_sla_compliance` — see `src/equity_groups.py` and API_REQUIREMENTS.md §1.1a. |
 | `council_districts` | `council_district` | 11 (CD_1…CD_11; At-Large overlays filtered) |
 | `community_networks` | `community_network` | 13 (CN_Central, CN_Southwest, …) |
 | `neighborhoods` | `neighborhood` | 78 (NB_AthmarPark, …) |

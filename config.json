@@ -38,17 +38,49 @@
     },
     {
       "region_category": "disadvantaged_areas",
-      "region_type": "v3",
-      "file": "/app/data/v3.json",
-      "name_prefix": "V3_",
+      "region_type": "er1",
+      "file": "/app/data/er1.json",
+      "name_prefix": "ER1_",
       "name_field": "GEOID20",
       "name_strategy": "field"
     },
     {
       "region_category": "disadvantaged_areas",
-      "region_type": "v4",
-      "file": "/app/data/v4.json",
-      "name_prefix": "V4_",
+      "region_type": "er2",
+      "file": "/app/data/er2.json",
+      "name_prefix": "ER2_",
+      "name_field": "GEOID20",
+      "name_strategy": "field"
+    },
+    {
+      "region_category": "disadvantaged_areas",
+      "region_type": "er3",
+      "file": "/app/data/er3.json",
+      "name_prefix": "ER3_",
+      "name_field": "GEOID20",
+      "name_strategy": "field"
+    },
+    {
+      "region_category": "disadvantaged_areas",
+      "region_type": "er4",
+      "file": "/app/data/er4.json",
+      "name_prefix": "ER4_",
+      "name_field": "GEOID20",
+      "name_strategy": "field"
+    },
+    {
+      "region_category": "disadvantaged_areas",
+      "region_type": "er5",
+      "file": "/app/data/er5.json",
+      "name_prefix": "ER5_",
+      "name_field": "GEOID20",
+      "name_strategy": "field"
+    },
+    {
+      "region_category": "disadvantaged_areas",
+      "region_type": "er6",
+      "file": "/app/data/er6.json",
+      "name_prefix": "ER6_",
       "name_field": "GEOID20",
       "name_strategy": "field"
     },

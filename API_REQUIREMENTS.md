@@ -215,10 +215,10 @@ start there.
 | §4 Stripe + rides + badges | Implemented (PR #9): `src/stripe_webhook.py`, `src/api_rides.py`, `src/badges.py`, `sql/014`. |
 | §5 rate limits, env, privacy endpoint | Implemented (PR #9): `src/ratelimit.py`, `src/api_meta.py`, `.env.example`. |
 | Repo rename | Pending — GitHub settings change (`veo-audit` → `scooter-fyi-api`), operator action. |
-| Equity boundary migration (new §1.1a) | In progress — see note below. `v3`/`v4` layers added for frontend prototyping; `v1`/`v2` retirement and the compliance-metric cutoff are still pending a DOTI decision. |
+| Equity boundary migration (new §1.1a) | In progress — see note below. `er1`–`er6` per-rank layers now tracked with full metric parity to v1/v2 (snapshot + daily SLA). `v1` retirement and the compliance-metric cutoff are still pending a DOTI decision. |
 
-**§1.1a Equity boundary migration note (2026-07-04):** Denver DOTI
-delivered an authoritative, census-block-group-based Equity Index
+**§1.1a Equity boundary migration note (2026-07-04, updated):** Denver
+DOTI delivered an authoritative, census-block-group-based Equity Index
 (`data/DOTI_Equity_Index_Final.geojson`, 572 block groups, continuous
 `EquityScore` + 6-tier `EquityGroupRank` where 1 = highest need). Analysis
 of the two legacy boundaries against it:
@@ -233,16 +233,34 @@ of the two legacy boundaries against it:
   materially worse and structurally different match.
 
 **Decision: `v1` is being retired; `v2`'s historical series is the one
-being carried forward.** Two new provisional layers were added for
-frontend prototyping while the compliance cutoff is confirmed with
-DOTI: `v3` (`EquityGroupRank ∈ {1,2}`, 92 block groups — closest single
-cumulative-rank match to the historical v1/v2 average footprint by
-area) and `v4` (`EquityGroupRank ∈ {1,2,3}`, 249 block groups). Neither
-is wired into `percent_all_devices_v1`/`v2` or the daily SLA compliance
-window yet — see the Layer reference "Notes on the layers" section in
-API.md. Once DOTI confirms which rank cutoff is contractually
-authoritative, that cutoff becomes the new compliance boundary and `v1`
-is removed from `config.json`/`compute.py` entirely.
+being carried forward.**
+
+Superseding the earlier composite `v3`/`v4` prototype layers, the system
+now tracks **each of the six `EquityGroupRank` tiers individually** as
+`er1` (highest need) through `er6` (lowest) — see `src/equity_groups.py`
+for the registry and `sql/015_equity_rank_groups.sql` for the schema.
+Each group has full metric parity with `v1`/`v2`:
+
+- **`snapshot_metadata_core`** gets the same 8 fields
+  (`total_devices_<g>`, `total_bike_<g>`, `total_scooter_<g>`,
+  `percent_all_devices_<g>`, `percent_all_bikes_<g>`,
+  `percent_all_scooters_<g>`, `percent_bikes_<g>`, `percent_scooters_<g>`)
+  for every `<g>` in `{v1, v2, er1..er6}`, computed every 10-minute cycle.
+- **`daily_sla_compliance`** gets the matching `avg_*` fields plus a
+  `compliance_<g>_pass` boolean (30% threshold, same as `compliance_v1_pass`)
+  for every group, computed in the 6am–9am Denver window.
+
+Tracking every rank **individually and atomically** — rather than
+pre-combining into a guessed cutoff like the old `v3`/`v4` did — means
+whatever cutoff DOTI eventually confirms as contractually authoritative
+(e.g. "rank ≤ 2") can be reconstructed retroactively from already-collected
+history (`er1 + er2`) instead of needing the right combination decided in
+advance. **No individual `erN` tier or `compliance_erN_pass` flag is
+itself a confirmed compliance requirement** — `percent_all_devices_v1` /
+`compliance_v1_pass` remain the primary RFP §3.0 metric until DOTI
+confirms otherwise. Once that happens, this note gets replaced with the
+actual migration (retiring `v1`, promoting the confirmed cutoff to "the"
+compliance metric).
 
 **§1.1 QR verification note:** the stored `vehicle_plate` is parsed from
 the `&number=` query param of Veo's own `rental_uris.android/.ios` deep

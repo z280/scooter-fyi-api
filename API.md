@@ -110,9 +110,12 @@ GET /health
 
 ### `GET /api/v1/snapshots/latest`
 
-The full set of 22 citywide compliance metrics from the most recent
-cycle. This is the most commonly consumed endpoint — it answers
-"what's the fleet doing right now?"
+The full set of 22 RFP-mandated citywide compliance metrics from the
+most recent cycle, **plus** the same per-group total/percent fields for
+every other tracked equity group (`er1`–`er6` — see
+[Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6) below).
+This is the most commonly consumed endpoint — it answers "what's the
+fleet doing right now?"
 
 **Request:**
 ```http
@@ -145,7 +148,16 @@ GET /api/v1/snapshots/latest
   "percent_bikes_v1": 66.28,
   "percent_scooters_v1": 33.72,
   "percent_bikes_v2": 63.64,
-  "percent_scooters_v2": 36.36
+  "percent_scooters_v2": 36.36,
+  "total_devices_er1": 1198,
+  "total_bike_er1": 782,
+  "total_scooter_er1": 416,
+  "percent_all_devices_er1": 20.29,
+  "percent_all_bikes_er1": 19.38,
+  "percent_all_scooters_er1": 22.27,
+  "percent_bikes_er1": 65.28,
+  "percent_scooters_er1": 34.72
+  /* … the same 8 fields, suffixed _er2 … _er6, omitted here for brevity … */
 }
 ```
 
@@ -183,6 +195,28 @@ GET /api/v1/snapshots/latest
 | `percent_bikes_v2` | float \| null | Bike share inside v2. |
 | `percent_scooters_v2` | float \| null | Scooter share inside v2. |
 
+#### Tracked equity groups (v1, v2, er1–er6)
+
+The 8 field families above (`total_devices_<g>`, `total_bike_<g>`,
+`total_scooter_<g>`, `percent_all_devices_<g>`, `percent_all_bikes_<g>`,
+`percent_all_scooters_<g>`, `percent_bikes_<g>`, `percent_scooters_<g>`)
+are computed identically for **every** tracked group
+`<g> ∈ {v1, v2, er1, er2, er3, er4, er5, er6}` — not just v1/v2. The
+group registry lives in `src/equity_groups.py`; adding a group there
+(plus a matching migration and `config.json` boundary entry) is the only
+change needed for it to appear here and in the daily SLA endpoint below.
+
+`er1`–`er6` are Denver DOTI's authoritative census-block-group Equity
+Index, one group per exact `EquityGroupRank` tier (`er1` = highest
+need). They are tracked **individually and atomically** — not
+pre-combined into a cutoff — specifically so that whatever cutoff DOTI
+confirms as contractually authoritative can be reconstructed from
+history later (e.g. a "rank ≤ 2" metric = `er1 + er2`) without this
+system having had to guess the right combination up front. None of
+`er1`–`er6` is a confirmed compliance boundary today — `percent_all_devices_v1`
+remains **the** primary RFP §3.0 metric until DOTI confirms otherwise;
+see API_REQUIREMENTS.md §1.1a.
+
 ---
 
 ### `GET /api/v1/spatial-snapshot`
@@ -195,7 +229,7 @@ nearest to a given timestamp).
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `layer` | string | yes | — | One of `v1`, `v2`, `v3`, `v4`, `council_district`, `community_network`, `neighborhood`. See [Layer reference](#layer-reference). |
+| `layer` | string | yes | — | One of `v1`, `v2`, `er1`, `er2`, `er3`, `er4`, `er5`, `er6`, `council_district`, `community_network`, `neighborhood`. See [Layer reference](#layer-reference). |
 | `time` | string | no | latest | ISO 8601 UTC timestamp. Snaps to the most recent snapshot at or before this time. Useful for historical playback. |
 
 **Example request:**
@@ -306,6 +340,8 @@ GET /api/v1/boundaries
   "layers": [
     { "region_category": "disadvantaged_areas", "region_type": "v1", "feature_count": 34, "bbox": [-105.0626, 39.6473, -104.7718, 39.7983], "url": "/api/v1/boundaries/v1" },
     { "region_category": "disadvantaged_areas", "region_type": "v2", "feature_count": 65, "bbox": [-105.0626, 39.6450, -104.7344, 39.7984], "url": "/api/v1/boundaries/v2" },
+    { "region_category": "disadvantaged_areas", "region_type": "er1", "feature_count": 34, "bbox": [-105.0626, 39.6450, -104.7344, 39.7984], "url": "/api/v1/boundaries/er1" },
+    /* … er2 … er6, same shape … */
     { "region_category": "council_districts", "region_type": "council_district", "feature_count": 11, "bbox": [-105.1100, 39.6143, -104.5995, 39.9142], "url": "/api/v1/boundaries/council_district" },
     { "region_category": "community_networks", "region_type": "community_network", "feature_count": 13, "bbox": [-105.1100, 39.6143, -104.7344, 39.8274], "url": "/api/v1/boundaries/community_network" },
     { "region_category": "neighborhoods", "region_type": "neighborhood", "feature_count": 78, "bbox": [-105.1100, 39.6143, -104.5996, 39.9142], "url": "/api/v1/boundaries/neighborhood" }
@@ -723,13 +759,23 @@ GET /api/v1/compliance/daily/latest
   "avg_percent_scooters_v2": 36.48,
   "compliance_v1_pass": false,
   "compliance_v2_pass": false,
+  "avg_total_devices_er1": 1189.44,
+  "avg_total_bike_er1": 776.61,
+  "avg_total_scooter_er1": 412.83,
+  "avg_percent_all_devices_er1": 20.24,
+  "avg_percent_all_bikes_er1": 19.36,
+  "avg_percent_all_scooters_er1": 22.15,
+  "avg_percent_bikes_er1": 65.30,
+  "avg_percent_scooters_er1": 34.70,
+  "compliance_er1_pass": false,
+  /* … the same 8 avg_* fields + compliance_erN_pass, for er2 … er6 … */
   "computed_at": "2026-05-30T15:00:08+00:00"
 }
 ```
 
 **Response 200 (pending):** No daily row computed yet (first run pending, or pipeline just deployed). Returns the same shape with every field nulled and `snapshot_count: 0`, so the gauge can render a "pending" state without special-casing a non-2xx status. The `avg_*` and `compliance_*` fields are `null` (not absent), matching the field reference below.
 ```json
-{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null … */ "compliance_v1_pass": null, "compliance_v2_pass": null, "computed_at": null }
+{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null, including er1..er6 … */ "compliance_v1_pass": null, "compliance_v2_pass": null, "compliance_er1_pass": null, /* … compliance_er2_pass … compliance_er6_pass … */ "computed_at": null }
 ```
 
 #### Field reference
@@ -740,9 +786,10 @@ GET /api/v1/compliance/daily/latest
 | `window_start_ts` | string \| null | 6:00 AM Denver expressed as UTC. `null` in the pending response. |
 | `window_end_ts` | string \| null | 9:00 AM Denver expressed as UTC. `null` in the pending response. |
 | `snapshot_count` | int | Number of cycles whose `snapshot_time` fell inside the window. Typically 18 (3 hours × 6 cycles/hour). Lower values indicate cycle misses; 0 means no data. |
-| `avg_*` fields | float \| null | Arithmetic mean of the corresponding `snapshot_metadata_core` field across all snapshots in the window. Null when `snapshot_count == 0`. |
+| `avg_*` fields | float \| null | Arithmetic mean of the corresponding `snapshot_metadata_core` field across all snapshots in the window, **for every tracked group** (`v1`, `v2`, `er1`–`er6` — see [Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6)). Null when `snapshot_count == 0`. |
 | `compliance_v1_pass` | bool \| null | `avg_percent_all_devices_v1 >= 30`. The primary SLA boolean. Null when no data. |
 | `compliance_v2_pass` | bool \| null | Same for v2. The contractually-binding map (v1 vs v2) is being confirmed with DOTI; track both for now. |
+| `compliance_er1_pass` … `compliance_er6_pass` | bool \| null | Same 30% check applied to each equity-rank tier individually, for comparability and history — **not** a confirmed compliance requirement for any individual tier. Null when no data. |
 | `computed_at` | string \| null | UTC timestamp of when this row was computed. `null` in the pending response. |
 
 ---
@@ -970,7 +1017,7 @@ this, so the published policy and the enforced one can't drift:
 
 ## Layer reference
 
-The seven layers, their `region_type` values (used in `layer=` query
+The eleven layers, their `region_type` values (used in `layer=` query
 params), and the naming convention for `region_name` (used in the
 trend endpoint and as the keys of `regions` in spatial-snapshot).
 
@@ -978,8 +1025,12 @@ trend endpoint and as the keys of `regions` in spatial-snapshot).
 |---|---|---|---|
 | `disadvantaged_areas` | `v1` | 34 | `V1_001`, `V1_002`, … `V1_034` (ordinal, zero-padded to 3 digits) |
 | `disadvantaged_areas` | `v2` | 65 | `V2_080010001001`, `V2_080010002003`, … (US Census Block Group GEOID20) |
-| `disadvantaged_areas` | `v3` | 92 | `V3_080310016034`, `V3_080310021013`, … (US Census Block Group GEOID20) |
-| `disadvantaged_areas` | `v4` | 249 | `V4_080310041102`, `V4_080310041014`, … (US Census Block Group GEOID20) |
+| `disadvantaged_areas` | `er1` | 34 | `ER1_080310043081`, … (US Census Block Group GEOID20; `EquityGroupRank == 1`, highest need) |
+| `disadvantaged_areas` | `er2` | 58 | `ER2_...` (`EquityGroupRank == 2`) |
+| `disadvantaged_areas` | `er3` | 157 | `ER3_...` (`EquityGroupRank == 3`) |
+| `disadvantaged_areas` | `er4` | 93 | `ER4_...` (`EquityGroupRank == 4`) |
+| `disadvantaged_areas` | `er5` | 114 | `ER5_...` (`EquityGroupRank == 5`) |
+| `disadvantaged_areas` | `er6` | 116 | `ER6_...` (`EquityGroupRank == 6`, lowest need) |
 | `council_districts` | `council_district` | 11 | `CD_1`, `CD_2`, … `CD_11` (Denver City Council district numbers) |
 | `community_networks` | `community_network` | 13 | `CN_Central`, `CN_East`, `CN_EastCentral`, `CN_FarNortheast`, `CN_FarSoutheast`, `CN_North`, `CN_Northeast`, `CN_Northwest`, `CN_ParkHill`, `CN_SouthCentral`, `CN_Southeast`, `CN_Southwest`, `CN_West` |
 | `neighborhoods` | `neighborhood` | 78 | `NB_AthmarPark`, `NB_Auraria`, `NB_Baker`, `NB_Barnum`, `NB_CBD`, `NB_CapitolHill`, `NB_CherryCreek`, `NB_FivePoints`, `NB_Highland`, `NB_SloanLake`, `NB_WashingtonPark`, `NB_Westwood`, … (Denver Statistical Neighborhood names with non-alphanumerics stripped) |
@@ -987,7 +1038,7 @@ trend endpoint and as the keys of `regions` in spatial-snapshot).
 ### Notes on the layers
 
 - **v1 vs v2** are two distinct versions of the city's original Equity / Opportunity Areas polygon. Both exist because Denver's contract negotiations referenced both; the canonical compliance metric (`percent_all_devices_v1` on `/api/v1/snapshots/latest`) is computed against `v1` specifically, with `v2` tracked in parallel. They are not nested or disjoint — a device can be in both, neither, or one or the other.
-- **v3 and v4 are provisional candidates** derived from Denver DOTI's newer, authoritative census-block-group Equity Index (`EquityGroupRank`, 1 = highest need): `v3` is `EquityGroupRank ∈ {1, 2}` (92 block groups), `v4` is `EquityGroupRank ∈ {1, 2, 3}` (249 block groups). They exist so the frontend can prototype against real geometry while the compliance-relevant cutoff is confirmed with DOTI. **They currently affect nothing else** — the 22-metric snapshot, the daily SLA compliance window, and `percent_all_devices_v1`/`v2` are computed exclusively from `v1`/`v2` and are untouched by v3/v4. `v3`/`v4` are available today only through the generic layer endpoints (`/api/v1/boundaries/{layer}`, `/api/v1/spatial-snapshot?layer=`, `/api/v1/analytics/trend?layer=`) — expect the specific region_type backing "the" compliance metric to change once DOTI confirms a cutoff, at which point this doc will say so.
+- **`er1`–`er6`** are Denver DOTI's newer, authoritative census-block-group Equity Index, split into one layer per exact `EquityGroupRank` tier (`er1` = highest need, `er6` = lowest). Unlike v1/v2 they **partition** the scored area — every scored block group falls in exactly one `erN` layer, never two. They're tracked individually (not pre-combined into a cutoff) in both `/api/v1/snapshots/latest` and `/api/v1/compliance/daily/latest` so that whatever cutoff DOTI confirms as contractually authoritative can be reconstructed from history later (e.g. a "rank ≤ 2" metric = `er1 + er2`). **No individual `erN` layer is a confirmed compliance boundary today** — `percent_all_devices_v1` remains the primary RFP §3.0 metric. See API_REQUIREMENTS.md §1.1a.
 - **At-Large council districts** (Gonzales-Gutierrez and Parady, which cover the entire city) are **excluded** from `council_district` rows to avoid double-counting. Only the 11 numbered districts appear.
 - **Neighborhoods** uses Denver's Statistical Neighborhood Boundaries (DOTI). Spaces and punctuation are stripped from names: `Athmar Park` → `NB_AthmarPark`, `Park Hill` → `NB_ParkHill` (note: there are also separate `NB_NortheastParkHill`, `NB_NorthParkHill`, `NB_SouthParkHill` neighborhoods).
 - **Community Networks** are Denver's 13 official planning regions, broader than neighborhoods.
