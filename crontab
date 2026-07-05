@@ -15,3 +15,7 @@
 # since the last successful upload. Self-gating means we can run this on a
 # daily cron without forcing a 48h cron expression.
 0 2 * * * cd /app && python -m src.cli archive_if_due
+
+# Receipt retention: purge discount-report receipt images older than 18
+# months (privacy policy). Idempotent; the report row outlives the image.
+30 3 * * * cd /app && python -m src.cli cleanup_receipts

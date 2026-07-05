@@ -207,9 +207,14 @@ start there.
 
 | Item | Status |
 |---|---|
-| §1.1 plate promotion | Implemented. QR verification pending — see note below. |
-| §1.2 reliability tier + raw fields | Implemented. Formula documented in `src/quality.py` and API.md. |
-| §2–§5 | Not started. |
+| §1.1 plate promotion | Implemented (PR #8). QR verification pending — see note below. |
+| §1.2 reliability tier + raw fields | Implemented (PR #8). Formula documented in `src/quality.py` and API.md. |
+| §2.1–§2.4 accounts, sessions, profile | Implemented (PR #9): `src/accounts.py`, `src/api_auth.py`, `src/api_profile.py`, `sql/012`. |
+| §2.5 GitHub OAuth retirement | Pending — gated on Google + magic links being live in prod and the frontend removing its hidden-tab gate in the same release. |
+| §3 reports + aggregates | Implemented (PR #9): `src/api_frontend_reports.py`, `src/receipts.py`, `src/geo.py`, `sql/013`. Device reports feed `has_negative_report`/`reliability_tier`. |
+| §4 Stripe + rides + badges | Implemented (PR #9): `src/stripe_webhook.py`, `src/api_rides.py`, `src/badges.py`, `sql/014`. |
+| §5 rate limits, env, privacy endpoint | Implemented (PR #9): `src/ratelimit.py`, `src/api_meta.py`, `.env.example`. |
+| Repo rename | Pending — GitHub settings change (`veo-audit` → `scooter-fyi-api`), operator action. |
 
 **§1.1 QR verification note:** the stored `vehicle_plate` is parsed from
 the `&number=` query param of Veo's own `rental_uris.android/.ios` deep
