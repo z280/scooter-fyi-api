@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from . import boundaries
 from .daily_sla import _AVG_FIELDS
 from .pg import connection
-from .quality import compute_quality_designation
+from .quality import compute_quality_designation, compute_reliability_tier
 
 router = APIRouter()
 
@@ -312,7 +312,8 @@ def devices_current(
                 "             AND nr.reported_at >= NOW() - INTERVAL '24 hours'"
                 "       ) AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
-                "       ds.number_failed_starts, ds.first_observed_at_location "
+                "       ds.number_failed_starts, ds.first_observed_at_location, "
+                "       r.vehicle_plate "
                 "FROM raw_telemetry_points r "
                 "LEFT JOIN device_state ds USING (vehicle_identifier) "
                 f"WHERE {' AND '.join(where)} "
@@ -321,18 +322,25 @@ def devices_current(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
-    # vehicle_plate is deliberately not selected — see src/identity.py for the
-    # public/private identifier split. Only vehicle_identifier (the hash) goes
-    # over an unauthenticated wire.
+    # vehicle_plate is public as of API_REQUIREMENTS.md §1.1 — it's painted on
+    # every scooter and needed for "Unlock in Veo" deep links. Position
+    # *history* under a stable identifier stays behind the private endpoints.
     features = []
     for r in rows:
+        number_failed_starts = int(r[22]) if r[22] is not None else None
         quality = compute_quality_designation(
             current_range_meters=r[8],
             max_range_meters_for_type=r[21],
             is_disabled=r[6],
             is_reserved=r[7],
-            number_failed_starts=r[22],
+            number_failed_starts=number_failed_starts,
             first_observed_at_location=r[23],
+            has_negative_report=bool(r[20]),
+        )
+        reliability = compute_reliability_tier(
+            number_failed_starts=number_failed_starts,
+            first_observed_at_location=r[23],
+            quality_designation=quality,
             has_negative_report=bool(r[20]),
         )
         features.append({
@@ -360,6 +368,10 @@ def devices_current(
                 "range_rank_h3_10_peers": r[19],
                 "has_negative_report": bool(r[20]),
                 "quality_designation": quality,
+                "vehicle_plate": r[24],
+                "number_failed_starts": number_failed_starts,
+                "first_observed_at_location": r[23].isoformat() if r[23] else None,
+                "reliability_tier": reliability,
             },
         })
 

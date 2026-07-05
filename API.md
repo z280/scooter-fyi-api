@@ -530,10 +530,14 @@ GET /api/v1/devices/current?form_factor=scooter
         "form_factor": "scooter",
         "spatial_status": "denver_core",
         "vehicle_identifier": "8c4a1f0d2e9b7a35",
+        "vehicle_plate": "1025543",
         "is_disabled": false,
         "is_reserved": false,
         "current_range_meters": 45293,
-        "propulsion_type": "electric"
+        "propulsion_type": "electric",
+        "number_failed_starts": 0,
+        "first_observed_at_location": "2026-05-30T16:10:09+00:00",
+        "reliability_tier": "ok"
       }
     },
     {
@@ -545,10 +549,14 @@ GET /api/v1/devices/current?form_factor=scooter
         "form_factor": "scooter",
         "spatial_status": "denver_core",
         "vehicle_identifier": "1b6e2d44a991f070",
+        "vehicle_plate": "1031877",
         "is_disabled": false,
         "is_reserved": true,
         "current_range_meters": 38110,
-        "propulsion_type": "electric"
+        "propulsion_type": "electric",
+        "number_failed_starts": 0,
+        "first_observed_at_location": "2026-05-30T17:40:12+00:00",
+        "reliability_tier": "unknown"
       }
     }
     /* … ~1,866 more features … */
@@ -563,7 +571,8 @@ GET /api/v1/devices/current?form_factor=scooter
 | `device_id` | string | The upstream Veo `bike_id` from GBFS `free_bike_status`. **Rotates per trip** by GBFS spec mandate — do not treat as stable. |
 | `form_factor` | string | `"bicycle"`, `"scooter"`, or `"unknown"`. |
 | `spatial_status` | string | `"denver_core"`, `"china_glitch"`, or `"other_outlier"`. |
-| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. The salt is a server-side secret, so the identifier is **not directly reversible** to the physical plate by anyone but us. A motivated researcher with the GBFS feed can still join our public output to plates by **position** correlation, but the trivial hash-lookup attack is closed. May be null if the upstream payload omits a plate. |
+| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins; per-device position **history** remains behind the authenticated private endpoints. May be null if the upstream payload omits a plate. |
+| `vehicle_plate` | string \| null | The visible plate number painted on the vehicle and printed in its QR code (e.g. `"1025543"`), as embedded by Veo in its own GBFS `rental_uris`. Use it to build "Unlock in Veo" deep links: `https://gmjc.adj.st/?adj_t=622qh4&number=<vehicle_plate>`. Null when the upstream payload omits a plate (then `vehicle_identifier` is null too). |
 | `is_disabled` | bool \| null | `true` when the scooter is out of service (low battery, mechanical fault, impound). Disabled devices still count toward fleet totals because they occupy space. |
 | `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
 | `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. Pair with `propulsion_type` and the per-type `max_range_meters` to derive battery % — pedal-bike (`"human"`) entries have no battery. |
@@ -576,6 +585,9 @@ GET /api/v1/devices/current?form_factor=scooter
 | `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
 | `has_negative_report` | bool | `true` when ≥1 citizen-submitted report has been filed against this `vehicle_identifier` at this exact `h3_10_index` cell within the last 24h. Becomes `false` automatically when the scooter moves to a different h3_10 cell. Submit reports via `POST /api/v1/reports`. |
 | `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, and active negative reports. `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
+| `number_failed_starts` | int \| null | How many times the upstream `bike_id` rotated (someone started a rental) **without the scooter moving** since it arrived at its current location. Resets to 0 when the scooter moves. Null when the device isn't state-tracked (no plate in the upstream payload). |
+| `first_observed_at_location` | string \| null | UTC ISO 8601 timestamp of when we first observed the scooter at its current location. `now - first_observed_at_location` = dwell time. Resets when the scooter moves. Null when the device isn't state-tracked. |
+| `reliability_tier` | string | `"ok"`, `"unknown"`, or `"high_risk"` — a single "will it actually unlock?" signal. `high_risk`: an active negative report, ≥2 failed starts, 1 failed start + ≥24 h dwell, or ≥96 h dwell. `unknown`: device not state-tracked, or `quality_designation` is `"N/A"` (disabled/reserved/rangeless). `ok`: everything else. Formula lives in `src/quality.py` (`compute_reliability_tier`) so the audit stays reproducible. Unlike `quality_designation`, battery range never affects this field. |
 
 #### Public write endpoints
 

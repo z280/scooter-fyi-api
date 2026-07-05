@@ -1,11 +1,15 @@
-"""Quality designation rules + daylight-hours math."""
+"""Quality designation rules + reliability tier + daylight-hours math."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from src.quality import compute_quality_designation, daylight_hours_between
+from src.quality import (
+    compute_quality_designation,
+    compute_reliability_tier,
+    daylight_hours_between,
+)
 
 DENVER = ZoneInfo("America/Denver")
 
@@ -164,6 +168,87 @@ def test_failed_start_and_long_dwell_stack():
            "now": _denver("2026-06-02", 10)},
     )
     assert out == "poor"
+
+
+# ---------- Reliability tier (API_REQUIREMENTS.md §1.2) ---------------------
+# Defaults: a healthy, state-tracked scooter that arrived an hour ago.
+_REL_BASE = dict(
+    number_failed_starts=0,
+    first_observed_at_location=_denver("2026-06-01", 10),
+    quality_designation="good",
+    has_negative_report=False,
+    now=_denver("2026-06-01", 11),
+)
+
+
+def test_reliability_ok_for_healthy_tracked_device():
+    assert compute_reliability_tier(**_REL_BASE) == "ok"
+
+
+def test_reliability_negative_report_is_high_risk():
+    out = compute_reliability_tier(**{**_REL_BASE, "has_negative_report": True})
+    assert out == "high_risk"
+
+
+def test_reliability_two_failed_starts_is_high_risk():
+    out = compute_reliability_tier(**{**_REL_BASE, "number_failed_starts": 2})
+    assert out == "high_risk"
+
+
+def test_reliability_one_failed_start_short_dwell_stays_ok():
+    """One bike_id rotation can be a rebalancing scan — not enough alone."""
+    out = compute_reliability_tier(**{**_REL_BASE, "number_failed_starts": 1})
+    assert out == "ok"
+
+
+def test_reliability_one_failed_start_plus_24h_dwell_is_high_risk():
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "number_failed_starts": 1,
+        "now": _denver("2026-06-02", 10),  # 24h dwell
+    })
+    assert out == "high_risk"
+
+
+def test_reliability_96h_idle_alone_is_high_risk():
+    """The ghost-scooter rule: 4 days untouched, zero failed starts."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "now": _denver("2026-06-05", 10),  # 96h dwell
+    })
+    assert out == "high_risk"
+
+
+def test_reliability_untracked_device_is_unknown():
+    """No plate upstream → no device_state row → both inputs None."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "number_failed_starts": None,
+        "first_observed_at_location": None,
+    })
+    assert out == "unknown"
+
+
+def test_reliability_quality_na_is_unknown():
+    """Disabled/reserved/rangeless devices can't be assessed."""
+    out = compute_reliability_tier(**{**_REL_BASE, "quality_designation": "N/A"})
+    assert out == "unknown"
+
+
+def test_reliability_failure_signals_beat_na():
+    """A disabled scooter with 2 failed starts is still high_risk, not unknown."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "quality_designation": "N/A",
+        "number_failed_starts": 2,
+    })
+    assert out == "high_risk"
+
+
+def test_reliability_poor_quality_alone_stays_ok():
+    """Low battery is not an unlock-failure signal — range never demotes."""
+    out = compute_reliability_tier(**{**_REL_BASE, "quality_designation": "poor"})
+    assert out == "ok"
 
 
 # ---------- Daylight-hours math --------------------------------------------
