@@ -21,7 +21,7 @@ import uuid
 
 import boto3
 from botocore.config import Config as BotoConfig
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import load, r2_credentials
 
@@ -59,6 +59,11 @@ def strip_and_reencode(data: bytes) -> bytes:
         img.load()
     except (UnidentifiedImageError, OSError) as e:
         raise ReceiptError("receipt is not a readable image") from e
+
+    # Bake EXIF orientation into the pixels before the EXIF block itself is
+    # dropped below — otherwise phone photos that rely on orientation (not
+    # rotated pixels) come out sideways once re-encoded.
+    img = ImageOps.exif_transpose(img)
 
     if img.width > _MAX_DIMENSION or img.height > _MAX_DIMENSION:
         img.thumbnail((_MAX_DIMENSION, _MAX_DIMENSION))

@@ -291,3 +291,5 @@ Enforced via Docker Compose `mem_limit`:
 
 Total Docker footprint: ~3.9 GiB on the 12 GiB VPS. The remaining ~0.6 GiB
 headroom absorbs transactional surges and host OS buffers.
+
+Hello, World!

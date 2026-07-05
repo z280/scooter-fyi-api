@@ -49,6 +49,8 @@ _LIMIT_MAGIC_PER_EMAIL = (3, 3600)    # 3/hour per email
 _LIMIT_MAGIC_PER_IP = (10, 3600)      # 10/hour per IP
 _LIMIT_GOOGLE_PER_IP = (30, 3600)
 _LIMIT_REDEEM_PER_IP = (30, 3600)
+_LIMIT_REFRESH_PER_ACCOUNT = (60, 3600)
+_LIMIT_SIGNOUT_PER_IP = (60, 3600)
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -221,6 +223,8 @@ def auth_refresh(request: Request, user: SessionUser = Depends(require_session))
     stored_scopes = [s for s in user.scopes if s != "supporter"]
     with connection() as conn:
         with conn.cursor() as cur:
+            enforce(cur, bucket="auth_refresh_account", key=str(user.account_id),
+                    limit=_LIMIT_REFRESH_PER_ACCOUNT[0], window_seconds=_LIMIT_REFRESH_PER_ACCOUNT[1])
             cur.execute(
                 """
                 INSERT INTO auth_sessions (
@@ -272,8 +276,11 @@ def auth_signout(request: Request) -> dict[str, Any]:
     if not authz.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer token")
     digest = hash_token(authz.split(" ", 1)[1].strip())
+    ip = real_client_ip(request)
     with connection() as conn:
         with conn.cursor() as cur:
+            enforce(cur, bucket="auth_signout_ip", key=ip or "?",
+                    limit=_LIMIT_SIGNOUT_PER_IP[0], window_seconds=_LIMIT_SIGNOUT_PER_IP[1])
             cur.execute(
                 "UPDATE auth_sessions SET revoked_at = NOW() "
                 "WHERE token_sha256 = %s AND revoked_at IS NULL",
