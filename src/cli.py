@@ -9,6 +9,7 @@ Available commands:
     archive_if_due    Run the R2 archive only if >= archive_hours have
                       passed since the last successful archive.
     daily_sla         Compute today's 6-9 AM Denver SLA window.
+    daily_trips       Roll up yesterday's full-day trip/popularity stats.
     cleanup_receipts  Delete receipt images past the 18-month retention
                       (API_REQUIREMENTS.md §3.2 / privacy policy).
 """
@@ -23,6 +24,7 @@ from .archive import run_archive
 from .config import load
 from .cycle import run_once
 from .daily_sla import run_daily
+from .daily_trips import run_daily as run_daily_trips
 from .pg import connection, run_migrations
 from .sentry import capture_exception, init as sentry_init, monitor
 
@@ -57,6 +59,14 @@ _MONITOR_ARCHIVE = {
     "failure_issue_threshold": 1,
     "recovery_threshold": 1,
 }
+_MONITOR_DAILY_TRIPS = {
+    "schedule": {"type": "crontab", "value": "0 9 * * *"},
+    "timezone": "America/Denver",
+    "checkin_margin": 10,
+    "max_runtime": 10,
+    "failure_issue_threshold": 1,
+    "recovery_threshold": 1,
+}
 
 
 @monitor(slug="ingest_cycle", monitor_config=_MONITOR_INGEST)
@@ -67,6 +77,11 @@ def _cli_ingest_cycle():
 @monitor(slug="daily_sla", monitor_config=_MONITOR_DAILY_SLA)
 def _cli_daily_sla():
     return run_daily()
+
+
+@monitor(slug="daily_trips", monitor_config=_MONITOR_DAILY_TRIPS)
+def _cli_daily_trips():
+    return run_daily_trips()
 
 
 @monitor(slug="archive_if_due", monitor_config=_MONITOR_ARCHIVE)
@@ -175,6 +190,7 @@ COMMANDS = {
     "ingest_cycle":      _cli_ingest_cycle,
     "archive_if_due":    _cli_archive_if_due,
     "daily_sla":         _cli_daily_sla,
+    "daily_trips":       _cli_daily_trips,
     "cleanup_receipts":  cleanup_receipts,
     "migrate":           lambda: run_migrations(),
 }

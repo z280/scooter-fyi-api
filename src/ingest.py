@@ -57,6 +57,8 @@ class TaggedDevice:
     h3_8_index: int | None = None    # H3 v4 cell IDs at three resolutions
     h3_9_index: int | None = None    # (signed-bigint-safe — see sql/006)
     h3_10_index: int | None = None
+    vehicle_use_type: str | None = None    # "sitting" | "standing" — see _KNOWN_VEHICLE_TYPES
+    vehicle_model_name: str | None = None  # Veo's in-app name, e.g. "Apollo"; None if unconfirmed
 
 
 # rental_uris.android/.ios deep-links embed the visible plate, e.g.
@@ -64,6 +66,58 @@ class TaggedDevice:
 # That `number` is the only persistent device identifier the GBFS spec allows
 # for dockless fleets — `bike_id` itself MUST rotate per trip.
 _NUMBER_RE = re.compile(r"[?&]number=([^&]+)")
+
+# Known vehicle_type_id -> ground truth, from direct visual confirmation
+# in the field (2026-07-05) — NOT taken as-given from Veo's upstream
+# vehicle_types.json, which is at least partly wrong (id=4 declares
+# "scooter" but is a seated, pedal-equipped bike).
+#
+# form_factor:  override for Veo's registry value, or None to trust it.
+#               Drives total_bike_denver/total_scooter_denver and
+#               therefore the RFP compliance percentages, so a stale/wrong
+#               upstream label needs a correction point, not silent trust.
+# use_type:     "sitting" | "standing" — the accessibility-relevant split,
+#               independent of form_factor. Every vehicle here happens to
+#               agree with its (corrected) form_factor today, but the two
+#               are tracked separately since GBFS's vocabulary and the
+#               compliance-relevant distinction aren't guaranteed to be
+#               the same axis forever.
+# app_name:     Veo's own in-app display name for the model.
+#
+#   id=1 (Astro):  registry says "scooter" — agrees. Standing kick scooter.
+#   id=3 (Cosmo):  registry says "bicycle" — agrees. Throttle e-bike, no
+#                  pedals, seated.
+#   id=4 (Apollo): registry says "scooter" — WRONG. Two-person pedal
+#                  e-bike, seated, ~18mph. Overridden to bicycle.
+#
+# id=0, id=2 (registered bicycle classes, zero live devices as of
+# 2026-07-05) and id=5 (0.5% of the live fleet, shares id=4's wrong
+# "scooter"/67000m registry entry but NOT visually confirmed either way)
+# are deliberately absent — nothing to correct, or nothing confirmed yet.
+# A vehicle_type_id absent here falls back to Veo's registry values as-is.
+@dataclass(frozen=True)
+class KnownVehicleType:
+    app_name: str
+    use_type: str                    # "sitting" | "standing"
+    form_factor: str | None = None   # override; None = trust the registry
+
+
+_KNOWN_VEHICLE_TYPES: dict[str, KnownVehicleType] = {
+    "1": KnownVehicleType(app_name="Astro", use_type="standing"),
+    "3": KnownVehicleType(app_name="Cosmo", use_type="sitting"),
+    "4": KnownVehicleType(app_name="Apollo", use_type="sitting", form_factor="bicycle"),
+}
+
+
+def _use_type_for_form_factor(form_factor: str) -> str | None:
+    """Fallback derivation for vehicle_type_ids not in the known registry:
+    every bicycle sits, every scooter stands, as of everything observed
+    so far. Returns None for "unknown" form_factor — no basis to guess."""
+    if form_factor == "bicycle":
+        return "sitting"
+    if form_factor == "scooter":
+        return "standing"
+    return None
 
 
 def _extract_vehicle_plate(rental_uris: Any) -> str | None:
@@ -239,6 +293,22 @@ def tag_envelope(payload: dict[str, Any], vt_map: dict[str, VehicleType]) -> Ing
         elif b.get("form_factor"):
             form_factor = str(b["form_factor"])
 
+        # Ground-truth override + use_type/app_name, applied regardless of
+        # whether the vt_map lookup above succeeded — a known-bad registry
+        # entry (id=4) should be corrected even if the live
+        # vehicle_types.json fetch fails and we fell back to the canonical
+        # {"1": scooter, "3": bicycle} map.
+        known = _KNOWN_VEHICLE_TYPES.get(vt_key) if vt_key else None
+        vehicle_model_name: str | None = None
+        vehicle_use_type: str | None = None
+        if known is not None:
+            if known.form_factor is not None:
+                form_factor = known.form_factor
+            vehicle_use_type = known.use_type
+            vehicle_model_name = known.app_name
+        else:
+            vehicle_use_type = _use_type_for_form_factor(form_factor)
+
         # is_disabled / is_reserved: GBFS spec says both REQUIRED bools, but
         # be defensive — fall back to None rather than coercing missing.
         is_disabled = b.get("is_disabled")
@@ -274,6 +344,8 @@ def tag_envelope(payload: dict[str, Any], vt_map: dict[str, VehicleType]) -> Ing
                 h3_8_index=h3_8,
                 h3_9_index=h3_9,
                 h3_10_index=h3_10,
+                vehicle_use_type=vehicle_use_type,
+                vehicle_model_name=vehicle_model_name,
             )
         )
 

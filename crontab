@@ -11,6 +11,11 @@
 # that just closed. Idempotent via ON CONFLICT.
 0 9 * * * cd /app && python -m src.cli daily_sla
 
+# Daily trip/popularity rollup: same 9:00 AM slot, but rolls up
+# YESTERDAY's full calendar day (today isn't over yet). Separate command
+# from daily_sla so a failure in one doesn't block or mask the other.
+0 9 * * * cd /app && python -m src.cli daily_trips
+
 # Archive: fires daily at 02:00 AM Denver but only acts if >= 48h elapsed
 # since the last successful upload. Self-gating means we can run this on a
 # daily cron without forcing a 48h cron expression.
