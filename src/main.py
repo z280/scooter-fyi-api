@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .api_admin import router as admin_router
 from .api_auth import router as auth_router
 from .api_frontend_reports import router as frontend_reports_router
+from .api_rides import router as rides_router
 from .api_private import router as private_router
 from .api_profile import router as profile_router
 from .api_public import router as public_router
@@ -26,6 +27,7 @@ from .config import load, session_https_only, session_secret
 from .map_auth import router as map_auth_router
 from .pg import run_migrations
 from .sentry import init as sentry_init
+from .stripe_webhook import router as stripe_router
 
 log = logging.getLogger("veo")
 logging.basicConfig(
@@ -84,6 +86,8 @@ app.include_router(reports_router)
 app.include_router(auth_router)
 app.include_router(profile_router)
 app.include_router(frontend_reports_router)
+app.include_router(rides_router)
+app.include_router(stripe_router)
 
 
 @app.get("/", include_in_schema=False)
