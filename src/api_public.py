@@ -425,7 +425,8 @@ def _daily_row_to_dict(cur, row) -> dict[str, Any]:
     if "snapshot_count" in d and d["snapshot_count"] is not None:
         d["snapshot_count"] = int(d["snapshot_count"])
     # booleans should stay booleans (float() above would coerce, e.g.
-    # float(True) == 1.0) — one column per tracked group (v1, v2, er1..er6).
+    # float(True) == 1.0) — one column per compliance group (v1, v2 only;
+    # er1..er6 are averages-only and have no stored pass/fail boolean).
     for k in _COMPLIANCE_PASS_COLUMNS:
         if k in d and d[k] is not None:
             d[k] = bool(d[k])

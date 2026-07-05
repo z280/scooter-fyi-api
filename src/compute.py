@@ -377,7 +377,7 @@ def write_to_postgres(result: ComputeResult) -> None:
     with connection() as conn:
         with conn.cursor() as cur:
             # Built from `core`'s own keys (cycle_id, snapshot_time, plus
-            # every column_metric_columns() name) rather than a hand-listed
+            # every core_metric_columns() name) rather than a hand-listed
             # column/placeholder pair — the two lists drifting apart is
             # exactly how a metric silently lands in the wrong column.
             insert_cols = list(core.keys())
