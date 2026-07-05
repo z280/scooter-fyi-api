@@ -292,10 +292,11 @@ def devices_current(
                 params.extend([min_lon, max_lon, min_lat, max_lat])
 
             # has_negative_report: true iff there's a report against THIS
-            # vehicle_identifier in the SAME h3_10 cell, ≤24h old. The
-            # row becomes "stale" (false here) the moment the scooter
-            # moves to a different h3_10, even though the report row
-            # remains queryable from /api/v1/private/reports.
+            # vehicle_identifier in the SAME h3_10 cell, ≤24h old — from
+            # either report pipeline (map-pin negative_reports or the §3.1
+            # rider device_reports). The flag goes "stale" (false here) the
+            # moment the scooter moves to a different h3_10, even though the
+            # report rows remain queryable from the private endpoints.
             sql = (
                 "SELECT r.device_id, r.form_factor, r.latitude, r.longitude, r.spatial_status, "
                 "       r.vehicle_identifier, r.is_disabled, r.is_reserved, "
@@ -305,12 +306,17 @@ def devices_current(
                 "       r.range_rank_all_by_type, r.range_rank_all_devices, "
                 "       r.range_rank_h3_8_peers, r.range_rank_h3_9_peers, "
                 "       r.range_rank_h3_10_peers, "
-                "       EXISTS ("
+                "       (EXISTS ("
                 "           SELECT 1 FROM negative_reports nr "
                 "           WHERE nr.vehicle_identifier = r.vehicle_identifier "
                 "             AND nr.h3_10_index = r.h3_10_index "
                 "             AND nr.reported_at >= NOW() - INTERVAL '24 hours'"
-                "       ) AS has_negative_report, "
+                "       ) OR EXISTS ("
+                "           SELECT 1 FROM device_reports dr "
+                "           WHERE dr.vehicle_identifier = r.vehicle_identifier "
+                "             AND dr.h3_10_index = r.h3_10_index "
+                "             AND dr.reported_at >= NOW() - INTERVAL '24 hours'"
+                "       )) AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
                 "       r.vehicle_plate "

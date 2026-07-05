@@ -9,6 +9,8 @@ Available commands:
     archive_if_due    Run the R2 archive only if >= archive_hours have
                       passed since the last successful archive.
     daily_sla         Compute today's 6-9 AM Denver SLA window.
+    cleanup_receipts  Delete receipt images past the 18-month retention
+                      (API_REQUIREMENTS.md §3.2 / privacy policy).
 """
 
 from __future__ import annotations
@@ -109,11 +111,58 @@ def archive_if_due() -> dict | None:
     return run_archive()
 
 
+_RECEIPT_RETENTION_MONTHS = 18
+
+
+def cleanup_receipts() -> dict:
+    """Purge receipt images older than the documented 18-month retention.
+
+    Deletes the R2 object and stamps receipt_deleted_at; the report row
+    itself is kept (the evidence record outlives the image). Idempotent —
+    rows already stamped are skipped.
+    """
+    from .receipts import ReceiptError, delete_receipt
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_RECEIPT_RETENTION_MONTHS * 30)
+    deleted = failed = 0
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, receipt_r2_key FROM discount_reports
+                WHERE receipt_r2_key IS NOT NULL
+                  AND receipt_deleted_at IS NULL
+                  AND created_at < %s
+                """,
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+            for row_id, key in rows:
+                try:
+                    delete_receipt(key)
+                except ReceiptError:
+                    log.exception("cleanup_receipts: R2 not configured — aborting")
+                    raise
+                except Exception:  # noqa: BLE001 — keep going, retry next run
+                    log.exception("cleanup_receipts: delete failed for %s", key)
+                    failed += 1
+                    continue
+                cur.execute(
+                    "UPDATE discount_reports SET receipt_deleted_at = NOW() WHERE id = %s",
+                    (row_id,),
+                )
+                deleted += 1
+        conn.commit()
+    log.info("cleanup_receipts: deleted=%d failed=%d", deleted, failed)
+    return {"deleted": deleted, "failed": failed}
+
+
 COMMANDS = {
-    "ingest_cycle":    _cli_ingest_cycle,
-    "archive_if_due":  _cli_archive_if_due,
-    "daily_sla":       _cli_daily_sla,
-    "migrate":         lambda: run_migrations(),
+    "ingest_cycle":      _cli_ingest_cycle,
+    "archive_if_due":    _cli_archive_if_due,
+    "daily_sla":         _cli_daily_sla,
+    "cleanup_receipts":  cleanup_receipts,
+    "migrate":           lambda: run_migrations(),
 }
 
 

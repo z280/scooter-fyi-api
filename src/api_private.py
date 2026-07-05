@@ -105,12 +105,17 @@ def private_devices_current(
                        ds.first_ever_observed_at,
                        r.h3_8_index, r.h3_9_index, r.h3_10_index,
                        r.max_range_meters_for_type,
-                       EXISTS (
+                       (EXISTS (
                            SELECT 1 FROM negative_reports nr
                            WHERE nr.vehicle_identifier = r.vehicle_identifier
                              AND nr.h3_10_index = r.h3_10_index
                              AND nr.reported_at >= NOW() - INTERVAL '24 hours'
-                       ) AS has_negative_report,
+                       ) OR EXISTS (
+                           SELECT 1 FROM device_reports dr
+                           WHERE dr.vehicle_identifier = r.vehicle_identifier
+                             AND dr.h3_10_index = r.h3_10_index
+                             AND dr.reported_at >= NOW() - INTERVAL '24 hours'
+                       )) AS has_negative_report,
                        ds.max_observed_range_meters, ds.max_observed_range_at
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)

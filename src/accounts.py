@@ -196,6 +196,15 @@ def require_session(request: Request) -> SessionUser:
     return _load_session(hash_token(_bearer_token(request)))
 
 
+def optional_session(request: Request) -> SessionUser | None:
+    """None when no Authorization header is presented; 401 when one is
+    presented but invalid (silently demoting a bad token to anonymous
+    would misattribute writes the client believes are signed-in)."""
+    if not (request.headers.get("Authorization") or "").strip():
+        return None
+    return require_session(request)
+
+
 def require_admin(request: Request) -> SessionUser:
     user = require_session(request)
     if "admin" not in user.scopes:
