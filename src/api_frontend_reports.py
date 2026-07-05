@@ -29,7 +29,13 @@ from .accounts import SessionUser, optional_session, require_session
 from .client_ip import real_client_ip
 from .pg import connection
 from .ratelimit import enforce
-from .receipts import MAX_RECEIPT_BYTES, ReceiptError, receipts_bucket, store_receipt
+from .receipts import (
+    MAX_RECEIPT_BYTES,
+    ReceiptError,
+    delete_receipt,
+    receipts_bucket,
+    store_receipt,
+)
 
 log = logging.getLogger(__name__)
 
@@ -228,26 +234,37 @@ async def submit_discount_report(
         except ReceiptError as e:
             raise HTTPException(400, str(e))
 
-    with connection() as conn:
-        with conn.cursor() as cur:
-            enforce(cur, bucket="discount_report_account", key=str(user.account_id),
-                    limit=_LIMIT_DISCOUNT_PER_ACCOUNT[0],
-                    window_seconds=_LIMIT_DISCOUNT_PER_ACCOUNT[1])
-            cur.execute(
-                """
-                INSERT INTO discount_reports (
-                    account_id, ride_ended_at, zone_version, end_lat, end_lng,
-                    amount_charged_cents, receipt_r2_key,
-                    reporter_ip, reporter_user_agent
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, created_at
-                """,
-                (user.account_id, payload.ride_ended_at, payload.zone_version,
-                 payload.end_lat, payload.end_lng, payload.amount_charged_cents,
-                 receipt_key, ip, ua),
-            )
-            new_id, created_at = cur.fetchone()
-        conn.commit()
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                enforce(cur, bucket="discount_report_account", key=str(user.account_id),
+                        limit=_LIMIT_DISCOUNT_PER_ACCOUNT[0],
+                        window_seconds=_LIMIT_DISCOUNT_PER_ACCOUNT[1])
+                cur.execute(
+                    """
+                    INSERT INTO discount_reports (
+                        account_id, ride_ended_at, zone_version, end_lat, end_lng,
+                        amount_charged_cents, receipt_r2_key,
+                        reporter_ip, reporter_user_agent
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (user.account_id, payload.ride_ended_at, payload.zone_version,
+                     payload.end_lat, payload.end_lng, payload.amount_charged_cents,
+                     receipt_key, ip, ua),
+                )
+                new_id, created_at = cur.fetchone()
+            conn.commit()
+    except Exception:
+        # The DB write is what makes the receipt reachable via cleanup_receipts
+        # (it only scans discount_reports). If that write never lands, delete
+        # the orphaned R2 object now rather than retaining it past 18 months.
+        if receipt_key is not None:
+            try:
+                delete_receipt(receipt_key)
+            except ReceiptError:
+                log.exception("failed to clean up orphaned receipt %s", receipt_key)
+        raise
 
     log.info("discount report id=%d account=%d receipt=%s",
              new_id, user.account_id, bool(receipt_key))

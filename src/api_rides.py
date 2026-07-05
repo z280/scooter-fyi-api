@@ -81,6 +81,8 @@ def create_ride(
     user: SessionUser = Depends(require_supporter),
     payload: RideIn = Body(...),
 ) -> dict[str, Any]:
+    if payload.started_at.tzinfo is None or payload.ended_at.tzinfo is None:
+        raise HTTPException(400, "started_at/ended_at must include a UTC offset")
     if payload.ended_at < payload.started_at:
         raise HTTPException(400, "ended_at < started_at")
     try:
