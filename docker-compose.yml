@@ -49,6 +49,7 @@ services:
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
       R2_BUCKET_NAME: ${R2_BUCKET_NAME}
+      R2_RECEIPTS_BUCKET: ${R2_RECEIPTS_BUCKET}
       SENTRY_DSN: ${SENTRY_DSN}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
@@ -57,6 +58,15 @@ services:
       MAP_OIDC_CLIENT_SECRET: ${MAP_OIDC_CLIENT_SECRET}
       MAP_AUTH_ALLOWED_GITHUB_ORGS: ${MAP_AUTH_ALLOWED_GITHUB_ORGS}
       SESSION_SECRET: ${SESSION_SECRET}
+      # Accounts & sessions (API_REQUIREMENTS.md §2-§4) — without these,
+      # api_auth.py/api_profile.py/stripe_webhook.py 503 even with a
+      # correct .env, because they never reached the container.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
+      ADMIN_EMAILS: ${ADMIN_EMAILS}
+      POSTMARK_TOKEN: ${POSTMARK_TOKEN}
+      POSTMARK_FROM: ${POSTMARK_FROM}
+      MAGIC_LINK_URL_TEMPLATE: ${MAGIC_LINK_URL_TEMPLATE}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
       # Required: HMAC key for vehicle_identifier. Lose this and every
       # previously-emitted identifier becomes orphaned. Treat like a DB
       # encryption key — back up out of repo.

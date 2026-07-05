@@ -11,6 +11,8 @@ import pytest
 from src.stripe_webhook import (
     StripeSignatureError,
     _handle_checkout_completed,
+    _handle_subscription_event,
+    _unix_to_dt,
     verify_stripe_signature,
 )
 
@@ -88,3 +90,46 @@ def test_checkout_missing_payment_status_is_ignored_without_db_write():
     """A missing/unrecognized status must NOT be treated as paid."""
     out = _handle_checkout_completed({"id": "cs_test_123", "client_reference_id": "1"})
     assert out == "ignored_unpaid"
+
+
+# ---------- subscription (trial) path early-exit guards ---------------------
+def test_subscription_checkout_missing_ids_is_ignored_without_db_write():
+    """mode=subscription is routed away from the one-time payment_status
+    check entirely — a trial checkout has payment_status=no_payment_required,
+    which must never fall through to the paid/unpaid branch."""
+    out = _handle_checkout_completed({
+        "id": "cs_test_456", "client_reference_id": "1", "mode": "subscription",
+        "payment_status": "no_payment_required",
+    })
+    assert out == "ignored_missing_subscription"
+
+
+def test_subscription_checkout_bad_reference_is_ignored_without_db_write():
+    out = _handle_checkout_completed({
+        "id": "cs_test_456", "client_reference_id": "not-a-digit", "mode": "subscription",
+        "subscription": "sub_123", "customer": "cus_123",
+    })
+    assert out == "ignored_bad_reference"
+
+
+def test_subscription_event_missing_status_is_ignored_without_db_write():
+    out = _handle_subscription_event({"id": "sub_123", "customer": "cus_123"})
+    assert out == "ignored_incomplete_subscription_event"
+
+
+def test_subscription_event_missing_customer_is_ignored_without_db_write():
+    out = _handle_subscription_event({"id": "sub_123", "status": "trialing"})
+    assert out == "ignored_incomplete_subscription_event"
+
+
+def test_unix_to_dt_converts():
+    dt = _unix_to_dt(1735689600)
+    assert dt is not None and dt.tzinfo is not None
+
+
+def test_unix_to_dt_none_passthrough():
+    assert _unix_to_dt(None) is None
+
+
+def test_unix_to_dt_garbage_is_none():
+    assert _unix_to_dt("not-a-timestamp") is None
