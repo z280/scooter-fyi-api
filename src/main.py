@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .api_admin import router as admin_router
 from .api_auth import router as auth_router
 from .api_frontend_reports import router as frontend_reports_router
+from .api_meta import router as meta_router
 from .api_rides import router as rides_router
 from .api_private import router as private_router
 from .api_profile import router as profile_router
@@ -88,6 +89,7 @@ app.include_router(profile_router)
 app.include_router(frontend_reports_router)
 app.include_router(rides_router)
 app.include_router(stripe_router)
+app.include_router(meta_router)
 
 
 @app.get("/", include_in_schema=False)
@@ -103,6 +105,11 @@ def root():
             "/api/v1/devices/current",
             "/api/v1/boundaries",
             "/api/v1/compliance/daily/latest",
+            "/api/v1/auth/{google,magic-link,redeem,refresh,session,signout}",
+            "/api/v1/profile",
+            "/api/v1/reports/{device,discount,summary,export/monthly.csv}",
+            "/api/v1/rides",
+            "/api/v1/meta/privacy",
             "/admin",
         ],
     }
