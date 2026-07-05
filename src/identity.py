@@ -11,19 +11,22 @@ The hash is HMAC-SHA256 keyed by VEHICLE_IDENTIFIER_SALT, truncated to
 ≈ 2e-12, negligible).
 
 PRIVACY MODEL --------------------------------------------------------
-As of API_REQUIREMENTS.md §1.1 the raw plate is ALSO exposed on the
-public /api/v1/devices/current endpoint (it's painted on the vehicle —
-not sensitive — and the frontend needs it for "Unlock in Veo" deep
-links). The identifier therefore no longer conceals the plate for a
-device's *current* position. What it still does:
-  * Serves as the stable primary key across all state/history tables —
-    plates could be re-painted or re-issued; the HMAC namespace is ours.
-  * Keeps the *history* boundary: per-device position history and dwell
-    trails are only queryable by identifier via the authenticated
-    /api/v1/private/* endpoints, and public report submission accepts
-    the identifier so reporters never need to transmit a plate.
-  * Only our system can resolve identifier ↔ plate offline (bulk joins
-    against historical archives still require the salt).
+The raw plate is NEVER exposed over an unauthenticated wire. Only the
+HMAC `vehicle_identifier` appears on the public /api/v1/devices/current
+endpoint; the plate is served exclusively by the bearer-gated
+/api/v1/private/* endpoints. (A §1.1 promotion of the plate to the
+public endpoint was later reverted — see API_REQUIREMENTS.md §1.1.)
+With the salt set:
+  * Casual scrapers see opaque 16-char identifiers, not plates.
+  * Anyone with our public API alone cannot reverse identifier → plate.
+  * The identifier is the stable primary key across all state/history
+    tables — plates could be re-painted or re-issued; the HMAC namespace
+    is ours. Per-device position history and dwell trails are queryable
+    only by identifier via the authenticated /api/v1/private/* endpoints,
+    and public report submission accepts the identifier so reporters
+    never need to transmit a plate.
+  * Only our system can resolve identifier ↔ plate (the salt is a
+    server-side secret).
 
 The salt is LOAD-BEARING and REQUIRED. There is no dev fallback: a
 missing env var is a startup error, not a silent degradation. Treat the

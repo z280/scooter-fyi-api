@@ -207,7 +207,7 @@ start there.
 
 | Item | Status |
 |---|---|
-| §1.1 plate promotion | Implemented (PR #8). QR verification pending — see note below. |
+| §1.1 plate promotion | **Reverted.** Shipped in PR #8, then rolled back — `vehicle_plate` is no longer exposed on the public `/api/v1/devices/current`; it stays private-only (`/api/v1/private/*`). Any frontend "Unlock in Veo" deep link must source the plate from an authenticated endpoint or Veo's own GBFS `rental_uris`. |
 | §1.2 reliability tier + raw fields | Implemented (PR #8). Formula documented in `src/quality.py` and API.md. |
 | §2.1–§2.4 accounts, sessions, profile | Implemented (PR #9): `src/accounts.py`, `src/api_auth.py`, `src/api_profile.py`, `sql/012`. |
 | §2.5 GitHub OAuth retirement | Pending — gated on Google + magic links being live in prod and the frontend removing its hidden-tab gate in the same release. |

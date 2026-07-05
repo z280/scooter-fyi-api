@@ -587,7 +587,6 @@ GET /api/v1/devices/current?form_factor=scooter
         "form_factor": "scooter",
         "spatial_status": "denver_core",
         "vehicle_identifier": "8c4a1f0d2e9b7a35",
-        "vehicle_plate": "1025543",
         "is_disabled": false,
         "is_reserved": false,
         "current_range_meters": 45293,
@@ -608,7 +607,6 @@ GET /api/v1/devices/current?form_factor=scooter
         "form_factor": "bicycle",
         "spatial_status": "denver_core",
         "vehicle_identifier": "1b6e2d44a991f070",
-        "vehicle_plate": "1031877",
         "is_disabled": false,
         "is_reserved": true,
         "current_range_meters": 38110,
@@ -632,8 +630,7 @@ GET /api/v1/devices/current?form_factor=scooter
 | `device_id` | string | The upstream Veo `bike_id` from GBFS `free_bike_status`. **Rotates per trip** by GBFS spec mandate — do not treat as stable. |
 | `form_factor` | string | `"bicycle"`, `"scooter"`, or `"unknown"`. Not taken as-given from Veo's upstream `vehicle_types.json` — corrected against direct visual confirmation where the upstream registry is known to be wrong (see `vehicle_model_name` below). |
 | `spatial_status` | string | `"denver_core"`, `"china_glitch"`, or `"other_outlier"`. |
-| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins; per-device position **history** remains behind the authenticated private endpoints. May be null if the upstream payload omits a plate. |
-| `vehicle_plate` | string \| null | The visible plate number painted on the vehicle and printed in its QR code (e.g. `"1025543"`), as embedded by Veo in its own GBFS `rental_uris`. Use it to build "Unlock in Veo" deep links: `https://gmjc.adj.st/?adj_t=622qh4&number=<vehicle_plate>`. Null when the upstream payload omits a plate (then `vehicle_identifier` is null too). |
+| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins. May be null if the upstream payload omits a plate. **The raw plate is NOT exposed on this public endpoint** — it's served only by the bearer-gated `/api/v1/private/*` endpoints. |
 | `is_disabled` | bool \| null | `true` when the scooter is out of service (low battery, mechanical fault, impound). Disabled devices still count toward fleet totals because they occupy space. |
 | `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
 | `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. Pair with `propulsion_type` and the per-type `max_range_meters` to derive battery % — pedal-bike (`"human"`) entries have no battery. |
