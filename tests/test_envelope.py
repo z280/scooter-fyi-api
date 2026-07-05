@@ -126,6 +126,81 @@ def test_vehicle_plate_extraction_handles_query_order(vt_map):
     assert by_id == {"i": "42", "j": "99", "k": None}
 
 
+def test_known_vehicle_type_reclassifies_mislabeled_apollo():
+    """id=4 is declared 'scooter' in Veo's live vehicle_types feed, but is
+    the pedal-equipped, seated 'Apollo' bike — confirmed by direct visual
+    inspection. Overridden to bicycle regardless of what the registry
+    says, since form_factor drives the RFP compliance percentages. Also
+    carries the in-app model name and the "sitting" use_type."""
+    vt_map = {
+        "4": ingest.VehicleType(form_factor="scooter", propulsion_type="electric",
+                                 max_range_meters=67000),
+    }
+    p = _payload({"bike_id": "apollo1", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "4"})
+    d = ingest.tag_envelope(p, vt_map).devices[0]
+    assert d.form_factor == "bicycle"
+    assert d.vehicle_model_name == "Apollo"
+    assert d.vehicle_use_type == "sitting"
+    # propulsion_type / max_range still come straight from the registry —
+    # only form_factor is corrected.
+    assert d.propulsion_type == "electric"
+    assert d.max_range_meters_for_type == 67000
+
+
+def test_known_vehicle_type_applies_even_without_a_vt_map_entry():
+    """The override must fire even if the live vehicle_types.json fetch
+    failed and id=4 isn't in vt_map at all (falls through to 'unknown'
+    otherwise, since the raw GBFS payload never carries form_factor)."""
+    p = _payload({"bike_id": "apollo2", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "4"})
+    d = ingest.tag_envelope(p, vt_map={}).devices[0]
+    assert d.form_factor == "bicycle"
+    assert d.vehicle_model_name == "Apollo"
+    assert d.vehicle_use_type == "sitting"
+
+
+def test_known_vehicle_type_is_noop_on_form_factor_when_registry_agrees(vt_map):
+    """id=3 (Cosmo) already reports 'bicycle' correctly in the registry —
+    listed in the known-types table anyway (as the single documented
+    source of what's been visually verified), but form_factor doesn't
+    change. Model name/use_type are still populated."""
+    p = _payload({"bike_id": "cosmo1", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "3"})
+    d = ingest.tag_envelope(p, vt_map).devices[0]
+    assert d.form_factor == "bicycle"
+    assert d.vehicle_model_name == "Cosmo"
+    assert d.vehicle_use_type == "sitting"
+
+
+def test_astro_scooter_is_standing():
+    vt_map = {"1": ingest.VehicleType(form_factor="scooter", propulsion_type="electric")}
+    p = _payload({"bike_id": "astro1", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "1"})
+    d = ingest.tag_envelope(p, vt_map).devices[0]
+    assert d.form_factor == "scooter"
+    assert d.vehicle_model_name == "Astro"
+    assert d.vehicle_use_type == "standing"
+
+
+def test_unconfirmed_id5_not_touched_but_use_type_derived_from_form_factor():
+    """id=5 shares id=4's 'scooter'/67000m registry entry but hasn't been
+    visually confirmed — must NOT be silently reclassified or given a
+    model name. use_type still gets derived from (unmodified) form_factor
+    as a fallback, since standing/sitting is inferable even without a
+    confirmed model name."""
+    vt_map = {"5": ingest.VehicleType(form_factor="scooter", propulsion_type="electric")}
+    p = _payload({"bike_id": "unknown5", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "5"})
+    d = ingest.tag_envelope(p, vt_map).devices[0]
+    assert d.form_factor == "scooter"
+    assert d.vehicle_model_name is None
+    assert d.vehicle_use_type == "standing"
+
+
+def test_unknown_form_factor_has_no_use_type():
+    p = _payload({"bike_id": "mystery", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "99"})
+    d = ingest.tag_envelope(p, vt_map={}).devices[0]
+    assert d.form_factor == "unknown"
+    assert d.vehicle_use_type is None
+    assert d.vehicle_model_name is None
+
+
 def test_vehicle_identifier_is_deterministic_for_a_given_salt():
     """The hash must be stable for a fixed salt + plate. Different plates
     produce different identifiers; null/empty produces null."""

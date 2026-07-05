@@ -322,7 +322,8 @@ def devices_current(
                 "       )) AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
-                "       r.vehicle_plate "
+                "       r.vehicle_plate, "
+                "       r.vehicle_use_type, r.vehicle_model_name "
                 "FROM raw_telemetry_points r "
                 "LEFT JOIN device_state ds USING (vehicle_identifier) "
                 f"WHERE {' AND '.join(where)} "
@@ -381,6 +382,8 @@ def devices_current(
                 "number_failed_starts": number_failed_starts,
                 "first_observed_at_location": r[23].isoformat() if r[23] else None,
                 "reliability_tier": reliability,
+                "vehicle_use_type": r[25],
+                "vehicle_model_name": r[26],
             },
         })
 

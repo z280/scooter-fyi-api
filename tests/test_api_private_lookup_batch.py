@@ -23,8 +23,10 @@ COSMO_A = "1014532"
 UNSEEN = "9999999"
 
 
-def _row(plate: str, form_factor: str, max_range: int | None):
-    return (hash_plate(plate), plate, form_factor, max_range, None, None, None)
+def _row(plate: str, form_factor: str, max_range: int | None,
+         use_type: str | None = None, model_name: str | None = None):
+    return (hash_plate(plate), plate, form_factor, max_range, None, None, None,
+            use_type, model_name)
 
 
 class _FakeCursor:
@@ -55,9 +57,9 @@ class _FakeConn:
 @pytest.fixture
 def client(monkeypatch):
     rows = [
-        _row(APOLLO_A, "bicycle", 67000),
-        _row(APOLLO_B, "bicycle", 66500),
-        _row(COSMO_A, "bicycle", 45000),
+        _row(APOLLO_A, "bicycle", 67000, "sitting", "Apollo"),
+        _row(APOLLO_B, "bicycle", 66500, "sitting", "Apollo"),
+        _row(COSMO_A, "bicycle", 45000, "sitting", "Cosmo"),
     ]
 
     @contextmanager
@@ -88,6 +90,15 @@ def test_batch_lookup_sorts_by_max_range_descending(client):
                     params={"plates": f"{COSMO_A},{APOLLO_A},{APOLLO_B}"})
     plates_in_order = [d["vehicle_plate"] for d in r.json()["found"]]
     assert plates_in_order == [APOLLO_A, APOLLO_B, COSMO_A]
+
+
+def test_batch_lookup_includes_use_type_and_model_name(client):
+    r = client.get("/api/v1/private/devices/lookup-batch",
+                    params={"plates": f"{APOLLO_A},{COSMO_A}"})
+    by_plate = {d["vehicle_plate"]: d for d in r.json()["found"]}
+    assert by_plate[APOLLO_A]["vehicle_model_name"] == "Apollo"
+    assert by_plate[APOLLO_A]["vehicle_use_type"] == "sitting"
+    assert by_plate[COSMO_A]["vehicle_model_name"] == "Cosmo"
 
 
 def test_batch_lookup_rejects_empty_plates(client):

@@ -216,6 +216,7 @@ start there.
 | §5 rate limits, env, privacy endpoint | Implemented (PR #9): `src/ratelimit.py`, `src/api_meta.py`, `.env.example`. |
 | Repo rename | Pending — GitHub settings change (`veo-audit` → `scooter-fyi-api`), operator action. |
 | Equity boundary migration (new §1.1a) | In progress — see note below. `er1`–`er6` per-rank layers now tracked with full metric parity to v1/v2 (snapshot + daily SLA). `v1` retirement and the compliance-metric cutoff are still pending a DOTI decision. |
+| Vehicle classification + trip tracking (new §1.1b) | Implemented — see note below. `vehicle_use_type`/`vehicle_model_name` on devices/current + device_state/history; `sitting`/`standing` compliance parity with `bicycle`/`scooter`; `trip_events` + daily popularity rollup at 9am. |
 
 **§1.1a Equity boundary migration note (2026-07-04, updated):** Denver
 DOTI delivered an authoritative, census-block-group-based Equity Index
@@ -265,6 +266,43 @@ requirement** — `percent_all_devices_v1` / `compliance_v1_pass` remain
 the primary RFP §3.0 metric until DOTI confirms otherwise. Once that
 happens, this note gets replaced with the actual migration (retiring
 `v1`, promoting the confirmed cutoff to "the" compliance metric).
+
+**§1.1b Vehicle classification + trip tracking note (2026-07-05):**
+Field investigation while chasing the equity-boundary question above
+surfaced that Veo's own `vehicle_types.json` mislabels its pedal-equipped
+two-person e-bike (`vehicle_type_id: 4`, in-app name "Apollo") as
+`form_factor: "scooter"` — confirmed by direct visual inspection of four
+physical units (seat, pedals, no way that's a scooter). Two changes:
+
+1. **Ground-truth vehicle registry** (`src/ingest.py`
+   `_KNOWN_VEHICLE_TYPES`): `vehicle_type_id → {app_name, use_type,
+   form_factor override}`, currently covering `id=1` (Astro, standing
+   scooter), `id=3` (Cosmo, sitting e-bike, no pedals), and `id=4`
+   (Apollo, sitting e-bike, pedals, ~18mph — `form_factor` corrected to
+   `bicycle`). `vehicle_model_name` and `vehicle_use_type` are new fields
+   on `/api/v1/devices/current`, `device_state`, and `device_history`.
+2. **`vehicle_use_type` (sitting/standing) gets full compliance-stat
+   parity with `form_factor` (bicycle/scooter)** — same 8-field family,
+   same tracked groups (v1/v2/er1-6 + citywide), in both
+   `snapshot_metadata_core` and `daily_sla_compliance`. Generalized via
+   `SPLIT_DIMENSIONS` in `src/equity_groups.py` rather than duplicated
+   by hand — a third dimension is a registry entry + migration, not a
+   rewrite. Rationale: sitting vs standing is the accessibility-relevant
+   operative distinction for compliance, independent of Veo's own GBFS
+   form-factor vocabulary (which this incident shows can be wrong).
+
+Also landed in the same pass: **trip/popularity tracking**. Every MOVED
+transition `src/device_state.py` detects (a vehicle relocated between
+cycles — i.e. someone rode it) is logged to `trip_events`. A new 9am
+Denver cron job (`python -m src.cli daily_trips`, `src/daily_trips.py`)
+rolls the prior full calendar day up into `daily_trip_summary` (total
+trips, distinct vehicles tripped) and `daily_vehicle_trip_counts`
+(per-vehicle trip count + popularity rank, ties sharing a rank). Read
+back via `GET /api/v1/private/trips/daily?date=YYYY-MM-DD`. A new batch
+lookup endpoint, `GET /api/v1/private/devices/lookup-batch?plates=...`,
+also shipped alongside — built for checking hand-spotted plates (like
+the Apollo/Cosmo ground-truth set that started this) against stored
+signals in one call instead of one request per plate.
 
 **§1.1 QR verification note:** the stored `vehicle_plate` is parsed from
 the `&number=` query param of Veo's own `rental_uris.android/.ios` deep

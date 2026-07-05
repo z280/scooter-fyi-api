@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -116,7 +116,8 @@ def private_devices_current(
                              AND dr.h3_10_index = r.h3_10_index
                              AND dr.reported_at >= NOW() - INTERVAL '24 hours'
                        )) AS has_negative_report,
-                       ds.max_observed_range_meters, ds.max_observed_range_at
+                       ds.max_observed_range_meters, ds.max_observed_range_at,
+                       r.vehicle_use_type, r.vehicle_model_name
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
                 WHERE {' AND '.join(where)}
@@ -161,6 +162,8 @@ def private_devices_current(
                 "quality_designation": quality,
                 "max_observed_range_meters": r[19],
                 "max_observed_range_at": r[20].isoformat() if r[20] else None,
+                "vehicle_use_type": r[21],
+                "vehicle_model_name": r[22],
             },
         })
 
@@ -213,7 +216,8 @@ def private_devices_lookup(
                        current_form_factor, first_observed_at_location,
                        number_failed_starts, first_ever_observed_at,
                        last_observed_at, last_cycle_id,
-                       max_observed_range_meters, max_observed_range_at
+                       max_observed_range_meters, max_observed_range_at,
+                       current_vehicle_use_type, current_vehicle_model_name
                 FROM device_state
                 WHERE vehicle_identifier = %s
                 """,
@@ -238,6 +242,8 @@ def private_devices_lookup(
         "last_cycle_id": str(row[11]) if row[11] else None,
         "max_observed_range_meters": row[12],
         "max_observed_range_at": row[13].isoformat() if row[13] else None,
+        "vehicle_use_type": row[14],
+        "vehicle_model_name": row[15],
     }
 
 
@@ -287,7 +293,8 @@ def private_devices_lookup_batch(
                 """
                 SELECT vehicle_identifier, vehicle_plate, current_form_factor,
                        max_observed_range_meters, max_observed_range_at,
-                       first_ever_observed_at, last_observed_at
+                       first_ever_observed_at, last_observed_at,
+                       current_vehicle_use_type, current_vehicle_model_name
                 FROM device_state
                 WHERE vehicle_identifier = ANY(%s)
                 """,
@@ -304,6 +311,8 @@ def private_devices_lookup_batch(
             "max_observed_range_at": r[4].isoformat() if r[4] else None,
             "first_ever_observed_at": r[5].isoformat() if r[5] else None,
             "last_observed_at": r[6].isoformat() if r[6] else None,
+            "vehicle_use_type": r[7],
+            "vehicle_model_name": r[8],
         }
         for r in rows
     ]
@@ -481,4 +490,69 @@ def private_devices_max_ranges(
         "filters": {"form_factor": form_factor},
         "device_count": len(devices),
         "devices": devices,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/private/trips/daily — read back src/daily_trips.py's rollup
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/private/trips/daily")
+def private_trips_daily(
+    user: MapUser = Depends(require_map_user),
+    date: str = Query(..., description="Denver-local date, YYYY-MM-DD"),
+    limit: int = Query(100, ge=1, le=5000),
+) -> dict[str, Any]:
+    """Daily trip/popularity rollup for one Denver-local calendar day —
+    computed at 9am by `python -m src.cli daily_trips` (see
+    src/daily_trips.py). `vehicles` is ranked by `popularity_rank`
+    ascending (1 = most trips that day; ties share a rank).
+    """
+    try:
+        d = date_cls.fromisoformat(date)
+    except ValueError as e:
+        raise HTTPException(400, f"bad date format: {e}")
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT total_trips, distinct_vehicles_tripped, computed_at "
+                "FROM daily_trip_summary WHERE trip_date = %s",
+                (d,),
+            )
+            summary = cur.fetchone()
+            if not summary:
+                raise HTTPException(404, f"no trip rollup for {date}")
+
+            cur.execute(
+                """
+                SELECT vehicle_identifier, vehicle_plate, form_factor,
+                       vehicle_use_type, vehicle_model_name,
+                       trip_count, popularity_rank
+                FROM daily_vehicle_trip_counts
+                WHERE trip_date = %s
+                ORDER BY popularity_rank ASC, vehicle_plate ASC
+                LIMIT %s
+                """,
+                (d, limit),
+            )
+            rows = cur.fetchall()
+
+    return {
+        "viewed_by": user.login,
+        "trip_date": d.isoformat(),
+        "total_trips": int(summary[0]),
+        "distinct_vehicles_tripped": int(summary[1]),
+        "computed_at": summary[2].isoformat() if summary[2] else None,
+        "vehicles": [
+            {
+                "vehicle_identifier": r[0],
+                "vehicle_plate": r[1],
+                "form_factor": r[2],
+                "vehicle_use_type": r[3],
+                "vehicle_model_name": r[4],
+                "trip_count": int(r[5]),
+                "popularity_rank": int(r[6]),
+            }
+            for r in rows
+        ],
     }

@@ -22,6 +22,11 @@ Devices with no vehicle_identifier (the upstream payload didn't embed a
 plate in rental_uris) are skipped entirely — we have no stable key to
 track them across cycles.
 
+Each MOVED transition also appends one row to `trip_events` (a
+"successful trip" for popularity-tracking purposes — see
+src/daily_trips.py for the daily rollup computed at 9am alongside the
+compliance SLA job).
+
 Distance is computed flat-earth using the device's own latitude as the
 local longitude scale. At Denver's ~40° latitude over 16m distances the
 approximation error is < 1cm — irrelevant.
@@ -115,6 +120,7 @@ def update_for_cycle(
             stationary_updates: list[tuple] = []
             new_history_rows: list[tuple] = []
             close_history_ids: list[str] = []
+            trip_event_rows: list[tuple] = []
 
             for d in eligible:
                 vid = d.vehicle_identifier
@@ -136,12 +142,14 @@ def update_for_cycle(
                         d.h3_8_index, d.h3_9_index, d.h3_10_index,
                         d.current_range_meters,  # max_observed_range_meters
                         seed_max_at,             # max_observed_range_at
+                        d.vehicle_use_type, d.vehicle_model_name,
                     ))
                     new_history_rows.append((
                         vid, d.vehicle_plate, str(cycle_id), snapshot_time,
                         d.lat, d.lon, d.spatial_status, d.form_factor,
                         d.device_id, 0,
                         d.h3_8_index, d.h3_9_index, d.h3_10_index,
+                        d.vehicle_use_type, d.vehicle_model_name,
                     ))
                     continue
 
@@ -154,7 +162,11 @@ def update_for_cycle(
                     )
 
                 if distance > threshold:
-                    # MOVED — close prior stop, open a new one
+                    # MOVED — close prior stop, open a new one. This is a
+                    # "successful trip" for popularity-tracking purposes
+                    # (src/daily_trips.py): the vehicle relocated between
+                    # consecutive cycles, which for a dockless fleet means
+                    # someone rode it somewhere.
                     stats.moved += 1
                     close_history_ids.append(vid)
                     moved_updates.append((
@@ -164,6 +176,7 @@ def update_for_cycle(
                         snapshot_time,    # last_observed_at
                         str(cycle_id),
                         d.h3_8_index, d.h3_9_index, d.h3_10_index,
+                        d.vehicle_use_type, d.vehicle_model_name,
                         vid,
                     ))
                     new_history_rows.append((
@@ -171,6 +184,15 @@ def update_for_cycle(
                         d.lat, d.lon, d.spatial_status, d.form_factor,
                         d.device_id, 0,
                         d.h3_8_index, d.h3_9_index, d.h3_10_index,
+                        d.vehicle_use_type, d.vehicle_model_name,
+                    ))
+                    from_lat = float(prev_lat) if prev_lat is not None else None
+                    from_lon = float(prev_lon) if prev_lon is not None else None
+                    trip_event_rows.append((
+                        vid, d.vehicle_plate, str(cycle_id), snapshot_time,
+                        d.form_factor, d.vehicle_use_type, d.vehicle_model_name,
+                        from_lat, from_lon, d.lat, d.lon,
+                        None if distance == float("inf") else distance,
                     ))
                 elif d.device_id != prev_device_id:
                     # FAILED_START — same spot, new bike_id. We deliberately
@@ -182,6 +204,7 @@ def update_for_cycle(
                     stats.failed_starts += 1
                     failed_start_updates.append((
                         d.device_id, d.spatial_status, d.form_factor,
+                        d.vehicle_use_type, d.vehicle_model_name,
                         snapshot_time, str(cycle_id), vid,
                     ))
                 else:
@@ -202,8 +225,9 @@ def update_for_cycle(
                         number_failed_starts, first_ever_observed_at,
                         last_observed_at, last_cycle_id,
                         current_h3_8_index, current_h3_9_index, current_h3_10_index,
-                        max_observed_range_meters, max_observed_range_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        max_observed_range_meters, max_observed_range_at,
+                        current_vehicle_use_type, current_vehicle_model_name
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     new_state_rows,
                 )
@@ -248,7 +272,9 @@ def update_for_cycle(
                         last_cycle_id = %s,
                         current_h3_8_index = %s,
                         current_h3_9_index = %s,
-                        current_h3_10_index = %s
+                        current_h3_10_index = %s,
+                        current_vehicle_use_type = %s,
+                        current_vehicle_model_name = %s
                     WHERE vehicle_identifier = %s
                     """,
                     moved_updates,
@@ -261,6 +287,8 @@ def update_for_cycle(
                         current_device_id = %s,
                         current_spatial_status = %s,
                         current_form_factor = %s,
+                        current_vehicle_use_type = %s,
+                        current_vehicle_model_name = %s,
                         number_failed_starts = number_failed_starts + 1,
                         last_observed_at = %s,
                         last_cycle_id = %s
@@ -314,10 +342,23 @@ def update_for_cycle(
                         vehicle_identifier, vehicle_plate, cycle_id, snapshot_time,
                         lat, lon, spatial_status, form_factor,
                         device_id_observed, dwell_failed_starts,
-                        h3_8_index, h3_9_index, h3_10_index
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        h3_8_index, h3_9_index, h3_10_index,
+                        vehicle_use_type, vehicle_model_name
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     new_history_rows,
+                )
+
+            if trip_event_rows:
+                cur.executemany(
+                    """
+                    INSERT INTO trip_events (
+                        vehicle_identifier, vehicle_plate, cycle_id, detected_at,
+                        form_factor, vehicle_use_type, vehicle_model_name,
+                        from_lat, from_lon, to_lat, to_lon, distance_meters
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    trip_event_rows,
                 )
 
         conn.commit()
