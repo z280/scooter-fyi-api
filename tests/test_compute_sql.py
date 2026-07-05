@@ -71,6 +71,41 @@ def _local_boundaries() -> tuple[BoundaryLayer, ...]:
     )
 
 
+def _er_boundaries() -> tuple[BoundaryLayer, ...]:
+    """v1/v2 plus all six equity-rank layers — same convention as v2."""
+    layers = list(_local_boundaries())
+    for n in range(1, 7):
+        layers.append(BoundaryLayer(
+            region_category="disadvantaged_areas",
+            region_type=f"er{n}",
+            file=str(REPO_DATA / f"er{n}.json"),
+            name_prefix=f"ER{n}_",
+            name_strategy="field",
+            name_field="GEOID20",
+        ))
+    return tuple(layers)
+
+
+def _patched_config(boundaries):
+    import src.config
+    fake_cfg = src.config.load()
+    return src.config.AppConfig(
+        gbfs=fake_cfg.gbfs,
+        schedule=fake_cfg.schedule,
+        denver_core=fake_cfg.denver_core,
+        china_glitch=fake_cfg.china_glitch,
+        boundaries=boundaries,
+        transmission_endpoints=fake_cfg.transmission_endpoints,
+        cors_origins=fake_cfg.cors_origins,
+        cors_origin_patterns=fake_cfg.cors_origin_patterns,
+        r2=fake_cfg.r2,
+        auth=fake_cfg.auth,
+        map_auth=fake_cfg.map_auth,
+        device_tracking=fake_cfg.device_tracking,
+        log_level=fake_cfg.log_level,
+    )
+
+
 def _devices() -> list[TaggedDevice]:
     # Hand-chosen points: 5 scooters and 3 bikes inside Denver, 1 China glitch
     # The Denver core coordinates are inside the city's actual footprint.
@@ -120,26 +155,13 @@ def _devices() -> list[TaggedDevice]:
     reason="v1.json missing",
 )
 def test_core_totals_match_hand_counts(monkeypatch):
-    # Patch the boundary list to use repo-relative paths
+    # Patch the boundary list to use repo-relative paths. Deliberately
+    # excludes er1..er6 — proves a tracked group absent from the DuckDB
+    # `boundaries` table yields zero (not an error). See
+    # test_core_totals_include_all_tracked_equity_groups below for the
+    # full-boundary-set case.
     import src.config
-    fake_cfg = src.config.load()
-    boundaries = _local_boundaries()
-    # Build a shallow copy with patched boundaries
-    patched = src.config.AppConfig(
-        gbfs=fake_cfg.gbfs,
-        schedule=fake_cfg.schedule,
-        denver_core=fake_cfg.denver_core,
-        china_glitch=fake_cfg.china_glitch,
-        boundaries=boundaries,
-        transmission_endpoints=fake_cfg.transmission_endpoints,
-        cors_origins=fake_cfg.cors_origins,
-        cors_origin_patterns=fake_cfg.cors_origin_patterns,
-        r2=fake_cfg.r2,
-        auth=fake_cfg.auth,
-        map_auth=fake_cfg.map_auth,
-        device_tracking=fake_cfg.device_tracking,
-        log_level=fake_cfg.log_level,
-    )
+    patched = _patched_config(_local_boundaries())
     monkeypatch.setattr(src.config, "load", lambda: patched)
     # Also patch the reference inside the compute module
     monkeypatch.setattr(compute, "load", lambda: patched)
@@ -187,3 +209,50 @@ def test_core_totals_match_hand_counts(monkeypatch):
     cd_names = {r["region_name"] for r in result.regional_rows if r["region_type"] == "council_district"}
     assert len(cd_names) == 11
     assert all(n.startswith("CD_") for n in cd_names)
+
+
+@pytest.mark.skipif(
+    not (REPO_DATA / "er1.json").exists(),
+    reason="er1.json missing",
+)
+def test_core_totals_include_all_tracked_equity_groups(monkeypatch):
+    """With er1..er6 present in the boundary set, run_cycle's core_row
+    must carry every column equity_groups.core_metric_columns() promises
+    — this is the thing that would silently break if the SQL SELECT list
+    and the Python column list it's zipped against ever drifted apart."""
+    import src.config
+    from src.equity_groups import TRACKED_GROUPS, core_metric_columns
+
+    patched = _patched_config(_er_boundaries())
+    monkeypatch.setattr(src.config, "load", lambda: patched)
+    monkeypatch.setattr(compute, "load", lambda: patched)
+
+    cycle_id = uuid.uuid4()
+    snap = datetime.now(timezone.utc)
+    payload = IngestPayload(
+        last_updated=1700000000,
+        payload_sha256="testhash",
+        devices=_devices(),
+        raw_count=len(_devices()),
+    )
+
+    result = compute.run_cycle(cycle_id, payload, snap)
+    core = result.core_row
+
+    for col in core_metric_columns():
+        assert col in core, f"missing {col} in core_row"
+
+    # Every device inside Denver lands in exactly one census block group
+    # (the six ranks partition the scored area), so the ranks can't
+    # collectively exceed the Denver total.
+    er_total = sum(core[f"total_devices_er{n}"] for n in range(1, 7))
+    assert 0 <= er_total <= core["total_devices_denver"]
+
+    # At least one of our hand-placed points should land in some rank —
+    # otherwise the er1..er6 CTEs are silently matching nothing.
+    assert er_total > 0
+
+    # Regional rows should include all six er layers too (generic
+    # per-layer breakdown, unrelated to the core-snapshot wiring above).
+    types = {r["region_type"] for r in result.regional_rows}
+    assert {f"er{n}" for n in range(1, 7)} <= types

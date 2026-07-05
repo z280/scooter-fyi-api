@@ -16,13 +16,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .api_admin import router as admin_router
+from .api_auth import router as auth_router
+from .api_frontend_reports import router as frontend_reports_router
+from .api_meta import router as meta_router
+from .api_rides import router as rides_router
 from .api_private import router as private_router
+from .api_profile import router as profile_router
 from .api_public import router as public_router
 from .api_reports import router as reports_router
 from .config import load, session_https_only, session_secret
 from .map_auth import router as map_auth_router
 from .pg import run_migrations
 from .sentry import init as sentry_init
+from .stripe_webhook import router as stripe_router
 
 log = logging.getLogger("veo")
 logging.basicConfig(
@@ -59,10 +65,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=list(_cfg.cors_origins),
     allow_origin_regex=_cors_regex,
-    # GET for read-only data, POST for /map-auth/logout. Bearer tokens travel
-    # in Authorization (covered by allow_headers="*"), not cookies — so
-    # allow_credentials stays false.
-    allow_methods=["GET", "POST"],
+    # GET for reads, POST for auth/reports, PUT for /api/v1/profile, DELETE
+    # for /api/v1/rides. Bearer tokens travel in Authorization (covered by
+    # allow_headers="*"), not cookies — so allow_credentials stays false.
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
     allow_credentials=False,
 )
@@ -78,6 +84,12 @@ app.include_router(admin_router)
 app.include_router(map_auth_router)
 app.include_router(private_router)
 app.include_router(reports_router)
+app.include_router(auth_router)
+app.include_router(profile_router)
+app.include_router(frontend_reports_router)
+app.include_router(rides_router)
+app.include_router(stripe_router)
+app.include_router(meta_router)
 
 
 @app.get("/", include_in_schema=False)
@@ -93,6 +105,11 @@ def root():
             "/api/v1/devices/current",
             "/api/v1/boundaries",
             "/api/v1/compliance/daily/latest",
+            "/api/v1/auth/{google,magic-link,redeem,refresh,session,signout}",
+            "/api/v1/profile",
+            "/api/v1/reports/{device,discount,summary,export/monthly.csv}",
+            "/api/v1/rides",
+            "/api/v1/meta/privacy",
             "/admin",
         ],
     }

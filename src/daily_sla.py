@@ -21,6 +21,7 @@ from datetime import date as date_cls, datetime, time, timedelta, timezone
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
+from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column, core_metric_columns
 from .pg import connection
 from .sentry import capture_exception
 
@@ -50,30 +51,10 @@ def window_for_date(d: date_cls) -> tuple[datetime, datetime]:
 # ---------------------------------------------------------------------------
 # Computation
 # ---------------------------------------------------------------------------
-_AVG_FIELDS = (
-    "total_devices_denver",
-    "total_devices_v1",
-    "total_devices_v2",
-    "total_bike_denver",
-    "total_bike_v1",
-    "total_bike_v2",
-    "total_scooter_denver",
-    "total_scooter_v1",
-    "total_scooter_v2",
-    "total_not_in_denver",
-    "percent_all_devices_v1",
-    "percent_all_devices_v2",
-    "percent_all_bikes_v1",
-    "percent_all_bikes_v2",
-    "percent_all_scooters_v1",
-    "percent_all_scooters_v2",
-    "percent_bikes_denver",
-    "percent_scooters_denver",
-    "percent_bikes_v1",
-    "percent_scooters_v1",
-    "percent_bikes_v2",
-    "percent_scooters_v2",
-)
+# The exact snapshot_metadata_core column list (v1, v2, er1..er6 — see
+# src/equity_groups.py) — this MUST stay the same list compute.py writes,
+# since a daily SLA row is a straight per-column average over these.
+_AVG_FIELDS = tuple(core_metric_columns())
 
 
 def _avg_select_list() -> str:
@@ -103,10 +84,17 @@ def compute_for_date(d: date_cls) -> dict:
             agg = dict(zip(cols, row))
 
     snapshot_count = int(agg["snapshot_count"] or 0)
-    v1_pct = agg.get("avg_percent_all_devices_v1")
-    v2_pct = agg.get("avg_percent_all_devices_v2")
-    pass_v1 = None if v1_pct is None else (float(v1_pct) >= COMPLIANCE_THRESHOLD)
-    pass_v2 = None if v2_pct is None else (float(v2_pct) >= COMPLIANCE_THRESHOLD)
+
+    # compliance_<g>_pass only for v1/v2 — er1..er6 are raw averages only.
+    # No individual rank tier is itself a compliance boundary; the
+    # frontend combines whichever er-groups make up a candidate cutoff
+    # and computes pass/fail itself from avg_percent_all_devices_erN.
+    compliance: dict[str, bool | None] = {}
+    for g in COMPLIANCE_GROUPS:
+        pct = agg.get(f"avg_percent_all_devices_{g}")
+        compliance[compliance_pass_column(g)] = (
+            None if pct is None else (float(pct) >= COMPLIANCE_THRESHOLD)
+        )
 
     record = {
         "sla_date": d,
@@ -114,8 +102,7 @@ def compute_for_date(d: date_cls) -> dict:
         "window_end_ts": end_utc,
         "snapshot_count": snapshot_count,
         **{f"avg_{f}": agg.get(f"avg_{f}") for f in _AVG_FIELDS},
-        "compliance_v1_pass": pass_v1,
-        "compliance_v2_pass": pass_v2,
+        **compliance,
     }
 
     insert_cols = list(record.keys())
@@ -138,7 +125,9 @@ def compute_for_date(d: date_cls) -> dict:
 
     log.info(
         "daily SLA %s: n=%d v1=%s%% (pass=%s) v2=%s%% (pass=%s)",
-        d, snapshot_count, v1_pct, pass_v1, v2_pct, pass_v2,
+        d, snapshot_count,
+        agg.get("avg_percent_all_devices_v1"), compliance[compliance_pass_column("v1")],
+        agg.get("avg_percent_all_devices_v2"), compliance[compliance_pass_column("v2")],
     )
     return record
 

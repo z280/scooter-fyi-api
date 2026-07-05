@@ -22,9 +22,13 @@ HTTP status codes.
 
 ## Authentication
 
-**None.** All endpoints listed in this document are public, read-only,
-and unauthenticated. The `/admin/*` routes (not documented here) require
-GitHub OAuth and are intended for operators only.
+**Not required for the map.** Every read endpoint that powers the public
+map and compliance dashboards is unauthenticated. Accounts exist for the
+cost ticker's rate choice, report attribution, and supporter features —
+see [Accounts & sessions](#accounts--sessions). Authenticated endpoints
+take `Authorization: Bearer <token>`. The `/admin/*` routes (not
+documented here) require GitHub OAuth and are intended for operators
+only.
 
 ## CORS
 
@@ -106,9 +110,12 @@ GET /health
 
 ### `GET /api/v1/snapshots/latest`
 
-The full set of 22 citywide compliance metrics from the most recent
-cycle. This is the most commonly consumed endpoint — it answers
-"what's the fleet doing right now?"
+The full set of 22 RFP-mandated citywide compliance metrics from the
+most recent cycle, **plus** the same per-group total/percent fields for
+every other tracked equity group (`er1`–`er6` — see
+[Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6) below).
+This is the most commonly consumed endpoint — it answers "what's the
+fleet doing right now?"
 
 **Request:**
 ```http
@@ -141,7 +148,16 @@ GET /api/v1/snapshots/latest
   "percent_bikes_v1": 66.28,
   "percent_scooters_v1": 33.72,
   "percent_bikes_v2": 63.64,
-  "percent_scooters_v2": 36.36
+  "percent_scooters_v2": 36.36,
+  "total_devices_er1": 1198,
+  "total_bike_er1": 782,
+  "total_scooter_er1": 416,
+  "percent_all_devices_er1": 20.29,
+  "percent_all_bikes_er1": 19.38,
+  "percent_all_scooters_er1": 22.27,
+  "percent_bikes_er1": 65.28,
+  "percent_scooters_er1": 34.72
+  /* … the same 8 fields, suffixed _er2 … _er6, omitted here for brevity … */
 }
 ```
 
@@ -179,6 +195,28 @@ GET /api/v1/snapshots/latest
 | `percent_bikes_v2` | float \| null | Bike share inside v2. |
 | `percent_scooters_v2` | float \| null | Scooter share inside v2. |
 
+#### Tracked equity groups (v1, v2, er1–er6)
+
+The 8 field families above (`total_devices_<g>`, `total_bike_<g>`,
+`total_scooter_<g>`, `percent_all_devices_<g>`, `percent_all_bikes_<g>`,
+`percent_all_scooters_<g>`, `percent_bikes_<g>`, `percent_scooters_<g>`)
+are computed identically for **every** tracked group
+`<g> ∈ {v1, v2, er1, er2, er3, er4, er5, er6}` — not just v1/v2. The
+group registry lives in `src/equity_groups.py`; adding a group there
+(plus a matching migration and `config.json` boundary entry) is the only
+change needed for it to appear here and in the daily SLA endpoint below.
+
+`er1`–`er6` are Denver DOTI's authoritative census-block-group Equity
+Index, one group per exact `EquityGroupRank` tier (`er1` = highest
+need). They are tracked **individually and atomically** — not
+pre-combined into a cutoff — specifically so that whatever cutoff DOTI
+confirms as contractually authoritative can be reconstructed from
+history later (e.g. a "rank ≤ 2" metric = `er1 + er2`) without this
+system having had to guess the right combination up front. None of
+`er1`–`er6` is a confirmed compliance boundary today — `percent_all_devices_v1`
+remains **the** primary RFP §3.0 metric until DOTI confirms otherwise;
+see API_REQUIREMENTS.md §1.1a.
+
 ---
 
 ### `GET /api/v1/spatial-snapshot`
@@ -191,7 +229,7 @@ nearest to a given timestamp).
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `layer` | string | yes | — | One of `v1`, `v2`, `council_district`, `community_network`, `neighborhood`. See [Layer reference](#layer-reference). |
+| `layer` | string | yes | — | One of `v1`, `v2`, `er1`, `er2`, `er3`, `er4`, `er5`, `er6`, `council_district`, `community_network`, `neighborhood`. See [Layer reference](#layer-reference). |
 | `time` | string | no | latest | ISO 8601 UTC timestamp. Snaps to the most recent snapshot at or before this time. Useful for historical playback. |
 
 **Example request:**
@@ -302,6 +340,8 @@ GET /api/v1/boundaries
   "layers": [
     { "region_category": "disadvantaged_areas", "region_type": "v1", "feature_count": 34, "bbox": [-105.0626, 39.6473, -104.7718, 39.7983], "url": "/api/v1/boundaries/v1" },
     { "region_category": "disadvantaged_areas", "region_type": "v2", "feature_count": 65, "bbox": [-105.0626, 39.6450, -104.7344, 39.7984], "url": "/api/v1/boundaries/v2" },
+    { "region_category": "disadvantaged_areas", "region_type": "er1", "feature_count": 34, "bbox": [-105.0626, 39.6450, -104.7344, 39.7984], "url": "/api/v1/boundaries/er1" },
+    /* … er2 … er6, same shape … */
     { "region_category": "council_districts", "region_type": "council_district", "feature_count": 11, "bbox": [-105.1100, 39.6143, -104.5995, 39.9142], "url": "/api/v1/boundaries/council_district" },
     { "region_category": "community_networks", "region_type": "community_network", "feature_count": 13, "bbox": [-105.1100, 39.6143, -104.7344, 39.8274], "url": "/api/v1/boundaries/community_network" },
     { "region_category": "neighborhoods", "region_type": "neighborhood", "feature_count": 78, "bbox": [-105.1100, 39.6143, -104.5996, 39.9142], "url": "/api/v1/boundaries/neighborhood" }
@@ -719,13 +759,22 @@ GET /api/v1/compliance/daily/latest
   "avg_percent_scooters_v2": 36.48,
   "compliance_v1_pass": false,
   "compliance_v2_pass": false,
+  "avg_total_devices_er1": 1189.44,
+  "avg_total_bike_er1": 776.61,
+  "avg_total_scooter_er1": 412.83,
+  "avg_percent_all_devices_er1": 20.24,
+  "avg_percent_all_bikes_er1": 19.36,
+  "avg_percent_all_scooters_er1": 22.15,
+  "avg_percent_bikes_er1": 65.30,
+  "avg_percent_scooters_er1": 34.70,
+  /* … the same 8 avg_* fields, for er2 … er6 … */
   "computed_at": "2026-05-30T15:00:08+00:00"
 }
 ```
 
 **Response 200 (pending):** No daily row computed yet (first run pending, or pipeline just deployed). Returns the same shape with every field nulled and `snapshot_count: 0`, so the gauge can render a "pending" state without special-casing a non-2xx status. The `avg_*` and `compliance_*` fields are `null` (not absent), matching the field reference below.
 ```json
-{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null … */ "compliance_v1_pass": null, "compliance_v2_pass": null, "computed_at": null }
+{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null, including er1..er6 … */ "compliance_v1_pass": null, "compliance_v2_pass": null, "computed_at": null }
 ```
 
 #### Field reference
@@ -736,10 +785,16 @@ GET /api/v1/compliance/daily/latest
 | `window_start_ts` | string \| null | 6:00 AM Denver expressed as UTC. `null` in the pending response. |
 | `window_end_ts` | string \| null | 9:00 AM Denver expressed as UTC. `null` in the pending response. |
 | `snapshot_count` | int | Number of cycles whose `snapshot_time` fell inside the window. Typically 18 (3 hours × 6 cycles/hour). Lower values indicate cycle misses; 0 means no data. |
-| `avg_*` fields | float \| null | Arithmetic mean of the corresponding `snapshot_metadata_core` field across all snapshots in the window. Null when `snapshot_count == 0`. |
+| `avg_*` fields | float \| null | Arithmetic mean of the corresponding `snapshot_metadata_core` field across all snapshots in the window, **for every tracked group** (`v1`, `v2`, `er1`–`er6` — see [Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6)). Null when `snapshot_count == 0`. |
 | `compliance_v1_pass` | bool \| null | `avg_percent_all_devices_v1 >= 30`. The primary SLA boolean. Null when no data. |
 | `compliance_v2_pass` | bool \| null | Same for v2. The contractually-binding map (v1 vs v2) is being confirmed with DOTI; track both for now. |
 | `computed_at` | string \| null | UTC timestamp of when this row was computed. `null` in the pending response. |
+
+**No `compliance_erN_pass` fields.** No individual equity-rank tier is
+itself a compliance boundary, so there's nothing to store a pass/fail
+flag for. Combine whichever `avg_percent_all_devices_erN` values make up
+a candidate cutoff (e.g. `er1 + er2` for a "rank ≤ 2" reading) and
+compute pass/fail client-side.
 
 ---
 
@@ -791,9 +846,182 @@ Days without any computed row are simply omitted from `rows` — don't expect de
 
 ---
 
+## Accounts & sessions
+
+Two sign-in doors, one session model. Session-minting endpoints return
+exactly `{ "token": "...", "expires": "<ISO 8601>" }`; store the token
+and send it as `Authorization: Bearer <token>`. Tokens are opaque
+(256-bit random) and stored server-side only as hashes.
+
+**Scopes:** every session has `rider`. `admin` is granted only on Google
+sign-in for allowlisted operator emails — magic-link sessions never carry
+it. `supporter` appears automatically while the account has a live
+supporter payment (see the Stripe webhook).
+
+**Expiry:** rider sessions last 30 days and slide — call
+`POST /api/v1/auth/refresh` any time to rotate the token and get a fresh
+30 days (the old token is revoked). Admin sessions last a fixed 24 h;
+refresh rotates without extending.
+
+| Endpoint | Body / notes |
+|---|---|
+| `POST /api/v1/auth/google` | `{ "credential": "<Google ID token>" }` from Google Identity Services / One Tap. Verified locally (signature, audience, expiry, `email_verified`). → `{token, expires}` |
+| `POST /api/v1/auth/magic-link` | `{ "email": "you@example.com" }` → always `202 { "sent": true }` (no account-existence oracle). Emails a single-use link (15-min TTL). Limits: 3/hour per email, 10/hour per IP. `502` if the email provider fails, `503` if unconfigured. |
+| `POST /api/v1/auth/redeem` | `{ "token": "<from the emailed link>" }` → `{token, expires}`. Single-use; `401` if invalid, expired, or already used. |
+| `POST /api/v1/auth/refresh` | Bearer required. → `{token, expires}` (new token; old one revoked). |
+| `GET /api/v1/auth/session` | Bearer required. → `{ email, scopes, supporter, expires }`. `401` when invalid/expired — treat as signed out. |
+| `POST /api/v1/auth/signout` | Bearer required. Revokes the token. → `{ "revoked": true }` |
+
+### `GET /api/v1/profile` / `PUT /api/v1/profile`
+
+Bearer required. GET returns:
+
+```json
+{
+  "email": "you@example.com",
+  "rate_plan": "resident",
+  "theme": null,
+  "favorites": [],
+  "supporter": false,
+  "badges": [ { "id": "first_report", "label": "Filed a report", "earned_at": "2026-07-01T18:00:00+00:00" } ]
+}
+```
+
+PUT accepts any subset of the client-writable fields — omitted fields are
+untouched, `"theme": null` clears the theme:
+
+| Field | Type | Notes |
+|---|---|---|
+| `rate_plan` | `"resident" \| "visitor" \| "equity"` | Drives the frontend cost ticker. |
+| `theme` | string \| null | Free-form, ≤64 chars. |
+| `favorites` | array | Opaque JSON, ≤100 entries — shape TBD by the frontend. |
+
+`supporter` and `badges` are server-computed and ignored if sent. Badge
+ids: `first_report`, `reporter_10`, `ghost_hunter` (one of your reports
+corroborated by a different reporter within 7 days), `discount_watchdog`,
+`miles_10`, `miles_100`, `streak_7` (rides on 7 consecutive days),
+`supporter`. Badges are recomputed on every read, so new thresholds apply
+retroactively.
+
+---
+
+## Rider reports
+
+### `POST /api/v1/reports/device`
+
+Report a scooter that failed you. Anonymous is fine (5/day per IP);
+sending a bearer token links the report to your account (30/day) and
+weighs it double in the public aggregates.
+
+```json
+{ "vehicle_identifier": "8c4a1f0d2e9b7a35", "report_type": "failed_unlock",
+  "observed_at": "2026-07-04T16:20:00Z", "lat": 39.7392, "lng": -104.9876 }
+```
+
+`report_type`: `failed_unlock` | `dead_battery` | `damaged`. `observed_at`,
+`lat`, `lng` optional — without coordinates the report is anchored to the
+scooter's last known cell. → `{ "id": 17, "reported_at": "...", "deduped": false }`.
+An identical (vehicle, type, reporter) report within 30 minutes returns
+the existing row with `"deduped": true` instead of creating a new one.
+
+Reports feed `has_negative_report` and `reliability_tier` on
+`/api/v1/devices/current` for 24 h or until the scooter moves, whichever
+comes first.
+
+### `POST /api/v1/reports/discount`
+
+Missed equity-discount evidence. **Bearer required** (evidence needs
+provenance), 20/day per account. Send JSON:
+
+```json
+{ "ride_ended_at": "2026-07-04T16:20:00Z", "zone_version": "v1",
+  "end_lat": 39.71, "end_lng": -105.01, "amount_charged_cents": 450 }
+```
+
+…or `multipart/form-data` with the same field names plus an optional
+`receipt` image part (JPEG/PNG/WebP, ≤10 MB). Receipts are re-encoded on
+ingest — EXIF/GPS metadata is destroyed, not just hidden — stored in a
+private bucket, and deleted after 18 months (see `/api/v1/meta/privacy`).
+→ `{ "id": 3, "created_at": "...", "receipt_stored": true }`
+
+### `GET /api/v1/reports/summary?layer=<layer>`
+
+Public per-region aggregate for the "Contract violations" choropleth and
+the ticker. Same `layer` values as `/api/v1/spatial-snapshot`. Cached
+~10 minutes (`Cache-Control: public, max-age=600`).
+
+```json
+{
+  "layer": "neighborhood",
+  "generated_at": "2026-07-04T16:30:00+00:00",
+  "regions": {
+    "NB_FivePoints": { "device_reports": 4, "discount_reports": 1, "est_overcharge_cents": 225 },
+    "NB_CBD":        { "device_reports": 0, "discount_reports": 0, "est_overcharge_cents": 0 }
+    /* … every region in the layer, zero-filled … */
+  }
+}
+```
+
+`device_reports` is a weighted count (authenticated ×2, anonymous ×1).
+`est_overcharge_cents` assumes the missed discount is 50% of the charged
+amount — an estimate, flagged as such until DOTI confirms the rate card.
+Reports without coordinates aren't regionalizable and are excluded here
+(they still appear in the CSV export).
+
+### `GET /api/v1/reports/export/monthly.csv?month=YYYY-MM`
+
+Public CSV of a month's reports for DOTI and journalists. No auth,
+rate-limited (10/hour per IP). Columns never include reporter identity —
+no IPs, no emails, just an `authenticated` boolean for evidentiary
+weight.
+
+---
+
+## Supporter: ride history
+
+`POST /api/v1/rides` requires the `supporter` scope (pay-what-you-want
+via the Stripe Payment Link; the webhook flips the account flag).
+Reading and deleting your rides needs only a signed-in session — a lapsed
+supporter can always export and wipe their own data.
+
+| Endpoint | Notes |
+|---|---|
+| `POST /api/v1/rides` | `{ started_at, ended_at, duration_s, distance_m, est_cost_cents?, rate_plan, started_in_zone, ended_in_zone, polyline }`. `polyline` is a Google encoded polyline (precision 5), validated at ingest. → the stored ride incl. `id`. |
+| `GET /api/v1/rides?limit=50&before=<ISO>` | Owner-only, newest first. → `{ count, rides: [...] }` |
+| `GET /api/v1/rides/export?format=geojson\|csv` | Owner-only full export. GeoJSON decodes each polyline to a `LineString`. |
+| `DELETE /api/v1/rides/{id}` | **Immediate hard delete.** → `{ "deleted": true }` |
+| `DELETE /api/v1/rides` | **Immediate hard delete of everything.** → `{ "deleted_count": n }` |
+
+Privacy commitment, stated here on purpose: route polylines are the most
+sensitive data this system holds. There is no soft-delete, no tombstone,
+and no analytics use of ride routes — ever. See `/api/v1/meta/privacy`.
+
+### `POST /webhooks/stripe`
+
+Operator plumbing (not for frontend use): Stripe webhook with signature
+verification. Handles `checkout.session.completed` (sets `supporter`,
+keyed by `client_reference_id` = account id) and `charge.refunded`
+(clears the flag on full refund only).
+
+---
+
+## Meta
+
+### `GET /api/v1/meta/privacy`
+
+Machine-readable retention policy — the frontend privacy page renders
+this, so the published policy and the enforced one can't drift:
+
+```json
+{ "updated": "2026-07-04", "contact": "zneill@gmail.com",
+  "retention": [ { "data": "sessions", "retention": "30 days idle", "detail": "…" } /* … */ ] }
+```
+
+---
+
 ## Layer reference
 
-The five layers, their `region_type` values (used in `layer=` query
+The eleven layers, their `region_type` values (used in `layer=` query
 params), and the naming convention for `region_name` (used in the
 trend endpoint and as the keys of `regions` in spatial-snapshot).
 
@@ -801,13 +1029,20 @@ trend endpoint and as the keys of `regions` in spatial-snapshot).
 |---|---|---|---|
 | `disadvantaged_areas` | `v1` | 34 | `V1_001`, `V1_002`, … `V1_034` (ordinal, zero-padded to 3 digits) |
 | `disadvantaged_areas` | `v2` | 65 | `V2_080010001001`, `V2_080010002003`, … (US Census Block Group GEOID20) |
+| `disadvantaged_areas` | `er1` | 34 | `ER1_080310043081`, … (US Census Block Group GEOID20; `EquityGroupRank == 1`, highest need) |
+| `disadvantaged_areas` | `er2` | 58 | `ER2_...` (`EquityGroupRank == 2`) |
+| `disadvantaged_areas` | `er3` | 157 | `ER3_...` (`EquityGroupRank == 3`) |
+| `disadvantaged_areas` | `er4` | 93 | `ER4_...` (`EquityGroupRank == 4`) |
+| `disadvantaged_areas` | `er5` | 114 | `ER5_...` (`EquityGroupRank == 5`) |
+| `disadvantaged_areas` | `er6` | 116 | `ER6_...` (`EquityGroupRank == 6`, lowest need) |
 | `council_districts` | `council_district` | 11 | `CD_1`, `CD_2`, … `CD_11` (Denver City Council district numbers) |
 | `community_networks` | `community_network` | 13 | `CN_Central`, `CN_East`, `CN_EastCentral`, `CN_FarNortheast`, `CN_FarSoutheast`, `CN_North`, `CN_Northeast`, `CN_Northwest`, `CN_ParkHill`, `CN_SouthCentral`, `CN_Southeast`, `CN_Southwest`, `CN_West` |
 | `neighborhoods` | `neighborhood` | 78 | `NB_AthmarPark`, `NB_Auraria`, `NB_Baker`, `NB_Barnum`, `NB_CBD`, `NB_CapitolHill`, `NB_CherryCreek`, `NB_FivePoints`, `NB_Highland`, `NB_SloanLake`, `NB_WashingtonPark`, `NB_Westwood`, … (Denver Statistical Neighborhood names with non-alphanumerics stripped) |
 
 ### Notes on the layers
 
-- **v1 vs v2** are two distinct versions of the city's Equity / Opportunity Areas polygon. Both exist because Denver's contract negotiations referenced both; the canonical compliance metric is `percent_all_devices_v1`, but `v2` is tracked in parallel. They are not nested or disjoint — a device can be in both, neither, or one or the other.
+- **v1 vs v2** are two distinct versions of the city's original Equity / Opportunity Areas polygon. Both exist because Denver's contract negotiations referenced both; the canonical compliance metric (`percent_all_devices_v1` on `/api/v1/snapshots/latest`) is computed against `v1` specifically, with `v2` tracked in parallel. They are not nested or disjoint — a device can be in both, neither, or one or the other.
+- **`er1`–`er6`** are Denver DOTI's newer, authoritative census-block-group Equity Index, split into one layer per exact `EquityGroupRank` tier (`er1` = highest need, `er6` = lowest). Unlike v1/v2 they **partition** the scored area — every scored block group falls in exactly one `erN` layer, never two. They're tracked individually (not pre-combined into a cutoff) in both `/api/v1/snapshots/latest` and `/api/v1/compliance/daily/latest` so that whatever cutoff DOTI confirms as contractually authoritative can be reconstructed from history later (e.g. a "rank ≤ 2" metric = `er1 + er2`). **No individual `erN` layer is a confirmed compliance boundary today** — `percent_all_devices_v1` remains the primary RFP §3.0 metric. See API_REQUIREMENTS.md §1.1a.
 - **At-Large council districts** (Gonzales-Gutierrez and Parady, which cover the entire city) are **excluded** from `council_district` rows to avoid double-counting. Only the 11 numbered districts appear.
 - **Neighborhoods** uses Denver's Statistical Neighborhood Boundaries (DOTI). Spaces and punctuation are stripped from names: `Athmar Park` → `NB_AthmarPark`, `Park Hill` → `NB_ParkHill` (note: there are also separate `NB_NortheastParkHill`, `NB_NorthParkHill`, `NB_SouthParkHill` neighborhoods).
 - **Community Networks** are Denver's 13 official planning regions, broader than neighborhoods.
@@ -936,9 +1171,15 @@ const delta = bikeShareV1 - bikeShareDenver;
 | Code | Meaning | When |
 |---|---|---|
 | `200` | OK | Normal response. |
-| `400` | Bad query | Malformed `time` or `range` parameter. |
-| `404` | No data | Requested layer has no snapshots (cold start only). |
-| `503` | Service unavailable | No snapshots exist yet (very fresh deploy). Retry after a minute. |
+| `202` | Accepted | Magic-link request accepted (says nothing about account existence). |
+| `400` | Bad query/body | Malformed `time`/`range` parameter, bad signature, unreadable receipt image. |
+| `401` | Unauthenticated | Missing/invalid/expired bearer token, failed Google credential, dead magic link. Treat as signed out. |
+| `403` | Forbidden | Valid session but missing scope (`admin`, `supporter`). |
+| `404` | No data | Requested layer has no snapshots (cold start), or the resource isn't yours. |
+| `413` | Too large | Receipt image over 10 MB. |
+| `429` | Rate limited | POST buckets are full — honor the `Retry-After` header (seconds). |
+| `502` | Upstream failure | Email provider rejected a magic-link send. Retry in a minute. |
+| `503` | Service unavailable | No snapshots exist yet, or the feature isn't configured on this deployment (Google/magic-link/Stripe/receipts). |
 | `5xx` (other) | Server error | Worker or Postgres failure. Logged in Sentry; transient — retry. |
 
 Error responses are JSON: `{ "detail": "human-readable message" }`.

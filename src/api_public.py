@@ -13,8 +13,11 @@ from fastapi import APIRouter, HTTPException, Query, Response
 
 from . import boundaries
 from .daily_sla import _AVG_FIELDS
+from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
 from .pg import connection
 from .quality import compute_quality_designation, compute_reliability_tier
+
+_COMPLIANCE_PASS_COLUMNS = tuple(compliance_pass_column(g) for g in COMPLIANCE_GROUPS)
 
 router = APIRouter()
 
@@ -292,10 +295,11 @@ def devices_current(
                 params.extend([min_lon, max_lon, min_lat, max_lat])
 
             # has_negative_report: true iff there's a report against THIS
-            # vehicle_identifier in the SAME h3_10 cell, ≤24h old. The
-            # row becomes "stale" (false here) the moment the scooter
-            # moves to a different h3_10, even though the report row
-            # remains queryable from /api/v1/private/reports.
+            # vehicle_identifier in the SAME h3_10 cell, ≤24h old — from
+            # either report pipeline (map-pin negative_reports or the §3.1
+            # rider device_reports). The flag goes "stale" (false here) the
+            # moment the scooter moves to a different h3_10, even though the
+            # report rows remain queryable from the private endpoints.
             sql = (
                 "SELECT r.device_id, r.form_factor, r.latitude, r.longitude, r.spatial_status, "
                 "       r.vehicle_identifier, r.is_disabled, r.is_reserved, "
@@ -305,12 +309,17 @@ def devices_current(
                 "       r.range_rank_all_by_type, r.range_rank_all_devices, "
                 "       r.range_rank_h3_8_peers, r.range_rank_h3_9_peers, "
                 "       r.range_rank_h3_10_peers, "
-                "       EXISTS ("
+                "       (EXISTS ("
                 "           SELECT 1 FROM negative_reports nr "
                 "           WHERE nr.vehicle_identifier = r.vehicle_identifier "
                 "             AND nr.h3_10_index = r.h3_10_index "
                 "             AND nr.reported_at >= NOW() - INTERVAL '24 hours'"
-                "       ) AS has_negative_report, "
+                "       ) OR EXISTS ("
+                "           SELECT 1 FROM device_reports dr "
+                "           WHERE dr.vehicle_identifier = r.vehicle_identifier "
+                "             AND dr.h3_10_index = r.h3_10_index "
+                "             AND dr.reported_at >= NOW() - INTERVAL '24 hours'"
+                "       )) AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
                 "       r.vehicle_plate "
@@ -415,8 +424,10 @@ def _daily_row_to_dict(cur, row) -> dict[str, Any]:
     # snapshot_count should stay an int
     if "snapshot_count" in d and d["snapshot_count"] is not None:
         d["snapshot_count"] = int(d["snapshot_count"])
-    # booleans should stay booleans (float() above would coerce)
-    for k in ("compliance_v1_pass", "compliance_v2_pass"):
+    # booleans should stay booleans (float() above would coerce, e.g.
+    # float(True) == 1.0) — one column per compliance group (v1, v2 only;
+    # er1..er6 are averages-only and have no stored pass/fail boolean).
+    for k in _COMPLIANCE_PASS_COLUMNS:
         if k in d and d[k] is not None:
             d[k] = bool(d[k])
     return d
@@ -440,8 +451,8 @@ def _empty_daily_payload() -> dict[str, Any]:
     }
     for f in _AVG_FIELDS:
         payload[f"avg_{f}"] = None
-    payload["compliance_v1_pass"] = None
-    payload["compliance_v2_pass"] = None
+    for k in _COMPLIANCE_PASS_COLUMNS:
+        payload[k] = None
     payload["computed_at"] = None
     return payload
 
