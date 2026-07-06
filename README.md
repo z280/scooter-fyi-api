@@ -22,7 +22,7 @@ Veo GBFS feed                                Browser
 ┌──────────────────────────┐               ┌────────────────┐
 │  scheduler               │               │   cloudflared  │   Cloudflare Tunnel
 │  supercronic + crontab   │               │   128 MiB cap  │   (TLS at CF edge)
-│  256 MiB cap             │               └────────────────┘
+│  1.0 GiB cap             │               └────────────────┘
 │  TZ=America/Denver       │                       │ outbound 443
 └──────────────────────────┘                       ▼
      │ shells `python -m src.cli ...`        Cloudflare edge
@@ -62,7 +62,8 @@ Postgres is the system of record. DuckDB is a worker tool that loads
 GeoJSON boundaries with its spatial extension, joins against the
 just-tagged points, dumps aggregates into Postgres, and closes. This
 keeps steady-state RAM near zero, which matters because a Hermes agent
-runs natively on the same 12 GiB VPS with a 7.5 GiB sandbox.
+runs natively on the same 12 GiB VPS (~256-512 MiB for an API-based
+agent process).
 
 ## Repo layout
 
@@ -285,11 +286,11 @@ Enforced via Docker Compose `mem_limit`:
 |---|---|---|
 | `pipeline_worker` | 1.0 GiB | bursts during DuckDB compute (~1 s/cycle) |
 | `denver_spatial_db` | 2.5 GiB | `shared_buffers=2GB`, `max_connections=20` |
-| `scheduler` | 256 MiB | supercronic + each job's transient Python process |
+| `scheduler` | 1.0 GiB | supercronic + each job's transient Python process; sized for the 02:00 archive's DuckDB → Parquet burst |
 | `cloudflared` | 128 MiB | tiny — outbound HTTPS tunnel daemon |
-| Native Hermes (host) | 7.5 GiB | enforced via cgroups, **not** by this repo |
+| Native Hermes (host) | ~512 MiB | API-based agent process; **not** enforced by this repo |
 
-Total Docker footprint: ~3.9 GiB on the 12 GiB VPS. The remaining ~0.6 GiB
-headroom absorbs transactional surges and host OS buffers.
+Total Docker footprint: ~4.6 GiB on the 12 GiB VPS. The remaining ~7 GiB
+covers Hermes, host OS buffers, and future services.
 
 Hello, World!
