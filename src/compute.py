@@ -119,24 +119,75 @@ def _load_boundaries_into_duck(con) -> None:
     # this is more accurate than the rough bbox envelope from src/ingest.py
     # (which catches devices in Aurora, Lakewood, the Veo repair shop, etc.).
     # The bbox check stays as a fast first-pass; this is the precise final word.
-    con.execute(
-        """
-        DROP TABLE IF EXISTS denver_city;
-        CREATE TABLE denver_city AS
-        SELECT ST_Union_Agg(geom) AS geom
-        FROM boundaries
-        WHERE region_type = 'neighborhood';
-        """
-    )
+    #
+    # Then buffer it outward by spatial.denver_core_buffer_meters (default
+    # 200m): Veo lets riders start some vehicles from just over the city line,
+    # and we want those in the dataset. WGS84 degrees aren't metric, so we
+    # project to UTM 13N (EPSG:26913, the zone Denver sits in), buffer in
+    # meters there, and project back. A 0 buffer skips the round-trip and
+    # keeps the exact union (no reprojection error).
+    buffer_m = float(load().spatial.denver_core_buffer_meters)
+    con.execute("DROP TABLE IF EXISTS denver_city;")
+    if buffer_m > 0:
+        con.execute(
+            f"""
+            CREATE TABLE denver_city AS
+            SELECT ST_Transform(
+                     ST_Buffer(
+                       ST_Transform(
+                         ST_Union_Agg(geom),
+                         'EPSG:4326', 'EPSG:26913', always_xy := true
+                       ),
+                       {buffer_m}
+                     ),
+                     'EPSG:26913', 'EPSG:4326', always_xy := true
+                   ) AS geom
+            FROM boundaries
+            WHERE region_type = 'neighborhood';
+            """
+        )
+    else:
+        con.execute(
+            """
+            CREATE TABLE denver_city AS
+            SELECT ST_Union_Agg(geom) AS geom
+            FROM boundaries
+            WHERE region_type = 'neighborhood';
+            """
+        )
 
 
-def _refine_spatial_status(con) -> int:
-    """Re-classify any point currently tagged 'denver_core' (by the bbox
-    envelope) that is actually outside the Denver city polygon. These get
-    re-tagged 'other_outlier' — they're in the rectangle but not in the
-    actual city (typically: Aurora, Lakewood, repair shops outside city
-    limits). Returns the number of devices re-tagged."""
-    cur = con.execute(
+def _update_count(cur) -> int:
+    """DuckDB returns the affected row count as the UPDATE's result set."""
+    try:
+        result = cur.fetchall()
+        if result and result[0]:
+            return int(result[0][0])
+    except Exception:
+        pass
+    return 0
+
+
+def _refine_spatial_status(con) -> tuple[int, int]:
+    """Make membership in the (buffered) Denver city polygon the single
+    source of truth for denver_core, correcting the rough bbox tag both
+    ways. Returns (demoted, promoted).
+
+    * DEMOTE: a point tagged 'denver_core' by the bbox envelope but outside
+      the polygon (e.g. Aurora, Lakewood, a repair shop past the city line
+      and beyond the buffer) → 'other_outlier'.
+    * PROMOTE: a point tagged 'other_outlier' (it fell outside the generous
+      bbox — the bbox clips the city's NE/E edge) but inside the buffered
+      polygon → 'denver_core'. Without this, buffered border vehicles beyond
+      the bbox would never be reconsidered.
+
+    'china_glitch' is never touched — those points are ~10⁴ km away and can't
+    fall inside the polygon anyway, but restricting the promote query to
+    'other_outlier' makes that explicit and cheap. The two updates operate on
+    disjoint predicates (outside-buffer vs inside-buffer), so order doesn't
+    matter and no point flips twice.
+    """
+    demoted = _update_count(con.execute(
         """
         UPDATE points
         SET spatial_status = 'other_outlier'
@@ -145,15 +196,18 @@ def _refine_spatial_status(con) -> int:
               SELECT 1 FROM denver_city c WHERE ST_Within(points.geom, c.geom)
           );
         """
-    )
-    # DuckDB returns affected row count via the cursor's rowcount-like result
-    try:
-        result = cur.fetchall()
-        if result and result[0]:
-            return int(result[0][0])
-    except Exception:
-        pass
-    return 0
+    ))
+    promoted = _update_count(con.execute(
+        """
+        UPDATE points
+        SET spatial_status = 'denver_core'
+        WHERE spatial_status = 'other_outlier'
+          AND EXISTS (
+              SELECT 1 FROM denver_city c WHERE ST_Within(points.geom, c.geom)
+          );
+        """
+    ))
+    return demoted, promoted
 
 
 # ---------------------------------------------------------------------------
@@ -317,11 +371,13 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
         _load_boundaries_into_duck(con)
         _load_points_into_duck(con, ingest.devices, snapshot_time)
 
-        # Refine the bbox-based denver_core tag against the actual city polygon
-        # (union of NB features). Devices in the bbox but outside the polygon
-        # — e.g. the Veo repair shop, parts of Aurora/Lakewood — get re-tagged
-        # other_outlier and excluded from all citywide metrics.
-        _refine_spatial_status(con)
+        # Refine the bbox-based tag against the (buffered) city polygon —
+        # the polygon is the source of truth. Devices in the bbox but past
+        # the buffered boundary (Veo repair shop, Aurora/Lakewood) get
+        # demoted to other_outlier; border devices within the buffer that
+        # the bbox missed get promoted to denver_core.
+        demoted, promoted = _refine_spatial_status(con)
+        log.info("spatial refine: demoted=%d promoted=%d", demoted, promoted)
 
         # Pull corrected statuses back so raw_telemetry_points reflects the
         # polygon-precise classification, not just the ingest-time bbox tag.

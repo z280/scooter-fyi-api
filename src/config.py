@@ -102,6 +102,17 @@ class DeviceTrackingConfig:
 
 
 @dataclass(frozen=True)
+class SpatialConfig:
+    # Distance (meters) the actual Denver city polygon is buffered outward
+    # before deciding denver_core membership. Veo lets riders start some
+    # vehicles from just over the city line; a small buffer keeps those in
+    # the dataset (and, deliberately, in the compliance denominator) instead
+    # of tagging them other_outlier. 0 disables the buffer entirely (exact
+    # inside-the-polygon behavior). See compute._refine_spatial_status.
+    denver_core_buffer_meters: float
+
+
+@dataclass(frozen=True)
 class AppConfig:
     gbfs: GBFSConfig
     schedule: ScheduleConfig
@@ -115,6 +126,7 @@ class AppConfig:
     auth: AuthConfig
     map_auth: MapAuthConfig
     device_tracking: DeviceTrackingConfig
+    spatial: SpatialConfig
     log_level: str
 
 
@@ -182,6 +194,11 @@ def load() -> AppConfig:
         device_tracking=DeviceTrackingConfig(
             stationary_threshold_meters=float(
                 raw.get("device_tracking", {}).get("stationary_threshold_meters", 16.0)
+            ),
+        ),
+        spatial=SpatialConfig(
+            denver_core_buffer_meters=float(
+                raw.get("spatial", {}).get("denver_core_buffer_meters", 200.0)
             ),
         ),
         log_level=raw.get("logging", {}).get("level", "INFO"),
