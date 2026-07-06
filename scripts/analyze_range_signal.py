@@ -111,8 +111,10 @@ def main() -> None:
         """
     )
 
+    # ::VARCHAR — fetching TIMESTAMPTZ values into Python requires pytz,
+    # which isn't in the image; all we do with these is print them.
     n_rows, t_min, t_max = con.execute(
-        "SELECT COUNT(*), MIN(snapshot_time), MAX(snapshot_time) FROM pts"
+        "SELECT COUNT(*), MIN(snapshot_time)::VARCHAR, MAX(snapshot_time)::VARCHAR FROM pts"
     ).fetchone()
     print(f"archive: {n_rows:,} points, {t_min} → {t_max}")
     if not n_rows:
