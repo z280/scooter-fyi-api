@@ -556,6 +556,7 @@ hidden unless explicitly requested.
 | `spatial_status` | string | (default below) | Filter by `denver_core`, `china_glitch`, or `other_outlier`. Explicit value overrides `include_outliers`. |
 | `include_outliers` | bool | `false` | When true, returns devices regardless of envelope. Ignored if `spatial_status` is set. |
 | `bbox` | string | (none) | `min_lon,min_lat,max_lon,max_lat` WGS84 bounding box. Useful for viewport-level queries. |
+| `include` | string | (none) | Comma-separated opt-in field groups: `ranks`, `h3`. Unknown tokens → `400`. See [Lean default payload](#lean-default-payload--include-opt-ins) below. |
 
 **Example request:**
 ```http
@@ -575,7 +576,8 @@ GET /api/v1/devices/current?form_factor=scooter
       "spatial_status": null,
       "include_outliers": false,
       "bbox": null
-    }
+    },
+    "include": []
   },
   "features": [
     {
@@ -590,10 +592,13 @@ GET /api/v1/devices/current?form_factor=scooter
         "is_disabled": false,
         "is_reserved": false,
         "current_range_meters": 45293,
+        "battery_percent": 86,
         "propulsion_type": "electric",
         "number_failed_starts": 0,
         "first_observed_at_location": "2026-05-30T16:10:09+00:00",
         "reliability_tier": "ok",
+        "dwell_percentile_hood": 42,
+        "dwell_peer_median_hours": 6.4,
         "vehicle_use_type": "standing",
         "vehicle_model_name": "Astro"
       }
@@ -610,10 +615,13 @@ GET /api/v1/devices/current?form_factor=scooter
         "is_disabled": false,
         "is_reserved": true,
         "current_range_meters": 38110,
+        "battery_percent": 72,
         "propulsion_type": "electric",
         "number_failed_starts": 0,
         "first_observed_at_location": "2026-05-30T17:40:12+00:00",
         "reliability_tier": "unknown",
+        "dwell_percentile_hood": 18,
+        "dwell_peer_median_hours": 7.1,
         "vehicle_use_type": "sitting",
         "vehicle_model_name": "Apollo"
       }
@@ -622,6 +630,50 @@ GET /api/v1/devices/current?form_factor=scooter
   ]
 }
 ```
+
+#### Lean default payload + `?include=` opt-ins
+
+The default field set above is deliberately lean — this payload is
+re-downloaded every 90 s by low-end phones. Two field groups exist but
+are **off the wire unless requested** (`metadata.include` echoes what was
+applied):
+
+- `?include=ranks` → the seven analysis-mode battery-ranking fields:
+  `range_percentile_by_type`, `range_rank_unique_by_type`,
+  `range_rank_all_by_type`, `range_rank_all_devices`,
+  `range_rank_h3_8_peers`, `range_rank_h3_9_peers`,
+  `range_rank_h3_10_peers`.
+- `?include=h3` → `h3_8_index` / `h3_9_index` / `h3_10_index`, now
+  **string-encoded** in canonical h3 form (e.g. `"8928308280fffff"`).
+  When these fields were integers they exceeded JS `MAX_SAFE_INTEGER`
+  and lost precision in `JSON.parse`; the opt-in re-introduction fixes
+  the encoding at the same time. For most aggregation use cases prefer
+  [`/api/v1/h3/aggregates`](#get-apiv1h3aggregatesres8910), which does
+  the bucketing server-side.
+
+Combine groups with a comma: `?include=ranks,h3`. Unknown tokens → `400`.
+
+#### Conditional requests (ETag / 304)
+
+Every response carries `Cache-Control: public, max-age=30` and a weak
+ETag keyed on `(cycle_id, include tokens)`. Send it back and unchanged
+polls cost headers instead of megabytes:
+
+```javascript
+let etag = null;
+async function refresh() {
+  const r = await fetch("https://data.scooter.fyi/api/v1/devices/current",
+                        { headers: etag ? { "If-None-Match": etag } : {} });
+  if (r.status === 304) return;        // same cycle — nothing to redraw
+  etag = r.headers.get("ETag");
+  map.getSource("devices").setData(await r.json());
+}
+```
+
+The ETag changes only when a new cycle lands (~every 10 min). It is
+**weak** on purpose: `has_negative_report`, dwell values, and the tiers
+derived from them drift *within* a cycle, so a 304 can defer those by at
+most one cycle length.
 
 #### Feature property reference
 
@@ -633,19 +685,22 @@ GET /api/v1/devices/current?form_factor=scooter
 | `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins. May be null if the upstream payload omits a plate. **The raw plate is NOT exposed on this public endpoint** — it's served only by the bearer-gated `/api/v1/private/*` endpoints. |
 | `is_disabled` | bool \| null | `true` when the scooter is out of service (low battery, mechanical fault, impound). Disabled devices still count toward fleet totals because they occupy space. |
 | `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
-| `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. Pair with `propulsion_type` and the per-type `max_range_meters` to derive battery % — pedal-bike (`"human"`) entries have no battery. |
+| `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. |
+| `battery_percent` | int \| null | Server-computed 0–100 battery estimate: `current_range_meters / max_range_meters_for_type` (the per-type rated max from Veo's `vehicle_types.json`), rounded and clamped to [0, 100] — upstream range occasionally exceeds the rated max. `null` when it can't be derived (range missing — e.g. pedal-only `"human"` bikes — or the type has no rated max). Replaces the old client-side approximation that re-scanned the whole fleet for per-propulsion max ranges on every fetch. |
 | `propulsion_type` | string \| null | `"electric"`, `"electric_assist"` (pedal-assist), or `"human"` (pedal-only). Splits the `form_factor: "bicycle"` bucket into throttle e-bikes vs pedal-assist vs acoustic. |
-| `h3_8_index` / `h3_9_index` / `h3_10_index` | int \| null | [Uber H3](https://h3geo.org/) hexagonal cell IDs at resolutions 8 (~750m wide), 9 (~210m), and 10 (~75m). 64-bit integers. Same value across resolutions for stationary devices; change when the scooter moves. Useful for spatial aggregation client-side. |
-| `range_percentile_by_type` | string \| null | One of `"0"`, `"25"`, `"50"`, `"75"`. Which quartile of unique `current_range_meters` values **within the same `form_factor`** this scooter falls into. `"75"` = top quartile (most range). |
-| `range_rank_unique_by_type` | string \| null | `"x/y"` where `x` is the rank of this scooter's range value among the `y` *distinct* range values within its form_factor (ascending; ties share a position). |
-| `range_rank_all_by_type` | string \| null | `"x/y"` where `y` is the count of scooters of this form_factor and `x` is this scooter's rank ascending (1 = lowest range). **Ties get the highest position in the tied group**: 20 scooters tied for the top range in a fleet of 100 all show `"100/100"`. |
-| `range_rank_all_devices` | string \| null | Same as above but `y` = all eligible scooters across types. |
-| `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
+| `h3_8_index` / `h3_9_index` / `h3_10_index` | string \| null | **Opt-in via `?include=h3`.** [Uber H3](https://h3geo.org/) hexagonal cell IDs at resolutions 8 (~750m wide), 9 (~210m), and 10 (~75m), **string-encoded in canonical h3 form** (previously raw 64-bit integers, which exceed JS `MAX_SAFE_INTEGER`). Same value across resolutions for stationary devices; change when the scooter moves. Prefer `/api/v1/h3/aggregates` for per-cell rollups. |
+| `range_percentile_by_type` | string \| null | **Opt-in via `?include=ranks`.** One of `"0"`, `"25"`, `"50"`, `"75"`. Which quartile of unique `current_range_meters` values **within the same `form_factor`** this scooter falls into. `"75"` = top quartile (most range). |
+| `range_rank_unique_by_type` | string \| null | **Opt-in via `?include=ranks`.** `"x/y"` where `x` is the rank of this scooter's range value among the `y` *distinct* range values within its form_factor (ascending; ties share a position). |
+| `range_rank_all_by_type` | string \| null | **Opt-in via `?include=ranks`.** `"x/y"` where `y` is the count of scooters of this form_factor and `x` is this scooter's rank ascending (1 = lowest range). **Ties get the highest position in the tied group**: 20 scooters tied for the top range in a fleet of 100 all show `"100/100"`. |
+| `range_rank_all_devices` | string \| null | **Opt-in via `?include=ranks`.** Same as above but `y` = all eligible scooters across types. |
+| `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | **Opt-in via `?include=ranks`.** Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
 | `has_negative_report` | bool | `true` when ≥1 citizen-submitted report has been filed against this `vehicle_identifier` at this exact `h3_10_index` cell within the last 24h. Becomes `false` automatically when the scooter moves to a different h3_10 cell. Submit reports via `POST /api/v1/reports`. |
-| `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, and active negative reports. `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
+| `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, active negative reports, and peer-relative dwell outliers (a dwell-outlier per the rules under `dwell_percentile_hood` costs one extra tier, stacking with the absolute-dwell demerits). `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
 | `number_failed_starts` | int \| null | How many times the upstream `bike_id` rotated (someone started a rental) **without the scooter moving** since it arrived at its current location. Resets to 0 when the scooter moves. Null when the device isn't state-tracked (no plate in the upstream payload). |
 | `first_observed_at_location` | string \| null | UTC ISO 8601 timestamp of when we first observed the scooter at its current location. `now - first_observed_at_location` = dwell time. Resets when the scooter moves. Null when the device isn't state-tracked. |
-| `reliability_tier` | string | `"ok"`, `"unknown"`, or `"high_risk"` — a single "will it actually unlock?" signal. `high_risk`: an active negative report, ≥2 failed starts, 1 failed start + ≥24 h dwell, or ≥96 h dwell. `unknown`: device not state-tracked, or `quality_designation` is `"N/A"` (disabled/reserved/rangeless). `ok`: everything else. Formula lives in `src/quality.py` (`compute_reliability_tier`) so the audit stays reproducible. Unlike `quality_designation`, battery range never affects this field. |
+| `reliability_tier` | string | `"ok"`, `"unknown"`, or `"high_risk"` — a single "will it actually unlock?" signal. `high_risk`: an active negative report, ≥2 failed starts, 1 failed start + ≥24 h dwell, ≥72 h dwell (recalibrated from 96 h — 48 h is already the citywide p90), or a **peer-relative dwell outlier with ≥48 h dwell** (see `dwell_percentile_hood`). `unknown`: device not state-tracked, or `quality_designation` is `"N/A"` (disabled/reserved/rangeless). `ok`: everything else, including a single failed start with short dwell (one `bike_id` rotation can be a rebalancing scan). Formula lives in `src/quality.py` (`compute_reliability_tier`) so the audit stays reproducible. Unlike `quality_designation`, battery range never affects this field. |
+| `dwell_percentile_hood` | int \| null | 0–100: where this device's dwell sits (≤-fraction, self included) among its **local peers** — all state-tracked devices in `gridDisk(r9 cell, 1)` (its res-9 hex + 6 neighbors, ~0.74 km² centered on the device), widening to `gridDisk(r9, 2)` and then the citywide distribution whenever a ring has <5 peers. `null` when the device isn't state-tracked or no ≥5-peer set exists even citywide. A device is a **dwell outlier** when percentile ≥90 AND dwell ≥3× `dwell_peer_median_hours` AND dwell ≥24 h (absolute floor so high-turnover blocks can't flag fresh scooters). |
+| `dwell_peer_median_hours` | float \| null | Median dwell (hours, 1 decimal) of the peer set used for `dwell_percentile_hood` — lets the UI explain verdicts: "idle 31 h — 5× its block's typical 6 h". Same null conditions. |
 | `vehicle_use_type` | string \| null | `"sitting"` or `"standing"` — whether a rider sits or stands to operate the vehicle. Independent of `form_factor`: this is the accessibility-relevant distinction for compliance purposes, tracked as its own axis in case a future vehicle class doesn't follow the current pattern (every bicycle sits, every scooter stands, as of everything observed so far). Null for a `vehicle_type_id` we haven't classified in any way. See [Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6) for how this feeds the compliance snapshot. |
 | `vehicle_model_name` | string \| null | Veo's own in-app display name for the physical vehicle model — `"Astro"` (kick scooter), `"Cosmo"` (throttle e-bike, no pedals), or `"Apollo"` (two-person pedal e-bike, seated, ~18mph). Visually confirmed per `vehicle_type_id`, not read from any upstream field (Veo's GBFS feed doesn't expose model names). Null for a `vehicle_type_id` not yet confirmed — absence doesn't imply anything about the vehicle, just that nobody's looked yet. |
 
@@ -675,11 +730,12 @@ Until then, treat the public report flow as best-effort.
 - `coordinates` is `[longitude, latitude]` per the GeoJSON spec (note: x, y order — not lat/lon).
 - `id` and `properties.device_id` are the same value, duplicated for convenience: GeoJSON `id` is what map libraries use for feature interaction (click handlers, hovers); `properties.device_id` survives projection through layer styles.
 - `device_id` is the upstream Veo `bike_id`, which is **already public via Veo's GBFS feed** — no new privacy exposure.
-- Typical response sizes:
-  - All Denver devices (~5,900 features): ~470 KB JSON, ~95 KB gzip
-  - Filtered to scooters (~1,870 features): ~150 KB / ~32 KB gzip
-  - bbox-filtered (downtown ~500 features): ~40 KB / ~10 KB gzip
-- Recommended polling: **60–120 seconds**. The upstream cycle only fires every 10 minutes, so faster polling wastes bytes.
+- Typical response sizes (lean default field set — the pre-diet payload with `?include=ranks,h3` runs ~35–40% larger before compression):
+  - All Denver devices (~5,900 features): ~300 KB JSON, ~65 KB gzip
+  - Filtered to scooters (~1,870 features): ~95 KB / ~22 KB gzip
+  - bbox-filtered (downtown ~500 features): ~26 KB / ~7 KB gzip
+- Responses are gzip-compressed at the origin and brotli-recoded at the CDN edge for clients that prefer it; send `Accept-Encoding` as usual.
+- Recommended polling: **60–120 seconds with `If-None-Match`** (see the ETag section above) — unchanged polls return `304` for free. The upstream cycle only fires every 10 minutes, so faster polling wastes bytes.
 - For viewport-aware rendering, pass `bbox` to keep response sizes small. The server-side filter is index-backed and cheap.
 
 #### Map rendering example (MapLibre GL JS)
@@ -736,6 +792,132 @@ async function refresh() {
 map.on("moveend", refresh);
 refresh();
 ```
+
+---
+
+### `GET /api/v1/h3/aggregates?res=8|9|10`
+
+Per-cell aggregates on the [Uber H3](https://h3geo.org/) hex grid, for
+analysis-mode choropleth layers — colored hexes by device density, usage
+heat, battery, risk, or dwell — **without** downloading and aggregating
+the full devices payload client-side on every refresh.
+
+Derived entirely from the most recent completed cycle (plus the trailing
+24 h of trip events, anchored at that cycle's `snapshot_time`), so the
+response only changes when a new cycle lands: it carries a cycle-keyed
+weak ETag and `Cache-Control: public, max-age=600`.
+
+**Query parameters:**
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `res` | int | yes | H3 resolution: `8` (~750 m cells), `9` (~210 m), or `10` (~75 m). |
+
+**Request:**
+```http
+GET /api/v1/h3/aggregates?res=9
+```
+
+**Response 200:**
+```json
+{
+  "res": 9,
+  "cycle_id": "8f3a2d10-1234-4abc-8def-0123456789ab",
+  "snapshot_time": "2026-07-06T18:30:14+00:00",
+  "cells": {
+    "8928308280fffff": {
+      "device_count": 14,
+      "trips_started_24h": 31,
+      "starts_per_hour_peak": 4,
+      "avg_battery_percent": 62,
+      "risk_share": 0.21,
+      "avg_dwell_hours": 9.4
+    }
+    /* … ~1,800 occupied cells at res 9 … */
+  }
+}
+```
+
+**Response 503:** no completed cycle yet (cold start), `{ "detail": "no completed cycles yet" }`.
+
+#### Per-cell field reference
+
+| Field | Type | Description |
+|---|---|---|
+| `device_count` | int | Devices (`denver_core` only) currently parked in the cell. |
+| `trips_started_24h` | int | Successful starts whose **from**-position falls in this cell in the trailing 24 h ending at `snapshot_time`. A "start" is the state tracker observing a device leave its spot between consecutive cycles — the same movement event that resets dwell. Failed starts are a separate signal (`number_failed_starts` on the devices endpoint). |
+| `starts_per_hour_peak` | int | Max starts in any single UTC clock hour within that 24 h window — usage heat. |
+| `avg_battery_percent` | int \| null | Mean `battery_percent` of the cell's parked devices that have one; `null` when none do. |
+| `risk_share` | float \| null | Fraction (2 decimals) of the cell's parked devices with `reliability_tier == "high_risk"` — same formula as the devices endpoint, dwell outliers included. `null` for trip-only cells with `device_count` 0. |
+| `avg_dwell_hours` | float \| null | Mean dwell (1 decimal) of the cell's state-tracked devices; `null` when none are tracked. |
+
+#### Notes
+
+- **Cell keys are canonical h3 strings** (e.g. `"8928308280fffff"`), never
+  raw integers — the 64-bit ints exceed JS `MAX_SAFE_INTEGER` and lose
+  precision in `JSON.parse`. `h3-js` accepts them directly
+  (`h3.cellToBoundary(key)` → polygon ring for rendering).
+- A cell appears if it has **either** parked devices or trip starts;
+  fully-empty cells are omitted. Zero-fill client-side if you need dense
+  coverage.
+- Rough sizes: res 9 ≈ 1.8k occupied cells ≈ tens of KB before
+  compression; res 10 is a few× that, res 8 a few× less.
+- Poll like the devices endpoint: `If-None-Match` with the returned ETag;
+  a new cycle (~every 10 min) is the only thing that changes the payload.
+
+---
+
+### `GET /api/v1/equity-estimate?ranks=1,2`
+
+Device share inside a **candidate equity-rank cutoff** — the combined
+`er1`–`er6` tiers you select — from the most recent snapshot. This is a
+server-side stand-in for the client's 8k-point point-in-polygon pass:
+weak clients can render a "% of fleet in ranks ≤ 2" gauge from a
+sub-kilobyte response instead of geometry math over the full devices
+payload.
+
+The `erN` tiers [partition the scored area](#notes-on-the-layers) (a
+device is in at most one), so combining ranks is a plain sum of the
+per-tier fields `/api/v1/snapshots/latest` already carries — this
+endpoint just does the arithmetic where the bandwidth isn't paid for.
+
+**Query parameters:**
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `ranks` | string | yes | Comma-separated `EquityGroupRank` tiers to combine, each in 1..6. Duplicates deduped, order irrelevant: `ranks=1,2` ≡ `ranks=2,1`. |
+
+**Request:**
+```http
+GET /api/v1/equity-estimate?ranks=1,2
+```
+
+**Response 200:**
+```json
+{
+  "cycle_id": "8f3a2d10-1234-4abc-8def-0123456789ab",
+  "snapshot_time": "2026-07-06T18:30:14+00:00",
+  "ranks": [1, 2],
+  "total_devices": 2054,
+  "total_bikes": 1339,
+  "total_scooters": 715,
+  "percent_all_devices": 24.71,
+  "percent_all_bikes": 26.02,
+  "percent_all_scooters": 22.63
+}
+```
+
+- Percentages are against the citywide denominators
+  (`total_devices_denver` etc.), rounded to 2 decimals, `null` when the
+  denominator is 0 — the same conventions as `/api/v1/snapshots/latest`.
+- **Response 400:** malformed `ranks` (non-integer, empty, or outside 1..6).
+- **Response 503:** no snapshot yet.
+- Carries a weak ETag keyed on `(cycle_id, ranks)` and
+  `Cache-Control: public, max-age=60`.
+- Reminder: no `erN` combination is a confirmed compliance boundary today
+  — `percent_all_devices_v1` remains the primary RFP §3.0 metric (see
+  API_REQUIREMENTS.md §1.1a). This endpoint exists to preview candidate
+  cutoffs.
 
 ---
 
@@ -1192,7 +1374,8 @@ const delta = bikeShareV1 - bikeShareDenver;
 |---|---|---|
 | `200` | OK | Normal response. |
 | `202` | Accepted | Magic-link request accepted (says nothing about account existence). |
-| `400` | Bad query/body | Malformed `time`/`range` parameter, bad signature, unreadable receipt image. |
+| `304` | Not modified | `If-None-Match` matched the current ETag — empty body, keep what you have. See [Caching & compression](#caching--compression). |
+| `400` | Bad query/body | Malformed `time`/`range`/`ranks`/`include` parameter, bad signature, unreadable receipt image. |
 | `401` | Unauthenticated | Missing/invalid/expired bearer token, failed Google credential, dead magic link. Treat as signed out. |
 | `403` | Forbidden | Valid session but missing scope (`admin`, `supporter`). |
 | `404` | No data | Requested layer has no snapshots (cold start), or the resource isn't yours. |
@@ -1206,12 +1389,31 @@ Error responses are JSON: `{ "detail": "human-readable message" }`.
 
 ---
 
-## Caching
+## Caching & compression
 
-The pipeline doesn't yet set explicit `Cache-Control` headers. In
-practice you can safely cache responses for 30 s without missing fresh
-data. If you're proxying through Cloudflare or another CDN, set the
-edge cache TTL to ≤ 60 s.
+Explicit `Cache-Control` headers, per endpoint:
+
+| Endpoint | Cache-Control | ETag |
+|---|---|---|
+| `/api/v1/devices/current` | `public, max-age=30` | weak, keyed on `(cycle_id, include tokens)` |
+| `/api/v1/h3/aggregates` | `public, max-age=600` | weak, keyed on `(res, cycle_id)` |
+| `/api/v1/equity-estimate` | `public, max-age=60` | weak, keyed on `(cycle_id, ranks)` |
+| `/api/v1/boundaries` | `public, max-age=3600` | — |
+| `/api/v1/boundaries/{layer}` | `public, max-age=86400, stale-while-revalidate=604800` | — |
+| `/api/v1/reports/summary` | `public, max-age=600` | — |
+| `/api/v1/reports/export/monthly.csv` | `public, max-age=600` | — |
+| `/api/v1/meta/privacy` | `public, max-age=3600` | — |
+
+Endpoints not listed set no cache headers; caching those for ≤30 s is
+safe in practice (a new snapshot lands at most every 10 minutes).
+
+Where an ETag is served, poll with `If-None-Match` — an unchanged
+resource returns `304` with no body. All ETags are cycle-keyed: they
+change when a new ingest cycle lands, not before.
+
+Responses ≥1 KB are gzip-compressed at the origin
+(`Accept-Encoding: gzip`); behind Cloudflare the edge re-encodes to
+brotli for clients that prefer it.
 
 ---
 
