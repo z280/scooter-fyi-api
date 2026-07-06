@@ -929,7 +929,7 @@ retroactively.
 
 ### `POST /api/v1/reports/device`
 
-Report a scooter that failed you. Anonymous is fine (1/hour per IP);
+Report a scooter that failed you. Anonymous is fine (3/hour per IP);
 sending a bearer token links the report to your account (10/hour) and
 weighs it double in the public aggregates.
 

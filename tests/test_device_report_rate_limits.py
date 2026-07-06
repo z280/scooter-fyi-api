@@ -1,6 +1,6 @@
 """Rate-limit wiring for POST /api/v1/reports/device.
 
-Anonymous callers are capped at 1/hour per IP; authenticated callers at
+Anonymous callers are capped at 3/hour per IP; authenticated callers at
 10/hour per account. This pins both the limit *and* which bucket each path
 uses, so a swap (anon<->auth) or a window change can't slip through. It
 records the enforce() call rather than driving a real limiter, so no
@@ -71,7 +71,7 @@ def _app():
     return app
 
 
-def test_anonymous_report_is_limited_to_1_per_hour_per_ip(recorded):
+def test_anonymous_report_is_limited_to_3_per_hour_per_ip(recorded):
     client = TestClient(_app())
     # lat/lng supplied so the handler doesn't take the device_state h3 lookup.
     r = client.post("/api/v1/reports/device", json={
@@ -82,7 +82,7 @@ def test_anonymous_report_is_limited_to_1_per_hour_per_ip(recorded):
     assert len(recorded) == 1
     call = recorded[0]
     assert call["bucket"] == "device_report_ip"
-    assert call["limit"] == 1
+    assert call["limit"] == 3
     assert call["window_seconds"] == 3600
 
 

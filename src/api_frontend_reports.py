@@ -44,7 +44,7 @@ router = APIRouter()
 _REPORT_TYPES = ("failed_unlock", "dead_battery", "damaged")
 _DEDUPE_WINDOW_MINUTES = 30
 
-_LIMIT_DEVICE_ANON_PER_IP = (1, 3600)        # 1/hour per IP (anonymous)
+_LIMIT_DEVICE_ANON_PER_IP = (3, 3600)        # 3/hour per IP (anonymous)
 _LIMIT_DEVICE_AUTH_PER_ACCOUNT = (10, 3600)  # 10/hour per authenticated account
 _LIMIT_DISCOUNT_PER_ACCOUNT = (20, 86400)
 _LIMIT_EXPORT_PER_IP = (10, 3600)
