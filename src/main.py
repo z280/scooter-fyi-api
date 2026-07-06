@@ -19,6 +19,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .api_admin import router as admin_router
 from .api_auth import router as auth_router
 from .api_frontend_reports import router as frontend_reports_router
+from .api_h3 import router as h3_router
 from .api_legal import router as legal_router
 from .api_meta import router as meta_router
 from .api_rides import router as rides_router
@@ -86,6 +87,7 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.include_router(public_router)
+app.include_router(h3_router)
 app.include_router(admin_router)
 app.include_router(map_auth_router)
 app.include_router(private_router)
