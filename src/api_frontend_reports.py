@@ -107,16 +107,15 @@ def submit_device_report(
 
     with connection() as conn:
         with conn.cursor() as cur:
-            if user is None:
-                enforce(cur, bucket="device_report_ip", key=ip or "?",
-                        limit=_LIMIT_DEVICE_ANON_PER_IP[0],
-                        window_seconds=_LIMIT_DEVICE_ANON_PER_IP[1])
-            else:
-                enforce(cur, bucket="device_report_account", key=str(user.account_id),
-                        limit=_LIMIT_DEVICE_AUTH_PER_ACCOUNT[0],
-                        window_seconds=_LIMIT_DEVICE_AUTH_PER_ACCOUNT[1])
-
-            # Dedupe: reporter = account when signed in, else IP.
+            # Dedupe FIRST, rate-limit second: a deduped resubmission is a
+            # no-op (no new row, no new evidence) and must not consume
+            # rate-limit quota. With the tight anon bucket (3/hour per IP),
+            # metering before dedup would let one impatient rider triple-
+            # tapping "report" on a single scooter exhaust their whole
+            # hourly budget and get 429'd reporting a DIFFERENT broken
+            # scooter minutes later. The dedup probe is a cheap indexed
+            # SELECT, so leaving it unmetered is not an abuse vector.
+            # Reporter = account when signed in, else IP.
             if user is not None:
                 reporter_clause, reporter_val = "account_id = %s", user.account_id
             else:
@@ -133,8 +132,16 @@ def submit_device_report(
             )
             dup = cur.fetchone()
             if dup:
-                conn.commit()  # keep the rate-limit event
                 return {"id": int(dup[0]), "reported_at": dup[1].isoformat(), "deduped": True}
+
+            if user is None:
+                enforce(cur, bucket="device_report_ip", key=ip or "?",
+                        limit=_LIMIT_DEVICE_ANON_PER_IP[0],
+                        window_seconds=_LIMIT_DEVICE_ANON_PER_IP[1])
+            else:
+                enforce(cur, bucket="device_report_account", key=str(user.account_id),
+                        limit=_LIMIT_DEVICE_AUTH_PER_ACCOUNT[0],
+                        window_seconds=_LIMIT_DEVICE_AUTH_PER_ACCOUNT[1])
 
             # h3 anchor: reporter coords when given, else the scooter's
             # current cell (same anchoring rationale as sql/008).
