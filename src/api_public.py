@@ -9,14 +9,19 @@ import re
 from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Response
+import h3
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from . import boundaries
 from .daily_sla import _AVG_FIELDS
 from .dwell_stats import stats_for_cycle
 from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
 from .pg import connection
-from .quality import compute_quality_designation, compute_reliability_tier
+from .quality import (
+    compute_battery_percent,
+    compute_quality_designation,
+    compute_reliability_tier,
+)
 
 _COMPLIANCE_PASS_COLUMNS = tuple(compliance_pass_column(g) for g in COMPLIANCE_GROUPS)
 
@@ -220,8 +225,41 @@ def boundaries_geojson(layer: str, response: Response) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Current device locations (for map rendering)
 # ---------------------------------------------------------------------------
+# Opt-in field groups for /api/v1/devices/current. The default payload is
+# deliberately lean (low-end phones re-download it every 90 s); analysis-mode
+# extras come back via ?include=.
+_INCLUDE_TOKENS = ("ranks", "h3")
+
+# Off the wire by default; restored by ?include=ranks.
+_RANK_FIELDS = (
+    "range_percentile_by_type",
+    "range_rank_unique_by_type",
+    "range_rank_all_by_type",
+    "range_rank_all_devices",
+    "range_rank_h3_8_peers",
+    "range_rank_h3_9_peers",
+    "range_rank_h3_10_peers",
+)
+
+# Conservative client-side cache: the underlying cycle only changes every
+# ~10 min, but has_negative_report / dwell drift within a cycle. Pair with
+# the cycle-keyed ETag for cheap 304 revalidation on the 90 s poll loop.
+_DEVICES_CACHE_HEADER = "public, max-age=30"
+
+
+def _if_none_match_hit(request: Request, etag: str) -> bool:
+    inm = request.headers.get("if-none-match")
+    if not inm:
+        return False
+    if inm.strip() == "*":
+        return True
+    return etag in (t.strip() for t in inm.split(","))
+
+
 @router.get("/api/v1/devices/current")
 def devices_current(
+    request: Request,
+    response: Response,
     form_factor: str | None = Query(
         None,
         description='Filter by form_factor. One of "bicycle", "scooter". Default: no filter.',
@@ -238,7 +276,11 @@ def devices_current(
         None,
         description='Comma-separated "min_lon,min_lat,max_lon,max_lat" bounding box filter (WGS84).',
     ),
-) -> dict[str, Any]:
+    include: str | None = Query(
+        None,
+        description='Comma-separated opt-in field groups: "ranks" (the seven range_rank_*/range_percentile_by_type fields), "h3" (h3_8/9/10_index, string-encoded).',
+    ),
+) -> Any:
     """GeoJSON FeatureCollection of every device's current position,
     drawn from the most recent successfully-completed observation cycle.
 
@@ -248,6 +290,18 @@ def devices_current(
         const geo = await r.json();
         map.getSource("devices").setData(geo);
     """
+    tokens: set[str] = set()
+    if include:
+        tokens = {t.strip() for t in include.split(",") if t.strip()}
+        unknown = tokens.difference(_INCLUDE_TOKENS)
+        if unknown:
+            raise HTTPException(
+                400,
+                detail=(
+                    f"unknown include token(s): {', '.join(sorted(unknown))}. "
+                    f"Valid: {', '.join(_INCLUDE_TOKENS)}"
+                ),
+            )
     # Resolve which cycle to use
     with connection() as conn:
         with conn.cursor() as cur:
@@ -265,6 +319,20 @@ def devices_current(
             if not row:
                 raise HTTPException(503, detail="no completed cycles yet")
             cycle_id, snapshot_time = row[0], row[1]
+
+            # Weak, cycle-keyed ETag: the 90 s poll loop revalidates for
+            # free until a new cycle lands (~every 10 min). Weak because
+            # has_negative_report / dwell drift within a cycle — a 304
+            # defers those by at most one cycle. Tokens are part of the
+            # tag so ?include= variants can't collide at a shared cache.
+            etag = f'W/"devices:{cycle_id}:{"+".join(sorted(tokens))}"'
+            if _if_none_match_hit(request, etag):
+                return Response(
+                    status_code=304,
+                    headers={"ETag": etag, "Cache-Control": _DEVICES_CACHE_HEADER},
+                )
+            response.headers["ETag"] = etag
+            response.headers["Cache-Control"] = _DEVICES_CACHE_HEADER
 
             # Build the filter. All predicates prefix `r.` so they compose
             # with the EXISTS subquery on negative_reports below.
@@ -364,47 +432,49 @@ def devices_current(
             has_negative_report=bool(r[20]),
             is_dwell_outlier=is_dwell_outlier,
         )
+        properties: dict[str, Any] = {
+            "device_id": r[0],
+            "form_factor": r[1],
+            "spatial_status": r[4],
+            "vehicle_identifier": r[5],
+            "is_disabled": r[6],
+            "is_reserved": r[7],
+            "current_range_meters": r[8],
+            "battery_percent": compute_battery_percent(r[8], r[21]),
+            "propulsion_type": r[9],
+            "has_negative_report": bool(r[20]),
+            "quality_designation": quality,
+            "number_failed_starts": number_failed_starts,
+            "first_observed_at_location": r[23].isoformat() if r[23] else None,
+            "reliability_tier": reliability,
+            "dwell_percentile_hood": (
+                round(dstat.percentile * 100)
+                if dstat and dstat.percentile is not None
+                else None
+            ),
+            "dwell_peer_median_hours": (
+                round(dstat.peer_median_hours, 1)
+                if dstat and dstat.peer_median_hours is not None
+                else None
+            ),
+            "vehicle_use_type": r[24],
+            "vehicle_model_name": r[25],
+        }
+        if "h3" in tokens:
+            # String-encoded (canonical h3 hex form): the raw 64-bit ints
+            # exceed JS MAX_SAFE_INTEGER and silently lose precision in
+            # JSON.parse.
+            properties["h3_8_index"] = h3.int_to_str(int(r[10])) if r[10] is not None else None
+            properties["h3_9_index"] = h3.int_to_str(int(r[11])) if r[11] is not None else None
+            properties["h3_10_index"] = h3.int_to_str(int(r[12])) if r[12] is not None else None
+        if "ranks" in tokens:
+            for name, value in zip(_RANK_FIELDS, r[13:20]):
+                properties[name] = value
         features.append({
             "type": "Feature",
             "id": r[0],
             "geometry": {"type": "Point", "coordinates": [float(r[3]), float(r[2])]},
-            "properties": {
-                "device_id": r[0],
-                "form_factor": r[1],
-                "spatial_status": r[4],
-                "vehicle_identifier": r[5],
-                "is_disabled": r[6],
-                "is_reserved": r[7],
-                "current_range_meters": r[8],
-                "propulsion_type": r[9],
-                "h3_8_index": int(r[10]) if r[10] is not None else None,
-                "h3_9_index": int(r[11]) if r[11] is not None else None,
-                "h3_10_index": int(r[12]) if r[12] is not None else None,
-                "range_percentile_by_type": r[13],
-                "range_rank_unique_by_type": r[14],
-                "range_rank_all_by_type": r[15],
-                "range_rank_all_devices": r[16],
-                "range_rank_h3_8_peers": r[17],
-                "range_rank_h3_9_peers": r[18],
-                "range_rank_h3_10_peers": r[19],
-                "has_negative_report": bool(r[20]),
-                "quality_designation": quality,
-                "number_failed_starts": number_failed_starts,
-                "first_observed_at_location": r[23].isoformat() if r[23] else None,
-                "reliability_tier": reliability,
-                "dwell_percentile_hood": (
-                    round(dstat.percentile * 100)
-                    if dstat and dstat.percentile is not None
-                    else None
-                ),
-                "dwell_peer_median_hours": (
-                    round(dstat.peer_median_hours, 1)
-                    if dstat and dstat.peer_median_hours is not None
-                    else None
-                ),
-                "vehicle_use_type": r[24],
-                "vehicle_model_name": r[25],
-            },
+            "properties": properties,
         })
 
     return {
@@ -419,8 +489,78 @@ def devices_current(
                 "include_outliers": include_outliers,
                 "bbox": bbox,
             },
+            "include": sorted(tokens),
         },
         "features": features,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Equity estimate (server-side stand-in for the client's point-in-polygon pass)
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/equity-estimate")
+def equity_estimate(
+    request: Request,
+    response: Response,
+    ranks: str = Query(
+        ...,
+        description="Comma-separated EquityGroupRank tiers to combine, e.g. '1,2' for a rank-≤-2 cutoff. Each in 1..6.",
+    ),
+) -> Any:
+    """Device share inside the selected equity-rank tiers, from the most
+    recent snapshot.
+
+    The erN tiers partition the scored area (a device is in at most one),
+    so combining ranks is a plain sum of the per-tier snapshot fields —
+    the same numbers `/api/v1/snapshots/latest` carries, pre-combined here
+    so weak clients don't have to run an 8k-point point-in-polygon pass
+    (or download the full devices payload) to draw the cutoff gauge.
+    """
+    try:
+        rank_list = sorted({int(t) for t in ranks.split(",") if t.strip()})
+    except ValueError:
+        raise HTTPException(400, detail="ranks must be comma-separated integers, e.g. '1,2'")
+    if not rank_list or any(n < 1 or n > 6 for n in rank_list):
+        raise HTTPException(400, detail="ranks must be within 1..6")
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM snapshot_metadata_core ORDER BY snapshot_time DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(503, detail="no snapshots yet")
+            snap = _row_to_dict(cur, row)
+
+    # "+"-joined — _if_none_match_hit splits the header on commas, so an
+    # ETag must never contain one.
+    etag = f'W/"equity:{snap["cycle_id"]}:{"+".join(str(n) for n in rank_list)}"'
+    if _if_none_match_hit(request, etag):
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "public, max-age=60"})
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "public, max-age=60"
+
+    def _sum(prefix: str) -> int:
+        return sum(int(snap.get(f"{prefix}_er{n}") or 0) for n in rank_list)
+
+    def _pct(num: int, den: int | None) -> float | None:
+        return round(100.0 * num / den, 2) if den else None
+
+    total_devices = _sum("total_devices")
+    total_bikes = _sum("total_bike")
+    total_scooters = _sum("total_scooter")
+
+    return {
+        "cycle_id": str(snap["cycle_id"]),
+        "snapshot_time": snap["snapshot_time"],
+        "ranks": rank_list,
+        "total_devices": total_devices,
+        "total_bikes": total_bikes,
+        "total_scooters": total_scooters,
+        "percent_all_devices": _pct(total_devices, snap.get("total_devices_denver")),
+        "percent_all_bikes": _pct(total_bikes, snap.get("total_bike_denver")),
+        "percent_all_scooters": _pct(total_scooters, snap.get("total_scooter_denver")),
     }
 
 

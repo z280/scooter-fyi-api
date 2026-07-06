@@ -25,7 +25,7 @@ from .dwell_stats import stats_for_cycle
 from .identity import hash_plate
 from .map_auth_dep import MapUser, require_map_user
 from .pg import connection
-from .quality import compute_quality_designation
+from .quality import compute_battery_percent, compute_quality_designation
 
 log = logging.getLogger(__name__)
 
@@ -155,6 +155,7 @@ def private_devices_current(
                 "is_disabled": r[7],
                 "is_reserved": r[8],
                 "current_range_meters": r[9],
+                "battery_percent": compute_battery_percent(r[9], r[17]),
                 "propulsion_type": r[10],
                 "first_observed_at_location": r[11].isoformat() if r[11] else None,
                 "number_failed_starts": int(r[12]) if r[12] is not None else None,

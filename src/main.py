@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .api_admin import router as admin_router
@@ -79,6 +80,10 @@ app.add_middleware(
     https_only=session_https_only(),
     same_site="lax",
 )
+# Origin-side gzip so big JSON payloads (devices/current is the heavy one)
+# are compressed even for clients that bypass the CDN; behind Cloudflare
+# the edge re-encodes to brotli for browsers that prefer it.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.include_router(public_router)
 app.include_router(admin_router)
@@ -105,6 +110,8 @@ def root():
             "/api/v1/spatial-snapshot?layer=…",
             "/api/v1/analytics/trend?layer=…&name=…&range=7d",
             "/api/v1/devices/current",
+            "/api/v1/equity-estimate?ranks=1,2",
+            "/api/v1/h3/aggregates?res=9",
             "/api/v1/boundaries",
             "/api/v1/compliance/daily/latest",
             "/api/v1/auth/{google,magic-link,redeem,refresh,session,signout}",
