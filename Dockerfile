@@ -29,6 +29,9 @@ COPY config.json .
 COPY crontab /app/crontab
 COPY scripts/run-scheduler.sh /usr/local/bin/run-scheduler.sh
 RUN chmod +x /usr/local/bin/run-scheduler.sh
+# Operator-run analysis scripts only — scripts/client/ is frontend assets
+# and stays out of the image.
+COPY scripts/analyze_range_signal.py scripts/
 
 EXPOSE 8080
 
