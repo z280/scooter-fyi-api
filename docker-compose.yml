@@ -131,11 +131,15 @@ services:
       # supercronic on change.
       - scheduler_state:/app/state
     command: ["/usr/local/bin/run-scheduler.sh"]
+    # 1 GiB covers the peak job: the 02:00 archive's transient DuckDB
+    # process streaming a normal 48h raw_telemetry_points window to
+    # Parquet. 256M OOM'd on a 38M-row backlog (f34e4e2); the backlog is
+    # drained, so the temporary 6144M ceiling is no longer needed.
     deploy:
       resources:
         limits:
-          memory: 6144M
-    mem_limit: 6144m
+          memory: 1024M
+    mem_limit: 1024m
 
   cloudflared:
     image: cloudflare/cloudflared:latest
