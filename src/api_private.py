@@ -21,6 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from .dwell_stats import stats_for_cycle
 from .identity import hash_plate
 from .map_auth_dep import MapUser, require_map_user
 from .pg import connection
@@ -126,8 +127,11 @@ def private_devices_current(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
+    dwell_stats = stats_for_cycle(cycle_id)
+
     features = []
     for r in rows:
+        dstat = dwell_stats.get(r[5])
         quality = compute_quality_designation(
             current_range_meters=r[9],
             max_range_meters_for_type=r[17],
@@ -136,6 +140,7 @@ def private_devices_current(
             number_failed_starts=int(r[12]) if r[12] is not None else None,
             first_observed_at_location=r[11],
             has_negative_report=bool(r[18]),
+            is_dwell_outlier=bool(dstat and dstat.is_outlier),
         )
         features.append({
             "type": "Feature",
@@ -160,6 +165,16 @@ def private_devices_current(
                 "max_range_meters_for_type": r[17],
                 "has_negative_report": bool(r[18]),
                 "quality_designation": quality,
+                "dwell_percentile_hood": (
+                    round(dstat.percentile * 100)
+                    if dstat and dstat.percentile is not None
+                    else None
+                ),
+                "dwell_peer_median_hours": (
+                    round(dstat.peer_median_hours, 1)
+                    if dstat and dstat.peer_median_hours is not None
+                    else None
+                ),
                 "max_observed_range_meters": r[19],
                 "max_observed_range_at": r[20].isoformat() if r[20] else None,
                 "vehicle_use_type": r[21],

@@ -86,6 +86,9 @@ def _fake_db(monkeypatch):
         yield _FakeConn()
 
     monkeypatch.setattr(api_public, "connection", _conn)
+    # Peer-relative dwell stats run their own (real) query + cache — stub
+    # them out; the no-stats path must leave the dwell fields null.
+    monkeypatch.setattr(api_public, "stats_for_cycle", lambda cycle_id: {})
 
 
 def test_public_devices_current_omits_vehicle_plate(_fake_db):

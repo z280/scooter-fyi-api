@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 
 from . import boundaries
 from .daily_sla import _AVG_FIELDS
+from .dwell_stats import stats_for_cycle
 from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
 from .pg import connection
 from .quality import compute_quality_designation, compute_reliability_tier
@@ -331,6 +332,11 @@ def devices_current(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
+    # Peer-relative dwell stats are computed over the FULL denver_core
+    # fleet (own query + per-cycle cache in src/dwell_stats.py), never the
+    # filtered subset — a bbox request must not shrink anyone's peer set.
+    dwell_stats = stats_for_cycle(cycle_id)
+
     # vehicle_plate is deliberately NOT selected here — see src/identity.py
     # for the public/private identifier split. Only vehicle_identifier (the
     # HMAC) goes over an unauthenticated wire; the raw plate stays behind the
@@ -339,6 +345,8 @@ def devices_current(
     features = []
     for r in rows:
         number_failed_starts = int(r[22]) if r[22] is not None else None
+        dstat = dwell_stats.get(r[5])
+        is_dwell_outlier = bool(dstat and dstat.is_outlier)
         quality = compute_quality_designation(
             current_range_meters=r[8],
             max_range_meters_for_type=r[21],
@@ -347,12 +355,14 @@ def devices_current(
             number_failed_starts=number_failed_starts,
             first_observed_at_location=r[23],
             has_negative_report=bool(r[20]),
+            is_dwell_outlier=is_dwell_outlier,
         )
         reliability = compute_reliability_tier(
             number_failed_starts=number_failed_starts,
             first_observed_at_location=r[23],
             quality_designation=quality,
             has_negative_report=bool(r[20]),
+            is_dwell_outlier=is_dwell_outlier,
         )
         features.append({
             "type": "Feature",
@@ -382,6 +392,16 @@ def devices_current(
                 "number_failed_starts": number_failed_starts,
                 "first_observed_at_location": r[23].isoformat() if r[23] else None,
                 "reliability_tier": reliability,
+                "dwell_percentile_hood": (
+                    round(dstat.percentile * 100)
+                    if dstat and dstat.percentile is not None
+                    else None
+                ),
+                "dwell_peer_median_hours": (
+                    round(dstat.peer_median_hours, 1)
+                    if dstat and dstat.peer_median_hours is not None
+                    else None
+                ),
                 "vehicle_use_type": r[24],
                 "vehicle_model_name": r[25],
             },
