@@ -114,8 +114,8 @@ attribution, and supporter features.
 
 - `POST /api/v1/reports/device` with
   `{ vehicle_identifier, report_type: "failed_unlock" | "dead_battery" | "damaged", observed_at?, lat?, lng? }`.
-- Anonymous allowed (tight limits: 5/day per IP); authenticated reports
-  are linked to the account and weighted higher in aggregates.
+- Anonymous allowed (tight limits: 3/hour per IP); authenticated reports
+  are linked to the account (10/hour) and weighted higher in aggregates.
 - Idempotency: dedupe identical (vehicle, type, reporter) within 30 min.
 - **Feedback loop:** reports feed the §1.2 `reliability_tier` inputs and
   `has_negative_report`.
