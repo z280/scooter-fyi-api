@@ -37,6 +37,8 @@ below "poor"):
     dwell ≥ 24h                 : -2 tiers
     elif dwell ≥ 12h            : -1 tier
     elif daylight-hours ≥ 6     : -1 tier
+    dwell-outlier vs peers      : -1 tier   (stacks with the dwell/daylight
+                                  demerits above; see DWELL OUTLIERS below)
 
 Daylight hours are counted as the elapsed time since
 first_observed_at_location that falls within 8 AM – 8 PM Denver
@@ -48,8 +50,8 @@ N/A OVERRIDES (any of these forces N/A and skips all other rules):
     is_reserved is True
     current_range_meters is None
 
-RELIABILITY TIER (API_REQUIREMENTS.md §1.2)
--------------------------------------------
+RELIABILITY TIER (API_REQUIREMENTS.md §1.2, recalibrated 2026-07)
+-----------------------------------------------------------------
 `compute_reliability_tier` collapses the failure signals into a single
 public field answering "will this scooter actually unlock?" — distinct
 from quality_designation, which is dominated by battery range. Rules,
@@ -58,7 +60,8 @@ evaluated in order (first match wins):
     high_risk : has_negative_report
               | number_failed_starts ≥ 2
               | number_failed_starts == 1 AND dwell ≥ 24h
-              | dwell ≥ 96h                       (ghost-scooter idle)
+              | dwell ≥ 72h                       (ghost-scooter idle)
+              | dwell-outlier vs peers AND dwell ≥ 48h
     unknown   : device never state-tracked (no plate → both inputs None)
               | quality_designation == "N/A"     (disabled/reserved/rangeless)
     ok        : everything else
@@ -67,12 +70,57 @@ A single failed start with short dwell stays "ok" — one bike_id rotation
 can be a rebalancing scan, not a rider failure. Dwell counters reset when
 the scooter moves (see src/device_state.py), so both inputs are naturally
 scoped to the current location — that's the "recent window".
+
+The clean-dwell ghost threshold was recalibrated from 96h to 72h against
+the 2026-07-06 production snapshot (8,449 devices): citywide dwell
+percentiles were p50=7.2h / p90=48h / p95=76h, so 96h (~p97) was leaving
+hundreds of top-decile idlers marked "ok".
+
+DWELL OUTLIERS (peer-relative, API_REQUIREMENTS.md workstream 2026-07)
+----------------------------------------------------------------------
+Absolute dwell thresholds can't tell "31h idle on a block that turns
+over every 6h" (damning) from "31h idle where everything sits a day"
+(normal). `compute_dwell_peer_stats` judges each state-tracked device
+against its local peers:
+
+    peer set  : all state-tracked devices in gridDisk(h3_r9_cell, 1) —
+                the device's res-9 cell plus its 6 neighbors, ~0.74 km²
+                centered on the device (same area as an r8 cell without
+                the fixed-grid boundary lottery). The device itself is
+                a member of its own peer set. If that yields < 5 peers,
+                expand to gridDisk(r9, 2); if still < 5, fall back to
+                the citywide distribution. Fewer than 5 peers citywide
+                → no stats (percentile is None, never an outlier).
+    outlier   : dwell percentile ≥ 0.90 among ≥ 5 peers
+                AND dwell ≥ 3 × peer-median dwell
+                AND dwell ≥ 24h  (absolute floor: a high-turnover block
+                                  can't flag an objectively fresh scooter)
+
+The evidence is exposed publicly as `dwell_percentile_hood` (0-100) and
+`dwell_peer_median_hours` so the frontend can explain verdicts
+("idle 31h — 5× its block's typical 6h") instead of asserting them.
+Percentile is the ≤-fraction: share of peers (self included) whose dwell
+is ≤ this device's dwell.
+
+BATTERY PERCENT
+---------------
+`compute_battery_percent` derives a 0-100 integer from
+current_range_meters against the per-type rated max
+(max_range_meters_for_type, from Veo's GBFS vehicle_types.json), clamped
+to [0, 100] — upstream range occasionally exceeds the rated max. None
+when either input is missing (e.g. pedal-only bikes have no battery).
 """
 
 from __future__ import annotations
 
+from bisect import bisect_right
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from statistics import median
+from typing import Hashable, Iterable
 from zoneinfo import ZoneInfo
+
+import h3
 
 DENVER_TZ = ZoneInfo("America/Denver")
 
@@ -96,7 +144,14 @@ _DAY_END_HOUR = 20
 # Reliability-tier thresholds (see module docstring).
 _RELIABILITY_FS_HARD = 2           # failed starts that alone mean high_risk
 _RELIABILITY_FS_DWELL_HOURS = 24.0 # 1 failed start + this much dwell
-_RELIABILITY_IDLE_HOURS = 96.0     # dwell alone (ghost scooter)
+_RELIABILITY_IDLE_HOURS = 72.0     # dwell alone (ghost scooter; was 96h pre-recalibration)
+_RELIABILITY_OUTLIER_DWELL_HOURS = 48.0  # peer-relative dwell outlier + this much dwell
+
+# Dwell-outlier thresholds (see module docstring).
+_DWELL_OUTLIER_MIN_PEERS = 5       # below this, widen the ring / fall back
+_DWELL_OUTLIER_PERCENTILE = 0.90   # ≤-fraction within the peer set
+_DWELL_OUTLIER_MEDIAN_MULT = 3.0   # dwell must be ≥ this × peer median
+_DWELL_OUTLIER_FLOOR_HOURS = 24.0  # absolute floor; high-turnover blocks can't flag fresh scooters
 
 
 def _baseline_tier(range_m: int, max_range_m: int | None) -> str:
@@ -144,6 +199,107 @@ def daylight_hours_between(start: datetime, end: datetime) -> float:
     return total
 
 
+@dataclass(frozen=True)
+class DwellPeerStats:
+    """Peer-relative dwell evidence for one state-tracked device.
+
+    `percentile` / `peer_median_hours` are None when even the citywide
+    fallback has fewer than _DWELL_OUTLIER_MIN_PEERS members — the device
+    then can't be an outlier either.
+    """
+
+    dwell_hours: float
+    percentile: float | None       # ≤-fraction in [0, 1] within the peer set
+    peer_median_hours: float | None
+    peer_count: int
+    is_outlier: bool
+
+
+def compute_dwell_peer_stats(
+    entries: Iterable[tuple[Hashable, int | None, float | None]],
+) -> dict[Hashable, DwellPeerStats]:
+    """Peer-relative dwell stats for a whole fleet snapshot.
+
+    ``entries`` is (key, h3_9_index, dwell_hours) per device; devices with
+    dwell_hours None (not state-tracked) are excluded from peer sets and
+    get no stats. h3_9_index is the raw 64-bit integer as stored; devices
+    without one only ever compare citywide.
+
+    Peer-set fallback per device: gridDisk(r9 cell, 1) → gridDisk(r9, 2)
+    → citywide, stopping at the first ring with ≥ _DWELL_OUTLIER_MIN_PEERS
+    members (the device itself included).
+    """
+    tracked: list[tuple[Hashable, str | None, float]] = []
+    cell_dwells: dict[str, list[float]] = {}
+    for key, h3_9, dwell in entries:
+        if dwell is None:
+            continue
+        cell = h3.int_to_str(h3_9) if h3_9 is not None else None
+        tracked.append((key, cell, dwell))
+        if cell is not None:
+            cell_dwells.setdefault(cell, []).append(dwell)
+
+    citywide = sorted(d for _, _, d in tracked)
+    citywide_median = median(citywide) if citywide else None
+
+    def _gather(cells: Iterable[str]) -> list[float]:
+        out: list[float] = []
+        for c in cells:
+            out.extend(cell_dwells.get(c, ()))
+        return out
+
+    stats: dict[Hashable, DwellPeerStats] = {}
+    for key, cell, dwell in tracked:
+        peers: list[float] | None = None
+        peer_median: float | None = None
+        if cell is not None:
+            for k in (1, 2):
+                ring = _gather(h3.grid_disk(cell, k))
+                if len(ring) >= _DWELL_OUTLIER_MIN_PEERS:
+                    peers = sorted(ring)
+                    peer_median = median(peers)
+                    break
+        if peers is None:
+            peers = citywide
+            peer_median = citywide_median
+
+        n = len(peers)
+        if n < _DWELL_OUTLIER_MIN_PEERS:
+            stats[key] = DwellPeerStats(
+                dwell_hours=dwell, percentile=None, peer_median_hours=None,
+                peer_count=n, is_outlier=False,
+            )
+            continue
+
+        pctl = bisect_right(peers, dwell) / n
+        assert peer_median is not None  # n ≥ min peers ⇒ median exists
+        stats[key] = DwellPeerStats(
+            dwell_hours=dwell,
+            percentile=pctl,
+            peer_median_hours=peer_median,
+            peer_count=n,
+            is_outlier=(
+                pctl >= _DWELL_OUTLIER_PERCENTILE
+                and dwell >= _DWELL_OUTLIER_MEDIAN_MULT * peer_median
+                and dwell >= _DWELL_OUTLIER_FLOOR_HOURS
+            ),
+        )
+    return stats
+
+
+def compute_battery_percent(
+    current_range_meters: int | None,
+    max_range_meters_for_type: int | None,
+) -> int | None:
+    """0-100 integer battery estimate, None when it can't be derived."""
+    if current_range_meters is None or not max_range_meters_for_type:
+        return None
+    if max_range_meters_for_type <= 0:
+        return None
+    pct = round(100 * current_range_meters / max_range_meters_for_type)
+    return max(0, min(100, pct))
+
+
 def compute_quality_designation(
     *,
     current_range_meters: int | None,
@@ -153,6 +309,7 @@ def compute_quality_designation(
     number_failed_starts: int | None,
     first_observed_at_location: datetime | None,
     has_negative_report: bool,
+    is_dwell_outlier: bool = False,
     now: datetime | None = None,
 ) -> str:
     """Return one of "N/A", "poor", "acceptable", "good", "great"."""
@@ -184,6 +341,9 @@ def compute_quality_designation(
             if daylight >= _DAYLIGHT_SOFT_HOURS:
                 tier = _knock_down(tier, 1)
 
+    if is_dwell_outlier:
+        tier = _knock_down(tier, 1)
+
     return tier
 
 
@@ -193,6 +353,7 @@ def compute_reliability_tier(
     first_observed_at_location: datetime | None,
     quality_designation: str,
     has_negative_report: bool,
+    is_dwell_outlier: bool = False,
     now: datetime | None = None,
 ) -> str:
     """Return "ok", "unknown", or "high_risk". Rules in module docstring."""
@@ -208,6 +369,8 @@ def compute_reliability_tier(
     if fs == 1 and dwell_hours >= _RELIABILITY_FS_DWELL_HOURS:
         return "high_risk"
     if dwell_hours >= _RELIABILITY_IDLE_HOURS:
+        return "high_risk"
+    if is_dwell_outlier and dwell_hours >= _RELIABILITY_OUTLIER_DWELL_HOURS:
         return "high_risk"
 
     if number_failed_starts is None and first_observed_at_location is None:

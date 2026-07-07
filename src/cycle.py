@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import traceback
@@ -127,8 +128,23 @@ def run_once() -> str | None:
         # Update per-scooter persistent state + history. Isolated try/except:
         # state-tracking is a derived layer, not load-bearing for the core
         # snapshot. A failure here shouldn't fail the cycle.
+        #
+        # Feed device_state the SPATIAL-CORRECTED statuses (post-buffer
+        # promote/demote), not the raw ingest bbox tags. run_cycle applies
+        # the buffered-polygon classification into result.raw_rows; if we
+        # passed tagged.devices here instead, a promoted/demoted border
+        # device would carry one status in raw_telemetry_points and a
+        # different one in device_state / device_history / the private
+        # lookup, which read from device_state.
+        corrected = {r["device_id"]: r["spatial_status"] for r in result.raw_rows}
+        corrected_devices = [
+            dataclasses.replace(
+                d, spatial_status=corrected.get(d.device_id, d.spatial_status)
+            )
+            for d in tagged.devices
+        ]
         try:
-            device_state.update_for_cycle(cycle_id, snapshot_time, tagged.devices)
+            device_state.update_for_cycle(cycle_id, snapshot_time, corrected_devices)
         except Exception as e:  # noqa: BLE001
             log.exception("device_state update failed for cycle %s", cycle_id)
             capture_exception(e)

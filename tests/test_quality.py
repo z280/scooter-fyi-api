@@ -210,11 +210,16 @@ def test_reliability_one_failed_start_plus_24h_dwell_is_high_risk():
     assert out == "high_risk"
 
 
-def test_reliability_96h_idle_alone_is_high_risk():
-    """The ghost-scooter rule: 4 days untouched, zero failed starts."""
+def test_reliability_72h_idle_alone_is_high_risk():
+    """The ghost-scooter rule: 3 days untouched, zero failed starts.
+
+    Recalibrated from 96h against the 2026-07-06 snapshot (48h was already
+    p90 citywide). The exact boundary is pinned in
+    tests/test_dwell_outliers.py::test_ghost_rule_72h_boundary.
+    """
     out = compute_reliability_tier(**{
         **_REL_BASE,
-        "now": _denver("2026-06-05", 10),  # 96h dwell
+        "now": _denver("2026-06-04", 10),  # 72h dwell
     })
     assert out == "high_risk"
 

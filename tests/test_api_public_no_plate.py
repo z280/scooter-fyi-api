@@ -15,8 +15,31 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import pytest
+from fastapi import Response
+from starlette.requests import Request
 
 from src import api_public
+
+
+def _request(headers: dict[str, str] | None = None) -> Request:
+    return Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/devices/current",
+        "headers": [
+            (k.lower().encode(), v.encode()) for k, v in (headers or {}).items()
+        ],
+        "query_string": b"",
+    })
+
+
+def _call(**kwargs):
+    defaults = dict(
+        form_factor=None, spatial_status=None, include_outliers=False,
+        bbox=None, include=None,
+    )
+    defaults.update(kwargs)
+    return api_public.devices_current(_request(), Response(), **defaults)
 
 _CYCLE_ID = uuid.UUID("8f3a2d10-1234-4abc-8def-0123456789ab")
 _SNAP = datetime(2026, 7, 5, 14, 30, tzinfo=timezone.utc)
@@ -86,17 +109,20 @@ def _fake_db(monkeypatch):
         yield _FakeConn()
 
     monkeypatch.setattr(api_public, "connection", _conn)
+    # Peer-relative dwell stats run their own (real) query + cache — stub
+    # them out; the no-stats path must leave the dwell fields null.
+    monkeypatch.setattr(api_public, "stats_for_cycle", lambda cycle_id, snapshot_time: {})
 
 
 def test_public_devices_current_omits_vehicle_plate(_fake_db):
-    out = api_public.devices_current(form_factor=None, spatial_status=None, include_outliers=False, bbox=None)
+    out = _call()
     props = out["features"][0]["properties"]
     assert "vehicle_plate" not in props, "raw plate must not appear on the public endpoint"
 
 
 def test_trailing_fields_still_map_after_plate_removal(_fake_db):
     """Proves the r[25]->r[24], r[26]->r[25] shift is correct."""
-    props = api_public.devices_current(form_factor=None, spatial_status=None, include_outliers=False, bbox=None)["features"][0]["properties"]
+    props = _call(include="ranks,h3")["features"][0]["properties"]
     assert props["vehicle_use_type"] == "standing"
     assert props["vehicle_model_name"] == "Astro"
     # And a spot-check that nothing else shifted:

@@ -148,6 +148,9 @@
   "device_tracking": {
     "stationary_threshold_meters": 16
   },
+  "spatial": {
+    "denver_core_buffer_meters": 200
+  },
   "logging": {
     "level": "INFO"
   }
