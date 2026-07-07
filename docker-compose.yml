@@ -54,9 +54,6 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
       AUTH_ALLOWED_GITHUB_ORGS: ${AUTH_ALLOWED_GITHUB_ORGS}
-      MAP_OIDC_CLIENT_ID: ${MAP_OIDC_CLIENT_ID}
-      MAP_OIDC_CLIENT_SECRET: ${MAP_OIDC_CLIENT_SECRET}
-      MAP_AUTH_ALLOWED_GITHUB_ORGS: ${MAP_AUTH_ALLOWED_GITHUB_ORGS}
       SESSION_SECRET: ${SESSION_SECRET}
       # Accounts & sessions (API_REQUIREMENTS.md §2-§4) — without these,
       # api_auth.py/api_profile.py/stripe_webhook.py 503 even with a
