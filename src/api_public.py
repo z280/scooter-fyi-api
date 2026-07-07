@@ -433,7 +433,6 @@ def devices_current(
         is_dwell_outlier = bool(dstat and dstat.is_outlier)
         quality = compute_quality_designation(
             current_range_meters=r[8],
-            max_range_meters_for_type=r[21],
             is_disabled=r[6],
             is_reserved=r[7],
             number_failed_starts=number_failed_starts,
@@ -456,7 +455,7 @@ def devices_current(
             "is_disabled": r[6],
             "is_reserved": r[7],
             "current_range_meters": r[8],
-            "battery_percent": compute_battery_percent(r[8], r[21]),
+            "battery_percent": compute_battery_percent(r[8]),
             "propulsion_type": r[9],
             "has_negative_report": bool(r[20]),
             "quality_designation": quality,

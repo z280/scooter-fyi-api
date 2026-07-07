@@ -199,7 +199,6 @@ def test_outlier_demerit_stacks_with_dwell_demerit():
     """great baseline − 2 (dwell ≥ 24h) − 1 (outlier) → poor."""
     base = dict(
         current_range_meters=50_000,
-        max_range_meters_for_type=52_800,
         is_disabled=False,
         is_reserved=False,
         number_failed_starts=0,

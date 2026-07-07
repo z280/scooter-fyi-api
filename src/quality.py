@@ -16,17 +16,19 @@ Ordered from worst to best:
     "good"
     "great"
 
-BASELINE (from current_range_meters alone)
-------------------------------------------
+BASELINE (from battery percent — recovered SoC, see BATTERY PERCENT)
+--------------------------------------------------------------------
 
-    great       : range ≥ 75% of max_range_meters_for_type
-    good        : range ≥ 24,140 m (≈ 15 miles)
-    acceptable  : range ≥ 12,875 m (≈ 8 miles)
-    poor        : range  <  12,875 m
+    great       : battery ≥ 75%
+    good        : battery ≥ 53%   (≈ old 24,140 m / 15 mi cutoff)
+    acceptable  : battery ≥ 28%   (≈ old 12,875 m / 8 mi cutoff)
+    poor        : battery <  28%
 
-If `max_range_meters_for_type` is unknown, the "great" tier is
-unreachable from baseline (treated as `good` if the absolute threshold
-is met).
+Thresholds were re-expressed from meters to percent when battery percent
+switched to exact SoC recovery (API_REQUIREMENTS.md §7.1): the old
+"great" rule (≥ 75% of the rated per-type max) was unreachable for
+bicycles, whose rated max (67,000 m) exceeds the highest value the feed
+ever emits (45,293 m).
 
 DEMERITS (apply in order; each knocks the tier DOWN one step, never
 below "poor"):
@@ -104,18 +106,26 @@ is ≤ this device's dwell.
 
 BATTERY PERCENT
 ---------------
-`compute_battery_percent` derives a 0-100 integer from
-current_range_meters against the per-type rated max
-(max_range_meters_for_type, from Veo's GBFS vehicle_types.json), clamped
-to [0, 100] — upstream range occasionally exceeds the rated max. None
-when either input is missing (e.g. pedal-only bikes have no battery).
+`compute_battery_percent` recovers the exact 0-100 integer SoC behind
+current_range_meters: the feed emits one fleet-wide 100-value lookup
+table for every vehicle type (verified stable across a 37-day archive by
+scripts/analyze_range_signal.py), so percent = the value's rank in
+data/range_soc_lut.json. Values outside the table (vendor drift) fall
+back to linear scaling against the observed 45,293 m full-charge cap and
+log a warning. None when range is missing (e.g. pedal-only bikes have no
+battery). The per-type rated max is NOT used — it's fiction (a full
+bicycle would read 68% against it).
 """
 
 from __future__ import annotations
 
-from bisect import bisect_right
+import json
+import logging
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
 from statistics import median
 from typing import Hashable, Iterable
 from zoneinfo import ZoneInfo
@@ -127,10 +137,13 @@ DENVER_TZ = ZoneInfo("America/Denver")
 # Tier ladder, worst → best (poor is index 0; "N/A" is sentinel).
 _TIERS = ("poor", "acceptable", "good", "great")
 
-# Baseline thresholds (meters).
-_GOOD_MIN_METERS = 24_140        # ≈ 15 mi
-_ACCEPTABLE_MIN_METERS = 12_875  # ≈ 8 mi
-_GREAT_FRAC_OF_MAX = 0.75
+# Baseline thresholds (battery percent — true SoC via the lookup table).
+# Percent equivalents of the previous meter cutoffs against the observed
+# 45,293 m full-charge cap (the rated per-type max they used to be scaled
+# by is fiction — see API_REQUIREMENTS.md §7.1).
+_GREAT_MIN_PCT = 75
+_GOOD_MIN_PCT = 53        # ≈ old 24,140 m (≈ 15 mi nominal)
+_ACCEPTABLE_MIN_PCT = 28  # ≈ old 12,875 m (≈ 8 mi nominal)
 
 # Dwell thresholds (hours).
 _DWELL_HARD_HOURS = 24.0
@@ -154,13 +167,13 @@ _DWELL_OUTLIER_MEDIAN_MULT = 3.0   # dwell must be ≥ this × peer median
 _DWELL_OUTLIER_FLOOR_HOURS = 24.0  # absolute floor; high-turnover blocks can't flag fresh scooters
 
 
-def _baseline_tier(range_m: int, max_range_m: int | None) -> str:
-    """Tier from range alone, no demerits."""
-    if max_range_m and max_range_m > 0 and range_m >= max_range_m * _GREAT_FRAC_OF_MAX:
+def _baseline_tier(battery_percent: int) -> str:
+    """Tier from battery percent alone, no demerits."""
+    if battery_percent >= _GREAT_MIN_PCT:
         return "great"
-    if range_m >= _GOOD_MIN_METERS:
+    if battery_percent >= _GOOD_MIN_PCT:
         return "good"
-    if range_m >= _ACCEPTABLE_MIN_METERS:
+    if battery_percent >= _ACCEPTABLE_MIN_PCT:
         return "acceptable"
     return "poor"
 
@@ -287,23 +300,46 @@ def compute_dwell_peer_stats(
     return stats
 
 
-def compute_battery_percent(
-    current_range_meters: int | None,
-    max_range_meters_for_type: int | None,
-) -> int | None:
-    """0-100 integer battery estimate, None when it can't be derived."""
-    if current_range_meters is None or not max_range_meters_for_type:
+@lru_cache(maxsize=1)
+def _soc_lut() -> tuple[int, ...]:
+    path = Path(__file__).resolve().parent.parent / "data" / "range_soc_lut.json"
+    return tuple(json.loads(path.read_text())["values"])
+
+
+# Values seen outside the LUT (vendor table drift); warn once per value.
+_unknown_range_values: set[int] = set()
+
+
+def compute_battery_percent(current_range_meters: int | None) -> int | None:
+    """0-100 integer battery estimate, None when it can't be derived.
+
+    Exact SoC recovery: the feed's range value is an integer percent
+    mapped through a fleet-wide 100-value lookup table (see
+    data/range_soc_lut.json), so percent = rank in that table. A value
+    outside the table means the vendor table drifted — fall back to
+    linear scaling against the observed full-charge cap and warn so the
+    LUT gets re-derived (scripts/analyze_range_signal.py section 2).
+    """
+    if current_range_meters is None:
         return None
-    if max_range_meters_for_type <= 0:
-        return None
-    pct = round(100 * current_range_meters / max_range_meters_for_type)
+    lut = _soc_lut()
+    r = int(current_range_meters)
+    i = bisect_left(lut, r)
+    if i < len(lut) and lut[i] == r:
+        return round(100 * i / (len(lut) - 1))
+    if r not in _unknown_range_values:
+        _unknown_range_values.add(r)
+        logging.getLogger(__name__).warning(
+            "current_range_meters=%d not in the SoC lookup table — vendor "
+            "table drift? Re-derive data/range_soc_lut.json", r,
+        )
+    pct = round(100 * r / lut[-1])
     return max(0, min(100, pct))
 
 
 def compute_quality_designation(
     *,
     current_range_meters: int | None,
-    max_range_meters_for_type: int | None,
     is_disabled: bool | None,
     is_reserved: bool | None,
     number_failed_starts: int | None,
@@ -317,7 +353,7 @@ def compute_quality_designation(
     if is_disabled or is_reserved or current_range_meters is None:
         return "N/A"
 
-    tier = _baseline_tier(current_range_meters, max_range_meters_for_type)
+    tier = _baseline_tier(compute_battery_percent(current_range_meters))
 
     # Hard overrides (any of these forces "poor")
     if has_negative_report:

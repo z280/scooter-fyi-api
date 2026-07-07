@@ -172,7 +172,6 @@ def h3_aggregates(
         is_outlier = bool(dstat and dstat.is_outlier)
         quality = compute_quality_designation(
             current_range_meters=range_m,
-            max_range_meters_for_type=max_range_m,
             is_disabled=is_disabled,
             is_reserved=is_reserved,
             number_failed_starts=fs,
@@ -192,7 +191,7 @@ def h3_aggregates(
         if tier == "high_risk":
             acc.high_risk += 1
 
-        battery = compute_battery_percent(range_m, max_range_m)
+        battery = compute_battery_percent(range_m)
         if battery is not None:
             acc.battery_sum += battery
             acc.battery_n += 1

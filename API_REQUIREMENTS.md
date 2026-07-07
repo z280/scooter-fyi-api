@@ -303,7 +303,7 @@ By early August there will be a full month. Then:
 | Repo rename | Pending — GitHub settings change (`veo-audit` → `scooter-fyi-api`), operator action. |
 | Equity boundary migration (new §1.1a) | In progress — see note below. `er1`–`er6` per-rank layers now tracked with full metric parity to v1/v2 (snapshot + daily SLA). `v1` retirement and the compliance-metric cutoff are still pending a DOTI decision. |
 | Vehicle classification + trip tracking (new §1.1b) | Implemented — see note below. `vehicle_use_type`/`vehicle_model_name` on devices/current + device_state/history; `sitting`/`standing` compliance parity with `bicycle`/`scooter`; `trip_events` + daily popularity rollup at 9am. |
-| §7 real range + battery percent | Design note (2026-07-07). §7.1 bugfix ready to build; §7.2 buildable now; §7.3 revisit gated on ≥30 days of post-016 archive (≥ 2026-08-05). |
+| §7 real range + battery percent | §7.1 implemented (2026-07-07): rank-based `battery_percent` via `data/range_soc_lut.json`, quality tiers re-expressed in SoC percent ('great' now reachable for bicycles). §7.2 buildable now; §7.3 revisit gated on ≥30 days of post-016 archive (≥ 2026-08-05). |
 
 **§1.1a Equity boundary migration note (2026-07-04, updated):** Denver
 DOTI delivered an authoritative, census-block-group-based Equity Index

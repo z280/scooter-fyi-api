@@ -32,10 +32,10 @@ assert _CELL_A != _CELL_B
 # (h3_idx, vid, is_disabled, is_reserved, range_m, max_range_m,
 #  failed_starts, first_observed_at_location, has_negative_report)
 _DEVICE_ROWS = [
-    # ok tier, battery 86, dwell 2h
+    # ok tier, battery 100 (LUT top), dwell 2h
     (h3.str_to_int(_CELL_A), "v-ok", False, False, 45293, 52800,
      0, _NOW - timedelta(hours=2), False),
-    # high_risk (live negative report), battery 50, dwell 30h
+    # high_risk (live negative report), battery 58 (off-LUT fallback), dwell 30h
     (h3.str_to_int(_CELL_A), "v-risk", False, False, 26400, 52800,
      0, _NOW - timedelta(hours=30), True),
     # untracked + rangeless: unknown tier, no battery, no dwell sample
@@ -142,7 +142,7 @@ def test_cell_keys_are_h3_strings(_fake_db):
 def test_device_cell_aggregates(_fake_db):
     a = _call()["cells"][_CELL_A]
     assert a["device_count"] == 3
-    assert a["avg_battery_percent"] == 68     # mean(86, 50); rangeless excluded
+    assert a["avg_battery_percent"] == 79     # mean(100, 58); rangeless excluded
     assert a["risk_share"] == 0.33            # 1 high_risk of 3
     assert a["avg_dwell_hours"] == 16.0       # mean(2h, 30h); untracked excluded
     assert a["trips_started_24h"] == 1

@@ -593,7 +593,7 @@ GET /api/v1/devices/current?form_factor=scooter
         "is_disabled": false,
         "is_reserved": false,
         "current_range_meters": 45293,
-        "battery_percent": 86,
+        "battery_percent": 100,
         "propulsion_type": "electric",
         "number_failed_starts": 0,
         "first_observed_at_location": "2026-05-30T16:10:09+00:00",
@@ -615,8 +615,8 @@ GET /api/v1/devices/current?form_factor=scooter
         "vehicle_identifier": "1b6e2d44a991f070",
         "is_disabled": false,
         "is_reserved": true,
-        "current_range_meters": 38110,
-        "battery_percent": 72,
+        "current_range_meters": 37538,
+        "battery_percent": 84,
         "propulsion_type": "electric",
         "number_failed_starts": 0,
         "first_observed_at_location": "2026-05-30T17:40:12+00:00",
@@ -687,7 +687,7 @@ most one cycle length.
 | `is_disabled` | bool \| null | `true` when the scooter is out of service (low battery, mechanical fault, impound). Disabled devices still count toward fleet totals because they occupy space. |
 | `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
 | `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. |
-| `battery_percent` | int \| null | Server-computed 0–100 battery estimate: `current_range_meters / max_range_meters_for_type` (the per-type rated max from Veo's `vehicle_types.json`), rounded and clamped to [0, 100] — upstream range occasionally exceeds the rated max. `null` when it can't be derived (range missing — e.g. pedal-only `"human"` bikes — or the type has no rated max). Replaces the old client-side approximation that re-scanned the whole fleet for per-propulsion max ranges on every fetch. |
+| `battery_percent` | int \| null | Server-computed 0–100 state of charge. Exact SoC recovery: upstream `current_range_meters` is an integer percent mapped through one fleet-wide 100-value lookup table (same table for every vehicle type — verified stable across a 37-day archive; see `data/range_soc_lut.json` and API_REQUIREMENTS.md §7.1), so percent = the value's rank in that table. Values outside the table (vendor drift) fall back to linear scaling against the observed 45,293 m full-charge cap, clamped to [0, 100]. `null` when range is missing (e.g. pedal-only `"human"` bikes). NOT scaled by the rated per-type max, which the archive disproved (a full bicycle would read 68%). |
 | `propulsion_type` | string \| null | `"electric"`, `"electric_assist"` (pedal-assist), or `"human"` (pedal-only). Splits the `form_factor: "bicycle"` bucket into throttle e-bikes vs pedal-assist vs acoustic. |
 | `h3_8_index` / `h3_9_index` / `h3_10_index` | string \| null | **Opt-in via `?include=h3`.** [Uber H3](https://h3geo.org/) hexagonal cell IDs at resolutions 8 (~750m wide), 9 (~210m), and 10 (~75m), **string-encoded in canonical h3 form** (previously raw 64-bit integers, which exceed JS `MAX_SAFE_INTEGER`). Same value across resolutions for stationary devices; change when the scooter moves. Prefer `/api/v1/h3/aggregates` for per-cell rollups. |
 | `range_percentile_by_type` | string \| null | **Opt-in via `?include=ranks`.** One of `"0"`, `"25"`, `"50"`, `"75"`. Which quartile of unique `current_range_meters` values **within the same `form_factor`** this scooter falls into. `"75"` = top quartile (most range). |

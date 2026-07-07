@@ -33,7 +33,7 @@ _BASE = dict(
 # ---------- N/A overrides --------------------------------------------------
 def test_disabled_is_na():
     out = compute_quality_designation(
-        current_range_meters=50000, max_range_meters_for_type=52800,
+        current_range_meters=50000,
         **{**_BASE, "is_disabled": True},
     )
     assert out == "N/A"
@@ -41,7 +41,7 @@ def test_disabled_is_na():
 
 def test_reserved_is_na():
     out = compute_quality_designation(
-        current_range_meters=50000, max_range_meters_for_type=52800,
+        current_range_meters=50000,
         **{**_BASE, "is_reserved": True},
     )
     assert out == "N/A"
@@ -49,49 +49,51 @@ def test_reserved_is_na():
 
 def test_no_range_is_na():
     out = compute_quality_designation(
-        current_range_meters=None, max_range_meters_for_type=52800, **_BASE,
+        current_range_meters=None, **_BASE,
     )
     assert out == "N/A"
 
 
 # ---------- Baseline tiers -------------------------------------------------
-def test_baseline_great_at_75pct_of_max():
-    """Cosmo scooter max = 52,800 m → 75% = 39,600 m."""
+def test_baseline_great_at_75_pct_battery():
+    """40,000 m ≈ 88% SoC (above the 75% 'great' floor)."""
     assert compute_quality_designation(
-        current_range_meters=40_000, max_range_meters_for_type=52_800, **_BASE,
+        current_range_meters=40_000, **_BASE,
     ) == "great"
 
 
 def test_baseline_good_at_15mi_absolute():
     assert compute_quality_designation(
-        current_range_meters=24_500, max_range_meters_for_type=52_800, **_BASE,
+        current_range_meters=24_500, **_BASE,
     ) == "good"
 
 
 def test_baseline_acceptable_at_8mi_absolute():
     assert compute_quality_designation(
-        current_range_meters=13_000, max_range_meters_for_type=52_800, **_BASE,
+        current_range_meters=13_000, **_BASE,
     ) == "acceptable"
 
 
 def test_baseline_poor_below_8mi():
     assert compute_quality_designation(
-        current_range_meters=5_000, max_range_meters_for_type=52_800, **_BASE,
+        current_range_meters=5_000, **_BASE,
     ) == "poor"
 
 
-def test_baseline_great_unreachable_without_max_range_known():
-    """If we don't know max_range_meters_for_type, we can't certify 'great'."""
+def test_baseline_great_reachable_at_full_charge():
+    """§7.1 regression: 45,293 m is the true full-charge value for EVERY
+    type (bicycles included). Under the old rated-max rule no bicycle
+    could ever reach 'great' (75% of 67,000 m > the 45,293 m cap)."""
     assert compute_quality_designation(
-        current_range_meters=40_000, max_range_meters_for_type=None, **_BASE,
-    ) == "good"
+        current_range_meters=45_293, **_BASE,
+    ) == "great"
 
 
 # ---------- Hard-override demerits -----------------------------------------
 def test_negative_report_forces_poor():
     """Even a 'great' baseline gets dragged to poor by a live report."""
     out = compute_quality_designation(
-        current_range_meters=50_000, max_range_meters_for_type=52_800,
+        current_range_meters=50_000,
         **{**_BASE, "has_negative_report": True},
     )
     assert out == "poor"
@@ -99,7 +101,7 @@ def test_negative_report_forces_poor():
 
 def test_two_failed_starts_forces_poor():
     out = compute_quality_designation(
-        current_range_meters=50_000, max_range_meters_for_type=52_800,
+        current_range_meters=50_000,
         **{**_BASE, "number_failed_starts": 2},
     )
     assert out == "poor"
@@ -108,7 +110,7 @@ def test_two_failed_starts_forces_poor():
 # ---------- Soft demerits --------------------------------------------------
 def test_one_failed_start_knocks_great_to_good():
     out = compute_quality_designation(
-        current_range_meters=50_000, max_range_meters_for_type=52_800,
+        current_range_meters=50_000,
         **{**_BASE, "number_failed_starts": 1},
     )
     assert out == "good"
@@ -116,7 +118,7 @@ def test_one_failed_start_knocks_great_to_good():
 
 def test_dwell_12_hours_knocks_one_tier():
     out = compute_quality_designation(
-        current_range_meters=50_000, max_range_meters_for_type=52_800,
+        current_range_meters=50_000,
         **{**_BASE,
            "first_observed_at_location": _denver("2026-06-01", 10),
            "now": _denver("2026-06-01", 22)},  # 12h elapsed
@@ -126,7 +128,7 @@ def test_dwell_12_hours_knocks_one_tier():
 
 def test_dwell_24_hours_knocks_two_tiers():
     out = compute_quality_designation(
-        current_range_meters=50_000, max_range_meters_for_type=52_800,
+        current_range_meters=50_000,
         **{**_BASE,
            "first_observed_at_location": _denver("2026-06-01", 10),
            "now": _denver("2026-06-02", 10)},  # 24h elapsed
@@ -137,7 +139,7 @@ def test_dwell_24_hours_knocks_two_tiers():
 def test_six_daylight_hours_knocks_one_tier_even_if_total_under_12h():
     """8am→3pm Denver = 7 daylight-hours; below 12h wall-clock total → daylight demerit kicks in."""
     out = compute_quality_designation(
-        current_range_meters=50_000, max_range_meters_for_type=52_800,
+        current_range_meters=50_000,
         **{**_BASE,
            "first_observed_at_location": _denver("2026-06-01", 8),
            "now": _denver("2026-06-01", 15)},  # 7h, all daylight
@@ -148,7 +150,7 @@ def test_six_daylight_hours_knocks_one_tier_even_if_total_under_12h():
 def test_overnight_hours_dont_count_as_daylight():
     """8pm→4am Denver = 8 wall-clock hours, ZERO daylight-hours."""
     out = compute_quality_designation(
-        current_range_meters=50_000, max_range_meters_for_type=52_800,
+        current_range_meters=50_000,
         **{**_BASE,
            "first_observed_at_location": _denver("2026-06-01", 20),
            "now": _denver("2026-06-02", 4)},  # 8h overnight, no daylight
@@ -161,7 +163,7 @@ def test_overnight_hours_dont_count_as_daylight():
 def test_failed_start_and_long_dwell_stack():
     """failed_starts==1 (-1) + dwell≥24h (-2) → start from 'great', drop 3 → 'poor'."""
     out = compute_quality_designation(
-        current_range_meters=50_000, max_range_meters_for_type=52_800,
+        current_range_meters=50_000,
         **{**_BASE,
            "number_failed_starts": 1,
            "first_observed_at_location": _denver("2026-06-01", 10),

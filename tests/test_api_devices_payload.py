@@ -159,9 +159,11 @@ def test_unknown_include_token_is_400(_fake_db):
 
 
 # ---------- battery + dwell evidence -----------------------------------------
-def test_battery_percent_derived_from_type_max(_fake_db):
+def test_battery_percent_full_charge_reads_100(_fake_db):
     props = _call()["features"][0]["properties"]
-    assert props["battery_percent"] == 86  # round(100 * 45293 / 52800)
+    # 45,293 m is the top of the SoC lookup table = 100% (§7.1; the old
+    # rated-max scaling read a full scooter as 86)
+    assert props["battery_percent"] == 100
 
 
 def test_dwell_evidence_fields_passed_through(_fake_db):
@@ -171,12 +173,13 @@ def test_dwell_evidence_fields_passed_through(_fake_db):
 
 
 def test_battery_percent_edge_cases():
-    assert compute_battery_percent(None, 52800) is None
-    assert compute_battery_percent(45293, None) is None
-    assert compute_battery_percent(45293, 0) is None
-    assert compute_battery_percent(60000, 52800) == 100  # clamp: range > rated max
-    assert compute_battery_percent(0, 52800) == 0
-    assert compute_battery_percent(26400, 52800) == 50
+    assert compute_battery_percent(None) is None
+    assert compute_battery_percent(0) == 0        # bottom of the LUT
+    assert compute_battery_percent(531) == 1      # rank 1 of 99
+    assert compute_battery_percent(45293) == 100  # top of the LUT
+    # off-table values (vendor drift) fall back to linear scaling + clamp
+    assert compute_battery_percent(60000) == 100
+    assert compute_battery_percent(26400) == 58   # round(100 * 26400 / 45293)
 
 
 # ---------- ETag / 304 --------------------------------------------------------

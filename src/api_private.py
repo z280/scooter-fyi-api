@@ -136,7 +136,6 @@ def private_devices_current(
         dstat = dwell_stats.get(r[5])
         quality = compute_quality_designation(
             current_range_meters=r[9],
-            max_range_meters_for_type=r[17],
             is_disabled=r[7],
             is_reserved=r[8],
             number_failed_starts=int(r[12]) if r[12] is not None else None,
@@ -157,7 +156,7 @@ def private_devices_current(
                 "is_disabled": r[7],
                 "is_reserved": r[8],
                 "current_range_meters": r[9],
-                "battery_percent": compute_battery_percent(r[9], r[17]),
+                "battery_percent": compute_battery_percent(r[9]),
                 "propulsion_type": r[10],
                 "first_observed_at_location": r[11].isoformat() if r[11] else None,
                 "number_failed_starts": int(r[12]) if r[12] is not None else None,
