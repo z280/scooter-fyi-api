@@ -1066,8 +1066,19 @@ supporter payment (see the Stripe webhook).
 30 days (the old token is revoked). Admin sessions last a fixed 24 h;
 refresh rotates without extending.
 
+**Discovering which doors are on:** call `GET /api/v1/auth/config` on
+load. It's public (no auth) and returns
+`{ "google_client_id": string | null, "google_enabled": bool, "magic_link_enabled": bool }`
+— the source of truth for whether to render the Google button (and the
+client id to initialize Google Identity Services with) and the magic-link
+form. The Google OAuth client id is **not** a secret; it only names the
+audience and is meant to be embedded in the browser. `*_enabled` mirror
+the `503`-when-unconfigured conditions on the endpoints below.
+Cached `public, max-age=300`.
+
 | Endpoint | Body / notes |
 |---|---|
+| `GET /api/v1/auth/config` | Public. → `{ google_client_id, google_enabled, magic_link_enabled }`. Render sign-in doors + init Google Identity Services from this. |
 | `POST /api/v1/auth/google` | `{ "credential": "<Google ID token>" }` from Google Identity Services / One Tap. Verified locally (signature, audience, expiry, `email_verified`). → `{token, expires}` |
 | `POST /api/v1/auth/magic-link` | `{ "email": "you@example.com" }` → always `202 { "sent": true }` (no account-existence oracle). Emails a single-use link (15-min TTL). Limits: 3/hour per email, 10/hour per IP. `502` if the email provider fails, `503` if unconfigured. |
 | `POST /api/v1/auth/redeem` | `{ "token": "<from the emailed link>" }` → `{token, expires}`. Single-use; `401` if invalid, expired, or already used. |

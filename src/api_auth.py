@@ -21,7 +21,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from .accounts import (
@@ -87,6 +87,32 @@ def google_client_id() -> str | None:
 
 def _session_response(token: str, expires: datetime) -> dict[str, Any]:
     return {"token": token, "expires": expires.isoformat()}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/auth/config
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/auth/config")
+def auth_config(response: Response) -> dict[str, Any]:
+    """Public sign-in capabilities for the frontend.
+
+    One source of truth for which sign-in doors to render and the Google
+    Identity Services client id to initialize with — so the frontend doesn't
+    hardcode the client id in a second place and can hide the Google option
+    when the server can't verify a token anyway.
+
+    The Google OAuth client id is NOT a secret: it's designed to be embedded
+    in the browser (it only names the audience; token exchange needs the
+    Google-held client secret, which never leaves the server). `*_enabled`
+    mirror the 503 conditions on the corresponding endpoints.
+    """
+    response.headers["Cache-Control"] = "public, max-age=300"
+    client_id = google_client_id()
+    return {
+        "google_client_id": client_id,
+        "google_enabled": client_id is not None,
+        "magic_link_enabled": postmark_credentials() is not None,
+    }
 
 
 # ---------------------------------------------------------------------------
