@@ -136,15 +136,6 @@
     "allowed_github_orgs": [],
     "callback_url": "https://data.scooter.fyi/admin/auth/callback"
   },
-  "map_auth": {
-    "allowed_github_orgs": ["scooter-club"],
-    "callback_url": "https://data.scooter.fyi/map-auth/callback",
-    "allowed_return_origins": [
-      "https://denver.scooter.fyi",
-      "https://denver-scooter-fyi.pages.dev"
-    ],
-    "token_ttl_hours": 8
-  },
   "accounts": {
     "magic_link_url_template": "https://denver.scooter.fyi/auth?ml={token}"
   },

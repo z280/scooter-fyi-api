@@ -11,7 +11,7 @@ PUBLIC:
                                           is ≤24h old (wired in
                                           api_public.py).
 
-PRIVATE (map-auth bearer required):
+PRIVATE (admin session scope required):
     GET  /api/v1/private/reports             list all reports
     GET  /api/v1/private/quality-feedback    list all feedback
 
@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from .client_ip import real_client_ip
 from .identity import hash_plate
-from .map_auth_dep import MapUser, require_map_user
+from .accounts import SessionUser, require_admin
 from .pg import connection
 
 log = logging.getLogger(__name__)
@@ -81,8 +81,8 @@ def submit_report(
     """Accept a citizen-submitted negative report. Public, no auth.
 
     Returns the persisted record's `id` and `reported_at`. The caller
-    cannot read other reports through this endpoint — that's behind
-    map-auth at /api/v1/private/reports.
+    cannot read other reports through this endpoint — that's behind the
+    admin session scope at /api/v1/private/reports.
     """
     # Resolve identity. Plate is ground truth; if both are given and
     # they disagree, prefer plate and log the mismatch.
@@ -185,7 +185,7 @@ _MAX_RANGE_DAYS = 90
 
 @router.get("/api/v1/private/reports")
 def list_reports(
-    user: MapUser = Depends(require_map_user),
+    user: SessionUser = Depends(require_admin),
     since: str | None = Query(None, description="ISO 8601 UTC; default = now - 24h"),
     until: str | None = Query(None, description="ISO 8601 UTC; default = now"),
     vehicle_identifier: str | None = Query(None, min_length=16, max_length=16),
@@ -235,7 +235,7 @@ def list_reports(
         "since": start.isoformat(),
         "until": end.isoformat(),
         "count": len(rows),
-        "viewed_by": user.login,
+        "viewed_by": user.email,
         "reports": [
             {
                 "id": int(r[0]),
@@ -318,7 +318,7 @@ def submit_quality_feedback(
 
 @router.get("/api/v1/private/quality-feedback")
 def list_quality_feedback(
-    user: MapUser = Depends(require_map_user),
+    user: SessionUser = Depends(require_admin),
     since: str | None = Query(None, description="ISO 8601 UTC; default = now - 7d"),
     until: str | None = Query(None, description="ISO 8601 UTC; default = now"),
     vehicle_identifier: str | None = Query(None, min_length=16, max_length=16),
@@ -368,7 +368,7 @@ def list_quality_feedback(
         "since": start.isoformat(),
         "until": end.isoformat(),
         "count": len(rows),
-        "viewed_by": user.login,
+        "viewed_by": user.email,
         "feedback": [
             {
                 "id": int(r[0]),

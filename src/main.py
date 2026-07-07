@@ -28,7 +28,6 @@ from .api_profile import router as profile_router
 from .api_public import router as public_router
 from .api_reports import router as reports_router
 from .config import load, session_https_only, session_secret
-from .map_auth import router as map_auth_router
 from .pg import run_migrations
 from .sentry import init as sentry_init
 from .stripe_webhook import router as stripe_router
@@ -89,7 +88,6 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(public_router)
 app.include_router(h3_router)
 app.include_router(admin_router)
-app.include_router(map_auth_router)
 app.include_router(private_router)
 app.include_router(reports_router)
 app.include_router(auth_router)

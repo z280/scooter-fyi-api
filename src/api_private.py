@@ -1,4 +1,4 @@
-"""Authenticated REST endpoints — gated by map-auth bearer tokens.
+"""Admin-only REST endpoints — gated by the Google `admin` session scope.
 
 These endpoints expose data that is privacy-sensitive to publish in the
 clear: raw plate numbers, persistent dwell times at a location, and the
@@ -7,9 +7,11 @@ the database (it's derived from public GBFS), but joining it under a
 stable identifier is the boundary GBFS's per-trip rotation is meant to
 prevent.
 
-All routes require `Authorization: Bearer <token>` minted by
-src/map_auth.py. Token verification + last_used_at tracking lives in
-src/map_auth_dep.py.
+All routes require `Authorization: Bearer <token>` for a session carrying
+the `admin` scope (see src/accounts.py `require_admin`). Admin is granted
+only via Google sign-in for an email on the ADMIN_EMAILS allowlist. This
+replaced the retired GitHub map-auth bearer flow (API_REQUIREMENTS.md
+§2.5).
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .dwell_stats import stats_for_cycle
 from .identity import hash_plate
-from .map_auth_dep import MapUser, require_map_user
+from .accounts import SessionUser, require_admin
 from .pg import connection
 from .quality import compute_battery_percent, compute_quality_designation
 
@@ -37,7 +39,7 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 @router.get("/api/v1/private/devices/current")
 def private_devices_current(
-    user: MapUser = Depends(require_map_user),
+    user: SessionUser = Depends(require_admin),
     form_factor: str | None = Query(None),
     spatial_status: str | None = Query(None),
     include_outliers: bool = Query(False),
@@ -189,7 +191,7 @@ def private_devices_current(
             "cycle_id": str(cycle_id),
             "snapshot_time": snapshot_time.isoformat(),
             "device_count": len(features),
-            "viewed_by": user.login,
+            "viewed_by": user.email,
             "filters": {
                 "form_factor": form_factor,
                 "spatial_status": spatial_status,
@@ -206,7 +208,7 @@ def private_devices_current(
 # ---------------------------------------------------------------------------
 @router.get("/api/v1/private/devices/lookup")
 def private_devices_lookup(
-    user: MapUser = Depends(require_map_user),
+    user: SessionUser = Depends(require_admin),
     plate: str | None = Query(None, description="Raw visible plate number, e.g. '1025543'"),
     vehicle_identifier: str | None = Query(None, description="16-char identifier"),
 ) -> dict[str, Any]:
@@ -271,7 +273,7 @@ _MAX_BATCH_PLATES = 200
 
 @router.get("/api/v1/private/devices/lookup-batch")
 def private_devices_lookup_batch(
-    user: MapUser = Depends(require_map_user),
+    user: SessionUser = Depends(require_admin),
     plates: str = Query(..., description="Comma-separated raw plate numbers"),
 ) -> dict[str, Any]:
     """Batch plate -> max_observed_range_meters (+ form factor / dwell)
@@ -343,7 +345,7 @@ def private_devices_lookup_batch(
                reverse=True)
 
     return {
-        "viewed_by": user.login,
+        "viewed_by": user.email,
         "requested": len(raw_plates),
         "found": found,
         "not_found": not_found,
@@ -361,7 +363,7 @@ _MAX_RANGE_DAYS = 365
 @router.get("/api/v1/private/devices/{vehicle_identifier}/history")
 def private_device_history(
     vehicle_identifier: str,
-    user: MapUser = Depends(require_map_user),
+    user: SessionUser = Depends(require_admin),
     since: str | None = Query(None, description="ISO 8601 UTC; default = now - 7d"),
     until: str | None = Query(None, description="ISO 8601 UTC; default = now"),
     limit: int = Query(2000, ge=1, le=10000),
@@ -445,7 +447,7 @@ def private_device_history(
         "since": start.isoformat(),
         "until": end.isoformat(),
         "stop_count": len(stops),
-        "viewed_by": user.login,
+        "viewed_by": user.email,
         "stops": stops,
     }
 
@@ -461,7 +463,7 @@ def private_device_history(
 # of this list for the high-battery cluster.
 @router.get("/api/v1/private/devices/max-ranges")
 def private_devices_max_ranges(
-    user: MapUser = Depends(require_map_user),
+    user: SessionUser = Depends(require_admin),
     form_factor: str | None = Query(None),
     limit: int = Query(5000, ge=1, le=20000),
 ) -> dict[str, Any]:
@@ -502,7 +504,7 @@ def private_devices_max_ranges(
         for r in rows
     ]
     return {
-        "viewed_by": user.login,
+        "viewed_by": user.email,
         "filters": {"form_factor": form_factor},
         "device_count": len(devices),
         "devices": devices,
@@ -514,7 +516,7 @@ def private_devices_max_ranges(
 # ---------------------------------------------------------------------------
 @router.get("/api/v1/private/trips/daily")
 def private_trips_daily(
-    user: MapUser = Depends(require_map_user),
+    user: SessionUser = Depends(require_admin),
     date: str = Query(..., description="Denver-local date, YYYY-MM-DD"),
     limit: int = Query(100, ge=1, le=5000),
 ) -> dict[str, Any]:
@@ -554,7 +556,7 @@ def private_trips_daily(
             rows = cur.fetchall()
 
     return {
-        "viewed_by": user.login,
+        "viewed_by": user.email,
         "trip_date": d.isoformat(),
         "total_trips": int(summary[0]),
         "distinct_vehicles_tripped": int(summary[1]),

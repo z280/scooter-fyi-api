@@ -77,20 +77,6 @@ class AuthConfig:
 
 
 @dataclass(frozen=True)
-class MapAuthConfig:
-    """Auth for the elevated-map flow — distinct from admin-panel auth.
-
-    Uses a SEPARATE GitHub OAuth app (different client_id/secret), so the
-    set of users who can read non-anonymized device data is decoupled from
-    the set who can manage cron/replay snapshots.
-    """
-    allowed_github_orgs: tuple[str, ...]   # e.g. ("scooter-club",)
-    callback_url: str                       # e.g. https://data.scooter.fyi/map-auth/callback
-    allowed_return_origins: tuple[str, ...] # exact-match origins for the return= parameter
-    token_ttl_hours: int                    # 8 by default
-
-
-@dataclass(frozen=True)
 class DeviceTrackingConfig:
     # Distance threshold (meters) below which a scooter is considered to have
     # not moved between cycles. Below this, a device_id rotation counts as a
@@ -134,7 +120,6 @@ class AppConfig:
     cors_origin_patterns: tuple[str, ...]
     r2: R2Config
     auth: AuthConfig
-    map_auth: MapAuthConfig
     accounts: AccountsConfig
     device_tracking: DeviceTrackingConfig
     spatial: SpatialConfig
@@ -194,14 +179,6 @@ def load() -> AppConfig:
             allowed_github_orgs=tuple(raw["auth"]["allowed_github_orgs"]),
             callback_url=raw["auth"]["callback_url"],
         ),
-        map_auth=MapAuthConfig(
-            allowed_github_orgs=tuple(raw.get("map_auth", {}).get("allowed_github_orgs", ["scooter-club"])),
-            callback_url=raw.get("map_auth", {}).get(
-                "callback_url", "https://data.scooter.fyi/map-auth/callback"
-            ),
-            allowed_return_origins=tuple(raw.get("map_auth", {}).get("allowed_return_origins", [])),
-            token_ttl_hours=int(raw.get("map_auth", {}).get("token_ttl_hours", 8)),
-        ),
         accounts=AccountsConfig(
             magic_link_url_template=(
                 raw.get("accounts", {}).get(
@@ -257,25 +234,10 @@ def oidc_credentials() -> dict[str, str] | None:
     return {"client_id": cid, "client_secret": cs}
 
 
-def map_oidc_credentials() -> dict[str, str] | None:
-    """Credentials for the SEPARATE OAuth app used by the elevated-map flow."""
-    cid = os.environ.get("MAP_OIDC_CLIENT_ID")
-    cs = os.environ.get("MAP_OIDC_CLIENT_SECRET")
-    if not cid or not cs:
-        return None
-    return {"client_id": cid, "client_secret": cs}
-
-
 def allowed_github_orgs() -> tuple[str, ...]:
     env = os.environ.get("AUTH_ALLOWED_GITHUB_ORGS", "")
     env_orgs = tuple(o.strip() for o in env.split(",") if o.strip())
     return env_orgs or load().auth.allowed_github_orgs
-
-
-def allowed_map_github_orgs() -> tuple[str, ...]:
-    env = os.environ.get("MAP_AUTH_ALLOWED_GITHUB_ORGS", "")
-    env_orgs = tuple(o.strip() for o in env.split(",") if o.strip())
-    return env_orgs or load().map_auth.allowed_github_orgs
 
 
 def session_secret() -> str:
