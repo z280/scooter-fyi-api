@@ -214,6 +214,81 @@ start there.
 
 ---
 
+## 7. Real range & calculated battery percent (design note, 2026-07-07)
+
+Grounded in the 37-day archive analysis (`scripts/analyze_range_signal.py`,
+44.2M points, 2026-05-31 → 2026-07-06). Full findings in that script's
+docstring; the three that drive this design:
+
+- `current_range_meters` is an **integer SoC percent behind a fleet-wide
+  100-value lookup table** (stable all 37 days, cap 45,293 m for every
+  vehicle type regardless of rated max). It carries zero per-model range
+  information.
+- Straight-line distance explains ≤3% of per-pair SoC burn (r² ≤ 0.03) —
+  round trips, van rebalancing, 1%-step quantization, and post-ride
+  rebound (+0.63% mean) swamp it. **Per-ride burn prediction is not
+  viable from GBFS pairs**; per-model aggregate burn rates are
+  (≈2.3–2.9 %SoC/km ⇒ real full-charge range ≈35–43 km, not the rated
+  45–67 km).
+- Idle readings are trustworthy: 98.5% of 42M stationary pairs show
+  exactly zero change.
+
+### 7.1 Fix `compute_battery_percent` (bug, ship first)
+
+`src/quality.py` currently divides by `max_range_meters_for_type` (Veo's
+rated max), which the data disproves: the true full-charge value is
+45,293 m for every type, so a full scooter reads 86% and a full bicycle
+reads **68%** — no bike can ever show 100. Two changes:
+
+- **Battery percent = rank of `current_range_meters` in the 100-value
+  lookup table** (exact integer SoC). Persist the table (data/ or a small
+  migration) with a fallback of `round(100 * r / 45_293)` for values not
+  in it; log/Sentry when the fallback fires so table drift is noticed.
+- **Quality tiers:** `_GREAT_FRAC_OF_MAX` is applied against rated max, so
+  "great" requires 50,250 m for bicycles — above the 45,293 m cap.
+  **No bicycle can currently earn "great."** Re-express tier thresholds
+  in recovered SoC percent.
+
+### 7.2 Real-range feature
+
+- **Model:** per-model burn-rate table `{model: {p25, p50, p75 %SoC/km}}`
+  computed offline from the archive (evolves from
+  `scripts/analyze_range_signal.py` §4 means; conservative = p75).
+  Stored in Postgres (small table, one row per model + computed_at);
+  refreshed by a monthly cli job, not per-request.
+- **API:** on `/api/v1/devices/current` features, alongside
+  `battery_percent`: `est_range_low_m` / `est_range_high_m` =
+  battery_percent ÷ p75/p25 burn — **an honest interval, not a false-
+  precision point estimate**. Optional `battery_settling: true` when the
+  device MOVED within the last ~20 min (rebound window — reading may be
+  ~1% low).
+- **Freshness signal:** a swap-detection flag (`recently_swapped`, SoC
+  jump ≥ +20% while stationary) is cheap from `device_state` deltas and
+  marks "guaranteed full battery" devices on the map.
+- **Frontend framing:** display as "~4–6 mi real range"; per-model, so
+  Apollo ≠ Astro at the same percent. This is the substance of the
+  "Range Maximizer" premium tier: honest range budget + elevation-aware
+  routing — NOT per-ride battery forecasting (see revisit below).
+
+### 7.3 Revisit after the data cooks (target: ≥ 2026-08-05)
+
+`vehicle_model_name` only exists in the archive from 2026-07-05
+(migration 016), so per-model regressions currently rest on ~2 days.
+By early August there will be a full month. Then:
+
+1. Re-run `scripts/analyze_range_signal.py`; per-model rows get
+   month-scale samples.
+2. Add a per-day slope breakdown — explain why the pre-016 period shows
+   slope ≈ 0 while the named-model days show 1.3–1.9 %SoC/km.
+3. Add a clean-trip filter (single-gap pairs, displacement > 1 km,
+   excluding zero-burn long moves = van transport) and re-check r².
+4. Decision gate: if clean-trip r² stays < ~0.3, close per-ride
+   prediction permanently and finalize the aggregate design above; if it
+   climbs, revisit with Valhalla routed distance as the regressor
+   (Section 2 routing plan).
+
+---
+
 ## Status
 
 | Item | Status |
@@ -228,6 +303,7 @@ start there.
 | Repo rename | Pending — GitHub settings change (`veo-audit` → `scooter-fyi-api`), operator action. |
 | Equity boundary migration (new §1.1a) | In progress — see note below. `er1`–`er6` per-rank layers now tracked with full metric parity to v1/v2 (snapshot + daily SLA). `v1` retirement and the compliance-metric cutoff are still pending a DOTI decision. |
 | Vehicle classification + trip tracking (new §1.1b) | Implemented — see note below. `vehicle_use_type`/`vehicle_model_name` on devices/current + device_state/history; `sitting`/`standing` compliance parity with `bicycle`/`scooter`; `trip_events` + daily popularity rollup at 9am. |
+| §7 real range + battery percent | Design note (2026-07-07). §7.1 bugfix ready to build; §7.2 buildable now; §7.3 revisit gated on ≥30 days of post-016 archive (≥ 2026-08-05). |
 
 **§1.1a Equity boundary migration note (2026-07-04, updated):** Denver
 DOTI delivered an authoritative, census-block-group-based Equity Index
