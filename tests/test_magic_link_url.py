@@ -18,9 +18,18 @@ _TOKEN = "abc123-xyz_TOKEN"
 
 
 def test_default_when_env_unset(monkeypatch):
+    """With no env override, the config.json default supplies the URL."""
     monkeypatch.delenv("MAGIC_LINK_URL_TEMPLATE", raising=False)
     url = api_auth._magic_link_url(_TOKEN)
     assert url == f"https://denver.scooter.fyi/auth?ml={_TOKEN}"
+
+
+def test_config_value_is_the_default(monkeypatch):
+    """The default lives in config.json (non-secret config), not just code."""
+    from src.config import load
+
+    monkeypatch.delenv("MAGIC_LINK_URL_TEMPLATE", raising=False)
+    assert load().accounts.magic_link_url_template == "https://denver.scooter.fyi/auth?ml={token}"
 
 
 def test_default_when_env_set_but_empty(monkeypatch):

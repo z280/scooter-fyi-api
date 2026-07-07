@@ -33,6 +33,7 @@ from .accounts import (
     upsert_account,
 )
 from .client_ip import real_client_ip
+from .config import load
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .pg import connection
 from .postmark import PostmarkError, postmark_credentials, send_magic_link
@@ -59,16 +60,21 @@ _DEFAULT_MAGIC_LINK_TEMPLATE = "https://denver.scooter.fyi/auth?ml={token}"
 
 
 def _magic_link_url(token: str) -> str:
+    # Precedence: a non-empty MAGIC_LINK_URL_TEMPLATE env override (staging),
+    # then the config.json default, then the hardcoded fallback.
+    #
     # `os.environ.get(key, default)` returns "" when the key is present but
-    # empty (default only applies to a MISSING key), and "".format(...) → ""
-    # — which silently ships a sign-in email with a blank link. Fall back to
-    # the default for unset/empty/whitespace, and for a template that dropped
-    # the {token} placeholder (which would email a tokenless, useless URL).
-    template = (os.environ.get("MAGIC_LINK_URL_TEMPLATE") or "").strip()
+    # empty (the default only applies to a MISSING key), and "".format(...)
+    # → "" — which silently shipped a sign-in email with a blank link. So an
+    # empty/whitespace env var is treated as unset, and a template missing
+    # the {token} placeholder (which would email a tokenless, useless URL)
+    # falls back to the default.
+    env = (os.environ.get("MAGIC_LINK_URL_TEMPLATE") or "").strip()
+    template = env or (load().accounts.magic_link_url_template or "").strip()
     if "{token}" not in template:
         if template:
             log.error(
-                "MAGIC_LINK_URL_TEMPLATE has no {token} placeholder (%r); using default",
+                "magic-link URL template has no {token} placeholder (%r); using default",
                 template,
             )
         template = _DEFAULT_MAGIC_LINK_TEMPLATE

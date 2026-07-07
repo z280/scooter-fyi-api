@@ -145,6 +145,9 @@
     ],
     "token_ttl_hours": 8
   },
+  "accounts": {
+    "magic_link_url_template": "https://denver.scooter.fyi/auth?ml={token}"
+  },
   "device_tracking": {
     "stationary_threshold_meters": 16
   },
