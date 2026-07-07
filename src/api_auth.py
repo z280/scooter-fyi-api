@@ -55,10 +55,23 @@ _LIMIT_SIGNOUT_PER_IP = (60, 3600)
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+_DEFAULT_MAGIC_LINK_TEMPLATE = "https://denver.scooter.fyi/auth?ml={token}"
+
+
 def _magic_link_url(token: str) -> str:
-    template = os.environ.get(
-        "MAGIC_LINK_URL_TEMPLATE", "https://denver.scooter.fyi/auth?ml={token}"
-    )
+    # `os.environ.get(key, default)` returns "" when the key is present but
+    # empty (default only applies to a MISSING key), and "".format(...) → ""
+    # — which silently ships a sign-in email with a blank link. Fall back to
+    # the default for unset/empty/whitespace, and for a template that dropped
+    # the {token} placeholder (which would email a tokenless, useless URL).
+    template = (os.environ.get("MAGIC_LINK_URL_TEMPLATE") or "").strip()
+    if "{token}" not in template:
+        if template:
+            log.error(
+                "MAGIC_LINK_URL_TEMPLATE has no {token} placeholder (%r); using default",
+                template,
+            )
+        template = _DEFAULT_MAGIC_LINK_TEMPLATE
     return template.format(token=token)
 
 

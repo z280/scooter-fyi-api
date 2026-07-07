@@ -42,6 +42,12 @@ def send_magic_link(email: str, link: str) -> None:
     if not creds:
         raise PostmarkError("postmark not configured (POSTMARK_TOKEN / POSTMARK_FROM)")
 
+    # Never ship the "tap to sign in" email with a blank/relative link — a
+    # linkless email is useless to the recipient and gives no signal that
+    # anything broke. Fail loudly instead (the auth route maps this to a 502).
+    if not link or not link.strip() or "://" not in link:
+        raise PostmarkError(f"refusing to send a magic-link email with a bad link: {link!r}")
+
     body = {
         "From": creds["sender"],
         "To": email,
