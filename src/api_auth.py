@@ -21,7 +21,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from .accounts import (
@@ -33,6 +33,7 @@ from .accounts import (
     upsert_account,
 )
 from .client_ip import real_client_ip
+from .config import load
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .pg import connection
 from .postmark import PostmarkError, postmark_credentials, send_magic_link
@@ -55,10 +56,28 @@ _LIMIT_SIGNOUT_PER_IP = (60, 3600)
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+_DEFAULT_MAGIC_LINK_TEMPLATE = "https://denver.scooter.fyi/auth?ml={token}"
+
+
 def _magic_link_url(token: str) -> str:
-    template = os.environ.get(
-        "MAGIC_LINK_URL_TEMPLATE", "https://denver.scooter.fyi/auth?ml={token}"
-    )
+    # Precedence: a non-empty MAGIC_LINK_URL_TEMPLATE env override (staging),
+    # then the config.json default, then the hardcoded fallback.
+    #
+    # `os.environ.get(key, default)` returns "" when the key is present but
+    # empty (the default only applies to a MISSING key), and "".format(...)
+    # → "" — which silently shipped a sign-in email with a blank link. So an
+    # empty/whitespace env var is treated as unset, and a template missing
+    # the {token} placeholder (which would email a tokenless, useless URL)
+    # falls back to the default.
+    env = (os.environ.get("MAGIC_LINK_URL_TEMPLATE") or "").strip()
+    template = env or (load().accounts.magic_link_url_template or "").strip()
+    if "{token}" not in template:
+        if template:
+            log.error(
+                "magic-link URL template has no {token} placeholder (%r); using default",
+                template,
+            )
+        template = _DEFAULT_MAGIC_LINK_TEMPLATE
     return template.format(token=token)
 
 
@@ -68,6 +87,32 @@ def google_client_id() -> str | None:
 
 def _session_response(token: str, expires: datetime) -> dict[str, Any]:
     return {"token": token, "expires": expires.isoformat()}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/auth/config
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/auth/config")
+def auth_config(response: Response) -> dict[str, Any]:
+    """Public sign-in capabilities for the frontend.
+
+    One source of truth for which sign-in doors to render and the Google
+    Identity Services client id to initialize with — so the frontend doesn't
+    hardcode the client id in a second place and can hide the Google option
+    when the server can't verify a token anyway.
+
+    The Google OAuth client id is NOT a secret: it's designed to be embedded
+    in the browser (it only names the audience; token exchange needs the
+    Google-held client secret, which never leaves the server). `*_enabled`
+    mirror the 503 conditions on the corresponding endpoints.
+    """
+    response.headers["Cache-Control"] = "public, max-age=300"
+    client_id = google_client_id()
+    return {
+        "google_client_id": client_id,
+        "google_enabled": client_id is not None,
+        "magic_link_enabled": postmark_credentials() is not None,
+    }
 
 
 # ---------------------------------------------------------------------------

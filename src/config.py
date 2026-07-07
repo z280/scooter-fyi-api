@@ -88,6 +88,16 @@ class DeviceTrackingConfig:
 
 
 @dataclass(frozen=True)
+class AccountsConfig:
+    # Template for the emailed magic-link sign-in URL; "{token}" is
+    # substituted with the single-use token. Non-secret, so it lives here
+    # rather than env-only — the env var MAGIC_LINK_URL_TEMPLATE still
+    # overrides when set to a non-empty value (staging), but this is the
+    # default so a blank/missing env var can't ship a linkless email.
+    magic_link_url_template: str
+
+
+@dataclass(frozen=True)
 class SpatialConfig:
     # Distance (meters) the actual Denver city polygon is buffered outward
     # before deciding denver_core membership. Veo lets riders start some
@@ -110,6 +120,7 @@ class AppConfig:
     cors_origin_patterns: tuple[str, ...]
     r2: R2Config
     auth: AuthConfig
+    accounts: AccountsConfig
     device_tracking: DeviceTrackingConfig
     spatial: SpatialConfig
     log_level: str
@@ -167,6 +178,13 @@ def load() -> AppConfig:
         auth=AuthConfig(
             allowed_github_orgs=tuple(raw["auth"]["allowed_github_orgs"]),
             callback_url=raw["auth"]["callback_url"],
+        ),
+        accounts=AccountsConfig(
+            magic_link_url_template=(
+                raw.get("accounts", {}).get(
+                    "magic_link_url_template", "https://denver.scooter.fyi/auth?ml={token}"
+                )
+            ),
         ),
         device_tracking=DeviceTrackingConfig(
             stationary_threshold_meters=float(

@@ -100,6 +100,7 @@ def _patched_config(boundaries):
         cors_origin_patterns=fake_cfg.cors_origin_patterns,
         r2=fake_cfg.r2,
         auth=fake_cfg.auth,
+        accounts=fake_cfg.accounts,
         device_tracking=fake_cfg.device_tracking,
         spatial=fake_cfg.spatial,
         log_level=fake_cfg.log_level,

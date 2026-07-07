@@ -114,6 +114,7 @@ def root():
             "/api/v1/h3/aggregates?res=9",
             "/api/v1/boundaries",
             "/api/v1/compliance/daily/latest",
+            "/api/v1/auth/config",
             "/api/v1/auth/{google,magic-link,redeem,refresh,session,signout}",
             "/api/v1/profile",
             "/api/v1/reports/{device,discount,summary,export/monthly.csv}",

@@ -136,6 +136,9 @@
     "allowed_github_orgs": [],
     "callback_url": "https://data.scooter.fyi/admin/auth/callback"
   },
+  "accounts": {
+    "magic_link_url_template": "https://denver.scooter.fyi/auth?ml={token}"
+  },
   "device_tracking": {
     "stationary_threshold_meters": 16
   },
