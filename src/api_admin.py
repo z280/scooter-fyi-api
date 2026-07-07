@@ -343,61 +343,6 @@ def scheduler_edit_save(
     return RedirectResponse(url="/admin/scheduler/edit?saved=1", status_code=303)
 
 
-@router.get("/map-tokens", response_class=HTMLResponse)
-def map_tokens_list(request: Request, user: dict = Depends(auth.require_admin)):
-    """List bearer tokens minted by the map-auth flow."""
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT token_sha256, github_login, github_user_id, github_orgs,
-                       issued_at, expires_at, revoked_at, last_used_at,
-                       issued_ip, user_agent,
-                       (expires_at < NOW()) AS expired
-                FROM api_tokens
-                ORDER BY issued_at DESC
-                LIMIT 200
-                """,
-            )
-            rows = [
-                {
-                    "token_sha256": r[0],
-                    "github_login": r[1],
-                    "github_user_id": r[2],
-                    "github_orgs": r[3] or [],
-                    "issued_at": r[4],
-                    "expires_at": r[5],
-                    "revoked_at": r[6],
-                    "last_used_at": r[7],
-                    "issued_ip": str(r[8]) if r[8] else None,
-                    "user_agent": r[9],
-                    "expired": bool(r[10]),
-                }
-                for r in cur.fetchall()
-            ]
-    return _render("map_tokens.html", user=user, rows=rows)
-
-
-@router.post("/map-tokens/{token_sha256}/revoke")
-def map_token_revoke(
-    token_sha256: str,
-    request: Request,
-    user: dict = Depends(auth.require_admin),
-):
-    """Mark a token revoked. Idempotent — already-revoked rows are untouched."""
-    if not _csrf_ok(request):
-        return RedirectResponse("/admin/map-tokens?error=cross-site", status_code=303)
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE api_tokens SET revoked_at = NOW() "
-                "WHERE token_sha256 = %s AND revoked_at IS NULL",
-                (token_sha256,),
-            )
-        conn.commit()
-    return RedirectResponse("/admin/map-tokens", status_code=303)
-
-
 @router.get("/regions", response_class=HTMLResponse)
 def regions(
     request: Request,

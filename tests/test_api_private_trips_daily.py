@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src import api_private
-from src.map_auth_dep import MapUser, require_map_user
+from src.accounts import SessionUser, require_admin
 
 SUMMARY_ROW = (42, 30, datetime(2026, 6, 16, 15, 0, tzinfo=timezone.utc))
 VEHICLE_ROWS = [
@@ -63,8 +63,10 @@ def _client(monkeypatch, summary=SUMMARY_ROW, vehicles=VEHICLE_ROWS):
     monkeypatch.setattr(api_private, "connection", fake_connection)
     app = FastAPI()
     app.include_router(api_private.router)
-    app.dependency_overrides[require_map_user] = lambda: MapUser(
-        login="tester", orgs=("scooter-club",)
+    app.dependency_overrides[require_admin] = lambda: SessionUser(
+        account_id=1, email="admin@example.com", scopes=("rider", "admin"),
+        supporter=False, expires_at=datetime.now(timezone.utc),
+        sliding=False, method="google", token_sha256="x",
     )
     return TestClient(app)
 

@@ -18,8 +18,11 @@ Expiry policy:
     admin sessions  — 24 h fixed: refresh rotates the token but keeps the
                       original expiry.
 
-The FastAPI dependencies live here too (require_session / require_admin),
-mirroring the map_auth_dep pattern.
+The FastAPI dependencies live here too: require_session (any valid
+session), require_admin (session carrying the `admin` scope — this
+gates the /api/v1/private/* endpoints that the retired GitHub map-auth
+bearer flow used to gate, per API_REQUIREMENTS.md §2.5), and
+require_supporter.
 """
 
 from __future__ import annotations

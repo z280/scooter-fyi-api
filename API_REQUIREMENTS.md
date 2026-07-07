@@ -221,7 +221,7 @@ start there.
 | §1.1 plate promotion | **Reverted.** Shipped in PR #8, then rolled back — `vehicle_plate` is no longer exposed on the public `/api/v1/devices/current`; it stays private-only (`/api/v1/private/*`). Any frontend "Unlock in Veo" deep link must source the plate from an authenticated endpoint or Veo's own GBFS `rental_uris`. |
 | §1.2 reliability tier + raw fields | Implemented (PR #8). Formula documented in `src/quality.py` and API.md. |
 | §2.1–§2.4 accounts, sessions, profile | Implemented (PR #9): `src/accounts.py`, `src/api_auth.py`, `src/api_profile.py`, `sql/012`. |
-| §2.5 GitHub OAuth retirement | Pending — gated on Google + magic links being live in prod and the frontend removing its hidden-tab gate in the same release. |
+| §2.5 GitHub OAuth retirement | **Done** — the GitHub "elevated map" OAuth flow (`map_auth.py`, `map_auth_dep.py`, the `scripts/client/` drop-ins, the `/admin` Map-tokens view, and the `api_tokens` table) is removed. The `/api/v1/private/*` endpoints it gated now require the Google `admin` session scope (`require_admin`). NOTE: the *operator* `/admin` panel keeps its own separate GitHub OAuth (`auth.py`) — that was never part of §2. Deploy prereq: `ADMIN_EMAILS` must be set so an admin session can actually be minted, else the private endpoints are unreachable. |
 | §3 reports + aggregates | Implemented (PR #9): `src/api_frontend_reports.py`, `src/receipts.py`, `src/geo.py`, `sql/013`. Device reports feed `has_negative_report`/`reliability_tier`. |
 | §4 Stripe + rides + badges | Implemented (PR #9): `src/stripe_webhook.py`, `src/api_rides.py`, `src/badges.py`, `sql/014`. |
 | §5 rate limits, env, privacy endpoint | Implemented (PR #9): `src/ratelimit.py`, `src/api_meta.py`, `.env.example`. |

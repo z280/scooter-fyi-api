@@ -8,6 +8,7 @@ injection, sorting/found-vs-not_found split — without a live Postgres.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -15,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from src import api_private
 from src.identity import hash_plate
-from src.map_auth_dep import MapUser, require_map_user
+from src.accounts import SessionUser, require_admin
 
 APOLLO_A = "1025861"
 APOLLO_B = "1022675"
@@ -69,8 +70,10 @@ def client(monkeypatch):
     monkeypatch.setattr(api_private, "connection", fake_connection)
     app = FastAPI()
     app.include_router(api_private.router)
-    app.dependency_overrides[require_map_user] = lambda: MapUser(
-        login="tester", orgs=("scooter-club",)
+    app.dependency_overrides[require_admin] = lambda: SessionUser(
+        account_id=1, email="admin@example.com", scopes=("rider", "admin"),
+        supporter=False, expires_at=datetime.now(timezone.utc),
+        sliding=False, method="google", token_sha256="x",
     )
     return TestClient(app)
 
