@@ -101,6 +101,7 @@ def _patched_config(boundaries):
         r2=fake_cfg.r2,
         auth=fake_cfg.auth,
         map_auth=fake_cfg.map_auth,
+        accounts=fake_cfg.accounts,
         device_tracking=fake_cfg.device_tracking,
         spatial=fake_cfg.spatial,
         log_level=fake_cfg.log_level,
