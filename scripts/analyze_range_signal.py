@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -83,9 +84,30 @@ def _r2_source() -> tuple[str, dict[str, str]]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--local", metavar="GLOB", help="read local parquet files instead of R2")
+    ap.add_argument("--workdir", default="/tmp/range_analysis",
+                    help="disk-backed db + spill dir; needs a few GB free (default %(default)s)")
+    ap.add_argument("--memory-limit", default="600MB",
+                    help="DuckDB memory cap — keep well under the container's "
+                         "cgroup limit (default %(default)s, sized for the 1 GiB worker)")
+    ap.add_argument("--threads", type=int, default=2,
+                    help="DuckDB threads; fewer threads = less peak memory (default %(default)s)")
     args = ap.parse_args()
 
-    con = duckdb.connect(":memory:")
+    # File-backed database + explicit memory cap. DuckDB sizes its memory
+    # budget from HOST RAM, not the container's cgroup limit, so an
+    # in-memory run inside the 1 GiB worker gets OOM-killed at the section-4
+    # window sort over the month-scale archive. A disk-backed db + capped
+    # memory_limit lets the big sort/materialization spill to disk instead.
+    workdir = Path(args.workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    dbfile = workdir / "range_analysis.duckdb"
+    dbfile.unlink(missing_ok=True)
+    con = duckdb.connect(str(dbfile))
+    con.execute(f"SET memory_limit='{args.memory_limit}';")
+    con.execute(f"SET threads={args.threads};")
+    con.execute(f"SET temp_directory='{workdir / 'spill'}';")
+    con.execute("SET preserve_insertion_order=false;")
+
     if args.local:
         glob = args.local
     else:
@@ -94,16 +116,20 @@ def main() -> None:
         for k, v in s3.items():
             con.execute(f"SET {k}='{v}';")
 
+    # Stage once: a single R2 scan into a compact local table that every
+    # section queries. FLOAT lat/lon keep ~1 m precision — plenty against
+    # the 50 m moved threshold — at half the width.
     # union_by_name: columns were added over time (003: range/identifier,
     # 016: model name) — older files simply yield NULLs for newer columns.
+    print("staging archive locally (single R2 scan) ...", flush=True)
     con.execute(
         f"""
-        CREATE VIEW pts AS
+        CREATE TABLE pts AS
         SELECT vehicle_identifier,
                snapshot_time,
-               CAST(latitude AS DOUBLE)  AS lat,
-               CAST(longitude AS DOUBLE) AS lon,
-               CAST(current_range_meters AS BIGINT) AS r,
+               CAST(latitude AS FLOAT)  AS lat,
+               CAST(longitude AS FLOAT) AS lon,
+               CAST(current_range_meters AS INTEGER) AS r,
                COALESCE(vehicle_model_name, form_factor) AS model
         FROM read_parquet('{glob}', union_by_name=true)
         WHERE current_range_meters IS NOT NULL
@@ -180,12 +206,14 @@ def main() -> None:
             FROM pts
             WINDOW w AS (PARTITION BY vehicle_identifier ORDER BY snapshot_time)
         )
-        SELECT lagged.*,
-               EPOCH(snapshot_time - t0) AS gap_s,
-               -- equirectangular approx; fine at trip scale in one metro
-               111320.0 * SQRT(POW(lat - lat0, 2)
-                             + POW((lon - lon0) * COS(RADIANS(lat)), 2)) AS dist_m,
-               lut1.pct - lut0.pct AS dsoc
+        -- keep only the columns sections 4-5 read; the full lagged row set
+        -- at month scale is what blew the memory budget
+        SELECT lagged.vehicle_identifier,
+               lagged.snapshot_time,
+               lagged.model,
+               CAST(111320.0 * SQRT(POW(lat - lat0, 2)
+                    + POW((lon - lon0) * COS(RADIANS(lat)), 2)) AS FLOAT) AS dist_m,
+               CAST(lut1.pct - lut0.pct AS FLOAT) AS dsoc
         FROM lagged
         JOIN soc_lut lut1 ON lut1.r = lagged.r
         JOIN soc_lut lut0 ON lut0.r = lagged.r0
@@ -263,6 +291,9 @@ def main() -> None:
     print(f"post-ride stationary pairs: {rebound[0]:,}; mean ΔSoC "
           f"{rebound[1]:+.4f}%, positive (rebound) share "
           f"{rebound[2] / max(rebound[0], 1):.1%}")
+
+    con.close()
+    shutil.rmtree(workdir, ignore_errors=True)
 
 
 if __name__ == "__main__":
