@@ -320,12 +320,34 @@ def devices_current(
                 raise HTTPException(503, detail="no completed cycles yet")
             cycle_id, snapshot_time = row[0], row[1]
 
+            # Validate the bbox up front — before the 304 short-circuit — so
+            # a malformed bbox always 400s even when the ETag matches.
+            bbox_vals: tuple[float, float, float, float] | None = None
+            if bbox:
+                parts = bbox.split(",")
+                if len(parts) != 4:
+                    raise HTTPException(400, detail="bbox must be 4 comma-separated numbers")
+                try:
+                    bbox_vals = (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
+                except ValueError as e:
+                    raise HTTPException(400, detail=f"bbox parse error: {e}")
+
             # Weak, cycle-keyed ETag: the 90 s poll loop revalidates for
             # free until a new cycle lands (~every 10 min). Weak because
-            # has_negative_report / dwell drift within a cycle — a 304
-            # defers those by at most one cycle. Tokens are part of the
-            # tag so ?include= variants can't collide at a shared cache.
-            etag = f'W/"devices:{cycle_id}:{"+".join(sorted(tokens))}"'
+            # has_negative_report drift within a cycle — a 304 defers that
+            # by at most one cycle. The ETag must vary with EVERY input that
+            # changes the body: the include tokens AND the filters
+            # (form_factor / spatial_status / include_outliers / bbox), or a
+            # client reusing a tag across filtered requests gets a 304 for a
+            # different representation.
+            filter_key = "|".join((
+                "+".join(sorted(tokens)),
+                form_factor or "",
+                spatial_status or "",
+                "1" if include_outliers else "0",
+                ",".join(repr(v) for v in bbox_vals) if bbox_vals else "",
+            ))
+            etag = f'W/"devices:{cycle_id}:{filter_key}"'
             if _if_none_match_hit(request, etag):
                 return Response(
                     status_code=304,
@@ -350,14 +372,8 @@ def devices_current(
                 where.append("r.form_factor = %s")
                 params.append(form_factor)
 
-            if bbox:
-                parts = bbox.split(",")
-                if len(parts) != 4:
-                    raise HTTPException(400, detail="bbox must be 4 comma-separated numbers")
-                try:
-                    min_lon, min_lat, max_lon, max_lat = [float(p) for p in parts]
-                except ValueError as e:
-                    raise HTTPException(400, detail=f"bbox parse error: {e}")
+            if bbox_vals:
+                min_lon, min_lat, max_lon, max_lat = bbox_vals
                 where.append(
                     "r.longitude BETWEEN %s AND %s AND r.latitude BETWEEN %s AND %s"
                 )
@@ -403,7 +419,7 @@ def devices_current(
     # Peer-relative dwell stats are computed over the FULL denver_core
     # fleet (own query + per-cycle cache in src/dwell_stats.py), never the
     # filtered subset — a bbox request must not shrink anyone's peer set.
-    dwell_stats = stats_for_cycle(cycle_id)
+    dwell_stats = stats_for_cycle(cycle_id, snapshot_time)
 
     # vehicle_plate is deliberately NOT selected here — see src/identity.py
     # for the public/private identifier split. Only vehicle_identifier (the

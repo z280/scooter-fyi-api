@@ -20,8 +20,10 @@ from starlette.requests import Request
 from src import api_h3
 
 _CYCLE_ID = uuid.UUID("8f3a2d10-1234-4abc-8def-0123456789ab")
+# Dwell/reliability are measured as of snapshot_time (cycle-deterministic),
+# so fixture first_observed_at_location offsets anchor to _SNAP, not wall clock.
 _SNAP = datetime(2026, 7, 6, 14, 30, tzinfo=timezone.utc)
-_NOW = datetime.now(timezone.utc)
+_NOW = _SNAP
 
 _CELL_A = h3.latlng_to_cell(39.7392, -104.9876, 9)   # downtown, devices + 1 trip
 _CELL_B = h3.latlng_to_cell(39.7500, -105.0000, 9)   # trips only
@@ -108,7 +110,7 @@ def _fake_db(monkeypatch):
         yield _FakeConn()
 
     monkeypatch.setattr(api_h3, "connection", _conn)
-    monkeypatch.setattr(api_h3, "stats_for_cycle", lambda cycle_id: {})
+    monkeypatch.setattr(api_h3, "stats_for_cycle", lambda cycle_id, snapshot_time: {})
 
 
 def _request(headers: dict[str, str] | None = None) -> Request:
@@ -163,6 +165,16 @@ def test_resolution_changes_bucketing(_fake_db):
     assert all(h3.get_resolution(k) == 8 for k in out["cells"])
 
 
+def test_payload_is_cycle_deterministic(_fake_db):
+    """Same cycle → byte-identical body (nothing reads the wall clock), so the
+    cycle-keyed ETag never fronts two different representations. dwell is
+    anchored to snapshot_time: v-ok=2h, v-risk=30h → avg 16.0h."""
+    a = _call()
+    b = _call()
+    assert a == b
+    assert a["cells"][_CELL_A]["avg_dwell_hours"] == 16.0
+
+
 def test_etag_and_304(_fake_db):
     resp = Response()
     api_h3.h3_aggregates(_request(), resp, res=9)
@@ -198,7 +210,7 @@ def test_dwell_outlier_feeds_risk_share(_fake_db, monkeypatch):
 
     monkeypatch.setattr(
         api_h3, "stats_for_cycle",
-        lambda cycle_id: {
+        lambda cycle_id, snapshot_time: {
             "v-ghostish": DwellPeerStats(
                 dwell_hours=50.0, percentile=0.95, peer_median_hours=5.0,
                 peer_count=9, is_outlier=True,

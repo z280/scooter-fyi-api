@@ -33,7 +33,7 @@ Per-cell attributes:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import h3
@@ -113,19 +113,21 @@ def h3_aggregates(
                            SELECT 1 FROM negative_reports nr
                            WHERE nr.vehicle_identifier = r.vehicle_identifier
                              AND nr.h3_10_index = r.h3_10_index
-                             AND nr.reported_at >= NOW() - INTERVAL '24 hours'
+                             AND nr.reported_at > %(snap)s - INTERVAL '24 hours'
+                             AND nr.reported_at <= %(snap)s
                        ) OR EXISTS (
                            SELECT 1 FROM device_reports dr
                            WHERE dr.vehicle_identifier = r.vehicle_identifier
                              AND dr.h3_10_index = r.h3_10_index
-                             AND dr.reported_at >= NOW() - INTERVAL '24 hours'
+                             AND dr.reported_at > %(snap)s - INTERVAL '24 hours'
+                             AND dr.reported_at <= %(snap)s
                        )) AS has_negative_report
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
-                WHERE r.cycle_id = %s
+                WHERE r.cycle_id = %(cycle)s
                   AND r.spatial_status = 'denver_core'
                 """,
-                (cycle_id,),
+                {"cycle": cycle_id, "snap": snapshot_time},
             )
             device_rows = cur.fetchall()
 
@@ -144,8 +146,11 @@ def h3_aggregates(
             )
             trip_rows = cur.fetchall()
 
-    dwell_stats = stats_for_cycle(cycle_id)
-    now = datetime.now(timezone.utc)
+    # Everything below is anchored to snapshot_time (reports, dwell,
+    # reliability), so the whole payload is a pure function of the cycle —
+    # which is what the cycle-keyed ETag promises. Nothing here reads the
+    # wall clock.
+    dwell_stats = stats_for_cycle(cycle_id, snapshot_time)
 
     cells: dict[str, _CellAccum] = {}
 
@@ -174,7 +179,7 @@ def h3_aggregates(
             first_observed_at_location=first_obs,
             has_negative_report=bool(has_neg),
             is_dwell_outlier=is_outlier,
-            now=now,
+            now=snapshot_time,
         )
         tier = compute_reliability_tier(
             number_failed_starts=fs,
@@ -182,7 +187,7 @@ def h3_aggregates(
             quality_designation=quality,
             has_negative_report=bool(has_neg),
             is_dwell_outlier=is_outlier,
-            now=now,
+            now=snapshot_time,
         )
         if tier == "high_risk":
             acc.high_risk += 1
@@ -193,7 +198,7 @@ def h3_aggregates(
             acc.battery_n += 1
 
         if first_obs is not None:
-            acc.dwell_sum += (now - first_obs).total_seconds() / 3600.0
+            acc.dwell_sum += (snapshot_time - first_obs).total_seconds() / 3600.0
             acc.dwell_n += 1
 
     for detected_at, from_lat, from_lon in trip_rows:

@@ -9,12 +9,12 @@ query here, independent of whatever filter the calling endpoint applies,
 and the result is cached per cycle_id (new cycle → new stats, ~every
 10 minutes).
 
-Dwell values are anchored at the first request of each cycle: a device's
-dwell keeps growing while the cycle is being served, but every device's
-dwell grows by the same amount, so percentiles and the ×-median ratio are
-stable; the absolute 24h/48h gates can lag by at most one cycle length.
-That trade buys "computed once per cycle" instead of an 8.4k-device
-gridDisk pass per request.
+Dwell values are anchored at the cycle's ``snapshot_time`` (NOT wall-clock
+now), so the result is a pure function of the cycle: every caller in the
+cycle sees identical stats, which is what lets the h3-aggregate ETag treat
+the payload as cycle-deterministic. The anchor is at most one cycle length
+(~10 min) behind real time — negligible for a dwell metric measured in
+hours, and worth it for cache-correctness.
 
 Peer population: state-tracked (has a vehicle_identifier + dwell clock),
 spatial_status='denver_core' devices of every form factor — dwell is a
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import uuid
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import datetime
 
 from .pg import connection
 from .quality import DwellPeerStats, compute_dwell_peer_stats
@@ -37,8 +37,15 @@ _CACHE_MAX = 2
 _cache: OrderedDict[str, dict[str, DwellPeerStats]] = OrderedDict()
 
 
-def stats_for_cycle(cycle_id: uuid.UUID | str) -> dict[str, DwellPeerStats]:
-    """Dwell peer stats keyed by vehicle_identifier for one cycle."""
+def stats_for_cycle(
+    cycle_id: uuid.UUID | str, snapshot_time: datetime
+) -> dict[str, DwellPeerStats]:
+    """Dwell peer stats keyed by vehicle_identifier for one cycle.
+
+    Dwell is measured as of ``snapshot_time`` (a fixed function of the
+    cycle), so the result is deterministic per cycle. ``snapshot_time`` is
+    only consulted on a cache miss; the cache key is the cycle alone.
+    """
     key = str(cycle_id)
     if key in _cache:
         _cache.move_to_end(key)
@@ -59,12 +66,11 @@ def stats_for_cycle(cycle_id: uuid.UUID | str) -> dict[str, DwellPeerStats]:
             )
             rows = cur.fetchall()
 
-    now = datetime.now(timezone.utc)
     entries = [
         (
             vid,
             int(h3_9) if h3_9 is not None else None,
-            (now - first_obs).total_seconds() / 3600.0 if first_obs is not None else None,
+            (snapshot_time - first_obs).total_seconds() / 3600.0 if first_obs is not None else None,
         )
         for vid, h3_9, first_obs in rows
     ]

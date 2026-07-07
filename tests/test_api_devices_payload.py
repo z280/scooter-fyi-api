@@ -87,7 +87,7 @@ def _fake_db(monkeypatch):
     monkeypatch.setattr(api_public, "connection", _conn)
     monkeypatch.setattr(
         api_public, "stats_for_cycle",
-        lambda cycle_id: {
+        lambda cycle_id, snapshot_time: {
             "8c4a1f0d2e9b7a35": DwellPeerStats(
                 dwell_hours=31.0, percentile=0.96, peer_median_hours=6.04,
                 peer_count=12, is_outlier=False,
@@ -210,6 +210,45 @@ def test_etag_varies_by_include_tokens(_fake_db):
         bbox=None, include="ranks",
     )
     assert r1.headers["etag"] != r2.headers["etag"]
+
+
+def test_etag_varies_by_filters(_fake_db):
+    """form_factor / spatial_status / include_outliers / bbox each change the
+    body, so each must change the ETag — otherwise a client reusing a tag
+    across filtered requests gets a 304 for a different representation."""
+    variants = [
+        dict(form_factor=None, spatial_status=None, include_outliers=False, bbox=None, include=None),
+        dict(form_factor="scooter", spatial_status=None, include_outliers=False, bbox=None, include=None),
+        dict(form_factor=None, spatial_status="china_glitch", include_outliers=False, bbox=None, include=None),
+        dict(form_factor=None, spatial_status=None, include_outliers=True, bbox=None, include=None),
+        dict(form_factor=None, spatial_status=None, include_outliers=False, bbox="-105,39.6,-104.9,39.8", include=None),
+    ]
+    tags = set()
+    for v in variants:
+        resp = Response()
+        api_public.devices_current(_request(), resp, **v)
+        tags.add(resp.headers["etag"])
+    assert len(tags) == len(variants), "each filter combination needs a distinct ETag"
+
+
+def test_invalid_bbox_400s_even_when_etag_matches(_fake_db):
+    """bbox is validated BEFORE the 304 short-circuit."""
+    # First get a valid ETag for the default query.
+    resp = Response()
+    api_public.devices_current(
+        _request(), resp,
+        form_factor=None, spatial_status=None, include_outliers=False,
+        bbox=None, include=None,
+    )
+    etag = resp.headers["etag"]
+    # Re-request WITH that ETag but a malformed bbox — must 400, not 304.
+    with pytest.raises(HTTPException) as e:
+        api_public.devices_current(
+            _request({"If-None-Match": etag}), Response(),
+            form_factor=None, spatial_status=None, include_outliers=False,
+            bbox="not,a,bbox,!!", include=None,
+        )
+    assert e.value.status_code == 400
 
 
 # ---------- /api/v1/equity-estimate -------------------------------------------
