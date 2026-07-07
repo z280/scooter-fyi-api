@@ -6,8 +6,8 @@
     "user_agent": "veo-audit/3.2"
   },
   "schedule": {
-    "cycle_minutes": 10,
-    "archive_hours": 48
+    "cycle_minutes": 2,
+    "archive_hours": 24
   },
   "envelope": {
     "denver_core": {

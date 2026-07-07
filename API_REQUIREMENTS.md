@@ -391,6 +391,24 @@ also shipped alongside — built for checking hand-spotted plates (like
 the Apollo/Cosmo ground-truth set that started this) against stored
 signals in one call instead of one request per plate.
 
+**Cadence cutover note (2026-07-07):** ingest moved from every 10
+minutes to every 2 minutes. The upstream feed is generated per-request
+(`last_updated` stamps at fetch time, `ttl: 0` — measured), so there was
+never an upstream cadence to match; 2 min tightens trip-duration
+resolution to ±2 min for the §7 burn-rate work. Metric-continuity
+impacts: (a) `daily_trip_summary` counts step up slightly from the
+cutover date — back-to-back rides with a short intermediate stop that a
+10-min gap merged into one MOVED event now resolve as separate trips
+(an accuracy correction, not inflation; single rides are unaffected
+because in-rental vehicles are absent from the feed and produce exactly
+one MOVED on reappearance at any cadence); (b) per-cycle tables grow 5×
+faster (~6.3M raw rows/day) — `archive_hours` dropped 48→24 to keep the
+archive window inside the scheduler's memory ceiling, and the archive
+DuckDB session is now explicitly memory-capped; (c) the 6–9 AM SLA
+averages are cadence-insensitive (more samples, same estimator). The
+live schedule is the admin-edited crontab on the `scheduler_state`
+volume — the repo `crontab` only seeds fresh environments.
+
 **§1.1 QR verification note:** the stored `vehicle_plate` is parsed from
 the `&number=` query param of Veo's own `rental_uris.android/.ios` deep
 links in the GBFS feed (see `src/ingest.py`). The frontend deep link

@@ -1,7 +1,7 @@
 # veo-audit
 
 Denver micromobility spatial analytics pipeline. Polls the Veo GBFS feed
-every 10 minutes, geo-tags each device against five boundary layers
+every 2 minutes, geo-tags each device against five boundary layers
 (Disadvantaged Areas v1/v2, Neighborhoods, Council Districts, Community
 Networks), and stores cycle-by-cycle metadata + per-region counts in
 Postgres. Cold storage of raw points goes to Cloudflare R2 as Parquet
@@ -18,7 +18,7 @@ API for live state.
 ```
 Veo GBFS feed                                Browser
      ▲                                             │ https://data.scooter.fyi
-     │ */10 min                                    ▼
+     │ */2 min                                     ▼
 ┌──────────────────────────┐               ┌────────────────┐
 │  scheduler               │               │   cloudflared  │   Cloudflare Tunnel
 │  supercronic + crontab   │               │   128 MiB cap  │   (TLS at CF edge)
@@ -264,7 +264,7 @@ Secret and redeploying.
 ## Operating tips
 
 - **First cycle**: fires ~5 s after the worker comes up (boot job),
-  then every 10 min. Watch `docker compose logs -f pipeline_worker`.
+  then every 2 min. Watch `docker compose logs -f pipeline_worker`.
 - **Stale upstream**: if Veo's `last_updated` hasn't changed since the
   previous cycle, the cycle aborts with `job_status='stale_aborted'`
   and a row in `api_failures`. This is normal during outages.

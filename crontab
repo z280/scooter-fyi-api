@@ -1,11 +1,17 @@
 # veo-audit cron schedule, read by supercronic in the `scheduler` container.
 # Times are in America/Denver (set via TZ env on the scheduler container) so
-# the daily SLA window correctly tracks DST. The 10-min ingest cadence drifts
+# the daily SLA window correctly tracks DST. The 2-min ingest cadence drifts
 # by 60 minutes twice a year at DST transitions — acceptable for a compliance
 # audit; missed cycles are caught by the staleness check on the next firing.
 
-# Ingest: every 10 minutes, wall-clock pinned to :00 :10 :20 :30 :40 :50
-*/10 * * * * cd /app && python -m src.cli ingest_cycle
+# Ingest: every 2 minutes (cadence cutover 2026-07-07; was */10 since v3.0).
+# The upstream feed is generated per-request (last_updated stamps at fetch
+# time, ttl=0), so any cadence returns current fleet state; 2 min tightens
+# trip-duration resolution to ±2 min for the burn-rate work. NOTE: the live
+# schedule is the admin-editable copy on the scheduler_state volume
+# (/app/state/crontab) — this file only seeds fresh environments. Changing
+# cadence in prod = edit /admin/scheduler/edit to match.
+*/2 * * * * cd /app && python -m src.cli ingest_cycle
 
 # Daily SLA window: 9:00 AM Denver, DST-aware. Computes the 6-9 AM window
 # that just closed. Idempotent via ON CONFLICT.
@@ -16,9 +22,11 @@
 # from daily_sla so a failure in one doesn't block or mask the other.
 0 9 * * * cd /app && python -m src.cli daily_trips
 
-# Archive: fires daily at 02:00 AM Denver but only acts if >= 48h elapsed
+# Archive: fires daily at 02:00 AM Denver but only acts if >= archive_hours
+# (config.json; 24 since the 2-min cadence cutover — a 48h window at 2-min
+# is ~12.5M rows, too close to the archive job's memory ceiling) elapsed
 # since the last successful upload. Self-gating means we can run this on a
-# daily cron without forcing a 48h cron expression.
+# daily cron without forcing an exact-interval cron expression.
 0 2 * * * cd /app && python -m src.cli archive_if_due
 
 # Receipt retention: purge discount-report receipt images older than 18

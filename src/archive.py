@@ -62,6 +62,15 @@ def _export_to_parquet(target: Path) -> int:
         f"password={pg['password']} dbname={pg['db']}"
     )
     with session() as con:
+        # DuckDB budgets ~80% of HOST RAM, not the container's cgroup limit —
+        # uncapped, this COPY was OOM-killed by the kernel on a large table
+        # (the 38M-row backlog incident, f34e4e2). Cap it well under the
+        # scheduler's 1 GiB and let the export spill to disk instead. Row
+        # order in the archive is irrelevant, so insertion order is off.
+        con.execute("SET memory_limit='600MB';")
+        con.execute("SET threads=2;")
+        con.execute("SET temp_directory='/tmp/duck_spill';")
+        con.execute("SET preserve_insertion_order=false;")
         con.execute("INSTALL postgres; LOAD postgres;")
         con.execute(f"ATTACH '{dsn}' AS pgsrc (TYPE POSTGRES, READ_ONLY);")
         count = con.execute(
