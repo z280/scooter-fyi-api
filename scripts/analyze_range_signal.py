@@ -91,6 +91,9 @@ def main() -> None:
                          "cgroup limit (default %(default)s, sized for the 1 GiB worker)")
     ap.add_argument("--threads", type=int, default=2,
                     help="DuckDB threads; fewer threads = less peak memory (default %(default)s)")
+    ap.add_argument("--buckets", type=int, default=16,
+                    help="device-hash passes for the pair window; more buckets "
+                         "= less peak memory, slightly slower (default %(default)s)")
     args = ap.parse_args()
 
     # File-backed database + explicit memory cap. DuckDB sizes its memory
@@ -194,33 +197,53 @@ def main() -> None:
         print(f"  {model or '<null>':<12} max={mx:>7,} m  ({n:,} points)")
 
     # ---- consecutive pairs ----------------------------------------------
+    # Bucketed by device hash: the window sort must hold whole device
+    # partitions in memory, and one pass over all 44M points exceeds any
+    # sane cap inside the 1 GiB worker (observed: OutOfMemoryException at
+    # the 600MB limit). Devices never span buckets, so N passes over 1/N of
+    # the fleet each are exact, and peak memory scales down by N.
+    # prev_dist (the previous pair's distance, for section 5's rebound
+    # check) is computed here in the same per-bucket window rather than in
+    # a second full-table window later.
     con.execute(
-        f"""
-        CREATE TABLE pairs AS
-        WITH lagged AS (
-            SELECT vehicle_identifier, model, snapshot_time, lat, lon, r,
-                   LAG(snapshot_time) OVER w AS t0,
-                   LAG(lat) OVER w AS lat0,
-                   LAG(lon) OVER w AS lon0,
-                   LAG(r)   OVER w AS r0
-            FROM pts
-            WINDOW w AS (PARTITION BY vehicle_identifier ORDER BY snapshot_time)
-        )
-        -- keep only the columns sections 4-5 read; the full lagged row set
-        -- at month scale is what blew the memory budget
-        SELECT lagged.vehicle_identifier,
-               lagged.snapshot_time,
-               lagged.model,
-               CAST(111320.0 * SQRT(POW(lat - lat0, 2)
-                    + POW((lon - lon0) * COS(RADIANS(lat)), 2)) AS FLOAT) AS dist_m,
-               CAST(lut1.pct - lut0.pct AS FLOAT) AS dsoc
-        FROM lagged
-        JOIN soc_lut lut1 ON lut1.r = lagged.r
-        JOIN soc_lut lut0 ON lut0.r = lagged.r0
-        WHERE t0 IS NOT NULL
-          AND EPOCH(snapshot_time - t0) BETWEEN {PAIR_GAP_MIN_S} AND {PAIR_GAP_MAX_S}
-        """
+        "CREATE TABLE pairs (model VARCHAR, dist_m FLOAT, dsoc FLOAT, prev_dist FLOAT)"
     )
+    print(f"\nbuilding consecutive-pair table in {args.buckets} device buckets ...",
+          flush=True)
+    for b in range(args.buckets):
+        con.execute(
+            f"""
+            INSERT INTO pairs
+            WITH lagged AS (
+                SELECT vehicle_identifier, model, snapshot_time, lat, lon, r,
+                       LAG(snapshot_time) OVER w AS t0,
+                       LAG(lat) OVER w AS lat0,
+                       LAG(lon) OVER w AS lon0,
+                       LAG(r)   OVER w AS r0
+                FROM pts
+                WHERE HASH(vehicle_identifier) % {args.buckets} = {b}
+                WINDOW w AS (PARTITION BY vehicle_identifier ORDER BY snapshot_time)
+            ),
+            pair_rows AS (
+                SELECT lagged.vehicle_identifier,
+                       lagged.snapshot_time,
+                       lagged.model,
+                       CAST(111320.0 * SQRT(POW(lat - lat0, 2)
+                            + POW((lon - lon0) * COS(RADIANS(lat)), 2)) AS FLOAT) AS dist_m,
+                       CAST(lut1.pct - lut0.pct AS FLOAT) AS dsoc
+                FROM lagged
+                JOIN soc_lut lut1 ON lut1.r = lagged.r
+                JOIN soc_lut lut0 ON lut0.r = lagged.r0
+                WHERE t0 IS NOT NULL
+                  AND EPOCH(snapshot_time - t0) BETWEEN {PAIR_GAP_MIN_S} AND {PAIR_GAP_MAX_S}
+            )
+            SELECT model, dist_m, dsoc,
+                   LAG(dist_m) OVER (PARTITION BY vehicle_identifier
+                                     ORDER BY snapshot_time) AS prev_dist
+            FROM pair_rows
+            """
+        )
+        print(f"  bucket {b + 1}/{args.buckets}", flush=True)
     n_pairs = con.execute("SELECT COUNT(*) FROM pairs").fetchone()[0]
     print(f"\nconsecutive same-device pairs ({PAIR_GAP_MIN_S // 60}-"
           f"{PAIR_GAP_MAX_S // 60} min apart): {n_pairs:,}")
@@ -254,13 +277,10 @@ def main() -> None:
 
     # ---- 5. Ops & noise floor --------------------------------------------
     print("\n== 5. swaps, idle drain, rebound ==")
-    swaps, days = con.execute(
-        f"""
-        SELECT SUM(CASE WHEN dsoc >= {SWAP_JUMP_PCT} THEN 1 ELSE 0 END),
-               COUNT(DISTINCT snapshot_time::DATE)
-        FROM pairs
-        """
-    ).fetchone()
+    swaps = con.execute(
+        f"SELECT COUNT(*) FROM pairs WHERE dsoc >= {SWAP_JUMP_PCT}"
+    ).fetchone()[0]
+    days = len(daily)
     print(f"battery swaps (jump ≥ +{SWAP_JUMP_PCT:.0f}% SoC): {swaps:,} "
           f"(~{swaps / max(days, 1):.0f}/day)")
     idle = con.execute(
@@ -274,15 +294,9 @@ def main() -> None:
           f"σ {idle[2]:.3f}%, exactly-zero {idle[3] / max(idle[0], 1):.1%}")
     rebound = con.execute(
         f"""
-        WITH seq AS (
-            SELECT dsoc, dist_m,
-                   LAG(dist_m) OVER (PARTITION BY vehicle_identifier
-                                     ORDER BY snapshot_time) AS prev_dist
-            FROM pairs
-        )
         SELECT COUNT(*), AVG(dsoc),
                SUM(CASE WHEN dsoc > 0 THEN 1 ELSE 0 END)
-        FROM seq
+        FROM pairs
         WHERE dist_m <= {MOVED_METERS}          -- now stationary
           AND prev_dist > {MOVED_METERS}        -- but just finished a trip
           AND ABS(dsoc) < {SWAP_JUMP_PCT}
