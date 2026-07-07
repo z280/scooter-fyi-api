@@ -36,11 +36,14 @@ log = logging.getLogger("veo.cli")
 # checkin_margin = how late a check-in can arrive before counting as missed
 # max_runtime = how long a run can take before Sentry alerts on a stuck job
 _MONITOR_INGEST = {
-    "schedule": {"type": "crontab", "value": "*/10 * * * *"},
+    "schedule": {"type": "crontab", "value": "*/2 * * * *"},
     "timezone": "America/Denver",
-    "checkin_margin": 2,    # minutes
-    "max_runtime": 5,
-    "failure_issue_threshold": 2,   # alert after 2 consecutive failures
+    "checkin_margin": 1,    # minutes; must stay under the 2-min interval
+    "max_runtime": 2,       # cycles run ~5s; a 2-min run is already stuck
+    # 5 consecutive failed cycles = one full 10-minute SLA interval with no
+    # data. Polling (2 min) is now decoupled from the SLA interval (10 min);
+    # a single missed 2-min cycle is a blip, not an SLA-scale event.
+    "failure_issue_threshold": 5,
     "recovery_threshold": 1,
 }
 _MONITOR_DAILY_SLA = {
