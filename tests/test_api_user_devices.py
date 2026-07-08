@@ -2,8 +2,8 @@
 
 Same shape as the public endpoint for any rider; adds the admin-only
 private fields (raw vehicle_plate + first-ever sighting + observed max
-range) only for an `admin`-scope session. Replaces the retired
-/api/v1/private/devices/current.
+range) when the session email is in ADMIN_EMAILS — via EITHER sign-in
+door. Replaces the retired /api/v1/private/devices/current.
 """
 
 from __future__ import annotations
@@ -85,12 +85,17 @@ def _fake_db(monkeypatch):
     monkeypatch.setattr(api_public, "stats_for_cycle", lambda cycle_id, snapshot_time: {})
 
 
-def _user(*, admin: bool) -> SessionUser:
+_ADMINS = frozenset({"z@neill.io"})
+
+
+def _user(email: str, method: str = "magic_link") -> SessionUser:
+    # Note: scopes is always just ("rider",) — the gate is email membership,
+    # NOT the admin scope, so a magic-link session (no admin scope) with an
+    # allowlisted email must still unlock plates.
     return SessionUser(
-        account_id=1, email="z@neill.io",
-        scopes=("rider", "admin") if admin else ("rider",),
+        account_id=1, email=email, scopes=("rider",),
         supporter=False, expires_at=_SNAP, sliding=True,
-        method="google" if admin else "magic_link", token_sha256="x" * 64,
+        method=method, token_sha256="x" * 64,
     )
 
 
@@ -102,17 +107,22 @@ def _request(headers: dict[str, str] | None = None) -> Request:
     })
 
 
-def _call(*, admin, headers=None, response=None):
+@pytest.fixture(autouse=True)
+def _allowlist(monkeypatch):
+    monkeypatch.setattr(api_user, "admin_emails", lambda: _ADMINS)
+
+
+def _call(*, email="rider@example.com", method="magic_link", headers=None, response=None):
     return api_user.user_devices_current(
-        _request(headers), response or Response(), user=_user(admin=admin),
+        _request(headers), response or Response(), user=_user(email, method),
         form_factor=None, spatial_status=None, include_outliers=False,
         bbox=None, include=None,
     )
 
 
-# ---------- non-admin rider ---------------------------------------------------
+# ---------- non-allowlisted rider ---------------------------------------------
 def test_non_admin_gets_map_without_plate(_fake_db):
-    out = _call(admin=False)
+    out = _call(email="rider@example.com")
     assert out["metadata"]["device_count"] == 1
     props = out["features"][0]["properties"]
     for f in _PLATE_FIELDS:
@@ -121,12 +131,14 @@ def test_non_admin_gets_map_without_plate(_fake_db):
     assert props["reliability_tier"] in ("ok", "unknown", "high_risk")
     assert isinstance(props["battery_percent"], int)
     assert out["metadata"]["admin"] is False
-    assert out["metadata"]["viewed_by"] == "z@neill.io"
+    assert out["metadata"]["viewed_by"] == "rider@example.com"
 
 
-# ---------- admin rider -------------------------------------------------------
-def test_admin_scope_gets_plate_fields(_fake_db):
-    out = _call(admin=True)
+# ---------- allowlisted email, EITHER door ------------------------------------
+def test_magic_link_admin_email_gets_plate_fields(_fake_db):
+    """The whole point of the either-door gate: a magic-link session (no
+    admin scope) whose email is allowlisted still sees plates."""
+    out = _call(email="z@neill.io", method="magic_link")
     props = out["features"][0]["properties"]
     assert props["vehicle_plate"] == "1025543"
     assert props["max_observed_range_meters"] == 50000
@@ -135,10 +147,21 @@ def test_admin_scope_gets_plate_fields(_fake_db):
     assert out["metadata"]["admin"] is True
 
 
+def test_google_admin_email_gets_plate_fields(_fake_db):
+    out = _call(email="z@neill.io", method="google")
+    assert out["features"][0]["properties"]["vehicle_plate"] == "1025543"
+    assert out["metadata"]["admin"] is True
+
+
+def test_email_match_is_case_insensitive(_fake_db):
+    out = _call(email="Z@Neill.IO", method="magic_link")
+    assert out["metadata"]["admin"] is True
+
+
 def test_admin_and_non_admin_get_distinct_etags(_fake_db):
     r_admin, r_plain = Response(), Response()
-    _call(admin=True, response=r_admin)
-    _call(admin=False, response=r_plain)
+    _call(email="z@neill.io", response=r_admin)
+    _call(email="rider@example.com", response=r_plain)
     assert r_admin.headers["etag"] != r_plain.headers["etag"]
     # Per-user response must not be shared-cached.
     assert r_admin.headers["cache-control"] == "private, max-age=30"
@@ -146,9 +169,9 @@ def test_admin_and_non_admin_get_distinct_etags(_fake_db):
 
 def test_user_endpoint_304_on_revalidation(_fake_db):
     resp = Response()
-    _call(admin=False, response=resp)
+    _call(email="rider@example.com", response=resp)
     etag = resp.headers["etag"]
     assert "user-devices" in etag
-    out = _call(admin=False, headers={"If-None-Match": etag})
+    out = _call(email="rider@example.com", headers={"If-None-Match": etag})
     assert isinstance(out, Response)
     assert out.status_code == 304

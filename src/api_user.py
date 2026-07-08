@@ -7,13 +7,14 @@ and — for an `admin`-scope session — the extra private fields that used to
 live behind the (now retired) `/api/v1/private/devices/current`: raw
 `vehicle_plate`, `first_ever_observed_at`, and the observed max range.
 
-Admin gate: this uses the `admin` scope (see src/accounts.py — granted
-only for an ADMIN_EMAILS email signed in via Google), matching how the
-`/api/v1/private/*` endpoints gate after the map-auth retirement
-(API_REQUIREMENTS.md §2.5). That keeps one admin definition across the
-API. If you'd rather unlock plates for an allowlisted email via EITHER
-door (magic-link included), swap `_wants_plate` to
-`normalize_email(user.email) in admin_emails()`.
+Admin gate: raw membership of the session email in `ADMIN_EMAILS`, so the
+private fields unlock for an allowlisted email signed in via EITHER door —
+magic-link or Google. This is intentionally broader than the `admin`
+*scope* (which src/accounts.py grants only via Google): the operator wants
+both doors viable (and may drop the Google door entirely). Both doors
+prove ownership of the email, and this is a read-only plate view, not an
+admin write action. (The `/api/v1/private/*` endpoints still gate on the
+`admin` scope — those are operator tooling, not the rider map.)
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
-from .accounts import SessionUser, require_session
+from .accounts import SessionUser, admin_emails, normalize_email, require_session
 from .api_public import _devices_current_impl
 
 router = APIRouter()
@@ -32,7 +33,9 @@ _USER_DEVICES_CACHE_HEADER = "private, max-age=30"
 
 
 def _wants_plate(user: SessionUser) -> bool:
-    return "admin" in user.scopes
+    # Either door: any session (magic-link OR Google) whose email is on the
+    # ADMIN_EMAILS allowlist. Broader than the Google-only `admin` scope.
+    return normalize_email(user.email) in admin_emails()
 
 
 @router.get("/api/v1/user/devices/current")
@@ -48,8 +51,9 @@ def user_devices_current(
 ) -> Any:
     """Signed-in map feed. Same shape as `/api/v1/devices/current`; adds
     `vehicle_plate`, `first_ever_observed_at`, `max_observed_range_meters`,
-    and `max_observed_range_at` for an `admin`-scope session.
-    `metadata.admin` reports whether those were included.
+    and `max_observed_range_at` when the session email is in `ADMIN_EMAILS`
+    (either sign-in door). `metadata.admin` reports whether those were
+    included.
 
     Requires a rider session (`Authorization: Bearer <token>`); `401` when
     missing/invalid/expired.

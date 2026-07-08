@@ -683,7 +683,7 @@ most one cycle length.
 | `device_id` | string | The upstream Veo `bike_id` from GBFS `free_bike_status`. **Rotates per trip** by GBFS spec mandate — do not treat as stable. |
 | `form_factor` | string | `"bicycle"`, `"scooter"`, or `"unknown"`. Not taken as-given from Veo's upstream `vehicle_types.json` — corrected against direct visual confirmation where the upstream registry is known to be wrong (see `vehicle_model_name` below). |
 | `spatial_status` | string | `"denver_core"`, `"china_glitch"`, or `"other_outlier"`. |
-| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins. May be null if the upstream payload omits a plate. **The raw plate is NOT exposed on this public endpoint** — it's served only to `admin`-scope sessions via `/api/v1/user/devices/current` (see below). |
+| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins. May be null if the upstream payload omits a plate. **The raw plate is NOT exposed on this public endpoint** — it's served only to `ADMIN_EMAILS` sessions via `/api/v1/user/devices/current` (see below). |
 | `is_disabled` | bool \| null | `true` when the scooter is out of service (low battery, mechanical fault, impound). Disabled devices still count toward fleet totals because they occupy space. |
 | `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
 | `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. |
@@ -814,7 +814,8 @@ sessions additionally get plates.
 
 **Response:** same as `/api/v1/devices/current`, plus `metadata.viewed_by`
 (the session email) and `metadata.admin` (whether the private fields were
-included). For an `admin`-scope session each feature also carries:
+included). When the session email is in `ADMIN_EMAILS` each feature also
+carries:
 
 | Field | Type | Description |
 |---|---|---|
@@ -823,10 +824,12 @@ included). For an `admin`-scope session each feature also carries:
 | `max_observed_range_meters` | int \| null | Highest `current_range_meters` ever observed for this vehicle. |
 | `max_observed_range_at` | string \| null | UTC ISO 8601 of when that max was observed. |
 
-**Admin gate:** the private fields unlock for the `admin` scope, which is
-granted only to an `ADMIN_EMAILS` email signed in via Google — the same
-admin definition that gates the `/api/v1/private/*` endpoints. A rider
-signed in via magic link (or any non-admin) gets the base map.
+**Admin gate:** the private fields unlock by raw membership of the session
+email in `ADMIN_EMAILS`, so they work for an allowlisted email signed in
+via **either** door (magic-link or Google). This is intentionally broader
+than the `admin` *scope* (Google-only) that gates the operator-facing
+`/api/v1/private/*` endpoints — both doors prove email ownership, and this
+is a read-only plate view. A non-allowlisted rider gets the base map.
 
 **Caching:** `Cache-Control: private, max-age=30` (per-user; never
 shared-cached) with a cycle-keyed weak ETag that also varies on whether
