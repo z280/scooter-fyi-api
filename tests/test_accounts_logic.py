@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from src import accounts
 from src.accounts import (
-    admin_emails,
     hash_token,
     normalize_email,
     session_expiry,
@@ -15,31 +15,28 @@ from src.accounts import (
 _NOW = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
 
 
-# ---------- admin allowlist --------------------------------------------------
-def test_admin_emails_parses_and_lowercases(monkeypatch):
-    monkeypatch.setenv("ADMIN_EMAILS", " ZNeill@Gmail.com , other@example.org ,")
-    assert admin_emails() == {"zneill@gmail.com", "other@example.org"}
-
-
-def test_admin_emails_empty_when_unset(monkeypatch):
-    monkeypatch.delenv("ADMIN_EMAILS", raising=False)
-    assert admin_emails() == frozenset()
-
-
 # ---------- scope derivation -------------------------------------------------
+# The admin allowlist now lives in Postgres (admin_allowlist table); the CRUD
+# + membership query are covered in test_admin_allowlist.py. Here we only
+# exercise the pure scope-derivation logic, stubbing the allowlist.
+def _allow(monkeypatch, *emails):
+    monkeypatch.setattr(accounts, "admin_emails", lambda: frozenset(emails))
+
+
 def test_google_allowlisted_email_gets_admin(monkeypatch):
-    monkeypatch.setenv("ADMIN_EMAILS", "zneill@gmail.com")
+    _allow(monkeypatch, "zneill@gmail.com")
     assert session_scopes(method="google", email="ZNeill@gmail.com") == ["rider", "admin"]
 
 
 def test_google_other_email_is_rider_only(monkeypatch):
-    monkeypatch.setenv("ADMIN_EMAILS", "zneill@gmail.com")
+    _allow(monkeypatch, "zneill@gmail.com")
     assert session_scopes(method="google", email="rando@example.com") == ["rider"]
 
 
-def test_magic_link_never_gets_admin_even_for_allowlisted_email(monkeypatch):
-    """The §2.3 trust decision: admin requires the Google door."""
-    monkeypatch.setenv("ADMIN_EMAILS", "zneill@gmail.com")
+def test_magic_link_never_gets_admin_scope_even_for_allowlisted_email(monkeypatch):
+    """The `admin` *scope* is still Google-only (signal only — access is
+    gated by ADMIN_EMAILS membership in require_admin, not the scope)."""
+    _allow(monkeypatch, "zneill@gmail.com")
     assert session_scopes(method="magic_link", email="zneill@gmail.com") == ["rider"]
 
 

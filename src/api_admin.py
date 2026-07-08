@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from . import auth
+from . import accounts, auth
 from .pg import connection
 
 router = APIRouter(prefix="/admin")
@@ -386,4 +386,59 @@ def regions(
         layer=layer,
         snapshot_time=snap[0].isoformat() if snap else None,
         rows=rows,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Admin allowlist management (the ADMIN_EMAILS replacement)
+# ---------------------------------------------------------------------------
+# This page is gated by the GitHub-OAuth admin session (auth.require_admin),
+# a SEPARATE trust boundary from the allowlist it edits. The allowlist
+# (accounts.admin_emails / admin_allowlist table) authorizes the account
+# session surface — /api/v1/private/* and the /api/v1/user plate fields.
+# So a GitHub operator manages who counts as an account-session admin.
+@router.get("/admins", response_class=HTMLResponse)
+def admins_page(
+    request: Request,
+    user: dict = Depends(auth.require_admin),
+    error: str | None = Query(None),
+    saved: str | None = Query(None),
+):
+    return _render(
+        "admins.html",
+        user=user,
+        admins=accounts.list_admins(),
+        error=error,
+        saved=saved,
+    )
+
+
+@router.post("/admins/add")
+def admins_add(
+    request: Request,
+    email: str = Form(...),
+    user: dict = Depends(auth.require_admin),
+):
+    if not _csrf_ok(request):
+        return RedirectResponse("/admin/admins?error=cross-site+request+blocked", status_code=303)
+    try:
+        added = accounts.add_admin(email, added_by=user.get("login"))
+    except ValueError:
+        return RedirectResponse("/admin/admins?error=not+an+email+address", status_code=303)
+    return RedirectResponse(
+        f"/admin/admins?saved={'added' if added else 'already+present'}", status_code=303
+    )
+
+
+@router.post("/admins/remove")
+def admins_remove(
+    request: Request,
+    email: str = Form(...),
+    user: dict = Depends(auth.require_admin),
+):
+    if not _csrf_ok(request):
+        return RedirectResponse("/admin/admins?error=cross-site+request+blocked", status_code=303)
+    removed = accounts.remove_admin(email)
+    return RedirectResponse(
+        f"/admin/admins?saved={'removed' if removed else 'not+found'}", status_code=303
     )

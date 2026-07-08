@@ -31,11 +31,11 @@ require_supporter.
 from __future__ import annotations
 
 import logging
-import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from typing import Any
 
 from fastapi import HTTPException, Request
 
@@ -48,9 +48,66 @@ ADMIN_SESSION_HOURS = 24
 
 
 def admin_emails() -> frozenset[str]:
-    """The ADMIN_EMAILS env allowlist, lowercased. Empty when unset."""
-    raw = os.environ.get("ADMIN_EMAILS", "")
-    return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+    """The admin allowlist (normalized, lowercased).
+
+    Source of truth is the `admin_allowlist` table, managed from the
+    GitHub-gated admin portal (/admin/admins) and `python -m src.cli admin`.
+    Empty when the table is empty. (Replaced the ADMIN_EMAILS env var — see
+    sql/021_admin_allowlist.sql.)
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT email FROM admin_allowlist")
+            return frozenset(r[0] for r in cur.fetchall())
+
+
+def list_admins() -> list[dict[str, Any]]:
+    """Full allowlist rows for the admin portal, newest first."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT email, added_by, added_at FROM admin_allowlist "
+                "ORDER BY added_at DESC, email"
+            )
+            return [
+                {
+                    "email": r[0],
+                    "added_by": r[1],
+                    "added_at": r[2].isoformat() if r[2] else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+
+def add_admin(email: str, added_by: str | None) -> bool:
+    """Add an email to the allowlist (stored normalized). Idempotent —
+    returns True if newly inserted, False if it was already present.
+    Raises ValueError for a non-email string."""
+    norm = normalize_email(email)
+    if not norm or "@" not in norm or norm.startswith("@") or norm.endswith("@"):
+        raise ValueError(f"not an email address: {email!r}")
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO admin_allowlist (email, added_by) VALUES (%s, %s) "
+                "ON CONFLICT (email) DO NOTHING",
+                (norm, added_by),
+            )
+            added = cur.rowcount == 1
+        conn.commit()
+    return added
+
+
+def remove_admin(email: str) -> bool:
+    """Remove an email from the allowlist. Returns True if a row was
+    removed, False if it wasn't present."""
+    norm = normalize_email(email)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM admin_allowlist WHERE email = %s", (norm,))
+            removed = cur.rowcount == 1
+        conn.commit()
+    return removed
 
 
 def normalize_email(email: str) -> str:

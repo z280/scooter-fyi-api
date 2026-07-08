@@ -1107,12 +1107,15 @@ and send it as `Authorization: Bearer <token>`. Tokens are opaque
 (256-bit random) and stored server-side only as hashes.
 
 **Scopes:** every session has `rider`. `admin` is a Google-only signal
-scope (granted on Google sign-in for allowlisted operator emails) — but it
-no longer gates anything: **admin authorization is `ADMIN_EMAILS`
-membership regardless of sign-in door**, so an allowlisted operator using
-magic-link reaches the admin/`/api/v1/private/*` surface too. `supporter`
-appears automatically while the account has a live supporter payment (see
-the Stripe webhook).
+scope (granted on Google sign-in for an allowlisted email) — but it no
+longer gates anything: **admin authorization is membership in the admin
+allowlist regardless of sign-in door**, so an allowlisted operator using
+magic-link reaches the admin/`/api/v1/private/*` surface too. The
+allowlist is stored in Postgres (`admin_allowlist` table) and managed from
+the GitHub-gated admin portal at `/admin/admins` (or
+`python -m src.cli admin add <email>`) — it replaced the `ADMIN_EMAILS`
+env var. `supporter` appears automatically while the account has a live
+supporter payment (see the Stripe webhook).
 
 **Expiry:** rider sessions last 30 days and slide — call
 `POST /api/v1/auth/refresh` any time to rotate the token and get a fresh
