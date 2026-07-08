@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}admins · veo-audit admin{% endblock %}
+{% block content %}
+<h1>Admin allowlist</h1>
+<p>
+  These emails are authorized for the account-session admin surface —
+  the <code>/api/v1/private/*</code> endpoints and the admin-only fields on
+  <code>/api/v1/user/devices/current</code> — reachable via either sign-in
+  door (magic-link or Google). This list replaces the <code>ADMIN_EMAILS</code>
+  environment variable.
+</p>
+
+{% if saved %}<p style="color:#2a7;">Saved: {{ saved }}</p>{% endif %}
+{% if error %}<p style="color:#c00;">Error: {{ error }}</p>{% endif %}
+
+<form method="post" action="/admin/admins/add" style="margin: 16px 0;">
+  <input type="email" name="email" placeholder="name@example.com" required
+         style="padding:6px 8px; width:280px; font-size:13px;" />
+  <button type="submit" style="padding:6px 12px; font-size:13px;">Add admin</button>
+</form>
+
+<table>
+  <thead><tr><th>email</th><th>added by</th><th>added at</th><th></th></tr></thead>
+  <tbody>
+    {% for a in admins %}
+      <tr>
+        <td><code>{{ a.email }}</code></td>
+        <td>{{ a.added_by or "—" }}</td>
+        <td>{{ a.added_at | denver_ts }}</td>
+        <td>
+          <form method="post" action="/admin/admins/remove"
+                onsubmit="return confirm('Remove this email from the admin allowlist?');"
+                style="margin:0;">
+            <input type="hidden" name="email" value="{{ a.email }}" />
+            <button type="submit" style="padding:2px 8px; font-size:12px; color:#c00;">remove</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4"><em>No admins yet — nobody can reach the admin API surface.</em></td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -683,7 +683,7 @@ most one cycle length.
 | `device_id` | string | The upstream Veo `bike_id` from GBFS `free_bike_status`. **Rotates per trip** by GBFS spec mandate — do not treat as stable. |
 | `form_factor` | string | `"bicycle"`, `"scooter"`, or `"unknown"`. Not taken as-given from Veo's upstream `vehicle_types.json` — corrected against direct visual confirmation where the upstream registry is known to be wrong (see `vehicle_model_name` below). |
 | `spatial_status` | string | `"denver_core"`, `"china_glitch"`, or `"other_outlier"`. |
-| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins. May be null if the upstream payload omits a plate. **The raw plate is NOT exposed on this public endpoint** — it's served only by the bearer-gated `/api/v1/private/*` endpoints. |
+| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins. May be null if the upstream payload omits a plate. **The raw plate is NOT exposed on this public endpoint** — it's served only to `ADMIN_EMAILS` sessions via `/api/v1/user/devices/current` (see below). |
 | `is_disabled` | bool \| null | `true` when the scooter is out of service (low battery, mechanical fault, impound). Disabled devices still count toward fleet totals because they occupy space. |
 | `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
 | `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. |
@@ -792,6 +792,56 @@ async function refresh() {
 }
 map.on("moveend", refresh);
 refresh();
+```
+
+---
+
+### `GET /api/v1/user/devices/current`
+
+The **signed-in** map feed. Identical shape and query parameters to
+`/api/v1/devices/current` (`form_factor`, `spatial_status`,
+`include_outliers`, `bbox`, `include`, ETag/304), but requires a rider
+session (`Authorization: Bearer <token>` from magic-link or Google
+sign-in) and — when the session email is in `ADMIN_EMAILS` — adds the
+admin-only private fields.
+
+This replaces the retired `/api/v1/private/devices/current`. Use it as the
+drop-in map source once a user is signed in: any signed-in rider gets the
+public field set (so the map works for everyone signed in), `ADMIN_EMAILS`
+sessions additionally get plates.
+
+**Auth:** `401` when the bearer is missing, invalid, or expired.
+
+**Response:** same as `/api/v1/devices/current`, plus `metadata.viewed_by`
+(the session email) and `metadata.admin` (whether the private fields were
+included). When the session email is in `ADMIN_EMAILS` each feature also
+carries:
+
+| Field | Type | Description |
+|---|---|---|
+| `vehicle_plate` | string \| null | The raw visible plate painted on the scooter. Null when the upstream payload had no plate. |
+| `first_ever_observed_at` | string \| null | UTC ISO 8601 of the first time we ever saw this `vehicle_identifier` (not reset by moves, unlike `first_observed_at_location`). |
+| `max_observed_range_meters` | int \| null | Highest `current_range_meters` ever observed for this vehicle. |
+| `max_observed_range_at` | string \| null | UTC ISO 8601 of when that max was observed. |
+
+**Admin gate:** the private fields unlock by raw membership of the session
+email in `ADMIN_EMAILS`, so they work for an allowlisted email signed in
+via **either** door (magic-link or Google) — the same gate as the
+operator-facing `/api/v1/private/*` endpoints. Both doors prove email
+ownership. A non-allowlisted rider gets the base map.
+
+**Caching:** `Cache-Control: private, max-age=30` (per-user; never
+shared-cached) with a cycle-keyed weak ETag that also varies on whether
+plates were included.
+
+```javascript
+// Signed-in map: one endpoint, richer for admins, works for everyone.
+const r = await fetch("https://data.scooter.fyi/api/v1/user/devices/current",
+                      { headers: { "Authorization": "Bearer " + token } });
+if (r.status === 401) { /* session expired — prompt re-auth, fall back to public map */ }
+const geo = await r.json();
+map.getSource("devices").setData(geo);
+if (geo.metadata.admin) showPlateLayer(geo);   // admins only
 ```
 
 ---
@@ -1056,9 +1106,15 @@ exactly `{ "token": "...", "expires": "<ISO 8601>" }`; store the token
 and send it as `Authorization: Bearer <token>`. Tokens are opaque
 (256-bit random) and stored server-side only as hashes.
 
-**Scopes:** every session has `rider`. `admin` is granted only on Google
-sign-in for allowlisted operator emails — magic-link sessions never carry
-it. `supporter` appears automatically while the account has a live
+**Scopes:** every session has `rider`. `admin` is a Google-only signal
+scope (granted on Google sign-in for an allowlisted email) — but it no
+longer gates anything: **admin authorization is membership in the admin
+allowlist regardless of sign-in door**, so an allowlisted operator using
+magic-link reaches the admin/`/api/v1/private/*` surface too. The
+allowlist is stored in Postgres (`admin_allowlist` table) and managed from
+the GitHub-gated admin portal at `/admin/admins` (or
+`python -m src.cli admin add <email>`) — it replaced the `ADMIN_EMAILS`
+env var. `supporter` appears automatically while the account has a live
 supporter payment (see the Stripe webhook).
 
 **Expiry:** rider sessions last 30 days and slide — call

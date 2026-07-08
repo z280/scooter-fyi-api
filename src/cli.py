@@ -12,6 +12,9 @@ Available commands:
     daily_trips       Roll up yesterday's full-day trip/popularity stats.
     cleanup_receipts  Delete receipt images past the 18-month retention
                       (API_REQUIREMENTS.md §3.2 / privacy policy).
+    migrate           Apply pending SQL migrations.
+    admin             Manage the admin allowlist:
+                      `admin (list | add <email> | remove <email>)`.
 """
 
 from __future__ import annotations
@@ -199,6 +202,47 @@ COMMANDS = {
 }
 
 
+def admin_cli(sub_args: list[str]) -> int:
+    """`python -m src.cli admin <list|add|remove> [email]` — manage the
+    admin allowlist (the ADMIN_EMAILS replacement, sql/021). Same table the
+    /admin/admins portal page edits."""
+    from .accounts import add_admin, list_admins, remove_admin
+
+    usage = "usage: python -m src.cli admin (list | add <email> | remove <email>)"
+    if not sub_args:
+        print(usage, file=sys.stderr)
+        return 2
+    action, rest = sub_args[0], sub_args[1:]
+
+    if action == "list":
+        rows = list_admins()
+        if not rows:
+            print("(no admins in the allowlist)")
+        for r in rows:
+            print(f"{r['email']}\t(added_by={r['added_by'] or '-'}, at={r['added_at'] or '-'})")
+        return 0
+
+    if action in ("add", "remove"):
+        if len(rest) != 1:
+            print(usage, file=sys.stderr)
+            return 2
+        email = rest[0]
+        if action == "add":
+            try:
+                added = add_admin(email, added_by="cli")
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 2
+            print(f"{'added' if added else 'already present'}: {email}")
+        else:
+            removed = remove_admin(email)
+            print(f"{'removed' if removed else 'not found'}: {email}")
+        return 0
+
+    print(usage, file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -207,9 +251,20 @@ def main(argv: list[str] | None = None) -> int:
     sentry_init()
 
     args = argv if argv is not None else sys.argv[1:]
+
+    # `admin` takes sub-arguments (list/add/remove <email>); the cron
+    # commands are strictly zero-arg.
+    if args and args[0] == "admin":
+        try:
+            return admin_cli(args[1:])
+        except Exception as e:  # noqa: BLE001
+            log.exception("cli command admin failed")
+            capture_exception(e)
+            return 1
+
     if len(args) != 1 or args[0] not in COMMANDS:
         choices = " | ".join(sorted(COMMANDS))
-        print(f"usage: python -m src.cli ({choices})", file=sys.stderr)
+        print(f"usage: python -m src.cli ({choices} | admin ...)", file=sys.stderr)
         return 2
 
     cmd = args[0]

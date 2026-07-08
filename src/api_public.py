@@ -256,39 +256,28 @@ def _if_none_match_hit(request: Request, etag: str) -> bool:
     return etag in (t.strip() for t in inm.split(","))
 
 
-@router.get("/api/v1/devices/current")
-def devices_current(
+def _devices_current_impl(
     request: Request,
     response: Response,
-    form_factor: str | None = Query(
-        None,
-        description='Filter by form_factor. One of "bicycle", "scooter". Default: no filter.',
-    ),
-    spatial_status: str | None = Query(
-        None,
-        description='Filter by spatial_status. One of "denver_core", "china_glitch", "other_outlier". Default behavior depends on include_outliers.',
-    ),
-    include_outliers: bool = Query(
-        False,
-        description="If false (default), only return devices with spatial_status='denver_core'. Set true to include China-factory glitches and other outliers.",
-    ),
-    bbox: str | None = Query(
-        None,
-        description='Comma-separated "min_lon,min_lat,max_lon,max_lat" bounding box filter (WGS84).',
-    ),
-    include: str | None = Query(
-        None,
-        description='Comma-separated opt-in field groups: "ranks" (the seven range_rank_*/range_percentile_by_type fields), "h3" (h3_8/9/10_index, string-encoded).',
-    ),
+    *,
+    form_factor: str | None,
+    spatial_status: str | None,
+    include_outliers: bool,
+    bbox: str | None,
+    include: str | None,
+    include_plate: bool = False,
+    resource: str = "devices",
+    cache_header: str = _DEVICES_CACHE_HEADER,
+    viewed_by: str | None = None,
 ) -> Any:
-    """GeoJSON FeatureCollection of every device's current position,
-    drawn from the most recent successfully-completed observation cycle.
+    """Shared builder for the public `/api/v1/devices/current` and the
+    session-gated `/api/v1/user/devices/current`.
 
-    Suitable for direct ingestion into Mapbox/Leaflet/MapLibre:
-
-        const r = await fetch("/api/v1/devices/current");
-        const geo = await r.json();
-        map.getSource("devices").setData(geo);
+    ``include_plate`` adds the admin-only private fields — raw
+    ``vehicle_plate``, ``first_ever_observed_at``, and the observed max
+    range — that used to live behind `/api/v1/private/devices/current`. It
+    is NEVER derived from a query param (that would let anyone opt in); the
+    caller decides it from the authenticated session.
     """
     tokens: set[str] = set()
     if include:
@@ -340,21 +329,36 @@ def devices_current(
             # (form_factor / spatial_status / include_outliers / bbox), or a
             # client reusing a tag across filtered requests gets a 304 for a
             # different representation.
+            # include_plate is part of the key so an admin's plate-bearing
+            # body can never be handed back to a non-admin via a shared 304
+            # (and the /user endpoint is served `private` anyway).
+            # `viewed_by` (the authenticated email) is part of the key so an
+            # admin's plate-bearing body can never be served to a different
+            # user via a shared/conditional cache hit — belt-and-suspenders
+            # alongside the per-response Vary: Authorization below.
             filter_key = "|".join((
                 "+".join(sorted(tokens)),
                 form_factor or "",
                 spatial_status or "",
                 "1" if include_outliers else "0",
                 ",".join(repr(v) for v in bbox_vals) if bbox_vals else "",
+                "plate" if include_plate else "",
+                viewed_by or "",
             ))
-            etag = f'W/"devices:{cycle_id}:{filter_key}"'
+            etag = f'W/"{resource}:{cycle_id}:{filter_key}"'
+            # Authenticated responses vary by the bearer and (for admins) can
+            # carry raw plates — a private cache must key on Authorization and
+            # never silently reuse across tokens within a freshness window.
+            extra_headers = {"Vary": "Authorization"} if viewed_by is not None else {}
             if _if_none_match_hit(request, etag):
                 return Response(
                     status_code=304,
-                    headers={"ETag": etag, "Cache-Control": _DEVICES_CACHE_HEADER},
+                    headers={"ETag": etag, "Cache-Control": cache_header, **extra_headers},
                 )
             response.headers["ETag"] = etag
-            response.headers["Cache-Control"] = _DEVICES_CACHE_HEADER
+            response.headers["Cache-Control"] = cache_header
+            for k, v in extra_headers.items():
+                response.headers[k] = v
 
             # Build the filter. All predicates prefix `r.` so they compose
             # with the EXISTS subquery on negative_reports below.
@@ -407,7 +411,9 @@ def devices_current(
                 "       )) AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
-                "       r.vehicle_use_type, r.vehicle_model_name "
+                "       r.vehicle_use_type, r.vehicle_model_name, "
+                "       r.vehicle_plate, ds.first_ever_observed_at, "
+                "       ds.max_observed_range_meters, ds.max_observed_range_at "
                 "FROM raw_telemetry_points r "
                 "LEFT JOIN device_state ds USING (vehicle_identifier) "
                 f"WHERE {' AND '.join(where)} "
@@ -421,11 +427,12 @@ def devices_current(
     # filtered subset — a bbox request must not shrink anyone's peer set.
     dwell_stats = stats_for_cycle(cycle_id, snapshot_time)
 
-    # vehicle_plate is deliberately NOT selected here — see src/identity.py
-    # for the public/private identifier split. Only vehicle_identifier (the
-    # HMAC) goes over an unauthenticated wire; the raw plate stays behind the
-    # bearer-gated /api/v1/private/* endpoints. (The §1.1 promotion of the
-    # plate to this public endpoint was reverted.)
+    # The raw vehicle_plate is emitted ONLY when include_plate is set — i.e.
+    # from /api/v1/user/devices/current for an admin session. On the public
+    # path (include_plate=False) it stays off the wire, preserving the
+    # public/private identifier split in src/identity.py (only the HMAC
+    # vehicle_identifier is public). The last four SELECT columns are always
+    # fetched but only emitted under include_plate (see the feature loop).
     features = []
     for r in rows:
         number_failed_starts = int(r[22]) if r[22] is not None else None
@@ -485,6 +492,12 @@ def devices_current(
         if "ranks" in tokens:
             for name, value in zip(_RANK_FIELDS, r[13:20]):
                 properties[name] = value
+        if include_plate:
+            # Admin-only private fields (retired /private/devices/current).
+            properties["vehicle_plate"] = r[26]
+            properties["first_ever_observed_at"] = r[27].isoformat() if r[27] else None
+            properties["max_observed_range_meters"] = r[28]
+            properties["max_observed_range_at"] = r[29].isoformat() if r[29] else None
         features.append({
             "type": "Feature",
             "id": r[0],
@@ -492,22 +505,72 @@ def devices_current(
             "properties": properties,
         })
 
+    metadata: dict[str, Any] = {
+        "cycle_id": str(cycle_id),
+        "snapshot_time": snapshot_time.isoformat(),
+        "device_count": len(features),
+        "filters": {
+            "form_factor": form_factor,
+            "spatial_status": spatial_status,
+            "include_outliers": include_outliers,
+            "bbox": bbox,
+        },
+        "include": sorted(tokens),
+    }
+    if viewed_by is not None:
+        metadata["viewed_by"] = viewed_by
+        metadata["admin"] = include_plate
     return {
         "type": "FeatureCollection",
-        "metadata": {
-            "cycle_id": str(cycle_id),
-            "snapshot_time": snapshot_time.isoformat(),
-            "device_count": len(features),
-            "filters": {
-                "form_factor": form_factor,
-                "spatial_status": spatial_status,
-                "include_outliers": include_outliers,
-                "bbox": bbox,
-            },
-            "include": sorted(tokens),
-        },
+        "metadata": metadata,
         "features": features,
     }
+
+
+@router.get("/api/v1/devices/current")
+def devices_current(
+    request: Request,
+    response: Response,
+    form_factor: str | None = Query(
+        None,
+        description='Filter by form_factor. One of "bicycle", "scooter". Default: no filter.',
+    ),
+    spatial_status: str | None = Query(
+        None,
+        description='Filter by spatial_status. One of "denver_core", "china_glitch", "other_outlier". Default behavior depends on include_outliers.',
+    ),
+    include_outliers: bool = Query(
+        False,
+        description="If false (default), only return devices with spatial_status='denver_core'. Set true to include China-factory glitches and other outliers.",
+    ),
+    bbox: str | None = Query(
+        None,
+        description='Comma-separated "min_lon,min_lat,max_lon,max_lat" bounding box filter (WGS84).',
+    ),
+    include: str | None = Query(
+        None,
+        description='Comma-separated opt-in field groups: "ranks" (the seven range_rank_*/range_percentile_by_type fields), "h3" (h3_8/9/10_index, string-encoded).',
+    ),
+) -> Any:
+    """GeoJSON FeatureCollection of every device's current position,
+    drawn from the most recent successfully-completed observation cycle.
+
+    Public and unauthenticated — no raw plates. Signed-in callers who want
+    the admin-only fields use `/api/v1/user/devices/current` instead.
+
+        const r = await fetch("/api/v1/devices/current");
+        const geo = await r.json();
+        map.getSource("devices").setData(geo);
+    """
+    return _devices_current_impl(
+        request,
+        response,
+        form_factor=form_factor,
+        spatial_status=spatial_status,
+        include_outliers=include_outliers,
+        bbox=bbox,
+        include=include,
+    )
 
 
 # ---------------------------------------------------------------------------

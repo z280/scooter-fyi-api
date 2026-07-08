@@ -6,9 +6,12 @@ Opaque bearer tokens: 32 bytes of urandom (256 bits), handed to the client
 once, stored only as sha256 hex in auth_sessions. Scopes:
 
     rider      — every session; gates profile + report attribution
-    admin      — Google sign-in AND email on the ADMIN_EMAILS allowlist.
-                 Magic-link sessions NEVER get admin, even for allowlisted
-                 emails (one trust decision, enforced here server-side).
+    admin      — a Google-only SIGNAL scope (Google sign-in AND email on
+                 ADMIN_EMAILS). It no longer gates access: admin
+                 authorization is ADMIN_EMAILS membership via either door
+                 (see is_admin_email / require_admin), so an allowlisted
+                 operator can use magic-link too. The scope is still handy
+                 for the frontend to know a Google admin door was used.
     supporter  — never stored; derived from accounts.supporter at read
                  time so a Stripe webhook flip applies to live sessions.
 
@@ -19,20 +22,20 @@ Expiry policy:
                       original expiry.
 
 The FastAPI dependencies live here too: require_session (any valid
-session), require_admin (session carrying the `admin` scope — this
-gates the /api/v1/private/* endpoints that the retired GitHub map-auth
-bearer flow used to gate, per API_REQUIREMENTS.md §2.5), and
+session), require_admin (session whose email is on ADMIN_EMAILS — either
+door; this gates the /api/v1/private/* endpoints that the retired GitHub
+map-auth bearer flow used to gate, per API_REQUIREMENTS.md §2.5), and
 require_supporter.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from typing import Any
 
 from fastapi import HTTPException, Request
 
@@ -45,13 +48,85 @@ ADMIN_SESSION_HOURS = 24
 
 
 def admin_emails() -> frozenset[str]:
-    """The ADMIN_EMAILS env allowlist, lowercased. Empty when unset."""
-    raw = os.environ.get("ADMIN_EMAILS", "")
-    return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+    """The admin allowlist (normalized, lowercased).
+
+    Source of truth is the `admin_allowlist` table, managed from the
+    GitHub-gated admin portal (/admin/admins) and `python -m src.cli admin`.
+    Empty when the table is empty. (Replaced the ADMIN_EMAILS env var — see
+    sql/021_admin_allowlist.sql.)
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT email FROM admin_allowlist")
+            # Normalize on read too: add_admin normalizes before insert, but
+            # a manual/backfilled row with mixed case or whitespace shouldn't
+            # silently fail the is_admin_email() check.
+            return frozenset(normalize_email(r[0]) for r in cur.fetchall())
+
+
+def list_admins() -> list[dict[str, Any]]:
+    """Full allowlist rows for the admin portal, newest first."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT email, added_by, added_at FROM admin_allowlist "
+                "ORDER BY added_at DESC, email"
+            )
+            return [
+                {
+                    "email": r[0],
+                    "added_by": r[1],
+                    "added_at": r[2].isoformat() if r[2] else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+
+def add_admin(email: str, added_by: str | None) -> bool:
+    """Add an email to the allowlist (stored normalized). Idempotent —
+    returns True if newly inserted, False if it was already present.
+    Raises ValueError for a non-email string."""
+    norm = normalize_email(email)
+    if not norm or "@" not in norm or norm.startswith("@") or norm.endswith("@"):
+        raise ValueError(f"not an email address: {email!r}")
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO admin_allowlist (email, added_by) VALUES (%s, %s) "
+                "ON CONFLICT (email) DO NOTHING",
+                (norm, added_by),
+            )
+            added = cur.rowcount == 1
+        conn.commit()
+    return added
+
+
+def remove_admin(email: str) -> bool:
+    """Remove an email from the allowlist. Returns True if a row was
+    removed, False if it wasn't present."""
+    norm = normalize_email(email)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM admin_allowlist WHERE email = %s", (norm,))
+            removed = cur.rowcount == 1
+        conn.commit()
+    return removed
 
 
 def normalize_email(email: str) -> str:
     return email.strip().lower()
+
+
+def is_admin_email(user: "SessionUser") -> bool:
+    """Whether a session's email is on the ADMIN_EMAILS allowlist.
+
+    This — NOT the `admin` scope — is the admin authorization check for the
+    /api/v1/private/* endpoints and the /api/v1/user plate fields, so an
+    allowlisted operator can use EITHER sign-in door (magic-link or Google).
+    Both doors prove ownership of the email. The `admin` scope stays a
+    Google-only signal (see session_scopes) but no longer gates access.
+    """
+    return normalize_email(user.email) in admin_emails()
 
 
 def hash_token(raw: str) -> str:
@@ -59,7 +134,8 @@ def hash_token(raw: str) -> str:
 
 
 def session_scopes(*, method: str, email: str) -> list[str]:
-    """Stored scopes for a new session. Admin requires the Google door."""
+    """Stored scopes for a new session. The `admin` scope is a Google-only
+    signal (it does NOT gate access — require_admin uses is_admin_email)."""
     scopes = ["rider"]
     if method == "google" and normalize_email(email) in admin_emails():
         scopes.append("admin")
@@ -209,9 +285,12 @@ def optional_session(request: Request) -> SessionUser | None:
 
 
 def require_admin(request: Request) -> SessionUser:
+    """Gate on ADMIN_EMAILS membership, so an allowlisted operator reaches
+    the /api/v1/private/* endpoints via EITHER sign-in door (magic-link or
+    Google) — not the Google-only `admin` scope."""
     user = require_session(request)
-    if "admin" not in user.scopes:
-        raise HTTPException(403, "admin scope required")
+    if not is_admin_email(user):
+        raise HTTPException(403, "admin access required (email not on ADMIN_EMAILS)")
     return user
 
 
