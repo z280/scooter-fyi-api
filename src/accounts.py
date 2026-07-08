@@ -58,7 +58,10 @@ def admin_emails() -> frozenset[str]:
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT email FROM admin_allowlist")
-            return frozenset(r[0] for r in cur.fetchall())
+            # Normalize on read too: add_admin normalizes before insert, but
+            # a manual/backfilled row with mixed case or whitespace shouldn't
+            # silently fail the is_admin_email() check.
+            return frozenset(normalize_email(r[0]) for r in cur.fetchall())
 
 
 def list_admins() -> list[dict[str, Any]]:

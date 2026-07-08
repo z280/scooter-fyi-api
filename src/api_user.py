@@ -3,18 +3,20 @@ Google) via require_session.
 
 `GET /api/v1/user/devices/current` is the signed-in map feed. It returns
 the same GeoJSON as the public `/api/v1/devices/current` for any rider,
-and — for an `admin`-scope session — the extra private fields that used to
-live behind the (now retired) `/api/v1/private/devices/current`: raw
-`vehicle_plate`, `first_ever_observed_at`, and the observed max range.
+and — when the session email is on the admin allowlist — the extra private
+fields that used to live behind the (now retired)
+`/api/v1/private/devices/current`: raw `vehicle_plate`,
+`first_ever_observed_at`, and the observed max range.
 
-Admin gate: raw membership of the session email in `ADMIN_EMAILS`, so the
-private fields unlock for an allowlisted email signed in via EITHER door —
-magic-link or Google. This is intentionally broader than the `admin`
-*scope* (which src/accounts.py grants only via Google): the operator wants
-both doors viable (and may drop the Google door entirely). Both doors
-prove ownership of the email, and this is a read-only plate view, not an
-admin write action. (The `/api/v1/private/*` endpoints still gate on the
-`admin` scope — those are operator tooling, not the rider map.)
+Admin gate: `accounts.is_admin_email(user)` — raw membership of the session
+email in the admin allowlist — so the private fields unlock for an
+allowlisted email signed in via EITHER door, magic-link or Google. This is
+intentionally broader than the `admin` *scope* (which src/accounts.py
+grants only via Google): the operator wants both doors viable (and may drop
+the Google door entirely). Both doors prove ownership of the email, and
+this is a read-only plate view, not an admin write action. The
+`/api/v1/private/*` endpoints share the same gate (`require_admin` →
+`is_admin_email`), so they too are reachable via either door.
 """
 
 from __future__ import annotations
@@ -28,8 +30,12 @@ from .api_public import _devices_current_impl
 
 router = APIRouter()
 
-# Per-user, plate-bearing responses must not be shared-cached by a CDN.
-_USER_DEVICES_CACHE_HEADER = "private, max-age=30"
+# Per-user, plate-bearing responses: `private` (never a shared/CDN cache) and
+# `no-cache` so a stored copy must be revalidated before every reuse. Paired
+# with Vary: Authorization + a user-keyed ETag (see _devices_current_impl),
+# this keeps the cheap 304 revalidation on the 90 s poll without ever letting
+# one bearer's plate-bearing body be reused for another.
+_USER_DEVICES_CACHE_HEADER = "private, no-cache"
 
 
 def _wants_plate(user: SessionUser) -> bool:

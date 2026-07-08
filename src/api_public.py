@@ -256,7 +256,6 @@ def _if_none_match_hit(request: Request, etag: str) -> bool:
     return etag in (t.strip() for t in inm.split(","))
 
 
-@router.get("/api/v1/devices/current")
 def _devices_current_impl(
     request: Request,
     response: Response,
@@ -333,6 +332,10 @@ def _devices_current_impl(
             # include_plate is part of the key so an admin's plate-bearing
             # body can never be handed back to a non-admin via a shared 304
             # (and the /user endpoint is served `private` anyway).
+            # `viewed_by` (the authenticated email) is part of the key so an
+            # admin's plate-bearing body can never be served to a different
+            # user via a shared/conditional cache hit — belt-and-suspenders
+            # alongside the per-response Vary: Authorization below.
             filter_key = "|".join((
                 "+".join(sorted(tokens)),
                 form_factor or "",
@@ -340,15 +343,22 @@ def _devices_current_impl(
                 "1" if include_outliers else "0",
                 ",".join(repr(v) for v in bbox_vals) if bbox_vals else "",
                 "plate" if include_plate else "",
+                viewed_by or "",
             ))
             etag = f'W/"{resource}:{cycle_id}:{filter_key}"'
+            # Authenticated responses vary by the bearer and (for admins) can
+            # carry raw plates — a private cache must key on Authorization and
+            # never silently reuse across tokens within a freshness window.
+            extra_headers = {"Vary": "Authorization"} if viewed_by is not None else {}
             if _if_none_match_hit(request, etag):
                 return Response(
                     status_code=304,
-                    headers={"ETag": etag, "Cache-Control": cache_header},
+                    headers={"ETag": etag, "Cache-Control": cache_header, **extra_headers},
                 )
             response.headers["ETag"] = etag
             response.headers["Cache-Control"] = cache_header
+            for k, v in extra_headers.items():
+                response.headers[k] = v
 
             # Build the filter. All predicates prefix `r.` so they compose
             # with the EXISTS subquery on negative_reports below.

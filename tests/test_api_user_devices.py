@@ -164,8 +164,21 @@ def test_admin_and_non_admin_get_distinct_etags(_fake_db):
     _call(email="z@neill.io", response=r_admin)
     _call(email="rider@example.com", response=r_plain)
     assert r_admin.headers["etag"] != r_plain.headers["etag"]
-    # Per-user response must not be shared-cached.
-    assert r_admin.headers["cache-control"] == "private, max-age=30"
+    # Per-user response must not be shared-cached, must revalidate, and must
+    # vary by bearer so one token's (plate-bearing) body can't be reused for
+    # another.
+    assert r_admin.headers["cache-control"] == "private, no-cache"
+    assert r_admin.headers["vary"] == "Authorization"
+
+
+def test_etag_is_per_user(_fake_db):
+    """Two users at the SAME admin level still get different ETags (identity
+    is folded into the key), so no cross-user 304 reuse even if a cache
+    mishandles Vary. Both non-admin here, so only the email differs."""
+    r1, r2 = Response(), Response()
+    _call(email="a@example.com", response=r1)
+    _call(email="b@example.com", response=r2)
+    assert r1.headers["etag"] != r2.headers["etag"]
 
 
 def test_user_endpoint_304_on_revalidation(_fake_db):
