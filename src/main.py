@@ -27,6 +27,7 @@ from .api_private import router as private_router
 from .api_profile import router as profile_router
 from .api_public import router as public_router
 from .api_reports import router as reports_router
+from .api_user import router as user_router
 from .config import load, session_https_only, session_secret
 from .pg import run_migrations
 from .sentry import init as sentry_init
@@ -87,6 +88,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.include_router(public_router)
 app.include_router(h3_router)
+app.include_router(user_router)
 app.include_router(admin_router)
 app.include_router(private_router)
 app.include_router(reports_router)
@@ -110,6 +112,7 @@ def root():
             "/api/v1/spatial-snapshot?layer=…",
             "/api/v1/analytics/trend?layer=…&name=…&range=7d",
             "/api/v1/devices/current",
+            "/api/v1/user/devices/current",
             "/api/v1/equity-estimate?ranks=1,2",
             "/api/v1/h3/aggregates?res=9",
             "/api/v1/boundaries",

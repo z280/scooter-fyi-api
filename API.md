@@ -683,7 +683,7 @@ most one cycle length.
 | `device_id` | string | The upstream Veo `bike_id` from GBFS `free_bike_status`. **Rotates per trip** by GBFS spec mandate — do not treat as stable. |
 | `form_factor` | string | `"bicycle"`, `"scooter"`, or `"unknown"`. Not taken as-given from Veo's upstream `vehicle_types.json` — corrected against direct visual confirmation where the upstream registry is known to be wrong (see `vehicle_model_name` below). |
 | `spatial_status` | string | `"denver_core"`, `"china_glitch"`, or `"other_outlier"`. |
-| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins. May be null if the upstream payload omits a plate. **The raw plate is NOT exposed on this public endpoint** — it's served only by the bearer-gated `/api/v1/private/*` endpoints. |
+| `vehicle_identifier` | string \| null | 16-hex-character stable per-scooter identifier (e.g. `"8c4a1f0d2e9b7a35"`). Persistent across trips, unlike `device_id`. Computed as `HMAC-SHA256(server_salt, visible_plate)[:16]`. This is the stable key for reports and cross-cycle joins. May be null if the upstream payload omits a plate. **The raw plate is NOT exposed on this public endpoint** — it's served only to `admin`-scope sessions via `/api/v1/user/devices/current` (see below). |
 | `is_disabled` | bool \| null | `true` when the scooter is out of service (low battery, mechanical fault, impound). Disabled devices still count toward fleet totals because they occupy space. |
 | `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
 | `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. |
@@ -792,6 +792,54 @@ async function refresh() {
 }
 map.on("moveend", refresh);
 refresh();
+```
+
+---
+
+### `GET /api/v1/user/devices/current`
+
+The **signed-in** map feed. Identical shape and query parameters to
+`/api/v1/devices/current` (`form_factor`, `spatial_status`,
+`include_outliers`, `bbox`, `include`, ETag/304), but requires a rider
+session (`Authorization: Bearer <token>` from magic-link or Google
+sign-in) and — for an `admin`-scope session — adds the admin-only private
+fields.
+
+This replaces the retired `/api/v1/private/devices/current`. Use it as the
+drop-in map source once a user is signed in: any signed-in rider gets the
+public field set (so the map works for everyone signed in), `admin`
+sessions additionally get plates.
+
+**Auth:** `401` when the bearer is missing, invalid, or expired.
+
+**Response:** same as `/api/v1/devices/current`, plus `metadata.viewed_by`
+(the session email) and `metadata.admin` (whether the private fields were
+included). For an `admin`-scope session each feature also carries:
+
+| Field | Type | Description |
+|---|---|---|
+| `vehicle_plate` | string \| null | The raw visible plate painted on the scooter. Null when the upstream payload had no plate. |
+| `first_ever_observed_at` | string \| null | UTC ISO 8601 of the first time we ever saw this `vehicle_identifier` (not reset by moves, unlike `first_observed_at_location`). |
+| `max_observed_range_meters` | int \| null | Highest `current_range_meters` ever observed for this vehicle. |
+| `max_observed_range_at` | string \| null | UTC ISO 8601 of when that max was observed. |
+
+**Admin gate:** the private fields unlock for the `admin` scope, which is
+granted only to an `ADMIN_EMAILS` email signed in via Google — the same
+admin definition that gates the `/api/v1/private/*` endpoints. A rider
+signed in via magic link (or any non-admin) gets the base map.
+
+**Caching:** `Cache-Control: private, max-age=30` (per-user; never
+shared-cached) with a cycle-keyed weak ETag that also varies on whether
+plates were included.
+
+```javascript
+// Signed-in map: one endpoint, richer for admins, works for everyone.
+const r = await fetch("https://data.scooter.fyi/api/v1/user/devices/current",
+                      { headers: { "Authorization": "Bearer " + token } });
+if (r.status === 401) { /* session expired — prompt re-auth, fall back to public map */ }
+const geo = await r.json();
+map.getSource("devices").setData(geo);
+if (geo.metadata.admin) showPlateLayer(geo);   // admins only
 ```
 
 ---
