@@ -6,9 +6,12 @@ Opaque bearer tokens: 32 bytes of urandom (256 bits), handed to the client
 once, stored only as sha256 hex in auth_sessions. Scopes:
 
     rider      — every session; gates profile + report attribution
-    admin      — Google sign-in AND email on the ADMIN_EMAILS allowlist.
-                 Magic-link sessions NEVER get admin, even for allowlisted
-                 emails (one trust decision, enforced here server-side).
+    admin      — a Google-only SIGNAL scope (Google sign-in AND email on
+                 ADMIN_EMAILS). It no longer gates access: admin
+                 authorization is ADMIN_EMAILS membership via either door
+                 (see is_admin_email / require_admin), so an allowlisted
+                 operator can use magic-link too. The scope is still handy
+                 for the frontend to know a Google admin door was used.
     supporter  — never stored; derived from accounts.supporter at read
                  time so a Stripe webhook flip applies to live sessions.
 
@@ -19,9 +22,9 @@ Expiry policy:
                       original expiry.
 
 The FastAPI dependencies live here too: require_session (any valid
-session), require_admin (session carrying the `admin` scope — this
-gates the /api/v1/private/* endpoints that the retired GitHub map-auth
-bearer flow used to gate, per API_REQUIREMENTS.md §2.5), and
+session), require_admin (session whose email is on ADMIN_EMAILS — either
+door; this gates the /api/v1/private/* endpoints that the retired GitHub
+map-auth bearer flow used to gate, per API_REQUIREMENTS.md §2.5), and
 require_supporter.
 """
 
@@ -54,12 +57,25 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def is_admin_email(user: "SessionUser") -> bool:
+    """Whether a session's email is on the ADMIN_EMAILS allowlist.
+
+    This — NOT the `admin` scope — is the admin authorization check for the
+    /api/v1/private/* endpoints and the /api/v1/user plate fields, so an
+    allowlisted operator can use EITHER sign-in door (magic-link or Google).
+    Both doors prove ownership of the email. The `admin` scope stays a
+    Google-only signal (see session_scopes) but no longer gates access.
+    """
+    return normalize_email(user.email) in admin_emails()
+
+
 def hash_token(raw: str) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
 def session_scopes(*, method: str, email: str) -> list[str]:
-    """Stored scopes for a new session. Admin requires the Google door."""
+    """Stored scopes for a new session. The `admin` scope is a Google-only
+    signal (it does NOT gate access — require_admin uses is_admin_email)."""
     scopes = ["rider"]
     if method == "google" and normalize_email(email) in admin_emails():
         scopes.append("admin")
@@ -209,9 +225,12 @@ def optional_session(request: Request) -> SessionUser | None:
 
 
 def require_admin(request: Request) -> SessionUser:
+    """Gate on ADMIN_EMAILS membership, so an allowlisted operator reaches
+    the /api/v1/private/* endpoints via EITHER sign-in door (magic-link or
+    Google) — not the Google-only `admin` scope."""
     user = require_session(request)
-    if "admin" not in user.scopes:
-        raise HTTPException(403, "admin scope required")
+    if not is_admin_email(user):
+        raise HTTPException(403, "admin access required (email not on ADMIN_EMAILS)")
     return user
 
 

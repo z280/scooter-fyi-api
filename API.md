@@ -802,12 +802,12 @@ The **signed-in** map feed. Identical shape and query parameters to
 `/api/v1/devices/current` (`form_factor`, `spatial_status`,
 `include_outliers`, `bbox`, `include`, ETag/304), but requires a rider
 session (`Authorization: Bearer <token>` from magic-link or Google
-sign-in) and — for an `admin`-scope session — adds the admin-only private
-fields.
+sign-in) and — when the session email is in `ADMIN_EMAILS` — adds the
+admin-only private fields.
 
 This replaces the retired `/api/v1/private/devices/current`. Use it as the
 drop-in map source once a user is signed in: any signed-in rider gets the
-public field set (so the map works for everyone signed in), `admin`
+public field set (so the map works for everyone signed in), `ADMIN_EMAILS`
 sessions additionally get plates.
 
 **Auth:** `401` when the bearer is missing, invalid, or expired.
@@ -826,10 +826,9 @@ carries:
 
 **Admin gate:** the private fields unlock by raw membership of the session
 email in `ADMIN_EMAILS`, so they work for an allowlisted email signed in
-via **either** door (magic-link or Google). This is intentionally broader
-than the `admin` *scope* (Google-only) that gates the operator-facing
-`/api/v1/private/*` endpoints — both doors prove email ownership, and this
-is a read-only plate view. A non-allowlisted rider gets the base map.
+via **either** door (magic-link or Google) — the same gate as the
+operator-facing `/api/v1/private/*` endpoints. Both doors prove email
+ownership. A non-allowlisted rider gets the base map.
 
 **Caching:** `Cache-Control: private, max-age=30` (per-user; never
 shared-cached) with a cycle-keyed weak ETag that also varies on whether
@@ -1107,10 +1106,13 @@ exactly `{ "token": "...", "expires": "<ISO 8601>" }`; store the token
 and send it as `Authorization: Bearer <token>`. Tokens are opaque
 (256-bit random) and stored server-side only as hashes.
 
-**Scopes:** every session has `rider`. `admin` is granted only on Google
-sign-in for allowlisted operator emails — magic-link sessions never carry
-it. `supporter` appears automatically while the account has a live
-supporter payment (see the Stripe webhook).
+**Scopes:** every session has `rider`. `admin` is a Google-only signal
+scope (granted on Google sign-in for allowlisted operator emails) — but it
+no longer gates anything: **admin authorization is `ADMIN_EMAILS`
+membership regardless of sign-in door**, so an allowlisted operator using
+magic-link reaches the admin/`/api/v1/private/*` surface too. `supporter`
+appears automatically while the account has a live supporter payment (see
+the Stripe webhook).
 
 **Expiry:** rider sessions last 30 days and slide — call
 `POST /api/v1/auth/refresh` any time to rotate the token and get a fresh

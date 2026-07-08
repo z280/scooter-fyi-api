@@ -23,7 +23,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
-from .accounts import SessionUser, admin_emails, normalize_email, require_session
+from .accounts import SessionUser, is_admin_email, require_session
 from .api_public import _devices_current_impl
 
 router = APIRouter()
@@ -34,8 +34,9 @@ _USER_DEVICES_CACHE_HEADER = "private, max-age=30"
 
 def _wants_plate(user: SessionUser) -> bool:
     # Either door: any session (magic-link OR Google) whose email is on the
-    # ADMIN_EMAILS allowlist. Broader than the Google-only `admin` scope.
-    return normalize_email(user.email) in admin_emails()
+    # ADMIN_EMAILS allowlist — the same gate as the /api/v1/private/*
+    # endpoints (accounts.is_admin_email), broader than the `admin` scope.
+    return is_admin_email(user)
 
 
 @router.get("/api/v1/user/devices/current")

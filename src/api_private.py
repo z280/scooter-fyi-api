@@ -1,4 +1,4 @@
-"""Admin-only REST endpoints — gated by the Google `admin` session scope.
+"""Admin-only REST endpoints — gated by ADMIN_EMAILS membership.
 
 These endpoints expose data that is privacy-sensitive to publish in the
 clear: raw plate numbers, persistent dwell times at a location, and the
@@ -7,11 +7,11 @@ the database (it's derived from public GBFS), but joining it under a
 stable identifier is the boundary GBFS's per-trip rotation is meant to
 prevent.
 
-All routes require `Authorization: Bearer <token>` for a session carrying
-the `admin` scope (see src/accounts.py `require_admin`). Admin is granted
-only via Google sign-in for an email on the ADMIN_EMAILS allowlist. This
-replaced the retired GitHub map-auth bearer flow (API_REQUIREMENTS.md
-§2.5).
+All routes require `Authorization: Bearer <token>` for a session whose
+email is on the ADMIN_EMAILS allowlist (see src/accounts.py
+`require_admin` / `is_admin_email`) — reachable via EITHER sign-in door,
+magic-link or Google, not the Google-only `admin` scope. This replaced the
+retired GitHub map-auth bearer flow (API_REQUIREMENTS.md §2.5).
 """
 
 from __future__ import annotations

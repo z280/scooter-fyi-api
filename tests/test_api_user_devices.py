@@ -16,7 +16,7 @@ import pytest
 from fastapi import Response
 from starlette.requests import Request
 
-from src import api_public, api_user
+from src import accounts, api_public, api_user
 from src.accounts import SessionUser
 
 _CYCLE_ID = uuid.UUID("8f3a2d10-1234-4abc-8def-0123456789ab")
@@ -109,7 +109,8 @@ def _request(headers: dict[str, str] | None = None) -> Request:
 
 @pytest.fixture(autouse=True)
 def _allowlist(monkeypatch):
-    monkeypatch.setattr(api_user, "admin_emails", lambda: _ADMINS)
+    # _wants_plate -> accounts.is_admin_email -> accounts.admin_emails()
+    monkeypatch.setattr(accounts, "admin_emails", lambda: _ADMINS)
 
 
 def _call(*, email="rider@example.com", method="magic_link", headers=None, response=None):
