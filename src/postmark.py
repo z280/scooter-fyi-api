@@ -74,3 +74,39 @@ def send_magic_link(email: str, link: str) -> None:
         # detail, surface only a generic message to the caller.
         log.error("postmark send failed: HTTP %d %s", r.status_code, r.text[:500])
         raise PostmarkError(f"postmark rejected the send (HTTP {r.status_code})")
+
+
+def send_login_code(email: str, code: str) -> None:
+    """Email a short sign-in code the user types back. Raises PostmarkError
+    on any failure (the auth route maps it to a 502)."""
+    creds = postmark_credentials()
+    if not creds:
+        raise PostmarkError("postmark not configured (POSTMARK_TOKEN / POSTMARK_FROM)")
+    if not code or not code.strip():
+        raise PostmarkError("refusing to send an empty login code")
+
+    body = {
+        "From": creds["sender"],
+        "To": email,
+        "Subject": "Your denver.scooter.fyi sign-in code",
+        "TextBody": (
+            "Your sign-in code for denver.scooter.fyi:\n\n"
+            f"    {code}\n\n"
+            "Enter it in the tab where you asked to sign in. It expires in "
+            "10 minutes and can be used once. If you didn't request it, "
+            "ignore this email — the code is useless without this inbox.\n"
+        ),
+        "MessageStream": "outbound",
+    }
+    try:
+        r = httpx.post(
+            _API_URL,
+            json=body,
+            headers={"X-Postmark-Server-Token": creds["token"], "Accept": "application/json"},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as e:
+        raise PostmarkError(f"postmark request failed: {e}") from e
+    if r.status_code >= 400:
+        log.error("postmark code send failed: HTTP %d %s", r.status_code, r.text[:500])
+        raise PostmarkError(f"postmark rejected the send (HTTP {r.status_code})")

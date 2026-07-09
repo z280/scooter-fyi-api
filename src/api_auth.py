@@ -3,6 +3,8 @@
     POST /api/v1/auth/google       Google ID token → session
     POST /api/v1/auth/magic-link   email → Postmark magic link (always 202)
     POST /api/v1/auth/redeem       magic-link token → session
+    POST /api/v1/auth/code         email → Postmark AA000AA code (always 202)
+    POST /api/v1/auth/code/verify  email + code → session
     POST /api/v1/auth/refresh      rotate the presented token
     GET  /api/v1/auth/session      session introspection for UI state
     POST /api/v1/auth/signout      revoke the presented token
@@ -14,11 +16,13 @@ session is readable from GET /api/v1/auth/session.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
@@ -33,10 +37,15 @@ from .accounts import (
     upsert_account,
 )
 from .client_ip import real_client_ip
-from .config import load
+from .config import load, session_secret
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .pg import connection
-from .postmark import PostmarkError, postmark_credentials, send_magic_link
+from .postmark import (
+    PostmarkError,
+    postmark_credentials,
+    send_login_code,
+    send_magic_link,
+)
 from .ratelimit import enforce
 
 log = logging.getLogger(__name__)
@@ -45,6 +54,17 @@ router = APIRouter()
 
 MAGIC_LINK_TTL_MINUTES = 15
 
+# Email code (type-a-code) sign-in. The code is low-entropy (AA000AA ≈
+# 24^4·10^3 ≈ 3.3e8), so it leans on: email-scoped verification, a short
+# TTL, a per-code attempt cap, and per-IP/per-email rate limits.
+CODE_TTL_MINUTES = 10
+MAX_CODE_ATTEMPTS = 5
+# AA000AA = 2 letters, 3 digits, 2 letters. Letters exclude I/O (look like
+# 1/0); digit positions keep the full 0-9.
+_CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+_CODE_DIGITS = "0123456789"
+_CODE_RE = re.compile(r"^[A-Z]{2}[0-9]{3}[A-Z]{2}$")
+
 # §2.3 limits, plus a modest per-IP bucket on the other POST doors (§5).
 _LIMIT_MAGIC_PER_EMAIL = (3, 3600)    # 3/hour per email
 _LIMIT_MAGIC_PER_IP = (10, 3600)      # 10/hour per IP
@@ -52,8 +72,38 @@ _LIMIT_GOOGLE_PER_IP = (30, 3600)
 _LIMIT_REDEEM_PER_IP = (30, 3600)
 _LIMIT_REFRESH_PER_ACCOUNT = (60, 3600)
 _LIMIT_SIGNOUT_PER_IP = (60, 3600)
+_LIMIT_CODE_PER_EMAIL = (3, 3600)     # 3 code requests/hour per email
+_LIMIT_CODE_PER_IP = (10, 3600)       # 10 code requests/hour per IP
+_LIMIT_CODE_VERIFY_PER_IP = (30, 3600)  # 30 verify attempts/hour per IP
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _generate_code() -> str:
+    """A fresh AA000AA code."""
+    ch = [
+        secrets.choice(_CODE_LETTERS),
+        secrets.choice(_CODE_LETTERS),
+        secrets.choice(_CODE_DIGITS),
+        secrets.choice(_CODE_DIGITS),
+        secrets.choice(_CODE_DIGITS),
+        secrets.choice(_CODE_LETTERS),
+        secrets.choice(_CODE_LETTERS),
+    ]
+    return "".join(ch)
+
+
+def _normalize_code(raw: str) -> str:
+    """Uppercase and drop spaces/hyphens the user may have typed."""
+    return re.sub(r"[^A-Za-z0-9]", "", raw or "").upper()
+
+
+def _hash_code(email: str, code: str) -> str:
+    """HMAC-SHA256(server secret, "email:CODE"). Keyed so a leaked
+    login_codes table can't be brute-forced offline, and bound to the email
+    so a code is only ever valid for the address it was sent to."""
+    msg = f"{normalize_email(email)}:{code}".encode("utf-8")
+    return hmac.new(session_secret().encode("utf-8"), msg, sha256).hexdigest()
 
 
 _DEFAULT_MAGIC_LINK_TEMPLATE = "https://denver.scooter.fyi/auth?ml={token}"
@@ -108,10 +158,13 @@ def auth_config(response: Response) -> dict[str, Any]:
     """
     response.headers["Cache-Control"] = "public, max-age=300"
     client_id = google_client_id()
+    postmark_ready = postmark_credentials() is not None
     return {
         "google_client_id": client_id,
         "google_enabled": client_id is not None,
-        "magic_link_enabled": postmark_credentials() is not None,
+        "magic_link_enabled": postmark_ready,
+        # The typed-code door uses the same Postmark transport as magic-link.
+        "code_enabled": postmark_ready,
     }
 
 
@@ -246,6 +299,140 @@ def auth_redeem(request: Request, payload: RedeemIn = Body(...)) -> dict[str, An
             token, expires = mint_session(
                 cur, account_id=account_id, email=email,
                 method="magic_link", issued_ip=ip, user_agent=ua,
+            )
+        conn.commit()
+    return _session_response(token, expires)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/auth/code  +  POST /api/v1/auth/code/verify
+# ---------------------------------------------------------------------------
+class CodeRequestIn(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+
+
+class CodeVerifyIn(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+    code: str = Field(..., min_length=1, max_length=32)
+
+
+@router.post("/api/v1/auth/code", status_code=202)
+def auth_code_request(request: Request, payload: CodeRequestIn = Body(...)) -> dict[str, Any]:
+    """Email a short AA000AA sign-in code (the user types it back at
+    /api/v1/auth/code/verify). Always 202 on success-shaped input — never
+    reveals whether an account exists. Requires Postmark (503 if not)."""
+    if not postmark_credentials():
+        raise HTTPException(503, "code sign-in not configured")
+    email = normalize_email(payload.email)
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(400, "not an email address")
+
+    ip = real_client_ip(request)
+    code = _generate_code()
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=CODE_TTL_MINUTES)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            enforce(cur, bucket="login_code_ip", key=ip or "?",
+                    limit=_LIMIT_CODE_PER_IP[0], window_seconds=_LIMIT_CODE_PER_IP[1])
+            enforce(cur, bucket="login_code_email", key=email,
+                    limit=_LIMIT_CODE_PER_EMAIL[0], window_seconds=_LIMIT_CODE_PER_EMAIL[1])
+            # Only the newest code per email stays live — issuing a new one
+            # burns any prior unused code so there's a single guess target.
+            cur.execute(
+                "UPDATE login_codes SET used_at = NOW() "
+                "WHERE email = %s AND used_at IS NULL",
+                (email,),
+            )
+            # Opportunistic prune of long-dead rows (used or >1 day expired).
+            cur.execute(
+                "DELETE FROM login_codes WHERE expires_at < NOW() - INTERVAL '1 day'"
+            )
+            cur.execute(
+                """
+                INSERT INTO login_codes (email, code_hash, expires_at, request_ip)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (email, _hash_code(email, code), expires_at, ip),
+            )
+        conn.commit()
+
+    # Send AFTER commit so a Postmark failure doesn't roll back the
+    # rate-limit events (a broken sender must not become a free retry loop).
+    try:
+        send_login_code(email, code)
+    except PostmarkError:
+        log.exception("login-code send failed for %s", email)
+        raise HTTPException(502, "couldn't send the code email — try again in a minute")
+
+    return {"sent": True}
+
+
+@router.post("/api/v1/auth/code/verify")
+def auth_code_verify(request: Request, payload: CodeVerifyIn = Body(...)) -> dict[str, Any]:
+    """Verify an emailed code, upsert the account, mint a session.
+
+    The code is low-entropy, so verification is email-scoped, attempt-capped
+    (MAX_CODE_ATTEMPTS wrong tries burns the code), and per-IP rate limited.
+    Like magic-link, a code session never carries the admin scope (enforced
+    in accounts.session_scopes — method is 'email_code'). Returns the same
+    `{token, expires}` the frontend stores to start the session in the tab.
+    """
+    ip = real_client_ip(request)
+    ua = request.headers.get("user-agent")
+    email = normalize_email(payload.email)
+    code = _normalize_code(payload.code)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            enforce(cur, bucket="login_code_verify_ip", key=ip or "?",
+                    limit=_LIMIT_CODE_VERIFY_PER_IP[0],
+                    window_seconds=_LIMIT_CODE_VERIFY_PER_IP[1])
+
+            cur.execute(
+                """
+                SELECT id, code_hash, attempts FROM login_codes
+                WHERE email = %s AND used_at IS NULL AND expires_at >= NOW()
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (email,),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.commit()  # keep the rate-limit event
+                raise HTTPException(401, "code is invalid or expired")
+            code_id, code_hash, attempts = row
+
+            if attempts >= MAX_CODE_ATTEMPTS:
+                cur.execute("UPDATE login_codes SET used_at = NOW() WHERE id = %s", (code_id,))
+                conn.commit()
+                raise HTTPException(401, "too many attempts — request a new code")
+
+            if not hmac.compare_digest(_hash_code(email, code), code_hash):
+                cur.execute(
+                    "UPDATE login_codes SET attempts = attempts + 1 WHERE id = %s",
+                    (code_id,),
+                )
+                conn.commit()
+                raise HTTPException(401, "code is invalid or expired")
+
+            # Success — burn single-use atomically (a concurrent verify that
+            # already won leaves used_at NOT NULL, so this returns no row).
+            cur.execute(
+                "UPDATE login_codes SET used_at = NOW() "
+                "WHERE id = %s AND used_at IS NULL RETURNING id",
+                (code_id,),
+            )
+            if not cur.fetchone():
+                conn.commit()
+                raise HTTPException(401, "code is invalid or expired")
+
+            account_id = upsert_account(cur, email)
+            token, expires = mint_session(
+                cur, account_id=account_id, email=email,
+                method="email_code", issued_ip=ip, user_agent=ua,
             )
         conn.commit()
     return _session_response(token, expires)
