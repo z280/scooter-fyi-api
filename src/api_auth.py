@@ -392,7 +392,7 @@ def auth_code_verify(request: Request, payload: CodeVerifyIn = Body(...)) -> dic
 
             cur.execute(
                 """
-                SELECT id, code_hash, attempts FROM login_codes
+                SELECT id, code_hash FROM login_codes
                 WHERE email = %s AND used_at IS NULL AND expires_at >= NOW()
                 ORDER BY created_at DESC
                 LIMIT 1
@@ -403,19 +403,29 @@ def auth_code_verify(request: Request, payload: CodeVerifyIn = Body(...)) -> dic
             if not row:
                 conn.commit()  # keep the rate-limit event
                 raise HTTPException(401, "code is invalid or expired")
-            code_id, code_hash, attempts = row
+            code_id, code_hash = row
 
-            if attempts >= MAX_CODE_ATTEMPTS:
+            # Claim an attempt ATOMICALLY before comparing: the row-locked
+            # UPDATE serializes concurrent verifies, so N simultaneous
+            # guesses can't all pass a stale `attempts` snapshot and blow
+            # past the cap (a TOCTOU the read-then-check version had). No row
+            # returned ⇒ the code was used/burned between the SELECT and here.
+            cur.execute(
+                "UPDATE login_codes SET attempts = attempts + 1 "
+                "WHERE id = %s AND used_at IS NULL RETURNING attempts",
+                (code_id,),
+            )
+            claimed = cur.fetchone()
+            if not claimed:
+                conn.commit()
+                raise HTTPException(401, "code is invalid or expired")
+            if claimed[0] > MAX_CODE_ATTEMPTS:
                 cur.execute("UPDATE login_codes SET used_at = NOW() WHERE id = %s", (code_id,))
                 conn.commit()
                 raise HTTPException(401, "too many attempts — request a new code")
 
             if not hmac.compare_digest(_hash_code(email, code), code_hash):
-                cur.execute(
-                    "UPDATE login_codes SET attempts = attempts + 1 WHERE id = %s",
-                    (code_id,),
-                )
-                conn.commit()
+                conn.commit()  # the attempt was already counted above
                 raise HTTPException(401, "code is invalid or expired")
 
             # Success — burn single-use atomically (a concurrent verify that

@@ -59,15 +59,16 @@ class _FakeCur:
         if s.startswith("INSERT INTO login_codes"):
             self.state["inserted"] = params            # (email, code_hash, expires_at, ip)
             self._fetch = None
-        elif s.startswith("SELECT id, code_hash, attempts FROM login_codes"):
-            self._fetch = self.state.get("row")
-        elif "attempts = attempts + 1" in s:
-            self.state["attempt_bumped"] = True
-            self._fetch = None
+        elif s.startswith("SELECT id, code_hash FROM login_codes"):
+            self._fetch = self.state.get("row")        # (id, code_hash) or None
+        elif "attempts = attempts + 1" in s and "RETURNING attempts" in s:
+            # Atomic attempt claim. None ⇒ the code was used/burned in the race.
+            self.state["attempt_claimed"] = True
+            self._fetch = None if self.state.get("claimed_none") else (self.state.get("claimed", 1),)
         elif "RETURNING id" in s:                       # success single-use burn
             self.state["burned"] = True
             self._fetch = (1,) if self.state.get("burn_wins", True) else None
-        elif "SET used_at = NOW() WHERE id = %s" in s:  # too-many-attempts burn
+        elif "SET used_at = NOW() WHERE id = %s" in s:  # too-many-attempts burn (no RETURNING)
             self.state["burned_toomany"] = True
             self._fetch = None
         else:                                           # UPDATE-supersede, DELETE-prune
@@ -166,18 +167,20 @@ def _verify(email="z@neill.io", code="AB123XY"):
 
 
 def test_verify_success_mints_session(env):
-    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"), 0)
+    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"))
+    env["claimed"] = 1
     out = _verify()
     assert out["token"] == "SESSIONTOKEN"
     assert env.get("burned") is True
 
 
-def test_verify_wrong_code_bumps_attempts_and_401s(env):
-    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"), 0)
+def test_verify_wrong_code_counts_attempt_and_401s(env):
+    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"))
+    env["claimed"] = 1
     with pytest.raises(HTTPException) as e:
         _verify(code="ZZ999ZZ")
     assert e.value.status_code == 401
-    assert env.get("attempt_bumped") is True
+    assert env.get("attempt_claimed") is True   # attempt was counted atomically
     assert env.get("burned") is not True
 
 
@@ -189,24 +192,45 @@ def test_verify_no_live_code_401s(env):
 
 
 def test_verify_too_many_attempts_burns_and_401s(env):
-    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"), api_auth.MAX_CODE_ATTEMPTS)
+    # The atomic claim returns a count over the cap → burn + reject, even
+    # with the correct code.
+    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"))
+    env["claimed"] = api_auth.MAX_CODE_ATTEMPTS + 1
     with pytest.raises(HTTPException) as e:
-        _verify()  # even with the correct code
+        _verify()
     assert e.value.status_code == 401
     assert env.get("burned_toomany") is True
 
 
+def test_verify_at_cap_still_allowed(env):
+    """The MAX_CODE_ATTEMPTS-th attempt (claim == MAX) is still honored."""
+    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"))
+    env["claimed"] = api_auth.MAX_CODE_ATTEMPTS
+    assert _verify()["token"] == "SESSIONTOKEN"
+
+
 def test_verify_is_email_scoped(env):
     # A code hash minted for a DIFFERENT email must not verify for this one.
-    env["row"] = (1, api_auth._hash_code("someone@else.io", "AB123XY"), 0)
+    env["row"] = (1, api_auth._hash_code("someone@else.io", "AB123XY"))
+    env["claimed"] = 1
     with pytest.raises(HTTPException) as e:
         _verify(email="z@neill.io", code="AB123XY")
     assert e.value.status_code == 401
 
 
 def test_verify_loses_single_use_race(env):
-    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"), 0)
-    env["burn_wins"] = False  # a concurrent verify already burned it
+    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"))
+    env["claimed"] = 1
+    env["burn_wins"] = False  # a concurrent verify already burned it post-claim
+    with pytest.raises(HTTPException) as e:
+        _verify()
+    assert e.value.status_code == 401
+
+
+def test_verify_code_used_between_select_and_claim(env):
+    """The atomic claim returns no row (code used/burned in the race)."""
+    env["row"] = (1, api_auth._hash_code("z@neill.io", "AB123XY"))
+    env["claimed_none"] = True
     with pytest.raises(HTTPException) as e:
         _verify()
     assert e.value.status_code == 401
