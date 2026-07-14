@@ -1101,10 +1101,15 @@ Days without any computed row are simply omitted from `rows` — don't expect de
 
 ## Accounts & sessions
 
-Two sign-in doors, one session model. Session-minting endpoints return
+Three sign-in doors, one session model. Session-minting endpoints return
 exactly `{ "token": "...", "expires": "<ISO 8601>" }`; store the token
 and send it as `Authorization: Bearer <token>`. Tokens are opaque
 (256-bit random) and stored server-side only as hashes.
+
+The email doors come in two flavors: **magic link** (we email a link the
+user clicks) and **typed code** (we email a short `AA000AA` code the user
+types back — handy for signing in on the same tab/device without leaving
+to an inbox app). Both mint the same kind of session.
 
 **Scopes:** every session has `rider`. `admin` is a Google-only signal
 scope (granted on Google sign-in for an allowlisted email) — but it no
@@ -1124,20 +1129,23 @@ refresh rotates without extending.
 
 **Discovering which doors are on:** call `GET /api/v1/auth/config` on
 load. It's public (no auth) and returns
-`{ "google_client_id": string | null, "google_enabled": bool, "magic_link_enabled": bool }`
-— the source of truth for whether to render the Google button (and the
-client id to initialize Google Identity Services with) and the magic-link
-form. The Google OAuth client id is **not** a secret; it only names the
-audience and is meant to be embedded in the browser. `*_enabled` mirror
-the `503`-when-unconfigured conditions on the endpoints below.
-Cached `public, max-age=300`.
+`{ "google_client_id": string | null, "google_enabled": bool, "magic_link_enabled": bool, "code_enabled": bool }`
+— the source of truth for which doors to render (the Google button + the
+client id to initialize Google Identity Services with, the magic-link
+form, the typed-code form). The Google OAuth client id is **not** a
+secret; it only names the audience and is meant to be embedded in the
+browser. `*_enabled` mirror the `503`-when-unconfigured conditions on the
+endpoints below (`magic_link_enabled` and `code_enabled` both track
+Postmark config). Cached `public, max-age=300`.
 
 | Endpoint | Body / notes |
 |---|---|
-| `GET /api/v1/auth/config` | Public. → `{ google_client_id, google_enabled, magic_link_enabled }`. Render sign-in doors + init Google Identity Services from this. |
+| `GET /api/v1/auth/config` | Public. → `{ google_client_id, google_enabled, magic_link_enabled, code_enabled }`. Render sign-in doors + init Google Identity Services from this. |
 | `POST /api/v1/auth/google` | `{ "credential": "<Google ID token>" }` from Google Identity Services / One Tap. Verified locally (signature, audience, expiry, `email_verified`). → `{token, expires}` |
 | `POST /api/v1/auth/magic-link` | `{ "email": "you@example.com" }` → always `202 { "sent": true }` (no account-existence oracle). Emails a single-use link (15-min TTL). Limits: 3/hour per email, 10/hour per IP. `502` if the email provider fails, `503` if unconfigured. |
 | `POST /api/v1/auth/redeem` | `{ "token": "<from the emailed link>" }` → `{token, expires}`. Single-use; `401` if invalid, expired, or already used. |
+| `POST /api/v1/auth/code` | `{ "email": "you@example.com" }` → always `202 { "sent": true }`. Emails a short `AA000AA` code (10-min TTL). Only the newest code per email is live. Limits: 3/hour per email, 10/hour per IP. `502` if the email provider fails, `503` if unconfigured. |
+| `POST /api/v1/auth/code/verify` | `{ "email": "you@example.com", "code": "AB123XY" }` → `{token, expires}`. Case-insensitive; spaces/hyphens ignored. `401` if the code is wrong, expired, already used, or after too many wrong tries (5 — which burns the code). Verify attempts are rate-limited 30/hour per IP. |
 | `POST /api/v1/auth/refresh` | Bearer required. → `{token, expires}` (new token; old one revoked). |
 | `GET /api/v1/auth/session` | Bearer required. → `{ email, scopes, supporter, expires }`. `401` when invalid/expired — treat as signed out. |
 | `POST /api/v1/auth/signout` | Bearer required. Revokes the token. → `{ "revoked": true }` |
