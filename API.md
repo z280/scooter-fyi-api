@@ -1140,8 +1140,8 @@ Postmark config). Cached `public, max-age=300`.
 
 | Endpoint | Body / notes |
 |---|---|
-| `GET /api/v1/auth/config` | Public. → `{ google_client_id, google_enabled, magic_link_enabled, code_enabled }`. Render sign-in doors + init Google Identity Services from this. |
-| `POST /api/v1/auth/google` | `{ "credential": "<Google ID token>" }` from Google Identity Services / One Tap. Verified locally (signature, audience, expiry, `email_verified`). → `{token, expires}` |
+| `GET /api/v1/auth/config` | Public. → `{ google_client_id, google_enabled, magic_link_enabled, code_enabled }`. Render sign-in doors + init Google Identity Services from this. `google_enabled` is false when unconfigured **or** force-disabled via `GOOGLE_AUTH_ENABLED` (and `google_client_id` is null in that case). |
+| `POST /api/v1/auth/google` | `{ "credential": "<Google ID token>" }` from Google Identity Services / One Tap. Verified locally (signature, audience, expiry, `email_verified`). → `{token, expires}`. `503` when unconfigured or force-disabled via `GOOGLE_AUTH_ENABLED`. |
 | `POST /api/v1/auth/magic-link` | `{ "email": "you@example.com" }` → always `202 { "sent": true }` (no account-existence oracle). Emails a single-use link (15-min TTL). Limits: 3/hour per email, 10/hour per IP. `502` if the email provider fails, `503` if unconfigured. |
 | `POST /api/v1/auth/redeem` | `{ "token": "<from the emailed link>" }` → `{token, expires}`. Single-use; `401` if invalid, expired, or already used. |
 | `POST /api/v1/auth/code` | `{ "email": "you@example.com" }` → always `202 { "sent": true }`. Emails a short `AA000AA` code (10-min TTL). Only the newest code per email is live. Limits: 3/hour per email, 10/hour per IP. `502` if the email provider fails, `503` if unconfigured. |
