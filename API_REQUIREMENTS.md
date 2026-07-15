@@ -65,6 +65,11 @@ attribution, and supporter features.
 
 ### 2.2 Google sign-in
 
+- **Master switch:** env `GOOGLE_AUTH_ENABLED` (default on). Set it to a
+  falsy value (`false`/`0`/`no`/`off`) to force Google off regardless of
+  `GOOGLE_OAUTH_CLIENT_ID` — `/api/v1/auth/google` then returns 503 and
+  `/api/v1/auth/config` reports `google_enabled: false`. Currently off while
+  email sign-in (magic link + code) is the only offered door.
 - `POST /api/v1/auth/google` with `{ credential }` (a Google ID token from
   Google Identity Services / One Tap).
 - Verify locally against Google's JWKS (cache keys; no per-request Google

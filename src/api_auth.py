@@ -131,7 +131,25 @@ def _magic_link_url(token: str) -> str:
     return template.format(token=token)
 
 
+def google_auth_enabled() -> bool:
+    """Master switch for the Google door. Default ON (backwards compatible),
+    so a configured GOOGLE_OAUTH_CLIENT_ID keeps working. Set
+    GOOGLE_AUTH_ENABLED to a falsy value (0/false/no/off, or blank) to force
+    Google OFF regardless of the client id — the product "Google off for now"
+    decision, enforced server-side rather than by unsetting the client id."""
+    raw = os.environ.get("GOOGLE_AUTH_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 def google_client_id() -> str | None:
+    """The GIS client id, or None when Google sign-in is unavailable — either
+    force-disabled via GOOGLE_AUTH_ENABLED or simply unconfigured. Both the
+    /auth/google endpoint (503) and /auth/config (google_enabled=false) key
+    off this one function, so the switch governs everything in one place."""
+    if not google_auth_enabled():
+        return None
     return os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or None
 
 
