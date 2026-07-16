@@ -39,6 +39,7 @@ from typing import Any
 import h3
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
+from .api_frontend_reports import reliability_report_type_sql
 from .api_public import _if_none_match_hit
 from .dwell_stats import stats_for_cycle
 from .pg import connection
@@ -121,6 +122,7 @@ def h3_aggregates(
                              AND dr.h3_10_index = r.h3_10_index
                              AND dr.reported_at > %(snap)s - INTERVAL '24 hours'
                              AND dr.reported_at <= %(snap)s
+                             AND """ + reliability_report_type_sql("dr") + """
                        )) AS has_negative_report
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)

@@ -13,6 +13,7 @@ import h3
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from . import boundaries
+from .api_frontend_reports import reliability_report_type_sql
 from .daily_sla import _AVG_FIELDS
 from .dwell_stats import stats_for_cycle
 from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
@@ -408,6 +409,9 @@ def _devices_current_impl(
                 "           WHERE dr.vehicle_identifier = r.vehicle_identifier "
                 "             AND dr.h3_10_index = r.h3_10_index "
                 "             AND dr.reported_at >= NOW() - INTERVAL '24 hours'"
+                # Parking complaints (improperly_parked) are excluded here:
+                # they feed the compliance aggregate, not ride reliability.
+                f"             AND {reliability_report_type_sql('dr')} "
                 "       )) AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "

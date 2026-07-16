@@ -41,7 +41,33 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_REPORT_TYPES = ("failed_unlock", "dead_battery", "damaged")
+# 'improperly_parked' is stored and counted in the reports summary/export
+# (compliance signal), but is EXCLUDED from has_negative_report /
+# reliability_tier — see NON_RELIABILITY_REPORT_TYPES and the exclusion in
+# api_public.py / api_h3.py. A parking complaint says nothing about whether
+# the scooter rides.
+_REPORT_TYPES = ("failed_unlock", "dead_battery", "damaged", "improperly_parked")
+
+# Report types that must NOT drive has_negative_report / reliability_tier.
+# Single source of truth for the exclusion applied in the /devices/current
+# and /h3 aggregate queries. A scooter blocking a sidewalk can still be a
+# great ride, so parking complaints stay out of the "worth the walk?" signal.
+NON_RELIABILITY_REPORT_TYPES = ("improperly_parked",)
+
+
+def reliability_report_type_sql(alias: str = "dr") -> str:
+    """SQL predicate limiting a device_reports row (table alias `alias`) to
+    the report types that count toward has_negative_report — i.e. excluding
+    NON_RELIABILITY_REPORT_TYPES. Interpolated into the /devices/current and
+    /h3 aggregate queries so the exclusion has one source of truth. The
+    values are code-controlled literals (never user input), so inlining them
+    is injection-safe; returns TRUE when nothing is excluded."""
+    if not NON_RELIABILITY_REPORT_TYPES:
+        return "TRUE"
+    excluded = ", ".join("'{}'".format(t.replace("'", "''")) for t in NON_RELIABILITY_REPORT_TYPES)
+    return f"{alias}.report_type NOT IN ({excluded})"
+
+
 _DEDUPE_WINDOW_MINUTES = 30
 
 _LIMIT_DEVICE_ANON_PER_IP = (3, 3600)        # 3/hour per IP (anonymous)

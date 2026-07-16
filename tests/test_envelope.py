@@ -179,14 +179,29 @@ def test_astro_scooter_is_standing():
     assert d.vehicle_use_type == "standing"
 
 
-def test_unconfirmed_id5_not_touched_but_use_type_derived_from_form_factor():
-    """id=5 shares id=4's 'scooter'/67000m registry entry but hasn't been
-    visually confirmed — must NOT be silently reclassified or given a
-    model name. use_type still gets derived from (unmodified) form_factor
-    as a fallback, since standing/sitting is inferable even without a
+def test_id5_confirmed_cosmo_is_overridden_to_bicycle():
+    """id=5 was field-confirmed 2026-07-16 to be a seated throttle e-bike,
+    no pedals (a Cosmo-class vehicle). Despite Veo's registry calling it
+    'scooter'/67000m, it's overridden to bicycle/sitting — otherwise those
+    units inflate the standing-scooter share that rides against the contract
+    fleet cap. (Was previously left unconfirmed → scooter; this is the
+    behavior change.)"""
+    vt_map = {"5": ingest.VehicleType(form_factor="scooter",
+                                      propulsion_type="electric", max_range_meters=67000)}
+    p = _payload({"bike_id": "cosmo5", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "5"})
+    d = ingest.tag_envelope(p, vt_map).devices[0]
+    assert d.form_factor == "bicycle"
+    assert d.vehicle_model_name == "Cosmo"
+    assert d.vehicle_use_type == "sitting"
+
+
+def test_unconfirmed_type_derives_use_type_from_form_factor():
+    """A vehicle_type_id NOT in the known registry keeps Veo's form_factor
+    as-is and gets no model name, but use_type is still derived from that
+    (unmodified) form_factor — standing/sitting is inferable even without a
     confirmed model name."""
-    vt_map = {"5": ingest.VehicleType(form_factor="scooter", propulsion_type="electric")}
-    p = _payload({"bike_id": "unknown5", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "5"})
+    vt_map = {"7": ingest.VehicleType(form_factor="scooter", propulsion_type="electric")}
+    p = _payload({"bike_id": "mystery7", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "7"})
     d = ingest.tag_envelope(p, vt_map).devices[0]
     assert d.form_factor == "scooter"
     assert d.vehicle_model_name is None

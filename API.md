@@ -1196,7 +1196,8 @@ weighs it double in the public aggregates.
   "observed_at": "2026-07-04T16:20:00Z", "lat": 39.7392, "lng": -104.9876 }
 ```
 
-`report_type`: `failed_unlock` | `dead_battery` | `damaged`. `observed_at`,
+`report_type`: `failed_unlock` | `dead_battery` | `damaged` |
+`improperly_parked`. `observed_at`,
 `lat`, `lng` optional — without coordinates the report is anchored to the
 scooter's last known cell. → `{ "id": 17, "reported_at": "...", "deduped": false }`.
 An identical (vehicle, type, reporter) report within 30 minutes returns
@@ -1204,7 +1205,12 @@ the existing row with `"deduped": true` instead of creating a new one.
 
 Reports feed `has_negative_report` and `reliability_tier` on
 `/api/v1/devices/current` for 24 h or until the scooter moves, whichever
-comes first.
+comes first — **except `improperly_parked`**, which is a parking-compliance
+signal, not a ride-quality one: it still counts in `/reports/summary` and
+the monthly CSV export, but a badly-parked scooter can ride perfectly, so
+it deliberately does **not** flip `has_negative_report` / `reliability_tier`.
+(The frontend also opens Veo's public Zendesk "improperly parked" form
+pre-filled when a rider files one.)
 
 ### `POST /api/v1/reports/discount`
 

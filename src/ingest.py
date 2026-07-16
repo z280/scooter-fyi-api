@@ -89,12 +89,18 @@ _NUMBER_RE = re.compile(r"[?&]number=([^&]+)")
 #                  pedals, seated.
 #   id=4 (Apollo): registry says "scooter" — WRONG. Two-person pedal
 #                  e-bike, seated, ~18mph. Overridden to bicycle.
+#   id=5 (Cosmo):  registry says "scooter"/67000m — WRONG. Field-confirmed
+#                  2026-07-16 to be a seated throttle e-bike, no pedals (a
+#                  Cosmo-class vehicle; distinct type_id, likely a hardware
+#                  revision). Overridden to bicycle so it stops inflating the
+#                  standing-scooter share against the contract fleet cap. The
+#                  67000m "max range" is Veo's junk metadata (same phantom
+#                  entry as id=4) and is ignored — battery_percent is
+#                  rank-based off the real SoC LUT, not this value.
 #
 # id=0, id=2 (registered bicycle classes, zero live devices as of
-# 2026-07-05) and id=5 (0.5% of the live fleet, shares id=4's wrong
-# "scooter"/67000m registry entry but NOT visually confirmed either way)
-# are deliberately absent — nothing to correct, or nothing confirmed yet.
-# A vehicle_type_id absent here falls back to Veo's registry values as-is.
+# 2026-07-05) are deliberately absent — nothing to correct. A vehicle_type_id
+# absent here falls back to Veo's registry values as-is.
 @dataclass(frozen=True)
 class KnownVehicleType:
     app_name: str
@@ -106,6 +112,7 @@ _KNOWN_VEHICLE_TYPES: dict[str, KnownVehicleType] = {
     "1": KnownVehicleType(app_name="Astro", use_type="standing"),
     "3": KnownVehicleType(app_name="Cosmo", use_type="sitting"),
     "4": KnownVehicleType(app_name="Apollo", use_type="sitting", form_factor="bicycle"),
+    "5": KnownVehicleType(app_name="Cosmo", use_type="sitting", form_factor="bicycle"),
 }
 
 
