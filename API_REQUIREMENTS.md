@@ -369,9 +369,11 @@ physical units (seat, pedals, no way that's a scooter). Two changes:
 1. **Ground-truth vehicle registry** (`src/ingest.py`
    `_KNOWN_VEHICLE_TYPES`): `vehicle_type_id → {app_name, use_type,
    form_factor override}`, currently covering `id=1` (Astro, standing
-   scooter), `id=3` (Cosmo, sitting e-bike, no pedals), and `id=4`
+   scooter), `id=3` (Cosmo, sitting e-bike, no pedals), `id=4`
    (Apollo, sitting e-bike, pedals, ~18mph — `form_factor` corrected to
-   `bicycle`). `vehicle_model_name` and `vehicle_use_type` are new fields
+   `bicycle`), and `id=5` (Cosmo-class, sitting e-bike, no pedals —
+   field-confirmed 2026-07-16; Veo's registry wrongly says `scooter`, so
+   `form_factor` corrected to `bicycle`). `vehicle_model_name` and `vehicle_use_type` are new fields
    on `/api/v1/devices/current`, `device_state`, and `device_history`.
 2. **`vehicle_use_type` (sitting/standing) gets full compliance-stat
    parity with `form_factor` (bicycle/scooter)** — same 8-field family,
