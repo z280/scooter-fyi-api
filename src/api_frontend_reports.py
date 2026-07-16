@@ -64,7 +64,7 @@ def reliability_report_type_sql(alias: str = "dr") -> str:
     is injection-safe; returns TRUE when nothing is excluded."""
     if not NON_RELIABILITY_REPORT_TYPES:
         return "TRUE"
-    excluded = ", ".join(f"'{t}'" for t in NON_RELIABILITY_REPORT_TYPES)
+    excluded = ", ".join("'{}'".format(t.replace("'", "''")) for t in NON_RELIABILITY_REPORT_TYPES)
     return f"{alias}.report_type NOT IN ({excluded})"
 
 

@@ -20,6 +20,8 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'device_reports_report_type_allowed'
+          AND conrelid = 'device_reports'::regclass
+          AND contype = 'c'
     ) THEN
         ALTER TABLE device_reports
             ADD CONSTRAINT device_reports_report_type_allowed
