@@ -66,12 +66,20 @@ evaluated in order (first match wins):
               | dwell-outlier vs peers AND dwell ≥ 48h
     unknown   : device never state-tracked (no plate → both inputs None)
               | quality_designation == "N/A"     (disabled/reserved/rangeless)
+              | number_failed_starts == 1         (uncorroborated by dwell)
+              | dwell ≥ 2 × peer-median dwell     (softer, earlier-warning
+                                                    version of the dwell-
+                                                    outlier rule above — just
+                                                    the ratio, no percentile
+                                                    or absolute-hour floor)
     ok        : everything else
 
-A single failed start with short dwell stays "ok" — one bike_id rotation
-can be a rebalancing scan, not a rider failure. Dwell counters reset when
-the scooter moves (see src/device_state.py), so both inputs are naturally
-scoped to the current location — that's the "recent window".
+A single failed start no longer stays "ok" — it now reads "unknown" rather
+than a clean bill of health, since one bike_id rotation could still be a
+rebalancing scan rather than confirmed evidence of a rider failure. Two or
+more, or one plus a day of dwell, remain outright high_risk. Dwell counters
+reset when the scooter moves (see src/device_state.py), so both inputs are
+naturally scoped to the current location — that's the "recent window".
 
 The clean-dwell ghost threshold was recalibrated from 96h to 72h against
 the 2026-07-06 production snapshot (8,449 devices): citywide dwell
@@ -159,6 +167,7 @@ _RELIABILITY_FS_HARD = 2           # failed starts that alone mean high_risk
 _RELIABILITY_FS_DWELL_HOURS = 24.0 # 1 failed start + this much dwell
 _RELIABILITY_IDLE_HOURS = 72.0     # dwell alone (ghost scooter; was 96h pre-recalibration)
 _RELIABILITY_OUTLIER_DWELL_HOURS = 48.0  # peer-relative dwell outlier + this much dwell
+_RELIABILITY_UNKNOWN_DWELL_MULT = 2.0    # dwell ≥ this × peer median alone → unknown
 
 # Dwell-outlier thresholds (see module docstring).
 _DWELL_OUTLIER_MIN_PEERS = 5       # below this, widen the ring / fall back
@@ -390,6 +399,7 @@ def compute_reliability_tier(
     quality_designation: str,
     has_negative_report: bool,
     is_dwell_outlier: bool = False,
+    peer_median_dwell_hours: float | None = None,
     now: datetime | None = None,
 ) -> str:
     """Return "ok", "unknown", or "high_risk". Rules in module docstring."""
@@ -412,6 +422,14 @@ def compute_reliability_tier(
     if number_failed_starts is None and first_observed_at_location is None:
         return "unknown"  # never state-tracked (upstream payload had no plate)
     if quality_designation == "N/A":
+        return "unknown"
+    if fs == 1:
+        return "unknown"  # uncorroborated by dwell, but no longer a clean "ok"
+    if (
+        peer_median_dwell_hours is not None
+        and peer_median_dwell_hours > 0
+        and dwell_hours >= _RELIABILITY_UNKNOWN_DWELL_MULT * peer_median_dwell_hours
+    ):
         return "unknown"
 
     return "ok"

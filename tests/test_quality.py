@@ -197,10 +197,11 @@ def test_reliability_two_failed_starts_is_high_risk():
     assert out == "high_risk"
 
 
-def test_reliability_one_failed_start_short_dwell_stays_ok():
-    """One bike_id rotation can be a rebalancing scan — not enough alone."""
+def test_reliability_one_failed_start_is_unknown():
+    """One bike_id rotation can be a rebalancing scan, so it's not enough
+    alone for high_risk — but it's no longer a clean "ok" either."""
     out = compute_reliability_tier(**{**_REL_BASE, "number_failed_starts": 1})
-    assert out == "ok"
+    assert out == "unknown"
 
 
 def test_reliability_one_failed_start_plus_24h_dwell_is_high_risk():
@@ -255,6 +256,43 @@ def test_reliability_failure_signals_beat_na():
 def test_reliability_poor_quality_alone_stays_ok():
     """Low battery is not an unlock-failure signal — range never demotes."""
     out = compute_reliability_tier(**{**_REL_BASE, "quality_designation": "poor"})
+    assert out == "ok"
+
+
+# ---------- Reliability tier: peer-median dwell ratio (unknown) -------------
+def test_reliability_dwell_2x_peer_median_is_unknown():
+    """Below the high_risk outlier's 3x/p90/48h bar, but still a meaningful
+    peer-relative outlier — reads as unknown rather than a clean "ok"."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "peer_median_dwell_hours": 5.0,
+        "now": _denver("2026-06-01", 20),  # 10h dwell = exactly 2x
+    })
+    assert out == "unknown"
+
+
+def test_reliability_dwell_under_2x_peer_median_stays_ok():
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "peer_median_dwell_hours": 5.1,
+        "now": _denver("2026-06-01", 20),  # 10h dwell < 2 * 5.1
+    })
+    assert out == "ok"
+
+
+def test_reliability_zero_peer_median_does_not_false_positive():
+    """A peer median of exactly 0h must not make every dwell an 'outlier'."""
+    out = compute_reliability_tier(**{**_REL_BASE, "peer_median_dwell_hours": 0.0})
+    assert out == "ok"
+
+
+def test_reliability_missing_peer_median_has_no_effect():
+    """Sparse peer sets (None) never trigger the ratio rule."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "peer_median_dwell_hours": None,
+        "now": _denver("2026-06-02", 10),  # 24h dwell, still under the 72h ghost rule
+    })
     assert out == "ok"
 
 
