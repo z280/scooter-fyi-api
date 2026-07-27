@@ -81,6 +81,12 @@ more, or one plus a day of dwell, remain outright high_risk. Dwell counters
 reset when the scooter moves (see src/device_state.py), so both inputs are
 naturally scoped to the current location — that's the "recent window".
 
+The 2x-median rule's missing floor (unlike the outlier rule's 24h one) is
+deliberate, not an oversight: this audit's fleet is large enough that the
+cost of an over-eager "unknown" is a rider glancing at one extra scooter,
+while the cost of a false "ok" is a rider walking to one that doesn't
+start. Asymmetric costs, asymmetric leniency.
+
 The clean-dwell ghost threshold was recalibrated from 96h to 72h against
 the 2026-07-06 production snapshot (8,449 devices): citywide dwell
 percentiles were p50=7.2h / p90=48h / p95=76h, so 96h (~p97) was leaving
