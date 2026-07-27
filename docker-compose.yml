@@ -50,6 +50,12 @@ services:
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
       R2_BUCKET_NAME: ${R2_BUCKET_NAME}
       R2_RECEIPTS_BUCKET: ${R2_RECEIPTS_BUCKET}
+      # Routing assets published by denver-map-prep. Separate bucket AND
+      # separate token: the archive credentials above are scoped to veo-audit's
+      # own buckets and 401 on this one.
+      R2_MAP_BUCKET: ${R2_MAP_BUCKET}
+      R2_MAP_ACCESS_KEY_ID: ${R2_MAP_ACCESS_KEY_ID}
+      R2_MAP_SECRET_ACCESS_KEY: ${R2_MAP_SECRET_ACCESS_KEY}
       SENTRY_DSN: ${SENTRY_DSN}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
@@ -75,6 +81,10 @@ services:
       # Shared with the scheduler container so /admin/scheduler/edit can
       # write to the live crontab and supercronic reloads within ~15s.
       - scheduler_state:/app/state
+      # Read-only view of the Valhalla volume: api_route reads the canopy
+      # coverage sidecar from here to score the `shade` profile. Read-only so
+      # only the fetch sidecar can ever mutate the routing assets.
+      - valhalla_files:/custom_files:ro
       # data/ is intentionally NOT mounted — the boundary files are baked into
       # the image (see Dockerfile). Mounting the host's (empty) ./data dir
       # here would mask the baked-in files and break boundary loading.
@@ -112,6 +122,9 @@ services:
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
       R2_BUCKET_NAME: ${R2_BUCKET_NAME}
+      R2_MAP_BUCKET: ${R2_MAP_BUCKET}
+      R2_MAP_ACCESS_KEY_ID: ${R2_MAP_ACCESS_KEY_ID}
+      R2_MAP_SECRET_ACCESS_KEY: ${R2_MAP_SECRET_ACCESS_KEY}
       SENTRY_DSN: ${SENTRY_DSN}
       # Required: matches pipeline_worker — the scheduler runs ingest_cycle
       # which calls hash_plate(), so it MUST have the same salt or every
@@ -127,6 +140,9 @@ services:
       # editable crontab. run-scheduler.sh polls its mtime and re-execs
       # supercronic on change.
       - scheduler_state:/app/state
+      # Writable here (unlike pipeline_worker): refresh_routing_graph re-syncs
+      # the .pbf and canopy sidecar from R2 on a schedule.
+      - valhalla_files:/custom_files
     command: ["/usr/local/bin/run-scheduler.sh"]
     # 1 GiB covers the peak job: the 02:00 archive's transient DuckDB
     # process streaming a normal 48h raw_telemetry_points window to
@@ -137,6 +153,68 @@ services:
         limits:
           memory: 1024M
     mem_limit: 1024m
+
+  # One-shot: pull denver_scooter_custom.pbf + the canopy sidecar out of the
+  # private R2 bucket with SigV4. Valhalla's own `tile_urls` fetcher does an
+  # unsigned HTTP GET and cannot read a private bucket, and we would rather not
+  # make a 26 MB routing graph world-readable just to feed it.
+  valhalla_map_fetch:
+    image: ${WORKER_IMAGE:-ghcr.io/z280/veo-audit:latest}
+    build:
+      context: .
+    container_name: valhalla_map_fetch
+    restart: "no"
+    environment:
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+      R2_MAP_BUCKET: ${R2_MAP_BUCKET}
+      R2_MAP_ACCESS_KEY_ID: ${R2_MAP_ACCESS_KEY_ID}
+      R2_MAP_SECRET_ACCESS_KEY: ${R2_MAP_SECRET_ACCESS_KEY}
+      VEO_CONFIG: /app/config.json
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - valhalla_files:/custom_files
+    command: ["python", "-m", "src.cli", "fetch_map_pbf"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    mem_limit: 256m
+
+  # Routing engine. Builds tiles from whatever .pbf the fetch sidecar left in
+  # /custom_files — `tile_urls` is deliberately unset so nothing is downloaded
+  # over plain HTTP. Internal only: riders reach it through /api/v1/route.
+  valhalla:
+    image: ghcr.io/valhalla/valhalla-scripted:latest
+    container_name: valhalla
+    restart: unless-stopped
+    depends_on:
+      valhalla_map_fetch:
+        condition: service_completed_successfully
+    environment:
+      # Build from the local .pbf rather than reusing a stale tile tarball.
+      use_tiles_ignore_pbf: "False"
+      # SRTM for the Denver bbox is a single 1-degree cell; this is what makes
+      # elevation_gain (and therefore the battery model's b2 term) possible.
+      build_elevation: "True"
+      build_admins: "True"
+      build_time_zones: "False"
+      build_tar: "True"
+      force_rebuild: "False"
+      serve_tiles: "True"
+      server_threads: "4"
+    volumes:
+      - valhalla_files:/custom_files
+    expose:
+      - "8002"
+    # Serving a Denver-sized graph needs ~1 GiB; the headroom is for the
+    # transient tile build, which is the actual peak.
+    deploy:
+      resources:
+        limits:
+          memory: 3072M
+    mem_limit: 3072m
 
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -155,3 +233,7 @@ services:
 volumes:
   pgdata:
   scheduler_state:
+  # Routing assets + built Valhalla tiles. A named volume, deliberately not a
+  # bind mount: ./data is unmounted on purpose elsewhere in this file and the
+  # same reasoning applies — nothing here should be shadowed by host state.
+  valhalla_files:

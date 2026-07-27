@@ -32,3 +32,21 @@
 # Receipt retention: purge discount-report receipt images older than 18
 # months (privacy policy). Idempotent; the report row outlives the image.
 30 3 * * * cd /app && python -m src.cli cleanup_receipts
+
+# Routing graph refresh. denver-map-prep rebuilds and re-uploads the .pbf at
+# 02:00 Denver daily; this picks it up afterwards, once map-prep's ~50-minute
+# window has closed. Downloads only when the R2 ETag changed, so most days it
+# is a no-op. A changed .pbf is logged loudly: the valhalla container has to be
+# recreated to rebuild tiles, and this container deliberately has no Docker
+# socket to do that itself.
+30 4 * * * cd /app && python -m src.cli refresh_routing_graph
+
+# Battery model. Extraction routes every candidate trip through Valhalla, so it
+# is kept clear of both the 02:00 archive and the map-prep window. Only trips
+# older than the ERA5 temperature lag (5 days) are eligible, so there is no
+# rush to run it more than daily.
+15 5 * * * cd /app && python -m src.cli extract_battery_trips
+
+# Refit weekly: the coefficients move slowly, and a daily refit would mostly
+# chase weather noise.
+45 5 * * 1 cd /app && python -m src.cli train_battery_model
