@@ -188,6 +188,7 @@ def h3_aggregates(
             quality_designation=quality,
             has_negative_report=bool(has_neg),
             is_dwell_outlier=is_outlier,
+            peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
             now=snapshot_time,
         )
         if tier == "high_risk":

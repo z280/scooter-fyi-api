@@ -25,6 +25,23 @@ Available commands:
                       resolution (src/ride_watch.py handles the two live
                       transitions every 2-min cycle; this just terminates
                       the ones that timed out).
+    fetch_map_pbf     Sync the routing .pbf + canopy sidecar from R2 into the
+                      Valhalla volume. Runs as a one-shot sidecar before the
+                      valhalla service starts.
+    refresh_routing_graph
+                      Re-sync the routing assets and report whether the .pbf
+                      changed, i.e. whether Valhalla needs a tile rebuild.
+    extract_battery_trips
+                      Mine the last ~26h of telemetry for observation-gap trips
+                      matching the anchor filter, route them through Valhalla,
+                      store the observations.
+    train_battery_model
+                      Refit the battery-burn regression on stored observations.
+    backfill_battery_trips
+                      Seed observations from the R2 parquet archive instead of
+                      waiting for the daily job to accumulate them. Needs ~2 GiB
+                      -- raise the container limit before running (see the
+                      docstring).
     migrate           Apply pending SQL migrations.
     admin             Manage the admin allowlist:
                       `admin (list | add <email> | remove <email>)`.
@@ -37,8 +54,14 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from .archive import run_archive
+from .battery_model import (
+    backfill_trips_from_archive,
+    extract_trips,
+    train as train_battery,
+)
 from .config import load
 from .cycle import run_once
+from .r2_map import sync_map_assets
 from .daily_sla import run_daily
 from .daily_trips import run_daily as run_daily_trips
 from .pg import connection, run_migrations
@@ -303,16 +326,67 @@ def expire_stale_watches() -> dict:
     return {"watches_expired": watches_expired, "rides_expired": rides_expired}
 
 
+def _cli_fetch_map_pbf() -> dict:
+    """One-shot sidecar: pull the routing assets into the Valhalla volume.
+
+    Always exits 0. `valhalla` gates on this via
+    service_completed_successfully, and the deploy script runs under `set -e`,
+    so a non-zero exit here fails `docker compose up -d` and aborts the deploy
+    of everything else in the push. A missing credential or an R2 outage must
+    degrade routing, not block a deploy. sync_map_assets logs loudly and
+    reports `pbf_present` so the failure is visible.
+    """
+    return sync_map_assets()
+
+
+def _cli_refresh_routing_graph() -> dict:
+    """Re-sync the routing assets on a schedule and report whether they moved.
+
+    Valhalla's scripted entrypoint hashes the .pbf and rebuilds tiles when it
+    changes, so the rebuild is triggered by recreating the container once this
+    reports pbf_changed. Left as an operator/deploy step rather than giving this
+    container a Docker socket.
+    """
+    result = sync_map_assets()
+    if result.get("pbf_changed"):
+        log.warning("Routing .pbf changed — recreate the valhalla service to "
+                    "rebuild tiles: docker compose up -d --force-recreate valhalla")
+    return result
+
+
+def _cli_extract_battery_trips() -> dict:
+    return extract_trips()
+
+
+def _cli_train_battery_model() -> dict:
+    return train_battery()
+
+
+def _cli_backfill_battery_trips() -> dict:
+    """Seed the observations table from the R2 parquet archive.
+
+    Run by hand, not from cron: measured at ~1.25 GiB peak RSS on a single
+    archive file, which exceeds the scheduler's 1024m limit. Raise it first:
+        docker update --memory 2g --memory-swap 2g scheduler
+    """
+    return backfill_trips_from_archive()
+
+
 COMMANDS = {
-    "ingest_cycle":      _cli_ingest_cycle,
-    "archive_if_due":    _cli_archive_if_due,
-    "daily_sla":         _cli_daily_sla,
-    "daily_trips":       _cli_daily_trips,
-    "cleanup_receipts":  cleanup_receipts,
+    "ingest_cycle":          _cli_ingest_cycle,
+    "archive_if_due":        _cli_archive_if_due,
+    "daily_sla":             _cli_daily_sla,
+    "daily_trips":           _cli_daily_trips,
+    "cleanup_receipts":      cleanup_receipts,
     "cleanup_ride_screenshots": cleanup_ride_screenshots,
     "backfill_public_usernames": backfill_public_usernames,
-    "expire_stale_watches": expire_stale_watches,
-    "migrate":           lambda: run_migrations(),
+    "expire_stale_watches":  expire_stale_watches,
+    "fetch_map_pbf":         _cli_fetch_map_pbf,
+    "refresh_routing_graph": _cli_refresh_routing_graph,
+    "extract_battery_trips": _cli_extract_battery_trips,
+    "train_battery_model":   _cli_train_battery_model,
+    "backfill_battery_trips": _cli_backfill_battery_trips,
+    "migrate":               lambda: run_migrations(),
 }
 
 

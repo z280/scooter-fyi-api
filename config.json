@@ -132,6 +132,60 @@
     "bucket_name": "veo-audit-archive",
     "endpoint_template": "https://{account_id}.r2.cloudflarestorage.com"
   },
+  "valhalla": {
+    "base_url": "http://valhalla:8002",
+    "timeout_seconds": 10.0,
+    "graph_bbox": {
+      "west": -105.060,
+      "south": 39.650,
+      "east": -104.880,
+      "north": 39.790
+    },
+    "elevation_interval": 30,
+    "retry_radius_meters": 100,
+    "custom_files_dir": "/custom_files",
+    "map_object_key": "denver_scooter_custom.pbf",
+    "canopy_object_key": "denver_canopy_coverage.csv.gz",
+    "default_profile": "safe",
+    "profiles": [
+      {
+        "key": "safe",
+        "label": "Safe & Protected",
+        "costing_options": {
+          "bicycle_type": "Hybrid",
+          "use_roads": 0.1,
+          "use_hills": 0.5
+        }
+      },
+      {
+        "key": "range",
+        "label": "The Range Maximizer",
+        "costing_options": {
+          "bicycle_type": "Hybrid",
+          "use_roads": 0.3,
+          "use_hills": 0.0
+        }
+      },
+      {
+        "key": "shade",
+        "label": "The Shaded Canopy",
+        "costing_options": {
+          "bicycle_type": "Hybrid",
+          "use_roads": 0.2
+        },
+        "alternates": 3,
+        "rerank_by_shade": true
+      },
+      {
+        "key": "express",
+        "label": "Commuter Express",
+        "costing_options": {
+          "bicycle_type": "Road",
+          "use_roads": 0.8
+        }
+      }
+    ]
+  },
   "auth": {
     "allowed_github_orgs": [],
     "callback_url": "https://data.scooter.fyi/admin/auth/callback"

@@ -77,6 +77,62 @@ class R2Config:
 
 
 @dataclass(frozen=True)
+class RouteProfile:
+    """One rider-selectable routing profile.
+
+    ``costing_options`` is passed straight through to Valhalla's ``bicycle``
+    costing block, so the knobs live in config.json and can be retuned in
+    production without rebuilding the image. ``rerank_by_shade`` turns on the
+    alternates + canopy-scoring pass in api_route: Valhalla exposes no
+    request-tunable shade lever, so shade is scored outside the graph.
+    """
+    key: str
+    label: str
+    costing_options: dict[str, Any]
+    rerank_by_shade: bool = False
+    alternates: int = 0
+
+
+@dataclass(frozen=True)
+class ValhallaConfig:
+    base_url: str
+    timeout_seconds: float
+    # Bounding box of the routing graph as built by denver-map-prep. Requests
+    # outside it are rejected up front rather than surfacing a raw Valhalla 400.
+    bbox_west: float
+    bbox_south: float
+    bbox_east: float
+    bbox_north: float
+    # Metres between elevation samples along the returned shape; this is what
+    # yields the elevation_gain the battery model regresses on.
+    elevation_interval: int
+    # Retry radius (metres) when a location fails to snap — HIN ways are
+    # bicycle=no in the graph, so an address fronting an arterial can have no
+    # routable edge within the default search radius.
+    retry_radius_meters: int
+    default_profile: str
+    profiles: tuple[RouteProfile, ...]
+    # Where the sidecar drops the routing assets (shared volume with Valhalla).
+    custom_files_dir: str
+    map_object_key: str
+    canopy_object_key: str
+
+    def contains(self, lat: float, lon: float) -> bool:
+        return (self.bbox_south <= lat <= self.bbox_north
+                and self.bbox_west <= lon <= self.bbox_east)
+
+    @property
+    def bbox(self) -> list[float]:
+        return [self.bbox_west, self.bbox_south, self.bbox_east, self.bbox_north]
+
+    def profile(self, key: str) -> RouteProfile | None:
+        for p in self.profiles:
+            if p.key == key:
+                return p
+        return None
+
+
+@dataclass(frozen=True)
 class AuthConfig:
     allowed_github_orgs: tuple[str, ...]
     callback_url: str
@@ -125,6 +181,7 @@ class AppConfig:
     cors_origins: tuple[str, ...]
     cors_origin_patterns: tuple[str, ...]
     r2: R2Config
+    valhalla: ValhallaConfig
     auth: AuthConfig
     accounts: AccountsConfig
     device_tracking: DeviceTrackingConfig
@@ -150,6 +207,37 @@ def _boundaries(raw: list[dict[str, Any]]) -> tuple[BoundaryLayer, ...]:
             filter_nonnull_field=b.get("filter_nonnull_field"),
         )
         for b in raw
+    )
+
+
+def _valhalla(raw: dict[str, Any]) -> ValhallaConfig:
+    bbox = raw.get("graph_bbox", {})
+    profiles = tuple(
+        RouteProfile(
+            key=p["key"],
+            label=p["label"],
+            costing_options=dict(p.get("costing_options", {})),
+            rerank_by_shade=bool(p.get("rerank_by_shade", False)),
+            alternates=int(p.get("alternates", 0)),
+        )
+        for p in raw.get("profiles", [])
+    )
+    return ValhallaConfig(
+        base_url=raw.get("base_url", "http://valhalla:8002"),
+        timeout_seconds=float(raw.get("timeout_seconds", 10.0)),
+        # Defaults mirror denver-map-prep/src/denver_map_prep/config.py. Keep
+        # them in sync when that pipeline's clip window changes.
+        bbox_west=float(bbox.get("west", -105.060)),
+        bbox_south=float(bbox.get("south", 39.650)),
+        bbox_east=float(bbox.get("east", -104.880)),
+        bbox_north=float(bbox.get("north", 39.790)),
+        elevation_interval=int(raw.get("elevation_interval", 30)),
+        retry_radius_meters=int(raw.get("retry_radius_meters", 100)),
+        default_profile=raw.get("default_profile", "safe"),
+        profiles=profiles,
+        custom_files_dir=raw.get("custom_files_dir", "/custom_files"),
+        map_object_key=raw.get("map_object_key", "denver_scooter_custom.pbf"),
+        canopy_object_key=raw.get("canopy_object_key", "denver_canopy_coverage.csv.gz"),
     )
 
 
@@ -181,6 +269,7 @@ def load() -> AppConfig:
         cors_origins=tuple(raw["cors"]["allowed_origins"]),
         cors_origin_patterns=tuple(raw["cors"].get("allowed_origin_patterns", [])),
         r2=R2Config(**raw["r2"]),
+        valhalla=_valhalla(raw.get("valhalla", {})),
         auth=AuthConfig(
             allowed_github_orgs=tuple(raw["auth"]["allowed_github_orgs"]),
             callback_url=raw["auth"]["callback_url"],
@@ -229,6 +318,34 @@ def r2_credentials() -> dict[str, str] | None:
         "access_key_id": os.environ["R2_ACCESS_KEY_ID"],
         "secret_access_key": os.environ["R2_SECRET_ACCESS_KEY"],
         "bucket": os.environ.get("R2_BUCKET_NAME") or load().r2.bucket_name,
+    }
+
+
+def r2_map_credentials() -> dict[str, str] | None:
+    """R2 credentials for the routing-asset bucket that denver-map-prep writes.
+
+    A DEDICATED token is required in practice. The archive token
+    (R2_ACCESS_KEY_ID) is scoped to veo-audit's own buckets and returns 401 on
+    denver-street-optimized-data — verified against the live bucket, not
+    assumed. So R2_MAP_ACCESS_KEY_ID / R2_MAP_SECRET_ACCESS_KEY are read first
+    and the archive credentials are only a fallback, which keeps a single
+    account-wide token workable if one is ever issued.
+    """
+    account_id = os.environ.get("R2_ACCOUNT_ID")
+    bucket = os.environ.get("R2_MAP_BUCKET")
+    if not account_id or not bucket:
+        return None
+    access_key = (os.environ.get("R2_MAP_ACCESS_KEY_ID")
+                  or os.environ.get("R2_ACCESS_KEY_ID"))
+    secret_key = (os.environ.get("R2_MAP_SECRET_ACCESS_KEY")
+                  or os.environ.get("R2_SECRET_ACCESS_KEY"))
+    if not access_key or not secret_key:
+        return None
+    return {
+        "account_id": account_id,
+        "access_key_id": access_key,
+        "secret_access_key": secret_key,
+        "bucket": bucket,
     }
 
 

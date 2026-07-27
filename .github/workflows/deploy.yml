@@ -49,6 +49,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The box's public :22 is closed — SSH/scp reach it only over the tailnet.
+      # Join the ephemeral runner to Tailscale before the scp/ssh steps below.
+      # Requires a Tailscale OAuth client (scope auth_keys) + an ACL letting
+      # tag:ci reach the box on :22; store its id/secret as TSC_OAUTH_* secrets.
+      # Also point the VPS_HOST secret at ovh3's tailnet address (MagicDNS name
+      # e.g. ovh3.<tailnet>.ts.net, or its 100.x.y.z IP).
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TSC_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TSC_OAUTH_SECRET }}
+          tags: tag:ci
+
       - name: Sync compose + config to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -76,6 +89,9 @@ jobs:
           VEHICLE_IDENTIFIER_SALT: ${{ secrets.VEHICLE_IDENTIFIER_SALT }}
           CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
           R2_RECEIPTS_BUCKET: ${{ secrets.R2_RECEIPTS_BUCKET }}
+          R2_MAP_BUCKET: ${{ secrets.R2_MAP_BUCKET }}
+          R2_MAP_ACCESS_KEY_ID: ${{ secrets.R2_MAP_ACCESS_KEY_ID }}
+          R2_MAP_SECRET_ACCESS_KEY: ${{ secrets.R2_MAP_SECRET_ACCESS_KEY }}
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           ADMIN_EMAILS: ${{ secrets.ADMIN_EMAILS }}
           POSTMARK_TOKEN: ${{ secrets.POSTMARK_TOKEN }}
@@ -89,7 +105,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,SENTRY_DSN,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,AUTH_ALLOWED_GITHUB_ORGS,SESSION_SECRET,VEHICLE_IDENTIFIER_SALT,CLOUDFLARE_TUNNEL_TOKEN,R2_RECEIPTS_BUCKET,GOOGLE_OAUTH_CLIENT_ID,ADMIN_EMAILS,POSTMARK_TOKEN,POSTMARK_FROM,MAGIC_LINK_URL_TEMPLATE,STRIPE_WEBHOOK_SECRET,GH_TOKEN,GH_ACTOR,REPO
+          envs: POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,SENTRY_DSN,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,AUTH_ALLOWED_GITHUB_ORGS,SESSION_SECRET,VEHICLE_IDENTIFIER_SALT,CLOUDFLARE_TUNNEL_TOKEN,R2_RECEIPTS_BUCKET,R2_MAP_BUCKET,R2_MAP_ACCESS_KEY_ID,R2_MAP_SECRET_ACCESS_KEY,GOOGLE_OAUTH_CLIENT_ID,ADMIN_EMAILS,POSTMARK_TOKEN,POSTMARK_FROM,MAGIC_LINK_URL_TEMPLATE,STRIPE_WEBHOOK_SECRET,GH_TOKEN,GH_ACTOR,REPO
           script: |
             set -e
             cd /opt/veo-audit
@@ -103,6 +119,9 @@ jobs:
             R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
             R2_BUCKET_NAME=$R2_BUCKET_NAME
             R2_RECEIPTS_BUCKET=$R2_RECEIPTS_BUCKET
+            R2_MAP_BUCKET=$R2_MAP_BUCKET
+            R2_MAP_ACCESS_KEY_ID=$R2_MAP_ACCESS_KEY_ID
+            R2_MAP_SECRET_ACCESS_KEY=$R2_MAP_SECRET_ACCESS_KEY
             SENTRY_DSN=$SENTRY_DSN
             OIDC_CLIENT_ID=$OIDC_CLIENT_ID
             OIDC_CLIENT_SECRET=$OIDC_CLIENT_SECRET

@@ -34,6 +34,7 @@ from .api_profile import router as profile_router
 from .api_public import router as public_router
 from .api_reports import router as reports_router
 from .api_tracked_rides import router as tracked_rides_router
+from .api_route import router as route_router
 from .api_user import router as user_router
 from .config import load, session_https_only, session_secret
 from .pg import run_migrations
@@ -114,6 +115,7 @@ app.include_router(stripe_router)
 app.include_router(meta_router)
 app.include_router(legal_router)
 app.include_router(lexicon_router)
+app.include_router(route_router)
 
 
 @app.get("/", include_in_schema=False)
@@ -127,6 +129,8 @@ def root():
             "/api/v1/spatial-snapshot?layer=…",
             "/api/v1/analytics/trend?layer=…&name=…&range=7d",
             "/api/v1/devices/current",
+            "/api/v1/route?from=lat,lon&to=lat,lon&profile=safe",
+            "/api/v1/route/profiles",
             "/api/v1/user/devices/current",
             "/api/v1/equity-estimate?ranks=1,2",
             "/api/v1/h3/aggregates?res=9",

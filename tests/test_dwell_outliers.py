@@ -167,17 +167,33 @@ def test_dwell_outlier_at_48h_is_high_risk():
     assert out == "high_risk"
 
 
-def test_dwell_outlier_under_48h_stays_ok():
+def test_dwell_outlier_under_48h_is_unknown():
+    """Below the high_risk floor (48h), but the ratio rule still catches it
+    as unknown — the same evidence just isn't damning enough yet."""
     out = compute_reliability_tier(**{
         **_REL_BASE,
         "is_dwell_outlier": True,
-        "now": _denver("2026-06-03", 9),  # 47h
+        "peer_median_dwell_hours": 10.0,
+        "now": _denver("2026-06-03", 9),  # 47h dwell, 4.7x the 10h peer median
     })
-    assert out == "ok"
+    assert out == "unknown"
+
+
+def test_high_risk_outlier_beats_unknown_dwell_ratio():
+    """When both the strict (3x/p90/48h) and the loose (2x-median) rules
+    would fire, the more severe high_risk verdict wins — first-match-wins."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "is_dwell_outlier": True,
+        "peer_median_dwell_hours": 10.0,
+        "now": _denver("2026-06-03", 10),  # 48h dwell, 4.8x the 10h peer median
+    })
+    assert out == "high_risk"
 
 
 def test_non_outlier_48h_dwell_stays_ok():
-    """48h alone (no outlier flag, no failed starts) is under the 72h ghost rule."""
+    """48h alone (no outlier flag, no peer median, no failed starts) is
+    under the 72h ghost rule."""
     out = compute_reliability_tier(**{
         **_REL_BASE,
         "now": _denver("2026-06-03", 10),  # 48h
@@ -185,13 +201,15 @@ def test_non_outlier_48h_dwell_stays_ok():
     assert out == "ok"
 
 
-def test_one_fresh_failed_start_leniency_unchanged():
+def test_one_fresh_failed_start_is_now_unknown_not_ok():
+    """A single failed start used to be pure leniency ("ok"); it now demotes
+    to unknown instead — still short of high_risk without dwell to back it."""
     out = compute_reliability_tier(**{
         **_REL_BASE,
         "number_failed_starts": 1,
         "is_dwell_outlier": False,
     })
-    assert out == "ok"
+    assert out == "unknown"
 
 
 # ---------- quality-designation wiring ----------------------------------------

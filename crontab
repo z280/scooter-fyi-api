@@ -43,3 +43,25 @@
 # Ride transaction screenshot retention: mirrors cleanup_receipts' 18-month
 # window and slot in the same daily 3:30am run.
 30 3 * * * cd /app && python -m src.cli cleanup_ride_screenshots
+
+# Routing graph refresh. denver-map-prep rebuilds and re-uploads the .pbf at
+# 02:00 Denver daily; this picks it up afterwards, once map-prep's ~50-minute
+# window has closed. Downloads only when the R2 ETag changed, so most days it
+# is a no-op. A changed .pbf is logged loudly: the valhalla container has to be
+# recreated to rebuild tiles, and this container deliberately has no Docker
+# socket to do that itself.
+30 4 * * * cd /app && python -m src.cli refresh_routing_graph
+
+# Battery model. Reads the last ~26h of raw_telemetry_points, so it MUST run
+# BEFORE the 02:00 archive, which flushes that table to R2 and truncates it.
+# Running after would see only the handful of cycles since the truncate. 01:30
+# leaves the full day in place; the 26h lookback overlaps the previous
+# truncation boundary so nothing falls between two runs.
+# Yields ~120 observations/day; the model becomes trainable after ~2 weeks.
+# To seed it from history instead, see `backfill_battery_trips` (manual, needs
+# a raised memory limit).
+30 1 * * * cd /app && python -m src.cli extract_battery_trips
+
+# Refit weekly. Runs after extraction has had its turn, and the coefficients
+# move slowly enough that a daily refit would mostly chase weather noise.
+45 5 * * 1 cd /app && python -m src.cli train_battery_model
