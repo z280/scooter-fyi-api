@@ -18,15 +18,22 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .api_admin import router as admin_router
 from .api_auth import router as auth_router
+from .api_device_photos import router as device_photos_router
+from .api_device_recommendations import router as device_recommendations_router
 from .api_frontend_reports import router as frontend_reports_router
 from .api_h3 import router as h3_router
 from .api_legal import router as legal_router
+from .api_lexicon import router as lexicon_router
 from .api_meta import router as meta_router
+from .api_points import router as points_router
+from .api_qr import router as qr_router
 from .api_rides import router as rides_router
+from .api_ride_screenshots import router as ride_screenshots_router
 from .api_private import router as private_router
 from .api_profile import router as profile_router
 from .api_public import router as public_router
 from .api_reports import router as reports_router
+from .api_tracked_rides import router as tracked_rides_router
 from .api_route import router as route_router
 from .api_user import router as user_router
 from .config import load, session_https_only, session_secret
@@ -70,9 +77,10 @@ app.add_middleware(
     allow_origins=list(_cfg.cors_origins),
     allow_origin_regex=_cors_regex,
     # GET for reads, POST for auth/reports, PUT for /api/v1/profile, DELETE
-    # for /api/v1/rides. Bearer tokens travel in Authorization (covered by
-    # allow_headers="*"), not cookies — so allow_credentials stays false.
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    # for /api/v1/rides, PATCH for /api/v1/tracked-rides/{id}/end. Bearer
+    # tokens travel in Authorization (covered by allow_headers="*"), not
+    # cookies — so allow_credentials stays false.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["*"],
     allow_credentials=False,
 )
@@ -97,9 +105,16 @@ app.include_router(auth_router)
 app.include_router(profile_router)
 app.include_router(frontend_reports_router)
 app.include_router(rides_router)
+app.include_router(tracked_rides_router)
+app.include_router(points_router)
+app.include_router(device_recommendations_router)
+app.include_router(device_photos_router)
+app.include_router(qr_router)
+app.include_router(ride_screenshots_router)
 app.include_router(stripe_router)
 app.include_router(meta_router)
 app.include_router(legal_router)
+app.include_router(lexicon_router)
 app.include_router(route_router)
 
 
@@ -124,8 +139,25 @@ def root():
             "/api/v1/auth/config",
             "/api/v1/auth/{google,magic-link,redeem,code,code/verify,refresh,session,signout}",
             "/api/v1/profile",
+            "/api/v1/profile/username/regenerate",
+            "/api/v1/emoji-nouns",
+            "/api/v1/emoji-nouns/search?q=…",
+            "/api/v1/adjectives",
+            "/api/v1/adjectives/search?q=…",
             "/api/v1/reports/{device,discount,summary,export/monthly.csv}",
             "/api/v1/rides",
+            "/api/v1/tracked-rides",
+            "/api/v1/tracked-rides/active",
+            "/api/v1/tracked-rides/{ride_id}",
+            "/api/v1/tracked-rides/{ride_id}/end",
+            "/api/v1/tracked-rides/{ride_id}/waypoints",
+            "/api/v1/tracked-rides/{ride_id}/screenshots",
+            "/api/v1/points",
+            "/api/v1/devices/{vehicle_identifier}/recommend",
+            "/api/v1/devices/{vehicle_identifier}/photos",
+            "/api/v1/devices/qr-scan",
+            "/api/v1/photos/{photo_id}/reports",
+            "/api/v1/photos/mine",
             "/api/v1/meta/privacy",
             "/legal/terms-of-service",
             "/legal/privacy-policy",

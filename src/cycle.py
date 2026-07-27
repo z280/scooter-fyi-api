@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import psycopg
 
-from . import compute, device_state, ingest, transmit
+from . import compute, device_state, ingest, ride_watch, transmit
 from .pg import connection
 from .sentry import capture_exception, set_cycle_tag
 
@@ -147,6 +147,16 @@ def run_once() -> str | None:
             device_state.update_for_cycle(cycle_id, snapshot_time, corrected_devices)
         except Exception as e:  # noqa: BLE001
             log.exception("device_state update failed for cycle %s", cycle_id)
+            capture_exception(e)
+
+        # Rider-declared ride watches (item 5): detect a watched scooter
+        # leaving/rejoining the feed. Same isolation contract as
+        # device_state just above — a derived layer, not load-bearing for
+        # the core snapshot, so a failure here must never fail the cycle.
+        try:
+            ride_watch.update_watches_for_cycle(cycle_id, snapshot_time, corrected_devices)
+        except Exception as e:  # noqa: BLE001
+            log.exception("ride_watch update failed for cycle %s", cycle_id)
             capture_exception(e)
 
         _set_status(

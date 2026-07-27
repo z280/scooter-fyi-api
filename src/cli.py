@@ -12,6 +12,19 @@ Available commands:
     daily_trips       Roll up yesterday's full-day trip/popularity stats.
     cleanup_receipts  Delete receipt images past the 18-month retention
                       (API_REQUIREMENTS.md §3.2 / privacy policy).
+    cleanup_ride_screenshots
+                      Delete ride transaction screenshots (+ their row)
+                      past the 18-month retention (/api/v1/meta/privacy).
+    backfill_public_usernames
+                      One-time: assign a public_username to every account
+                      created before sql/025 (idempotent — already-
+                      assigned accounts are skipped).
+    expire_stale_watches
+                      Close out user_device_watch_list / tracked_rides
+                      rows whose 3h watch window elapsed with no GBFS-side
+                      resolution (src/ride_watch.py handles the two live
+                      transitions every 2-min cycle; this just terminates
+                      the ones that timed out).
     fetch_map_pbf     Sync the routing .pbf + canopy sidecar from R2 into the
                       Valhalla volume. Runs as a one-shot sidecar before the
                       valhalla service starts.
@@ -215,6 +228,104 @@ def cleanup_receipts() -> dict:
     return {"deleted": deleted, "failed": failed}
 
 
+_SCREENSHOT_RETENTION_MONTHS = 18
+
+
+def cleanup_ride_screenshots() -> dict:
+    """Purge ride transaction screenshots older than 18 months — mirrors
+    cleanup_receipts, but the row itself is deleted once the image is
+    gone rather than kept with a tombstone column: unlike discount_reports
+    (which carries other evidence fields), a ride_transaction_screenshots
+    row has no purpose once its one image is removed.
+    """
+    from .ride_screenshots import RideScreenshotError, delete_screenshot
+
+    cutoff = _months_ago(datetime.now(timezone.utc), _SCREENSHOT_RETENTION_MONTHS)
+    deleted = failed = 0
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, r2_key FROM ride_transaction_screenshots WHERE created_at < %s",
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+            for row_id, key in rows:
+                try:
+                    delete_screenshot(key)
+                except RideScreenshotError:
+                    log.exception("cleanup_ride_screenshots: R2 not configured — aborting")
+                    raise
+                except Exception:  # noqa: BLE001 — keep going, retry next run
+                    log.exception("cleanup_ride_screenshots: delete failed for %s", key)
+                    failed += 1
+                    continue
+                cur.execute("DELETE FROM ride_transaction_screenshots WHERE id = %s", (row_id,))
+                deleted += 1
+        conn.commit()
+    log.info("cleanup_ride_screenshots: deleted=%d failed=%d", deleted, failed)
+    return {"deleted": deleted, "failed": failed}
+
+
+def backfill_public_usernames() -> dict:
+    """One-time backfill: assign a public_username to every account that
+    doesn't have one yet (pre-sql/025 accounts). Idempotent — accounts
+    that already have one are skipped by the WHERE clause, so safe to
+    re-run. `python -m src.cli backfill_public_usernames`.
+
+    Commits per-row rather than in one giant transaction: each call to
+    assign_public_username takes a short-lived advisory lock per candidate
+    word pair, and committing frequently keeps any one lock's hold time
+    short so a large backfill can't add latency to concurrent live
+    sign-ups. It also means a crash mid-run leaves resumable progress
+    instead of losing everything.
+    """
+    from .accounts import assign_public_username
+
+    assigned = 0
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM accounts WHERE public_username IS NULL ORDER BY id")
+            ids = [r[0] for r in cur.fetchall()]
+        for account_id in ids:
+            with conn.cursor() as cur:
+                assign_public_username(cur, account_id)
+            conn.commit()
+            assigned += 1
+    log.info("backfill_public_usernames: assigned=%d", assigned)
+    return {"assigned": assigned}
+
+
+def expire_stale_watches() -> dict:
+    """Close out watches/rides whose 3h window elapsed with no GBFS-side
+    resolution. NOT required for read-path correctness — every read query
+    already filters watch_expires_at/timestamps directly (see
+    src/api_tracked_rides.py) — this exists to (1) give riders a clean
+    terminal status instead of one stuck showing 'watching' forever, and
+    (2) keep idx_watch_list_open_expiry / idx_tracked_rides_open (both
+    partial indexes keyed on status/NULL-checks) from accumulating rows
+    that can never match a live query again.
+    """
+    now = datetime.now(timezone.utc)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE user_device_watch_list SET status = 'expired' "
+                "WHERE status IN ('watching', 'left_feed') AND watch_expires_at < %s",
+                (now,),
+            )
+            watches_expired = cur.rowcount
+            cur.execute(
+                "UPDATE tracked_rides SET status = 'expired', updated_at = %s "
+                "WHERE status IN ('watching', 'left_feed') "
+                "AND watch_expires_at < %s AND user_reported_ended_at IS NULL",
+                (now, now),
+            )
+            rides_expired = cur.rowcount
+        conn.commit()
+    log.info("expire_stale_watches: watches=%d rides=%d", watches_expired, rides_expired)
+    return {"watches_expired": watches_expired, "rides_expired": rides_expired}
+
+
 def _cli_fetch_map_pbf() -> dict:
     """One-shot sidecar: pull the routing assets into the Valhalla volume.
 
@@ -267,6 +378,9 @@ COMMANDS = {
     "daily_sla":             _cli_daily_sla,
     "daily_trips":           _cli_daily_trips,
     "cleanup_receipts":      cleanup_receipts,
+    "cleanup_ride_screenshots": cleanup_ride_screenshots,
+    "backfill_public_usernames": backfill_public_usernames,
+    "expire_stale_watches":  expire_stale_watches,
     "fetch_map_pbf":         _cli_fetch_map_pbf,
     "refresh_routing_graph": _cli_refresh_routing_graph,
     "extract_battery_trips": _cli_extract_battery_trips,

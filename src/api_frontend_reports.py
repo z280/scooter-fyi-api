@@ -28,6 +28,7 @@ from . import geo
 from .accounts import SessionUser, optional_session, require_session
 from .client_ip import real_client_ip
 from .pg import connection
+from .points import credit_report_points
 from .ratelimit import enforce
 from .receipts import (
     MAX_RECEIPT_BYTES,
@@ -45,8 +46,9 @@ router = APIRouter()
 # (compliance signal), but is EXCLUDED from has_negative_report /
 # reliability_tier — see NON_RELIABILITY_REPORT_TYPES and the exclusion in
 # api_public.py / api_h3.py. A parking complaint says nothing about whether
-# the scooter rides.
-_REPORT_TYPES = ("failed_unlock", "dead_battery", "damaged", "improperly_parked")
+# the scooter rides. 'not_found' (sql/029) is NOT excluded — see that
+# migration's header for why a missing vehicle IS a reliability signal.
+_REPORT_TYPES = ("failed_unlock", "dead_battery", "damaged", "improperly_parked", "not_found")
 
 # Report types that must NOT drive has_negative_report / reliability_tier.
 # Single source of truth for the exclusion applied in the /devices/current
@@ -158,7 +160,8 @@ def submit_device_report(
             )
             dup = cur.fetchone()
             if dup:
-                return {"id": int(dup[0]), "reported_at": dup[1].isoformat(), "deduped": True}
+                return {"id": int(dup[0]), "reported_at": dup[1].isoformat(),
+                        "deduped": True, "points_awarded": 0}
 
             if user is None:
                 enforce(cur, bucket="device_report_ip", key=ip or "?",
@@ -194,13 +197,35 @@ def submit_device_report(
                  user.account_id if user else None, ip, ua),
             )
             new_id, reported_at = cur.fetchone()
+
+            # Points (requirement #10): only for an authenticated, freshly-
+            # inserted report of a points-eligible type. Reuses the same
+            # h3_10 anchor already resolved above (reporter coords when
+            # given, else the scooter's current cell) — cell_to_latlng
+            # recovers a real lat/lng from that cell when the reporter
+            # didn't supply coordinates directly.
+            points_awarded = 0
+            if user is not None:
+                points_lat, points_lng = payload.lat, payload.lng
+                if (points_lat is None or points_lng is None) and h3_10 is not None:
+                    points_lat, points_lng = h3.cell_to_latlng(h3.int_to_str(h3_10))
+                if points_lat is not None and points_lng is not None:
+                    credited = credit_report_points(
+                        cur, account_id=user.account_id,
+                        report_type=payload.report_type,
+                        lat=points_lat, lng=points_lng,
+                        vehicle_identifier=payload.vehicle_identifier,
+                        report_id=int(new_id),
+                    )
+                    points_awarded = credited["points"] if credited else 0
         conn.commit()
 
     log.info(
-        "device report id=%d vehicle=%s type=%s auth=%s",
-        new_id, payload.vehicle_identifier, payload.report_type, user is not None,
+        "device report id=%d vehicle=%s type=%s auth=%s points=%d",
+        new_id, payload.vehicle_identifier, payload.report_type, user is not None, points_awarded,
     )
-    return {"id": int(new_id), "reported_at": reported_at.isoformat(), "deduped": False}
+    return {"id": int(new_id), "reported_at": reported_at.isoformat(),
+            "deduped": False, "points_awarded": points_awarded}
 
 
 # ---------------------------------------------------------------------------

@@ -1,11 +1,16 @@
-"""Point-in-polygon + region assignment for the report aggregates."""
+"""Point-in-polygon + region assignment for the report aggregates, plus
+distance_meters (promoted from device_state.py — see
+tests/test_device_state.py for the tests confirming its re-export under
+that module's historical `_distance_meters` name behaves identically)."""
 
 from __future__ import annotations
+
+import math
 
 import pytest
 
 from src import boundaries, geo
-from src.geo import geometry_contains, region_for_point, region_names
+from src.geo import distance_meters, geometry_contains, region_for_point, region_names
 
 # Unit square with a hole in the middle quarter.
 _SQUARE_WITH_HOLE = {
@@ -94,3 +99,26 @@ def test_region_names_enumerates_layer(fake_layer):
 def test_unknown_layer_raises(fake_layer):
     with pytest.raises(KeyError):
         region_for_point("nope", 1.0, 1.0)
+
+
+# ---------- distance_meters --------------------------------------------------
+
+def test_distance_zero_for_same_point():
+    assert distance_meters(39.74, -104.99, 39.74, -104.99) == 0.0
+
+
+def test_distance_one_degree_latitude_is_111km():
+    d = distance_meters(39.0, -105.0, 40.0, -105.0)
+    assert math.isclose(d, 111_320.0, rel_tol=1e-3)
+
+
+def test_distance_within_20m_threshold_used_by_gbfs_trip_validation():
+    """src/points.py:credit_gbfs_validation_points pays a bonus when the
+    GBFS reappearance is within 20m of the reported end location — sanity
+    check the boundary at that specific scale."""
+    delta_lat = 19.0 / 111_320.0
+    d = distance_meters(39.74, -104.99, 39.74 + delta_lat, -104.99)
+    assert d < 20.0
+    delta_lat = 21.0 / 111_320.0
+    d = distance_meters(39.74, -104.99, 39.74 + delta_lat, -104.99)
+    assert d > 20.0

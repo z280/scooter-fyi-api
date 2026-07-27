@@ -9,9 +9,10 @@ every 48 hours.
 
 The original purpose was tracking compliance with Denver RFP §3.0 (30%
 of fleet in Equity Areas) — see `VEO_AUDIT.md` for that history. The
-v3.2 architecture (this README) generalizes the pipeline so any future
+v3.3 architecture (this README) generalizes the pipeline so any future
 frontend (scooter.fyi, weseeyouveo.com, keepdenverfair.com, …) can XHR-poll the public REST
-API for live state.
+API for live state. For full request/response shapes, error codes, and
+auth details behind the endpoint tables below, see [API.md](API.md).
 
 ## Architecture
 
@@ -82,28 +83,80 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql            schema, applied idempotently at boot
+├── sql/001_init.sql … 033_ride_transaction_screenshots.sql
+│                              33 migrations, applied idempotently at boot
 ├── src/
-│   ├── main.py                 FastAPI app, lifespan, migrations
+│   ├── main.py                 FastAPI app, lifespan, migrations, router mounts
 │   ├── cli.py                  subcommands run by the scheduler container
-│   ├── config.py               loads config.json + env
+│   ├── config.py               loads config.json (non-secret) + env (secrets)
 │   ├── pg.py                   psycopg pool + migration runner
 │   ├── duck.py                 ephemeral DuckDB session factory
 │   ├── ingest.py               GBFS fetch + freshness + envelope tagging
-│   ├── compute.py              DuckDB CTEs → core + narrow rows
-│   ├── cycle.py                observation_cycles lifecycle state machine
-│   ├── transmit.py             fanout to downstream endpoints
-│   ├── archive.py              48-hour Parquet → R2 → TRUNCATE
+│   ├── identity.py              HMAC plate → vehicle_identifier (the privacy boundary),
+│   │                            + plate_display_code (cosmetic-only, NOT a privacy control)
+│   ├── compute.py               DuckDB CTEs → core + narrow rows
+│   ├── device_state.py          per-vehicle NEW/MOVED/FAILED_START/STATIONARY state machine
+│   ├── ride_watch.py            rider-declared ride watch: detect a device leaving/
+│   │                            rejoining the feed (tracked_rides); called from cycle.py
+│   │                            right after device_state, same isolation contract
+│   ├── cycle.py                 observation_cycles lifecycle state machine
+│   ├── transmit.py              fanout to downstream endpoints
+│   ├── archive.py               48-hour Parquet → R2 → TRUNCATE
+│   ├── boundaries.py            cached GeoJSON boundary loader
+│   ├── geo.py                   pure-Python point-in-polygon (report-time region lookup;
+│   │                            the per-cycle device join stays in DuckDB — see compute.py)
+│   │                            + distance_meters (shared flat-earth distance helper)
 │   ├── equity_groups.py         registry of tracked equity groups (v1, v2, er1..er6) and
 │   │                            split dimensions (bicycle/scooter, sitting/standing) —
 │   │                            single source of truth for compute.py + daily_sla.py
+│   ├── quality.py               reliability tier + battery-percent conversion
+│   ├── ranking.py               range/popularity ranking helpers
+│   ├── dwell_stats.py           dwell-time outlier detection
+│   ├── daily_sla.py             9am daily SLA compliance rollup
 │   ├── daily_trips.py           9am daily trip/popularity rollup (trip_events → ranked stats)
-│   ├── api_public.py           4 read-only public REST routes
-│   ├── api_admin.py            GitHub-OAuth-protected admin views
-│   ├── auth.py                 GitHub OAuth + org allowlist
-│   ├── sentry.py               Sentry SDK init (no-op without DSN)
-│   └── templates/              Jinja templates for /admin
-├── tests/                      pytest
+│   ├── accounts.py              account/session core: bearer tokens, require_session/
+│   │                            require_admin/require_supporter, public-username generation/
+│   │                            choice, phone number validation
+│   ├── google_auth.py           local Google ID-token (JWKS) verification, no per-request call
+│   ├── postmark.py              transactional email (magic link, sign-in code)
+│   ├── ratelimit.py             Postgres-advisory-lock rate limiting (no Redis)
+│   ├── image_processing.py      shared Pillow re-encode pipeline (EXIF strip, resize, JPEG) —
+│   │                            used by receipts, device photos, ride screenshots
+│   ├── receipts.py              discount-report receipt upload → R2 (thin wrapper over
+│   │                            image_processing.py)
+│   ├── device_photos.py         device photo upload → PUBLIC R2 bucket
+│   ├── ride_screenshots.py      ride transaction screenshot upload → PRIVATE R2 bucket
+│   ├── qr.py                    QR payload plate extraction + vehicle_identifier validation
+│   ├── points.py                points ledger primitives (credit_points + per-action wrappers)
+│   ├── polyline.py              Google polyline encode/decode (ride paths)
+│   ├── badges.py                server-computed profile badges (recomputed on every read)
+│   ├── client_ip.py             client IP extraction behind the Cloudflare Tunnel
+│   ├── auth.py                  GitHub OAuth + org allowlist (admin panel only — a
+│   │                            separate mechanism from accounts.py's rider auth)
+│   ├── sentry.py                Sentry SDK init (no-op without DSN)
+│   ├── stripe_webhook.py        POST /webhooks/stripe → flips accounts.supporter
+│   ├── api_public.py            11 public read-only REST routes
+│   ├── api_h3.py                public H3 aggregate endpoint
+│   ├── api_meta.py              public privacy-policy metadata endpoint
+│   ├── api_user.py              signed-in device map feed
+│   ├── api_profile.py           rider profile GET/PUT + public-username endpoints
+│   ├── api_lexicon.py           emoji-noun / adjective list + search endpoints
+│   ├── api_auth.py              sign-in doors + session lifecycle
+│   ├── api_rides.py             supporter ride history (log/list/export/delete) — legacy
+│   ├── api_tracked_rides.py     GBFS-detected ride tracking: start/list/active/detail/
+│   │                            end-report/waypoints/delete
+│   ├── api_points.py            GET /api/v1/points — ledger + running total
+│   ├── api_device_recommendations.py  POST .../recommend
+│   ├── api_device_photos.py     device photo upload/list/report + GET /api/v1/photos/mine
+│   ├── api_qr.py                POST /api/v1/devices/qr-scan
+│   ├── api_ride_screenshots.py  ride transaction screenshot upload/list
+│   ├── api_reports.py           map-pin negative reports + quality feedback
+│   ├── api_frontend_reports.py  account-aware device/discount report flow
+│   ├── api_private.py           bearer-token admin JSON API (distinct from api_admin.py)
+│   ├── api_admin.py             GitHub-OAuth-protected admin HTML views
+│   ├── api_legal.py             static legal pages
+│   └── templates/               Jinja templates for /admin
+├── tests/                      pytest, ~60 files, roughly one per src/ module
 └── .github/workflows/deploy.yml  build → GHCR → SSH-deploy on push to main
 ```
 
@@ -163,27 +216,190 @@ all the natural ratios — bikes_denver, scooters_v1, all_devices_v2, etc.
 
 ## Public API
 
-All read-only, CORS-locked to `scooter.fyi` / `weseeyouveo.com` / `keepdenverfair.com`:
+No authentication required. CORS-locked to `scooter.fyi` /
+`weseeyouveo.com` / `keepdenverfair.com` for browser callers; anything
+else (curl, server-to-server) is unaffected by CORS.
+
+### Spatial snapshots & analytics
 
 | Endpoint | Returns |
 |---|---|
 | `GET /health` | `{last_data_ingest_ts, last_data_upload_ts, last_cycle_id, last_retrieval_ts}` |
 | `GET /api/v1/snapshots/latest` | Latest row of `snapshot_metadata_core` |
-| `GET /api/v1/spatial-snapshot?layer=…&time=…` | `{region_name: {total, bikes, scooters}}` for a layer |
-| `GET /api/v1/analytics/trend?layer=…&name=…&range=7d` | Time-series for a region |
+| `GET /api/v1/spatial-snapshot?layer=…&time=…` | `{snapshot_time, layer, regions: {region_name: {total, bikes, scooters}}}` for a layer, optionally at a past time |
+| `GET /api/v1/analytics/trend?layer=…&name=…&range=7d` | Time-series of counts for one region |
+| `GET /api/v1/boundaries` | List of boundary layers with feature count, bbox, URL |
+| `GET /api/v1/boundaries/{layer}` | Full GeoJSON FeatureCollection for one boundary layer |
+| `GET /api/v1/devices/current` | GeoJSON FeatureCollection of every device's current position/quality (no plate) |
+| `GET /api/v1/equity-estimate` | Device share inside selected equity-rank tiers from the latest snapshot |
+| `GET /api/v1/h3/aggregates` | Per-H3-cell aggregates (device_count, trips_started_24h, battery, risk_share, dwell) at res 8/9/10 |
+
+### Compliance
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/compliance/daily/latest` | Most recent computed daily SLA compliance window |
+| `GET /api/v1/compliance/daily?date=…` | Daily SLA window for one Denver-local date |
+| `GET /api/v1/compliance/daily/range` | Range of daily SLA rows, ascending |
+
+### Sign-in
+
+The first half of each door in `src/api_auth.py` — public because you use
+them before you have a session. The session-management half
+(`refresh`/`session`/`signout`) is bearer-gated; see Rider API below.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/auth/config` | Public sign-in capability flags + Google client id |
+| `POST /api/v1/auth/google` | Google ID token → session |
+| `POST /api/v1/auth/magic-link` | Email → Postmark magic link (always 202) |
+| `POST /api/v1/auth/redeem` | Magic-link token → session |
+| `POST /api/v1/auth/code` | Email → Postmark 6-char sign-in code (always 202) |
+| `POST /api/v1/auth/code/verify` | Email + code → session |
+
+### Reports (public submission & aggregates)
+
+| Endpoint | Returns |
+|---|---|
+| `POST /api/v1/reports` | Submit a citizen negative report (map pin) |
+| `POST /api/v1/quality-feedback` | Public positive/negative feedback on a shown quality designation |
+| `POST /api/v1/reports/device` | Rider device-failure report (anonymous allowed, tightly rate-limited) |
+| `GET /api/v1/reports/summary` | Per-region report aggregate (~10 min cache) |
+| `GET /api/v1/reports/export/monthly.csv` | Monthly CSV export for DOTI/journalists |
+
+### Other
+
+| Endpoint | Returns |
+|---|---|
+| `GET /` | JSON banner listing every mounted endpoint (discovery only) |
+| `GET /api/v1/meta/privacy` | Machine-readable data retention policy |
+| `GET /legal/terms-of-service` | Static Terms of Service page |
+| `GET /legal/privacy-policy` | Static Privacy Policy page |
+
+## Rider API
+
+Requires `Authorization: Bearer <token>` from one of the sign-in doors
+above. Every endpoint below is open to any signed-in rider — nothing in
+this section is supporter-gated except where marked **(supporter)**, a
+holdover from the original ride-log feature (see `/api/v1/meta/privacy`,
+and Webhooks below for how that flag gets set).
+
+### Session & profile
+
+| Endpoint | Returns |
+|---|---|
+| `POST /api/v1/auth/refresh` | Rotate the presented bearer token |
+| `GET /api/v1/auth/session` | Session introspection for UI state |
+| `POST /api/v1/auth/signout` | Revoke the presented token |
+| `GET /api/v1/profile` | Full rider profile incl. server-computed badges/supporter flag/public username |
+| `PUT /api/v1/profile` | Partial update of `rate_plan`/`theme`/`favorites`/`email`/`phone_number`/`show_public_username`/`show_in_leaderboards`/`home_lat`/`home_lng`/`work_lat`/`work_lng` |
+| `POST /api/v1/profile/username/regenerate` | Re-roll your public username to a new random adjective+emoji pair |
+| `PUT /api/v1/profile/username` | Choose a specific adjective and/or emoji (partial update) |
+| `GET /api/v1/emoji-nouns` | Full emoji → noun-word list, for building a username picker |
+| `GET /api/v1/emoji-nouns/search?q=…` | Partial word match on the emoji-noun list |
+| `GET /api/v1/adjectives` | Full curated adjective list |
+| `GET /api/v1/adjectives/search?q=…` | Partial word match on the adjective list |
+| `GET /api/v1/user/devices/current` | Signed-in device map feed; adds plate/admin fields for admin-allowlisted sessions |
+| `POST /api/v1/reports/discount` | Missed-discount evidence, optional receipt upload |
+
+### Legacy ride log (supporter perk)
+
+Manually client-declared ride history — a different, older mechanism from
+Tracked rides below. See `sql/014_supporter_rides.sql`.
+
+| Endpoint | Returns |
+|---|---|
+| `POST /api/v1/rides` **(supporter)** | Log a ride |
+| `GET /api/v1/rides` | Owner-only paginated ride list, newest first |
+| `GET /api/v1/rides/export?format=geojson\|csv` | Owner-only export |
+| `DELETE /api/v1/rides/{ride_id}` | Hard-delete one ride |
+| `DELETE /api/v1/rides` | Hard-delete every ride the account owns |
+
+### Tracked rides (GBFS-detected, all riders)
+
+Server-detected ride tracking: you declare a ride start, a watch list
+compares the device against every GBFS ingest cycle for up to 3 hours to
+detect it leaving/rejoining the feed, and you separately report your own
+end. See `sql/027_tracked_rides.sql` / `src/ride_watch.py`.
+
+| Endpoint | Returns |
+|---|---|
+| `POST /api/v1/tracked-rides` | Start a ride + watch (404 unknown device, 409 if one's already active) |
+| `GET /api/v1/tracked-rides?limit=&before=&status=` | Owner-only paginated list |
+| `GET /api/v1/tracked-rides/active` | The caller's one active ride, or `{"active": null}` |
+| `GET /api/v1/tracked-rides/{ride_id}` | Full detail incl. decoded `path_geojson`; GBFS fields hidden until you report your own end |
+| `PATCH /api/v1/tracked-rides/{ride_id}/end` | Report your end location/battery/cost/metadata (single-shot) |
+| `POST /api/v1/tracked-rides/{ride_id}/waypoints` | Append a GPS waypoint while the ride is active |
+| `GET /api/v1/tracked-rides/{ride_id}/waypoints?limit=&before=` | Paginated waypoint list |
+| `DELETE /api/v1/tracked-rides/{ride_id}` / (bare) | Hard-delete one ride / every ride you own |
+| `POST /api/v1/tracked-rides/{ride_id}/screenshots?screenshot_type=overview\|receipt` | Upload a transaction screenshot (overwrites the same slot) |
+| `GET /api/v1/tracked-rides/{ride_id}/screenshots` | List your screenshots for a ride |
+
+### Points & device engagement
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/points?limit=&before=` | Your points ledger + running total |
+| `POST /api/v1/devices/{vehicle_identifier}/recommend` | Yes/no — only accepted with a completed ride on that device in the last 24h |
+| `POST /api/v1/devices/qr-scan` | Validate a scanned QR against the claimed device; awards a first-scan bonus |
+
+### Device photos
+
+Public content — capped at 3 photos per device, attributed to the
+uploader's public username. See `sql/031_device_photos.sql`.
+
+| Endpoint | Returns |
+|---|---|
+| `POST /api/v1/devices/{vehicle_identifier}/photos` | Upload (multipart `photo`); 409 at the 3-photo cap, 503 if storage isn't configured |
+| `GET /api/v1/devices/{vehicle_identifier}/photos` | List a device's photos |
+| `POST /api/v1/photos/{photo_id}/reports` | Report a problem with a photo (distinct from reporting the device itself) |
+| `GET /api/v1/photos/mine` | Everything you've uploaded — device photos and ride transaction screenshots together |
+
+## Private API
+
+Bearer-token JSON endpoints gated on `require_admin` (session email must be
+on the `admin_allowlist` table, reachable via either sign-in door) —
+**distinct from the Admin panel below**, which is a separate GitHub-OAuth
+HTML portal with its own login flow.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/private/devices/lookup` | Resolve plate ↔ identifier + current state row |
+| `GET /api/v1/private/devices/lookup-batch` | Batch plate → max observed range lookup |
+| `GET /api/v1/private/devices/{vehicle_identifier}/history` | Time-ordered position-stop history for one scooter |
+| `GET /api/v1/private/devices/max-ranges` | Devices sorted by highest-ever observed range |
+| `GET /api/v1/private/trips/daily` | Daily trip/popularity rollup for one Denver-local date |
+| `GET /api/v1/private/reports` | Admin listing of all negative reports |
+| `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback |
 
 ## Admin panel
 
 At `https://data.scooter.fyi/admin`, behind GitHub OAuth. Reached via
 Cloudflare Tunnel (`cloudflared` sidecar) — the VPS does not expose port
 80 or 443 to the internet. Users must be members of an org in
-`AUTH_ALLOWED_GITHUB_ORGS`. Read-only views:
+`AUTH_ALLOWED_GITHUB_ORGS`. HTML views (GET unless noted):
 
+- `/admin/login` — start GitHub OAuth login
+- `/admin/auth/callback` — GitHub OAuth callback
+- `/admin/logout` — clear the admin session
+- `/admin` — redirects to `/admin/login` (signed out) or `/admin/cycles` (signed in)
 - `/admin/cycles` — paginated cycle log with status colors
 - `/admin/cycles/{cycle_id}` — every phase timestamp, JSONB blob,
   transmission attempts, related failures
 - `/admin/failures` — recent `api_failures` rows
+- `/admin/scheduler` — active crontab + recent cycle cadence view
+- `/admin/scheduler/edit` — crontab textarea editor form
+- `/admin/scheduler/edit` (POST) — validate (via `supercronic -test`) and save/reset the crontab
 - `/admin/regions?layer=…` — current snapshot's per-region counts
+- `/admin/admins` — admin allowlist management view
+- `/admin/admins/add` (POST) — add an email to the admin allowlist
+- `/admin/admins/remove` (POST) — remove an email from the admin allowlist
+
+## Webhooks
+
+- `POST /webhooks/stripe` — signature-verified; Stripe checkout/subscription/refund
+  events drive `accounts.supporter`/`supporter_amount_cents`/`supporter_since`.
+  Not for client use.
 
 ## Run locally
 
@@ -206,7 +422,10 @@ curl localhost:8080/api/v1/snapshots/latest   # 503 until first cycle lands (~15
 ```bash
 python3.11 -m pip install -r requirements.txt pytest
 python3.11 -m pytest -v
-# 10 tests, ~60s. test_compute_sql exercises the real DuckDB spatial join.
+# 476 tests across ~60 files. Most run with no real Postgres (a fake
+# cursor/connection is monkeypatched in) — test_compute_sql exercises the
+# real DuckDB spatial join, and files ending _pg.py additionally skip
+# unless VEO_TEST_PG_DSN points at a real, migratable Postgres instance.
 ```
 
 ## Deploy
@@ -292,5 +511,3 @@ Enforced via Docker Compose `mem_limit`:
 
 Total Docker footprint: ~4.6 GiB on the 12 GiB VPS. The remaining ~7 GiB
 covers Hermes, host OS buffers, and future services.
-
-Hello, World!
