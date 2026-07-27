@@ -350,3 +350,45 @@ def test_partial_elevation_is_unknown_not_undercounted():
     trip = {"legs": [{"shape": "a", "elevation": [1600.0, 1620.0]}, {"shape": "b"}],
             "summary": {"length": 1.0, "time": 60.0}}
     assert valhalla.elevation_gain_meters(trip) is None
+
+
+# --- temperature availability (found by Copilot review of 90aeda4) -----------
+
+class _FakeCursor:
+    def __init__(self, result): self.result = result
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, *a, **kw): pass
+    def fetchone(self): return self.result
+
+
+class _FakeConn:
+    def __init__(self, temp_row): self.temp_row = temp_row
+    def cursor(self): return _FakeCursor(self.temp_row)
+
+
+def test_observation_is_skipped_when_no_temperature_is_available(monkeypatch):
+    """A row stored with temperature_c NULL is permanently dead weight: train()
+    filters it out and the (vehicle, departed_at) dedupe means a later run never
+    revisits it. Skipping keeps the candidate eligible after a backfill."""
+    routed = []
+    monkeypatch.setattr(battery_model.valhalla, "route",
+                        lambda *a, **kw: routed.append(1) or {"trip": {}})
+    stats = {"rejected_no_temperature": 0, "no_route": 0,
+             "rejected_distance": 0, "rejected_speed": 0}
+    cand = {"departed_at": None, "latitude": 39.7, "longitude": -105.0,
+            "lat2": 39.71, "lon2": -104.99, "duration_seconds": 900}
+
+    stored = battery_model._route_and_store(_FakeConn(None), cand, stats)
+    assert stored is False
+    assert stats["rejected_no_temperature"] == 1
+    # And it bailed BEFORE paying for a Valhalla call.
+    assert routed == []
+
+
+def test_temperature_is_checked_before_routing(monkeypatch):
+    """Ordering matters: an unavailable temperature must not cost a route call
+    on every subsequent run."""
+    import inspect
+    src = inspect.getsource(battery_model._route_and_store)
+    assert src.index("_temperature_at") < src.index("valhalla.route")

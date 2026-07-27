@@ -106,6 +106,35 @@ def backfill_recent_hourly(past_days: int = 7) -> int:
     return _upsert(resp.json().get("hourly", {}))
 
 
+def _hours_missing(start: date, end: date) -> int:
+    """How many hourly readings the cache lacks over the inclusive date range.
+
+    Counting beats comparing MIN/MAX: an envelope check only detects data
+    missing OUTSIDE the cached range, so a partial backfill (a rate-limited or
+    truncated response) leaves an interior hole that the envelope reports as
+    fully covered. Trips in that hole then get no temperature at all, while the
+    log claims the cache "already covers" the window.
+    """
+    expected = ((end - start).days + 1) * 24
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM hourly_temperature
+                WHERE observed_hour >= %s AND observed_hour < %s
+                """,
+                (start, end + timedelta(days=1)),
+            )
+            have = cur.fetchone()[0]
+    # Open-Meteo can legitimately omit the final partial hour, so a single
+    # missing reading is not worth a refetch.
+    missing = max(expected - have, 0)
+    if missing:
+        log.info("Temperature cache: %d of %d hours missing for %s..%s",
+                 missing, expected, start, end)
+    return 0 if missing <= 1 else missing
+
+
 def ensure_coverage(start: date, end: date) -> int:
     """Make sure [start, end] is cached, choosing the right source per range.
 
@@ -116,24 +145,11 @@ def ensure_coverage(start: date, end: date) -> int:
     archive_cutoff = today - timedelta(days=ARCHIVE_LAG_DAYS)
 
     written = 0
-    # Older portion: ERA5 archive, but only the part we don't already hold.
+    # Older portion: ERA5 archive, refetched whenever the range is incomplete.
     if start < archive_cutoff:
         archive_end = min(end, archive_cutoff - timedelta(days=1))
-        with connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT MIN(observed_hour)::date, MAX(observed_hour)::date "
-                    "FROM hourly_temperature"
-                )
-                row = cur.fetchone()
-        have_lo, have_hi = (row or (None, None))
-        if have_lo is None:
+        if _hours_missing(start, archive_end):
             written += backfill_hourly(start, archive_end)
-        else:
-            if start < have_lo:
-                written += backfill_hourly(start, min(have_lo - timedelta(days=1), archive_end))
-            if archive_end > have_hi:
-                written += backfill_hourly(have_hi + timedelta(days=1), archive_end)
 
     # Recent tail: forecast endpoint. Always refetched — it is one cheap request
     # and it lets a provisional value be corrected as the model settles.

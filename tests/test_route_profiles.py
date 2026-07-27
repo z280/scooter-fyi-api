@@ -274,3 +274,17 @@ def test_elevation_gain_is_none_without_elevation_data():
     """A graph built without build_elevation must report None, not 0.0 — the
     battery model treats those very differently."""
     assert valhalla.elevation_gain_meters(_trip()) is None
+
+
+# --- weather cache completeness (found by Copilot review of 90aeda4) ---------
+
+def test_hours_missing_counts_interior_gaps_not_just_the_envelope():
+    """A MIN/MAX envelope check reports a partially-backfilled range as fully
+    covered, so trips in the hole silently get no temperature."""
+    import inspect
+
+    from src import weather
+    src = inspect.getsource(weather._hours_missing)
+    assert "COUNT(*)" in src
+    # The old envelope-only approach must not come back.
+    assert "MIN(observed_hour)" not in inspect.getsource(weather.ensure_coverage)

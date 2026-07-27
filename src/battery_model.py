@@ -245,6 +245,16 @@ def _accept_pair(candidate: dict, stats: dict) -> dict | None:
 
 def _route_and_store(conn, cand: dict, stats: dict) -> bool:
     """Route a candidate through Valhalla, apply the routed anchors, persist."""
+    # Temperature FIRST, before paying for a Valhalla call. A row stored with
+    # temperature_c NULL is permanently dead weight: train() filters it out, and
+    # the (vehicle_identifier, departed_at) dedupe means a later run will never
+    # revisit it. Skipping instead leaves the candidate eligible once the
+    # weather cache is backfilled.
+    temp = _temperature_at(conn, cand["departed_at"])
+    if temp is None:
+        stats["rejected_no_temperature"] += 1
+        return False
+
     try:
         body = valhalla.route(
             [(float(cand["latitude"]), float(cand["longitude"])),
@@ -270,8 +280,6 @@ def _route_and_store(conn, cand: dict, stats: dict) -> bool:
     if mph < MIN_IMPLIED_MPH:
         stats["rejected_speed"] += 1
         return False
-
-    temp = _temperature_at(conn, cand["departed_at"])
 
     with conn.cursor() as cur:
         cur.execute(
@@ -315,7 +323,8 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
     stats = {
         "candidates": 0, "accepted": 0, "zero_delta": 0,
         "rejected_soc": 0, "rejected_distance": 0, "rejected_speed": 0,
-        "rejected_swap": 0, "rejected_rebalance": 0, "no_route": 0,
+        "rejected_swap": 0, "rejected_rebalance": 0,
+        "rejected_no_temperature": 0, "no_route": 0,
     }
 
     with connection() as conn:
@@ -466,7 +475,8 @@ def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
     stats = {
         "files": 0, "candidates": 0, "accepted": 0, "zero_delta": 0,
         "rejected_soc": 0, "rejected_distance": 0, "rejected_speed": 0,
-        "rejected_swap": 0, "rejected_rebalance": 0, "no_route": 0,
+        "rejected_swap": 0, "rejected_rebalance": 0,
+        "rejected_no_temperature": 0, "no_route": 0,
     }
 
     con = duckdb.connect(":memory:")
