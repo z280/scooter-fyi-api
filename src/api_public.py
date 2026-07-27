@@ -457,6 +457,7 @@ def _devices_current_impl(
             quality_designation=quality,
             has_negative_report=bool(r[20]),
             is_dwell_outlier=is_dwell_outlier,
+            peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
         )
         properties: dict[str, Any] = {
             "device_id": r[0],

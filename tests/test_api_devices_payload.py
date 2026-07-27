@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from collections import namedtuple
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import h3
 import pytest
@@ -170,6 +170,48 @@ def test_dwell_evidence_fields_passed_through(_fake_db):
     props = _call()["features"][0]["properties"]
     assert props["dwell_percentile_hood"] == 96
     assert props["dwell_peer_median_hours"] == 6.0  # rounded to 1 dp
+
+
+# ---------- unknown via peer-median dwell ratio (end-to-end, not just the
+# compute_reliability_tier unit tests in test_quality.py) ---------------------
+def test_reliability_unknown_via_dwell_ratio_end_to_end(_fake_db, monkeypatch):
+    """10h dwell vs a 4h peer median (2.5x) is well under the 3x/p90/48h
+    high_risk outlier bar, but should still surface as "unknown" through
+    the real handler — exercises the peer_median_dwell_hours wiring at the
+    api_public.py call site, not compute_reliability_tier in isolation."""
+    now = datetime.now(timezone.utc)
+    row = _ROW[:23] + (now - timedelta(hours=10),) + _ROW[24:]
+    monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
+    monkeypatch.setattr(
+        api_public, "stats_for_cycle",
+        lambda cycle_id, snapshot_time: {
+            "8c4a1f0d2e9b7a35": DwellPeerStats(
+                dwell_hours=10.0, percentile=0.7, peer_median_hours=4.0,
+                peer_count=6, is_outlier=False,
+            )
+        },
+    )
+    props = _call()["features"][0]["properties"]
+    assert props["reliability_tier"] == "unknown"
+
+
+def test_reliability_ok_when_under_dwell_ratio_end_to_end(_fake_db, monkeypatch):
+    """Same 10h dwell, but a 6h peer median keeps the ratio under 2x —
+    confirms it's the ratio gating this, not merely having peer stats at all."""
+    now = datetime.now(timezone.utc)
+    row = _ROW[:23] + (now - timedelta(hours=10),) + _ROW[24:]
+    monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
+    monkeypatch.setattr(
+        api_public, "stats_for_cycle",
+        lambda cycle_id, snapshot_time: {
+            "8c4a1f0d2e9b7a35": DwellPeerStats(
+                dwell_hours=10.0, percentile=0.4, peer_median_hours=6.0,
+                peer_count=6, is_outlier=False,
+            )
+        },
+    )
+    props = _call()["features"][0]["properties"]
+    assert props["reliability_tier"] == "ok"
 
 
 def test_battery_percent_edge_cases():
