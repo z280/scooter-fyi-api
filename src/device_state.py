@@ -35,34 +35,17 @@ approximation error is < 1cm — irrelevant.
 from __future__ import annotations
 
 import logging
-import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
 from .config import load
+from .geo import distance_meters as _distance_meters
 from .ingest import TaggedDevice
 from .pg import connection
 
 log = logging.getLogger(__name__)
-
-
-# Earth's radius is not needed — at the scales we care about (single-digit
-# meters), a degree of latitude is 111,320 m and a degree of longitude is
-# 111,320 × cos(lat) m. We use the cosine of the device's own latitude as
-# the local east-west scale.
-_METERS_PER_DEG_LAT = 111_320.0
-
-
-def _distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Flat-earth distance, accurate enough for sub-100m comparisons at
-    Denver's latitude."""
-    avg_lat_rad = math.radians((lat1 + lat2) / 2.0)
-    meters_per_deg_lon = _METERS_PER_DEG_LAT * math.cos(avg_lat_rad)
-    dy = (lat2 - lat1) * _METERS_PER_DEG_LAT
-    dx = (lon2 - lon1) * meters_per_deg_lon
-    return math.sqrt(dx * dx + dy * dy)
 
 
 @dataclass

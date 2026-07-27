@@ -67,3 +67,23 @@ def hash_plate(plate: str | None) -> str | None:
         return None
     mac = hmac.new(_salt(), plate.encode("utf-8"), sha256)
     return mac.hexdigest()[:_IDENTIFIER_LEN]
+
+
+# --- Cosmetic display code (NOT a privacy control) -------------------------
+# A fixed digit substitution so ride-facing UI can show something other
+# than the bare plate number, e.g. "1231234" -> "ZTRZTRF". Unlike
+# hash_plate above, this has no secret and anyone who knows the mapping
+# can trivially invert it — that's fine here: a rider starting a ride can
+# already read the real plate off the scooter, so this is a light visual
+# disguise, not a security boundary. Do not use this in place of
+# hash_plate/vehicle_identifier for anything that needs real privacy.
+_DISPLAY_DIGIT_MAP = {
+    "0": "W", "1": "Z", "2": "T", "3": "R", "4": "F",
+    "5": "V", "6": "A", "7": "S", "8": "H", "9": "N",
+}
+
+
+def plate_display_code(plate: str) -> str:
+    """Obfuscate a plate number for display, e.g. '1231234' -> 'ZTRZTRF'.
+    Non-digit characters pass through unchanged."""
+    return "".join(_DISPLAY_DIGIT_MAP.get(ch, ch) for ch in plate)

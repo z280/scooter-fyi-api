@@ -14,24 +14,20 @@ Receipts are the only user-uploaded binary this system holds. Rules:
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import uuid
 
 import boto3
 from botocore.config import Config as BotoConfig
-from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import load, r2_credentials
+from .image_processing import ImageProcessingError
+from .image_processing import strip_and_reencode as _strip_and_reencode
 
 log = logging.getLogger(__name__)
 
 MAX_RECEIPT_BYTES = 10 * 1024 * 1024
-_JPEG_QUALITY = 85
-# Cap pixel dimensions: bounds decode memory (PIL bomb protection is on by
-# default, this just tightens it) and receipt legibility never needs more.
-_MAX_DIMENSION = 4096
 
 
 class ReceiptError(Exception):
@@ -46,36 +42,14 @@ def receipts_bucket() -> str | None:
 
 
 def strip_and_reencode(data: bytes) -> bytes:
-    """Decode the image and re-encode pixels-only to JPEG.
-
-    Re-encoding (rather than deleting EXIF blocks) guarantees nothing
-    survives: EXIF, XMP, IPTC, thumbnails, GPS — none of it transfers to
-    a fresh Image buffer.
-    """
-    if len(data) > MAX_RECEIPT_BYTES:
-        raise ReceiptError(f"receipt too large (max {MAX_RECEIPT_BYTES // (1024*1024)} MB)")
+    """Decode the image and re-encode pixels-only to JPEG — thin wrapper
+    around src/image_processing.py's shared pipeline (also used by device
+    photos and ride transaction screenshots), translated back to
+    ReceiptError so every existing caller/test is unaffected."""
     try:
-        img = Image.open(io.BytesIO(data))
-        img.load()
-    except (UnidentifiedImageError, OSError) as e:
-        raise ReceiptError("receipt is not a readable image") from e
-
-    # Bake EXIF orientation into the pixels before the EXIF block itself is
-    # dropped below — otherwise phone photos that rely on orientation (not
-    # rotated pixels) come out sideways once re-encoded.
-    img = ImageOps.exif_transpose(img)
-
-    if img.width > _MAX_DIMENSION or img.height > _MAX_DIMENSION:
-        img.thumbnail((_MAX_DIMENSION, _MAX_DIMENSION))
-    if img.mode not in ("RGB", "L"):
-        img = img.convert("RGB")
-
-    out = io.BytesIO()
-    # PIL's JPEG encoder only writes EXIF/XMP when they're passed as save()
-    # kwargs — a plain re-save emits pixels (+ ICC color profile) only.
-    # test_receipts.py asserts the output of a GPS-tagged input has no EXIF.
-    img.save(out, format="JPEG", quality=_JPEG_QUALITY)
-    return out.getvalue()
+        return _strip_and_reencode(data, max_bytes=MAX_RECEIPT_BYTES)
+    except ImageProcessingError as e:
+        raise ReceiptError(str(e)) from e
 
 
 def _r2_client():

@@ -65,6 +65,12 @@ class TransmissionEndpoint:
 class R2Config:
     bucket_name: str
     endpoint_template: str
+    # Public HTTPS base URL for R2_BUCKET_NAME once r2.dev access or a
+    # custom domain is enabled for it (see src/device_photos.py) — that's
+    # a one-time Cloudflare Dashboard step, not something this repo can
+    # configure itself. None until an operator sets it in config.json;
+    # device photo URLs are null in API responses until then.
+    public_base_url: str | None = None
 
     def endpoint_url(self, account_id: str) -> str:
         return self.endpoint_template.format(account_id=account_id)

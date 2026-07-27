@@ -14,10 +14,31 @@ may land on either side — irrelevant at report-coordinate precision.
 
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from typing import Any
 
 from . import boundaries
+
+# Earth's radius is not needed — at the scales we care about (single-digit
+# meters), a degree of latitude is 111,320 m and a degree of longitude is
+# 111,320 x cos(lat) m. We use the cosine of the midpoint latitude as the
+# local east-west scale.
+_METERS_PER_DEG_LAT = 111_320.0
+
+
+def distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Flat-earth distance, accurate enough for sub-100m comparisons at
+    Denver's latitude. Promoted from device_state.py's original private
+    implementation so src/points.py's 20m GBFS-validation check (and any
+    other future caller) uses the same math instead of a second copy;
+    device_state.py now imports this under its historical `_distance_meters`
+    name."""
+    avg_lat_rad = math.radians((lat1 + lat2) / 2.0)
+    meters_per_deg_lon = _METERS_PER_DEG_LAT * math.cos(avg_lat_rad)
+    dy = (lat2 - lat1) * _METERS_PER_DEG_LAT
+    dx = (lon2 - lon1) * meters_per_deg_lon
+    return math.sqrt(dx * dx + dy * dy)
 
 
 def _ring_contains(ring: list[list[float]], lon: float, lat: float) -> bool:

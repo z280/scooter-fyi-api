@@ -32,3 +32,14 @@
 # Receipt retention: purge discount-report receipt images older than 18
 # months (privacy policy). Idempotent; the report row outlives the image.
 30 3 * * * cd /app && python -m src.cli cleanup_receipts
+
+# Ride-watch expiry: close out user_device_watch_list / tracked_rides rows
+# whose 3h window elapsed with no GBFS-side resolution (src/ride_watch.py
+# handles the two live transitions every 2-min cycle; this just terminates
+# the ones that timed out). Cheap indexed range scan — no self-gating
+# needed like archive_if_due.
+*/15 * * * * cd /app && python -m src.cli expire_stale_watches
+
+# Ride transaction screenshot retention: mirrors cleanup_receipts' 18-month
+# window and slot in the same daily 3:30am run.
+30 3 * * * cd /app && python -m src.cli cleanup_ride_screenshots

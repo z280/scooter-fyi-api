@@ -1,7 +1,14 @@
-"""Google encoded-polyline decoding (precision 5) for ride exports.
+"""Google encoded-polyline decode/encode (precision 5 by default) for ride
+paths.
 
-Rides arrive and are stored as encoded polylines (§4.2); decoding happens
-only at GeoJSON export time. ~25 lines beats a dependency.
+The legacy `rides` table only ever needed decode() — the client sends an
+already-encoded polyline after the fact (§4.2), and decoding happens only
+at GeoJSON export time. encode() was added for tracked_rides
+(sql/027_tracked_rides.sql): waypoints arrive one at a time with
+client-supplied timestamps and can arrive out of order, so
+path_polyline is rebuilt from scratch (encode() over the full ordered
+point list) on every waypoint insert rather than appended incrementally,
+which would silently corrupt the path on any out-of-order POST.
 Algorithm: https://developers.google.com/maps/documentation/utilities/polylinealgorithm
 """
 
@@ -41,3 +48,28 @@ def decode(encoded: str, precision: int = 5) -> list[tuple[float, float]]:
         lon += _next_delta()
         coords.append((lat / factor, lon / factor))
     return coords
+
+
+def encode(points: list[tuple[float, float]], precision: int = 5) -> str:
+    """Encode (lat, lon) tuples to a Google polyline string. Inverse of
+    decode() — round-trips exactly at the given precision."""
+    factor = 10 ** precision
+
+    def _encode_delta(d: int) -> str:
+        d = ~(d << 1) if d < 0 else (d << 1)
+        chunks = []
+        while d >= 0x20:
+            chunks.append(chr((0x20 | (d & 0x1F)) + 63))
+            d >>= 5
+        chunks.append(chr(d + 63))
+        return "".join(chunks)
+
+    out: list[str] = []
+    prev_lat = prev_lon = 0
+    for lat, lon in points:
+        lat_i = round(lat * factor)
+        lon_i = round(lon * factor)
+        out.append(_encode_delta(lat_i - prev_lat))
+        out.append(_encode_delta(lon_i - prev_lon))
+        prev_lat, prev_lon = lat_i, lon_i
+    return "".join(out)

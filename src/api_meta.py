@@ -15,7 +15,7 @@ from fastapi import APIRouter, Response
 router = APIRouter()
 
 _PRIVACY = {
-    "updated": "2026-07-04",
+    "updated": "2026-07-27",
     "contact": "zneill@gmail.com",
     "retention": [
         {
@@ -58,9 +58,43 @@ _PRIVACY = {
         {
             "data": "accounts",
             "retention": "until deletion is requested",
-            "detail": "An account stores your email, rate-plan choice, theme, "
-                      "and favorites. Email zneill@gmail.com to delete an "
+            "detail": "An account stores your email and/or phone number (at "
+                      "least one is required), rate-plan choice, theme, "
+                      "favorites, a public username (an adjective + emoji you "
+                      "can choose or re-roll), optional home/work coordinates, "
+                      "and two visibility toggles (public username, "
+                      "leaderboards). Email zneill@gmail.com to delete an "
                       "account until self-serve deletion ships.",
+        },
+        {
+            "data": "tracked_rides",
+            "retention": "until you delete them",
+            "detail": "Server-detected ride tracking (start location, GBFS "
+                      "watch results, waypoints, your reported end location/"
+                      "cost/battery). A separate mechanism from the `rides` "
+                      "entry above — open to every rider, not just supporters "
+                      "— but the same commitment applies: DELETE "
+                      "/api/v1/tracked-rides[/:id] is an immediate hard delete, "
+                      "cascading to its waypoints and watch record.",
+        },
+        {
+            "data": "device_photos",
+            "retention": "indefinite (public content)",
+            "detail": "Rider-uploaded photos of physical devices are public, "
+                      "capped at 3 per device, and attributed to the "
+                      "uploader's public username if they've enabled it. "
+                      "EXIF/GPS is stripped on upload. Kept indefinitely as "
+                      "community reference material, same as device and "
+                      "discount reports.",
+        },
+        {
+            "data": "ride_transaction_screenshots",
+            "retention": "18 months",
+            "detail": "Two screenshots per ride (overview, receipt) in a "
+                      "private bucket, EXIF-stripped on upload, visible only "
+                      "to the uploader. Mirrors the receipts retention window "
+                      "above; a matching cleanup job removes the image after "
+                      "18 months.",
         },
     ],
 }
