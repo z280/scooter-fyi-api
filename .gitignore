@@ -9,3 +9,5 @@ __pycache__/
 *.parquet
 *.swp
 docker-compose.override.yml
+.venv/
+.pytest_cache/
