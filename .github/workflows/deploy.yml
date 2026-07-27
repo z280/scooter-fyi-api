@@ -49,6 +49,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The box's public :22 is closed — SSH/scp reach it only over the tailnet.
+      # Join the ephemeral runner to Tailscale before the scp/ssh steps below.
+      # Requires a Tailscale OAuth client (scope auth_keys) + an ACL letting
+      # tag:ci reach the box on :22; store its id/secret as TSC_OAUTH_* secrets.
+      # Also point the VPS_HOST secret at ovh3's tailnet address (MagicDNS name
+      # e.g. ovh3.<tailnet>.ts.net, or its 100.x.y.z IP).
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TSC_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TSC_OAUTH_SECRET }}
+          tags: tag:ci
+
       - name: Sync compose + config to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
