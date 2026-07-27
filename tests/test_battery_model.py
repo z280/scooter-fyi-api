@@ -55,6 +55,31 @@ def test_anchor_filter_thresholds_match_the_spec():
     assert battery_model.MIN_IMPLIED_MPH == 8.0
 
 
+def test_straight_line_prefilter_is_below_the_routed_anchor():
+    """The cheap pre-filter must not pre-empt the real 1-mile test.
+
+    Straight-line distance always understates the routed path, so filtering at
+    1 mile before routing would silently drop qualifying trips.
+    """
+    assert battery_model.MIN_STRAIGHT_LINE_METERS < battery_model.MIN_DISTANCE_METERS
+
+
+def test_trips_are_derived_from_observation_gaps_not_trip_tables():
+    """Guards the finding that forced this design.
+
+    device_history.departed_at equals the next stop's snapshot_time at p50, p90
+    and mean (measured over 1.37M stops), so it yields no duration and zero
+    stops in the 10-30 min band. The extraction SQL must read the telemetry
+    stream, not a trip table.
+    """
+    sql = battery_model._PAIRS_SQL
+    assert "raw_telemetry_points" in sql
+    assert "device_history" not in sql
+    assert "trip_events" not in sql
+    # The gap between consecutive observations IS the duration.
+    assert "LEAD(snapshot_time)" in sql
+
+
 def test_implied_speed_uses_routed_distance():
     # 2 miles in 12 minutes = 10 mph, which clears the 8 mph floor.
     mph = battery_model._implied_mph(2 * 1609.34, 12 * 60)
@@ -76,6 +101,46 @@ def test_swap_threshold_excludes_recharges_not_rides():
     """A +20pp jump is a battery swap. Left in, it would appear as a large
     negative burn and drag the whole fit."""
     assert battery_model.SWAP_JUMP_PCT == 20.0
+
+
+# --- pair acceptance ---------------------------------------------------------
+
+def _pair(range_start, range_end):
+    from src.quality import _soc_lut
+    lut = _soc_lut()
+    return {"range_start": lut[range_start], "range_end": lut[range_end]}
+
+
+def _stats():
+    return {"zero_delta": 0, "rejected_soc": 0, "rejected_swap": 0}
+
+
+def test_normal_burn_is_accepted():
+    st = _stats()
+    out = battery_model._accept_pair(_pair(80, 70), st)
+    assert out is not None
+    assert out["burn"] == pytest.approx(10, abs=1)
+
+
+def test_battery_swap_is_rejected_not_counted_as_negative_burn():
+    st = _stats()
+    assert battery_model._accept_pair(_pair(20, 90), st) is None
+    assert st["rejected_swap"] == 1
+    assert st["rejected_soc"] == 0
+
+
+def test_zero_delta_is_counted_but_not_stored():
+    """Quantization, not a real observation — storing it would drag the
+    intercept toward zero burn, but it still has to be visible."""
+    st = _stats()
+    assert battery_model._accept_pair(_pair(50, 50), st) is None
+    assert st["zero_delta"] == 1
+
+
+def test_implausibly_large_burn_is_rejected():
+    st = _stats()
+    assert battery_model._accept_pair(_pair(99, 1), st) is None
+    assert st["rejected_soc"] == 1
 
 
 # --- serving -----------------------------------------------------------------

@@ -41,12 +41,16 @@
 # socket to do that itself.
 30 4 * * * cd /app && python -m src.cli refresh_routing_graph
 
-# Battery model. Extraction routes every candidate trip through Valhalla, so it
-# is kept clear of both the 02:00 archive and the map-prep window. Only trips
-# older than the ERA5 temperature lag (5 days) are eligible, so there is no
-# rush to run it more than daily.
-15 5 * * * cd /app && python -m src.cli extract_battery_trips
+# Battery model. Reads the last ~26h of raw_telemetry_points, so it MUST run
+# BEFORE the 02:00 archive, which flushes that table to R2 and truncates it.
+# Running after would see only the handful of cycles since the truncate. 01:30
+# leaves the full day in place; the 26h lookback overlaps the previous
+# truncation boundary so nothing falls between two runs.
+# Yields ~120 observations/day; the model becomes trainable after ~2 weeks.
+# To seed it from history instead, see `backfill_battery_trips` (manual, needs
+# a raised memory limit).
+30 1 * * * cd /app && python -m src.cli extract_battery_trips
 
-# Refit weekly: the coefficients move slowly, and a daily refit would mostly
-# chase weather noise.
+# Refit weekly. Runs after extraction has had its turn, and the coefficients
+# move slowly enough that a daily refit would mostly chase weather noise.
 45 5 * * 1 cd /app && python -m src.cli train_battery_model

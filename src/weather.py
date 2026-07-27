@@ -48,7 +48,11 @@ def backfill_hourly(start: date, end: date) -> int:
     log.info("Fetching Open-Meteo archive %s..%s", start, end)
     resp = httpx.get(ARCHIVE_URL, params=params, timeout=_TIMEOUT)
     resp.raise_for_status()
-    hourly = resp.json().get("hourly", {})
+    return _upsert(resp.json().get("hourly", {}))
+
+
+def _upsert(hourly: dict) -> int:
+    """Upsert an Open-Meteo hourly block. Returns rows written."""
     times = hourly.get("time", []) or []
     temps = hourly.get("temperature_2m", []) or []
 
@@ -58,7 +62,7 @@ def backfill_hourly(start: date, end: date) -> int:
         if c is not None
     ]
     if not rows:
-        log.warning("Open-Meteo returned no usable temperatures for %s..%s", start, end)
+        log.warning("Open-Meteo returned no usable temperatures")
         return 0
 
     with connection() as conn:
@@ -77,26 +81,66 @@ def backfill_hourly(start: date, end: date) -> int:
     return len(rows)
 
 
+def backfill_recent_hourly(past_days: int = 7) -> int:
+    """Fetch the last ``past_days`` of hourly temperature from the forecast API.
+
+    The archive (ERA5 reanalysis) lags ~5 days, but extraction runs against the
+    last 26 hours of telemetry — so every fresh observation would land with a
+    NULL temperature and be discarded at fit time. The forecast endpoint serves
+    recent history with no lag via ``past_days``. It is a forecast model rather
+    than reanalysis, so the two sources differ slightly; for a single
+    degrees-Celsius regressor that is well inside the noise, and rows are upsert
+    keyed by hour so a later archive fetch supersedes a forecast value.
+    """
+    params = {
+        "latitude": DENVER_LAT,
+        "longitude": DENVER_LON,
+        "hourly": "temperature_2m",
+        "past_days": min(max(past_days, 1), 92),
+        "forecast_days": 1,
+        "timezone": "UTC",
+    }
+    log.info("Fetching Open-Meteo recent hours (past_days=%s)", params["past_days"])
+    resp = httpx.get(FORECAST_URL, params=params, timeout=_TIMEOUT)
+    resp.raise_for_status()
+    return _upsert(resp.json().get("hourly", {}))
+
+
 def ensure_coverage(start: date, end: date) -> int:
-    """Backfill only the hours we don't already have, to keep refits cheap."""
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT MIN(observed_hour)::date, MAX(observed_hour)::date
-                FROM hourly_temperature
-                """
-            )
-            row = cur.fetchone()
-    have_lo, have_hi = (row or (None, None))
-    if have_lo is None:
-        return backfill_hourly(start, end)
+    """Make sure [start, end] is cached, choosing the right source per range.
+
+    Anything older than the reanalysis lag comes from the archive; the recent
+    tail comes from the forecast endpoint, which has no lag.
+    """
+    today = datetime.now(timezone.utc).date()
+    archive_cutoff = today - timedelta(days=ARCHIVE_LAG_DAYS)
 
     written = 0
-    if start < have_lo:
-        written += backfill_hourly(start, have_lo - timedelta(days=1))
-    if end > have_hi:
-        written += backfill_hourly(have_hi + timedelta(days=1), end)
+    # Older portion: ERA5 archive, but only the part we don't already hold.
+    if start < archive_cutoff:
+        archive_end = min(end, archive_cutoff - timedelta(days=1))
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MIN(observed_hour)::date, MAX(observed_hour)::date "
+                    "FROM hourly_temperature"
+                )
+                row = cur.fetchone()
+        have_lo, have_hi = (row or (None, None))
+        if have_lo is None:
+            written += backfill_hourly(start, archive_end)
+        else:
+            if start < have_lo:
+                written += backfill_hourly(start, min(have_lo - timedelta(days=1), archive_end))
+            if archive_end > have_hi:
+                written += backfill_hourly(have_hi + timedelta(days=1), archive_end)
+
+    # Recent tail: forecast endpoint. Always refetched — it is one cheap request
+    # and it lets a provisional value be corrected as the model settles.
+    if end >= archive_cutoff:
+        written += backfill_recent_hourly(
+            past_days=max((today - max(start, archive_cutoff)).days + 1, 1))
+
     if written == 0:
         log.info("Temperature cache already covers %s..%s", start, end)
     return written

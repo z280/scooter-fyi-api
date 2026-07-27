@@ -19,10 +19,16 @@ Available commands:
                       Re-sync the routing assets and report whether the .pbf
                       changed, i.e. whether Valhalla needs a tile rebuild.
     extract_battery_trips
-                      Mine device_history for trips matching the anchor filter,
-                      route them through Valhalla, store the observations.
+                      Mine the last ~26h of telemetry for observation-gap trips
+                      matching the anchor filter, route them through Valhalla,
+                      store the observations.
     train_battery_model
                       Refit the battery-burn regression on stored observations.
+    backfill_battery_trips
+                      Seed observations from the R2 parquet archive instead of
+                      waiting for the daily job to accumulate them. Needs ~2 GiB
+                      -- raise the container limit before running (see the
+                      docstring).
     migrate           Apply pending SQL migrations.
     admin             Manage the admin allowlist:
                       `admin (list | add <email> | remove <email>)`.
@@ -35,7 +41,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from .archive import run_archive
-from .battery_model import extract_trips, train as train_battery
+from .battery_model import (
+    backfill_trips_from_archive,
+    extract_trips,
+    train as train_battery,
+)
 from .config import load
 from .cycle import run_once
 from .r2_map import sync_map_assets
@@ -238,6 +248,16 @@ def _cli_train_battery_model() -> dict:
     return train_battery()
 
 
+def _cli_backfill_battery_trips() -> dict:
+    """Seed the observations table from the R2 parquet archive.
+
+    Run by hand, not from cron: measured at ~1.25 GiB peak RSS on a single
+    archive file, which exceeds the scheduler's 1024m limit. Raise it first:
+        docker update --memory 2g --memory-swap 2g scheduler
+    """
+    return backfill_trips_from_archive()
+
+
 COMMANDS = {
     "ingest_cycle":          _cli_ingest_cycle,
     "archive_if_due":        _cli_archive_if_due,
@@ -248,6 +268,7 @@ COMMANDS = {
     "refresh_routing_graph": _cli_refresh_routing_graph,
     "extract_battery_trips": _cli_extract_battery_trips,
     "train_battery_model":   _cli_train_battery_model,
+    "backfill_battery_trips": _cli_backfill_battery_trips,
     "migrate":               lambda: run_migrations(),
 }
 

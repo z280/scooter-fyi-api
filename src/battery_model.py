@@ -11,8 +11,13 @@ data (see sql/024_battery_model.sql for the long form):
   lookup table in data/range_soc_lut.json. ``current_range_meters`` is a
   nonlinear vendor re-encoding of an integer percent and is identical across all
   three vehicle models, so regressing on metres would fit the vendor curve.
-* Trips come from ``device_history`` (which has ``departed_at``, hence a real
-  duration) rather than ``trip_events`` (which has only ``detected_at``).
+* A trip is an OBSERVATION GAP in the telemetry stream, not a row in any of the
+  trip tables. A rented vehicle drops out of GBFS free_bike_status, so a ride
+  shows up as two consecutive observations 10-30 minutes apart with a position
+  jump between them. Neither ``trip_events`` (no duration at all) nor
+  ``device_history`` works: measured over 1.37M stops, device_history's
+  ``departed_at`` equals the next stop's ``snapshot_time`` at p50, p90 and mean,
+  because it records the detecting cycle rather than the departure.
 * Distance and elevation are Valhalla's routed values;
   ``trip_events.distance_meters`` is a documented flat-earth approximation.
 
@@ -24,7 +29,7 @@ terms does not justify a scikit-learn dependency, in the spirit of
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from . import valhalla, weather
@@ -62,64 +67,81 @@ def _implied_mph(distance_meters: float, duration_seconds: float) -> float:
 
 
 # --- Extraction --------------------------------------------------------------
+#
+# A trip is an OBSERVATION GAP, not a device_history row.
+#
+# GBFS free_bike_status lists only available vehicles, so a rented scooter drops
+# out of the feed for the duration of the ride and reappears at the destination.
+# Two consecutive observations of the same vehicle separated by 10-30 minutes,
+# with a position jump across the gap, therefore bracket a trip — and the gap
+# itself is the duration.
+#
+# device_history looked like the natural source (it has departed_at) but is not
+# usable: measured over 1.37M stops, departed_at equals the NEXT stop's
+# snapshot_time at p50, p90 AND mean, because it records the cycle that detected
+# the move rather than the moment of departure. Zero stops fall in the 10-30
+# minute band. The observation-gap model is what scripts/analyze_range_signal.py
+# already used, and it is the one that survives contact with the data.
+#
+# Measured on a 2-day archive file: 11.7M consecutive pairs -> 17,401 with a
+# 10-30 min gap -> 1,146 that also moved -> 243 usable after the distance and
+# SoC filters. Roughly 120 usable observations per day.
 
-_CANDIDATE_SQL = """
-WITH stops AS (
-    SELECT
-        h.vehicle_identifier,
-        h.snapshot_time                                        AS arrived_at,
-        h.departed_at,
-        h.lat, h.lon,
-        LEAD(h.snapshot_time) OVER w                           AS next_arrived_at,
-        LEAD(h.lat)           OVER w                           AS next_lat,
-        LEAD(h.lon)           OVER w                           AS next_lon
-    FROM device_history h
-    WHERE h.departed_at IS NOT NULL
-      AND h.snapshot_time >= %(window_start)s
-      AND h.snapshot_time <  %(window_end)s
-    WINDOW w AS (PARTITION BY h.vehicle_identifier ORDER BY h.snapshot_time)
-)
-SELECT
-    s.vehicle_identifier,
-    s.departed_at,
-    s.next_arrived_at        AS arrived_at,
-    s.lat                    AS from_lat,
-    s.lon                    AS from_lon,
-    s.next_lat               AS to_lat,
-    s.next_lon               AS to_lon,
-    EXTRACT(EPOCH FROM (s.next_arrived_at - s.departed_at)) AS duration_seconds
-FROM stops s
-WHERE s.next_arrived_at IS NOT NULL
-  AND s.next_lat IS NOT NULL
-  AND EXTRACT(EPOCH FROM (s.next_arrived_at - s.departed_at))
-      BETWEEN %(min_s)s AND %(max_s)s
-  AND NOT EXISTS (
-      SELECT 1 FROM battery_trip_observations o
-      WHERE o.vehicle_identifier = s.vehicle_identifier
-        AND o.departed_at = s.departed_at
-  )
-ORDER BY s.departed_at DESC
-LIMIT %(limit)s
+# Flat-earth metres between the two ends of a pair. Postgres here has no
+# PostGIS; this is the same approximation device_state.py already uses for its
+# movement threshold, and it only gates which pairs are worth routing — the
+# distance that reaches the regression is Valhalla's.
+_STRAIGHT_LINE_M = """
+        sqrt(
+            pow((o.lat2 - o.latitude) * 111320.0, 2) +
+            pow((o.lon2 - o.longitude) * 111320.0 * cos(radians(o.latitude)), 2)
+        )
 """
 
-# SoC at each end of the trip: the last reading before departure and the first
-# after arrival, from the 48-hour hot buffer.
-_SOC_SQL = """
+# Cheap pre-filter before paying for a Valhalla call. Deliberately well below
+# the 1-mile anchor: straight-line distance always understates the routed path,
+# so filtering at 1 mile here would silently drop qualifying trips. The real
+# 1-mile test is applied to the routed distance.
+MIN_STRAIGHT_LINE_METERS = 800.0
+
+_PAIRS_SQL = f"""
+WITH obs AS (
+    SELECT
+        vehicle_identifier, vehicle_model_name, snapshot_time,
+        latitude, longitude, current_range_meters,
+        LEAD(snapshot_time)        OVER w AS t2,
+        LEAD(latitude)             OVER w AS lat2,
+        LEAD(longitude)            OVER w AS lon2,
+        LEAD(current_range_meters) OVER w AS range2
+    FROM raw_telemetry_points
+    WHERE spatial_status = 'denver_core'
+      AND snapshot_time >= %(window_start)s
+      AND snapshot_time <  %(window_end)s
+    WINDOW w AS (PARTITION BY vehicle_identifier ORDER BY snapshot_time)
+)
 SELECT
-    (SELECT r.current_range_meters
-       FROM raw_telemetry_points r
-      WHERE r.vehicle_identifier = %(vid)s
-        AND r.snapshot_time <= %(departed_at)s
-      ORDER BY r.snapshot_time DESC LIMIT 1) AS range_start,
-    (SELECT r.current_range_meters
-       FROM raw_telemetry_points r
-      WHERE r.vehicle_identifier = %(vid)s
-        AND r.snapshot_time >= %(arrived_at)s
-      ORDER BY r.snapshot_time ASC LIMIT 1) AS range_end,
-    (SELECT r.vehicle_model_name
-       FROM raw_telemetry_points r
-      WHERE r.vehicle_identifier = %(vid)s
-      ORDER BY r.snapshot_time DESC LIMIT 1) AS model
+    o.vehicle_identifier,
+    o.vehicle_model_name,
+    o.snapshot_time AS departed_at,
+    o.t2            AS arrived_at,
+    EXTRACT(EPOCH FROM (o.t2 - o.snapshot_time)) AS duration_seconds,
+    o.latitude, o.longitude, o.lat2, o.lon2,
+    o.current_range_meters AS range_start,
+    o.range2               AS range_end,
+    {_STRAIGHT_LINE_M}     AS straight_line_m
+FROM obs o
+WHERE o.t2 IS NOT NULL
+  AND o.range2 IS NOT NULL
+  AND o.current_range_meters IS NOT NULL
+  AND EXTRACT(EPOCH FROM (o.t2 - o.snapshot_time)) BETWEEN %(min_s)s AND %(max_s)s
+  AND {_STRAIGHT_LINE_M} > %(min_straight_m)s
+  AND NOT EXISTS (
+      SELECT 1 FROM battery_trip_observations b
+      WHERE b.vehicle_identifier = o.vehicle_identifier
+        AND b.departed_at = o.snapshot_time
+  )
+ORDER BY o.snapshot_time DESC
+LIMIT %(limit)s
 """
 
 
@@ -137,17 +159,105 @@ def _temperature_at(conn, when: datetime) -> float | None:
     return float(row[0]) if row else None
 
 
-def extract_trips(days: int = 30, limit: int = 5000) -> dict[str, Any]:
-    """Find candidate trips, route them through Valhalla, and persist observations.
+def _accept_pair(candidate: dict, stats: dict) -> dict | None:
+    """Apply the SoC and anchor filters that need no Valhalla call.
 
-    Only trips older than the ERA5 publication lag are considered, so every
-    stored row has a real temperature rather than a silently defaulted one.
+    Returns the enriched candidate, or None (having counted a rejection).
+    """
+    soc_start = compute_battery_percent(candidate["range_start"])
+    soc_end = compute_battery_percent(candidate["range_end"])
+    if soc_start is None or soc_end is None:
+        stats["rejected_soc"] += 1
+        return None
+
+    burn = soc_start - soc_end
+    if burn <= -SWAP_JUMP_PCT:
+        stats["rejected_swap"] += 1
+        return None
+    if burn == 0:
+        # Counted, never stored. The SoC grid is ~1 percentage point, so a short
+        # trip can burn less than one step; keeping those would drag the
+        # intercept toward zero burn.
+        stats["zero_delta"] += 1
+        return None
+    if burn < 0 or burn > MAX_BURN_PCT:
+        stats["rejected_soc"] += 1
+        return None
+
+    candidate["soc_start"] = soc_start
+    candidate["soc_end"] = soc_end
+    candidate["burn"] = burn
+    return candidate
+
+
+def _route_and_store(conn, cand: dict, stats: dict) -> bool:
+    """Route a candidate through Valhalla, apply the routed anchors, persist."""
+    try:
+        body = valhalla.route(
+            [(float(cand["latitude"]), float(cand["longitude"])),
+             (float(cand["lat2"]), float(cand["lon2"]))],
+            costing_options={"bicycle_type": "Hybrid"},
+        )
+    except valhalla.ValhallaError:
+        stats["no_route"] += 1
+        return False
+
+    trips = valhalla.all_trips(body)
+    if not trips:
+        stats["no_route"] += 1
+        return False
+
+    summary = valhalla.trip_summary(trips[0])
+    distance = summary["distance_meters"]
+    if distance is None or distance < MIN_DISTANCE_METERS:
+        stats["rejected_distance"] += 1
+        return False
+
+    mph = _implied_mph(distance, float(cand["duration_seconds"]))
+    if mph < MIN_IMPLIED_MPH:
+        stats["rejected_speed"] += 1
+        return False
+
+    temp = _temperature_at(conn, cand["departed_at"])
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO battery_trip_observations (
+                vehicle_identifier, vehicle_model_name, departed_at, arrived_at,
+                duration_seconds, from_lat, from_lon, to_lat, to_lon,
+                route_distance_meters, elevation_gain_meters, temperature_c,
+                soc_start_percent, soc_end_percent, burn_percent, implied_mph
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (vehicle_identifier, departed_at) DO NOTHING
+            """,
+            (cand["vehicle_identifier"], cand["vehicle_model_name"],
+             cand["departed_at"], cand["arrived_at"], float(cand["duration_seconds"]),
+             cand["latitude"], cand["longitude"], cand["lat2"], cand["lon2"],
+             distance, summary["elevation_gain_meters"], temp,
+             cand["soc_start"], cand["soc_end"], cand["burn"], mph),
+        )
+    return True
+
+
+def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
+    """Mine the hot telemetry buffer for trips and persist the good ones.
+
+    Runs against ``raw_telemetry_points``, which the archive job flushes to R2
+    and truncates every 24 hours — hence the default 26-hour window, which
+    overlaps the flush boundary so nothing is missed between runs. Re-runs are
+    idempotent via the (vehicle_identifier, departed_at) unique constraint.
+
+    The observations table accumulates: a single run yields ~120 trips, and the
+    model becomes trainable after a couple of weeks of daily runs. See
+    ``backfill_trips_from_archive`` to seed it from history instead of waiting.
     """
     now = datetime.now(timezone.utc)
-    window_end = now - timedelta(days=weather.ARCHIVE_LAG_DAYS)
-    window_start = window_end - timedelta(days=days)
+    window_start = now - timedelta(hours=hours)
 
-    weather.ensure_coverage(window_start.date(), window_end.date())
+    # Temperature must cover the window before any row is written, or every
+    # observation lands with a NULL the regression then has to discard.
+    weather.ensure_coverage(window_start.date(), now.date())
 
     stats = {
         "candidates": 0, "accepted": 0, "zero_delta": 0,
@@ -157,98 +267,32 @@ def extract_trips(days: int = 30, limit: int = 5000) -> dict[str, Any]:
 
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(_CANDIDATE_SQL, {
+            cur.execute(_PAIRS_SQL, {
                 "window_start": window_start,
-                "window_end": window_end,
+                "window_end": now,
                 "min_s": MIN_DURATION_S,
                 "max_s": MAX_DURATION_S,
+                "min_straight_m": MIN_STRAIGHT_LINE_METERS,
                 "limit": limit,
             })
-            candidates = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            candidates = [dict(zip(cols, row)) for row in cur.fetchall()]
+
         stats["candidates"] = len(candidates)
-        log.info("battery extraction: %d candidate trips in %s..%s",
-                 len(candidates), window_start.date(), window_end.date())
+        log.info("battery extraction: %d candidate pairs in the last %dh",
+                 len(candidates), hours)
 
-        for (vid, departed_at, arrived_at, from_lat, from_lon,
-             to_lat, to_lon, duration_s) in candidates:
-            with conn.cursor() as cur:
-                cur.execute(_SOC_SQL, {
-                    "vid": vid, "departed_at": departed_at, "arrived_at": arrived_at})
-                soc_row = cur.fetchone()
-            if not soc_row or soc_row[0] is None or soc_row[1] is None:
-                stats["rejected_soc"] += 1
+        for cand in candidates:
+            enriched = _accept_pair(cand, stats)
+            if enriched is None:
                 continue
+            if _route_and_store(conn, enriched, stats):
+                stats["accepted"] += 1
 
-            soc_start = compute_battery_percent(soc_row[0])
-            soc_end = compute_battery_percent(soc_row[1])
-            model = soc_row[2]
-            if soc_start is None or soc_end is None:
-                stats["rejected_soc"] += 1
-                continue
-
-            burn = soc_start - soc_end
-            if burn <= -SWAP_JUMP_PCT:
-                stats["rejected_swap"] += 1
-                continue
-            if burn == 0:
-                # Counted but not stored: a zero here is quantization, and
-                # keeping them would bias the intercept toward zero burn.
-                stats["zero_delta"] += 1
-                continue
-            if burn < 0 or burn > MAX_BURN_PCT:
-                stats["rejected_soc"] += 1
-                continue
-
-            try:
-                body = valhalla.route(
-                    [(float(from_lat), float(from_lon)), (float(to_lat), float(to_lon))],
-                    costing_options={"bicycle_type": "Hybrid"},
-                )
-            except valhalla.ValhallaError:
-                stats["no_route"] += 1
-                continue
-            trips = valhalla.all_trips(body)
-            if not trips:
-                stats["no_route"] += 1
-                continue
-
-            summary = valhalla.trip_summary(trips[0])
-            distance = summary["distance_meters"]
-            if distance is None or distance < MIN_DISTANCE_METERS:
-                stats["rejected_distance"] += 1
-                continue
-
-            mph = _implied_mph(distance, float(duration_s))
-            if mph < MIN_IMPLIED_MPH:
-                stats["rejected_speed"] += 1
-                continue
-
-            temp = _temperature_at(conn, departed_at)
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO battery_trip_observations (
-                        vehicle_identifier, vehicle_model_name, departed_at, arrived_at,
-                        duration_seconds, from_lat, from_lon, to_lat, to_lon,
-                        route_distance_meters, elevation_gain_meters, temperature_c,
-                        soc_start_percent, soc_end_percent, burn_percent, implied_mph
-                    ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                    ) ON CONFLICT (vehicle_identifier, departed_at) DO NOTHING
-                    """,
-                    (vid, model, departed_at, arrived_at, float(duration_s),
-                     from_lat, from_lon, to_lat, to_lon,
-                     distance, summary["elevation_gain_meters"], temp,
-                     soc_start, soc_end, burn, mph),
-                )
-            stats["accepted"] += 1
-
-        # The zero-delta share is the headline health metric for this pipeline:
-        # the SoC grid is ~1 percentage point, so a high share means trips are
-        # burning less than one step and the fit would be mostly quantization
-        # noise. Zeros are never stored as observations, so record the ratio
-        # here or it is unrecoverable at fit time.
+        # The zero-delta share is the health metric for this pipeline: with a
+        # ~1 percentage point SoC grid, a high share means trips are burning
+        # less than one step and any fit would be quantization noise. Zeros are
+        # never stored, so record the ratio here or it is unrecoverable later.
         scored = stats["accepted"] + stats["zero_delta"]
         stats["zero_delta_fraction"] = (
             round(stats["zero_delta"] / scored, 4) if scored else None)
@@ -265,6 +309,152 @@ def extract_trips(days: int = 30, limit: int = 5000) -> dict[str, Any]:
         conn.commit()
 
     log.info("battery extraction complete: %r", stats)
+    return stats
+
+
+# --- Historical backfill from the R2 parquet archive -------------------------
+#
+# Seeds the observations table from history instead of waiting weeks for the
+# daily job to accumulate. Opt-in and run by hand, because it is the one job
+# here that needs more memory than the scheduler's default limit.
+#
+# MEMORY: measured at 1,243 MiB peak RSS for a single 11.9M-row archive file.
+# The scheduler container is capped at 1024m, so this WILL be OOM-killed
+# (exit 137) at the default limit. Raise it for the duration:
+#
+#     docker update --memory 2g --memory-swap 2g scheduler
+#     docker compose exec scheduler python -m src.cli backfill_battery_trips
+#     docker update --memory 1024m --memory-swap 1024m scheduler
+#
+# Files are processed one at a time rather than through a single glob: the
+# whole archive is ~167M rows, and joining across all of it at once exhausts
+# any plausible limit.
+
+ARCHIVE_DUCKDB_MEMORY = "1GB"
+
+
+def _archive_keys(client, bucket: str) -> list[str]:
+    keys = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix="raw/"):
+        for obj in page.get("Contents", []):
+            if obj["Key"].endswith(".parquet"):
+                keys.append(obj["Key"])
+    return sorted(keys)
+
+
+def _pairs_from_archive_file(con, url: str) -> list[dict]:
+    """Same observation-gap model as _PAIRS_SQL, over one archive file.
+
+    Timestamps are returned as text: DuckDB needs pytz to hand a TIMESTAMPTZ
+    back to Python and the worker image does not ship it.
+    """
+    sql = f"""
+    WITH obs AS (
+        SELECT vehicle_identifier, vehicle_model_name, snapshot_time,
+               latitude, longitude, current_range_meters,
+               LEAD(snapshot_time)        OVER w AS t2,
+               LEAD(latitude)             OVER w AS lat2,
+               LEAD(longitude)            OVER w AS lon2,
+               LEAD(current_range_meters) OVER w AS range2
+        FROM read_parquet('{url}')
+        WHERE spatial_status = 'denver_core'
+        WINDOW w AS (PARTITION BY vehicle_identifier ORDER BY snapshot_time)
+    )
+    SELECT vehicle_identifier, vehicle_model_name,
+           snapshot_time::VARCHAR AS departed_at,
+           t2::VARCHAR            AS arrived_at,
+           date_diff('second', snapshot_time, t2) AS duration_seconds,
+           latitude, longitude, lat2, lon2,
+           current_range_meters AS range_start, range2 AS range_end
+    FROM obs
+    WHERE t2 IS NOT NULL AND range2 IS NOT NULL AND current_range_meters IS NOT NULL
+      AND date_diff('second', snapshot_time, t2) BETWEEN {MIN_DURATION_S} AND {MAX_DURATION_S}
+      AND sqrt(pow((lat2 - latitude) * 111320.0, 2) +
+               pow((lon2 - longitude) * 111320.0 * cos(radians(latitude)), 2))
+          > {MIN_STRAIGHT_LINE_METERS}
+    """
+    cur = con.execute(sql)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
+    """Seed battery_trip_observations from the R2 parquet archive.
+
+    See the memory note above — raise the container limit before running.
+    """
+    import duckdb
+
+    from .config import load, r2_credentials
+
+    creds = r2_credentials()
+    if creds is None:
+        return {"error": "R2 credentials absent"}
+
+    import boto3
+    from botocore.client import Config as BotoConfig
+
+    cfg = load().r2
+    endpoint = cfg.endpoint_url(creds["account_id"])
+    s3 = boto3.client("s3", endpoint_url=endpoint,
+                      aws_access_key_id=creds["access_key_id"],
+                      aws_secret_access_key=creds["secret_access_key"],
+                      config=BotoConfig(signature_version="s3v4"), region_name="auto")
+    keys = _archive_keys(s3, creds["bucket"])
+    if max_files:
+        keys = keys[-max_files:]
+    log.info("backfill: %d archive files to process", len(keys))
+
+    stats = {
+        "files": 0, "candidates": 0, "accepted": 0, "zero_delta": 0,
+        "rejected_soc": 0, "rejected_distance": 0, "rejected_speed": 0,
+        "rejected_swap": 0, "no_route": 0,
+    }
+
+    con = duckdb.connect(":memory:")
+    con.execute(f"SET memory_limit='{ARCHIVE_DUCKDB_MEMORY}';")
+    con.execute("SET threads=1; SET preserve_insertion_order=false;")
+    con.execute("SET temp_directory='/tmp/duck_backfill';")
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    for k, v in {
+        "s3_endpoint": endpoint.removeprefix("https://"),
+        "s3_access_key_id": creds["access_key_id"],
+        "s3_secret_access_key": creds["secret_access_key"],
+        "s3_region": "auto",
+        "s3_url_style": "path",
+    }.items():
+        con.execute(f"SET {k}='{v}';")
+
+    try:
+        with connection() as conn:
+            for key in keys:
+                url = f"s3://{creds['bucket']}/{key}"
+                log.info("backfill: %s", key)
+                candidates = _pairs_from_archive_file(con, url)
+                stats["files"] += 1
+                stats["candidates"] += len(candidates)
+
+                # Temperature for this file's span, once per file.
+                if candidates:
+                    days = sorted({c["departed_at"][:10] for c in candidates})
+                    weather.ensure_coverage(
+                        date.fromisoformat(days[0]), date.fromisoformat(days[-1]))
+
+                for cand in candidates:
+                    cand["departed_at"] = datetime.fromisoformat(cand["departed_at"])
+                    cand["arrived_at"] = datetime.fromisoformat(cand["arrived_at"])
+                    enriched = _accept_pair(cand, stats)
+                    if enriched is None:
+                        continue
+                    if _route_and_store(conn, enriched, stats):
+                        stats["accepted"] += 1
+                conn.commit()
+                log.info("backfill: %s done -> %r", key, stats)
+    finally:
+        con.close()
+
+    log.info("backfill complete: %r", stats)
     return stats
 
 

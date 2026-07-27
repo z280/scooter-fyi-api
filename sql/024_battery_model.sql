@@ -14,11 +14,17 @@
 --    raw metres are a nonlinear re-encoding of that percent, so regressing on
 --    them would fit the vendor's curve rather than physics.
 --
--- 2. Trips come from device_history, not trip_events. trip_events records
---    detected_at but no duration, so the 10-30 minute anchor filter cannot be
---    applied to it. device_history is already movement-segmented and carries
---    departed_at, giving a real dt: stop N's departed_at -> stop N+1's
---    snapshot_time.
+-- 2. A trip is an OBSERVATION GAP, not a row in a trip table. GBFS
+--    free_bike_status lists only available vehicles, so a rented scooter
+--    disappears for the length of the ride; two consecutive observations of one
+--    vehicle 10-30 minutes apart, with a position jump between them, bracket a
+--    trip and the gap IS the duration.
+--
+--    Neither trip table works. trip_events records detected_at but no duration
+--    at all. device_history looked right (it has departed_at) but measured over
+--    1.37M stops its departed_at equals the NEXT stop's snapshot_time at p50,
+--    p90 AND mean — it stores the cycle that detected the move, not the moment
+--    of departure — so zero stops fall in the 10-30 minute band.
 --
 -- 3. distance/elevation are Valhalla's routed values, not straight-line.
 --    trip_events.distance_meters is explicitly a flat-earth approximation and
