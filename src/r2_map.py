@@ -102,18 +102,44 @@ def sync_map_assets() -> dict:
 
     vcfg = load().valhalla
     dest_dir = Path(vcfg.custom_files_dir)
+    pbf_path = dest_dir / vcfg.map_object_key
     client = _client(creds)
 
-    pbf_changed = _download_if_changed(
-        client, creds["bucket"], vcfg.map_object_key, dest_dir / vcfg.map_object_key)
-    canopy_changed = _download_if_changed(
-        client, creds["bucket"], vcfg.canopy_object_key, dest_dir / vcfg.canopy_object_key)
+    # Failures are caught per object rather than propagated. This runs as a
+    # one-shot sidecar that `valhalla` gates on via
+    # service_completed_successfully, and the deploy script runs under `set -e`
+    # — so letting a transient R2 error escape here would fail `docker compose
+    # up -d` and abort the deploy of every unrelated change in the same push.
+    # Routing is optional; the audit API is not.
+    errors: list[str] = []
+
+    def _try(key: str, target: Path) -> bool:
+        try:
+            return _download_if_changed(client, creds["bucket"], key, target)
+        except Exception as exc:  # noqa: BLE001
+            log.error("map sync: failed to fetch %s: %s", key, exc)
+            errors.append(f"{key}: {exc}")
+            return False
+
+    pbf_changed = _try(vcfg.map_object_key, pbf_path)
+    canopy_changed = _try(vcfg.canopy_object_key, dest_dir / vcfg.canopy_object_key)
 
     result = {
         "pbf_changed": pbf_changed,
         "canopy_changed": canopy_changed,
         "dir": str(dest_dir),
+        "errors": errors,
+        # Whether Valhalla has anything to build from, which is what actually
+        # matters downstream — a failed refresh with a previously-downloaded
+        # .pbf still present is fine.
+        "pbf_present": pbf_path.exists(),
     }
+    if errors and not result["pbf_present"]:
+        log.error("map sync: NO routing graph present and the fetch failed — "
+                  "valhalla will have nothing to build; /api/v1/route will 503")
+    elif errors:
+        log.warning("map sync: fetch failed but an existing .pbf is present; "
+                    "valhalla will serve the previous graph")
     log.info("map sync: %r", result)
     return result
 

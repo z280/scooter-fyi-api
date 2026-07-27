@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS battery_model_coefficients (
     -- Mean training temperature, used as the fallback when the live
     -- temperature lookup fails at request time.
     mean_temperature_c  DOUBLE PRECISION,
+    -- Per-vehicle-model intercept offsets in percentage points, e.g.
+    -- {"_default": 0.4, "Cosmo": 0.0, "Astro": 1.1, "Apollo": 0.3}. A standing
+    -- Astro and a seated Cosmo do not consume alike, and the fleet mixes them,
+    -- so a single intercept averages over a real difference. "_default" is the
+    -- observation-weighted mean, used when the caller doesn't name a model
+    -- (the route endpoint usually can't).
+    model_offsets       JSONB,
     -- Share of candidate trips whose SoC delta was exactly zero. The SoC grid
     -- is ~1 percentage point, so short trips can burn less than one step; a
     -- high value here means the fit is mostly quantization noise.

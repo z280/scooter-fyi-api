@@ -15,6 +15,7 @@ alongside the routing graph.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -27,16 +28,28 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# way_id -> canopy coverage fraction. Loaded lazily on first use and cached for
-# the process lifetime; the sidecar only changes when the graph is rebuilt, at
-# which point the container is recreated anyway.
+# way_id -> canopy coverage fraction, loaded lazily from the shared volume.
 _CANOPY: dict[int, float] | None = None
+_CANOPY_LOADED_AT: float = 0.0
+# Only a SUCCESSFUL load is cached indefinitely; a miss is retried on this
+# interval. pipeline_worker deliberately does not depend on valhalla_map_fetch —
+# the audit API must boot whether or not the routing assets exist — so on a cold
+# `docker compose up` the worker can reach /api/v1/route before the sidecar has
+# finished downloading. Caching that empty result forever would disable shade
+# re-ranking for the life of the process, silently, with routes still 200-ing.
+_CANOPY_RETRY_SECONDS = 60.0
 
 
 def _canopy() -> dict[int, float]:
-    global _CANOPY
-    if _CANOPY is None:
-        _CANOPY = load_canopy_coverage()
+    global _CANOPY, _CANOPY_LOADED_AT
+    import time
+
+    if _CANOPY:
+        return _CANOPY
+    if _CANOPY is not None and (time.monotonic() - _CANOPY_LOADED_AT) < _CANOPY_RETRY_SECONDS:
+        return _CANOPY
+    _CANOPY = load_canopy_coverage()
+    _CANOPY_LOADED_AT = time.monotonic()
     return _CANOPY
 
 
@@ -56,8 +69,12 @@ def _parse_point(raw: str, field: str) -> tuple[float, float]:
     return lat, lon
 
 
-def shade_score(trip: dict[str, Any], costing_options: dict[str, Any]) -> float | None:
+def shade_score(trip: dict[str, Any], costing_options: dict[str, Any],
+                shape: list[tuple[float, float]] | None = None) -> float | None:
     """Length-weighted mean canopy coverage over the edges a trip traverses.
+
+    ``shape`` may be passed in by a caller that has already decoded it, to avoid
+    decoding the same polyline twice.
 
     Returns None when the coverage table is unavailable or the trip's shape
     can't be snapped back onto the graph — callers treat that as "unknown"
@@ -66,7 +83,8 @@ def shade_score(trip: dict[str, Any], costing_options: dict[str, Any]) -> float 
     coverage = _canopy()
     if not coverage:
         return None
-    shape = valhalla.trip_shape(trip)
+    if shape is None:
+        shape = valhalla.trip_shape(trip)
     if len(shape) < 2:
         return None
     try:
@@ -77,17 +95,54 @@ def shade_score(trip: dict[str, Any], costing_options: dict[str, Any]) -> float 
 
     total_len = 0.0
     weighted = 0.0
+    unmeasured_len = 0.0
     for edge in edges:
         length = edge.get("length") or 0.0
         if length <= 0:
             continue
         total_len += length
-        # Ways absent from the table are non-residential (arterials, cycleways,
-        # service roads) and were never measured; score them as unshaded.
-        weighted += length * coverage.get(edge.get("way_id"), 0.0)
-    if total_len <= 0:
+        way_id = edge.get("way_id")
+        if way_id in coverage:
+            weighted += length * coverage[way_id]
+        else:
+            # Not measured by denver-map-prep (motorways, service roads, steps).
+            # Excluded from BOTH sides of the ratio rather than scored 0: an
+            # unmeasured way is unknown, not treeless, and scoring it 0 would
+            # penalise whole route classes for a gap in the input data.
+            unmeasured_len += length
+    measured_len = total_len - unmeasured_len
+    if measured_len <= 0:
         return None
-    return round(weighted / total_len, 4)
+    return round(weighted / measured_len, 4)
+
+
+def _score_alternates(trips: list[dict[str, Any]],
+                      costing_options: dict[str, Any]) -> list[tuple[float | None, dict]]:
+    """Score every alternate concurrently.
+
+    Serially this was one /route plus N /trace_attributes calls, each with its
+    own timeout — a worst case of (N+1) x timeout before the client saw
+    anything. httpx is synchronous here, so a small thread pool is the cheapest
+    way to overlap them; N is 3.
+    """
+    shapes = [valhalla.trip_shape(t) for t in trips]
+    if len(trips) == 1:
+        return [(shade_score(trips[0], costing_options, shapes[0]), trips[0])]
+
+    with ThreadPoolExecutor(max_workers=min(len(trips), 4)) as pool:
+        futures = {
+            pool.submit(shade_score, trip, costing_options, shape): (trip, shape)
+            for trip, shape in zip(trips, shapes)
+        }
+        scored: list[tuple[float | None, dict]] = []
+        for fut in as_completed(futures):
+            trip, _ = futures[fut]
+            try:
+                scored.append((fut.result(), trip))
+            except Exception as exc:  # noqa: BLE001 — one bad alternate must not fail the request
+                log.warning("shade scoring raised for an alternate: %s", exc)
+                scored.append((None, trip))
+    return scored
 
 
 def _route_with_retry(points, profile: RouteProfile) -> dict[str, Any]:
@@ -116,6 +171,9 @@ def route(
     from_: str = Query(..., alias="from", description="Origin as 'lat,lon'"),
     to: str = Query(..., description="Destination as 'lat,lon'"),
     profile: str | None = Query(None, description="safe | range | shade | express"),
+    vehicle_model: str | None = Query(
+        None, description="Optional vehicle model (Astro/Cosmo/Apollo) for a "
+                          "model-specific battery estimate"),
     explain: bool = Query(False, description="Include diagnostics (shade score on every profile)"),
 ) -> dict[str, Any]:
     cfg = load().valhalla
@@ -169,24 +227,41 @@ def route(
     score = None
     considered = len(trips)
 
+    chosen_shape = None
     if prof.rerank_by_shade:
-        scored = [(shade_score(t, prof.costing_options), t) for t in trips]
-        # Trips whose score is unknown keep Valhalla's own ranking by sorting
-        # last; a None must never beat a real measurement.
-        rated = [(s, t) for s, t in scored if s is not None]
+        # Include the DEFAULT profile's route as a candidate. Shade's own
+        # costing (use_roads 0.2) generates a different route family from the
+        # default (0.1), so re-ranking only within it can return LESS canopy
+        # than the rider would have got without asking for shade at all —
+        # measured at -0.0026 on a Platte-corridor pair. A rider who selects
+        # "Shaded Canopy" must never do worse than the default on shade.
+        baseline = cfg.profile(cfg.default_profile)
+        if baseline is not None and baseline.key != prof.key:
+            try:
+                trips += valhalla.all_trips(
+                    _route_with_retry([origin, dest], baseline))
+            except valhalla.ValhallaError as exc:
+                log.warning("shade baseline route failed, scoring alternates only: %s", exc)
+        considered = len(trips)
+        scored = _score_alternates(trips, prof.costing_options)
+        # Trips whose score is unknown keep Valhalla's own ranking; a None must
+        # never beat a real measurement.
+        rated = [(sc, t) for sc, t in scored if sc is not None]
         if rated:
             score, chosen = max(rated, key=lambda pair: pair[0])
         else:
             score = None
     elif explain:
         # Neutrality diagnostic: score the non-shade profiles too, so the shade
-        # bias of the graph itself can be measured (see plan verification §5).
-        score = shade_score(chosen, prof.costing_options)
+        # bias of the graph itself can be measured.
+        chosen_shape = valhalla.trip_shape(chosen)
+        score = shade_score(chosen, prof.costing_options, chosen_shape)
 
     summary = valhalla.trip_summary(chosen)
     battery = battery_model.estimate_burn_percent(
         distance_meters=summary["distance_meters"],
         elevation_gain_meters=summary["elevation_gain_meters"],
+        vehicle_model=vehicle_model,
     )
 
     properties: dict[str, Any] = {
@@ -206,9 +281,11 @@ def route(
             "battery_detail": battery,
         }
 
+    if chosen_shape is None:
+        chosen_shape = valhalla.trip_shape(chosen)
     return {
         "type": "Feature",
-        "geometry": valhalla.to_geojson(valhalla.trip_shape(chosen)),
+        "geometry": valhalla.to_geojson(chosen_shape),
         "properties": properties,
     }
 

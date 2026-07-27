@@ -174,20 +174,24 @@ def elevation_gain_meters(trip: dict[str, Any]) -> float | None:
     summary, so the ascent is integrated here. Returns None when the graph was
     built without elevation data.
     """
+    legs = trip.get("legs", []) or []
+    if not legs:
+        return None
     total = 0.0
-    saw_any = False
-    for leg in trip.get("legs", []):
+    for leg in legs:
         samples = leg.get("elevation")
         if not samples:
-            continue
-        saw_any = True
+            # A partially-elevated response would silently UNDERCOUNT the climb,
+            # which the battery model would read as a flat route. Unknown is the
+            # honest answer; the caller treats None and 0.0 very differently.
+            return None
         for prev, cur in zip(samples, samples[1:]):
             if prev is None or cur is None:
                 continue
             delta = cur - prev
             if delta > 0:
                 total += delta
-    return round(total, 1) if saw_any else None
+    return round(total, 1)
 
 
 def trip_summary(trip: dict[str, Any]) -> dict[str, Any]:

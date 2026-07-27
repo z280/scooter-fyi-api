@@ -257,3 +257,96 @@ def test_failed_map_match_is_unknown_not_false(monkeypatch):
 
 def test_adherence_threshold_is_85_percent():
     assert battery_model.ADHERENCE_THRESHOLD == 0.85
+
+
+# --- operator rebalancing ----------------------------------------------------
+
+def _cand(vid, lat, lon, lat2, lon2, ts):
+    from datetime import datetime, timezone
+    return {"vehicle_identifier": vid, "latitude": lat, "longitude": lon,
+            "lat2": lat2, "lon2": lon2,
+            "departed_at": datetime.fromtimestamp(ts, tz=timezone.utc)}
+
+
+def test_van_rebalancing_is_detected():
+    """A van moves several scooters between the same two places at once; the
+    8 mph floor does not exclude it, so it would train the model on drain that
+    has nothing to do with riding."""
+    batch = [_cand(f"v{i}", 39.75, -104.99, 39.70, -104.95, 1_000_000)
+             for i in range(battery_model.REBALANCE_MIN_GROUP)]
+    flagged = battery_model._rebalance_keys(batch)
+    assert all(battery_model._rebalance_key(c) in flagged for c in batch)
+
+
+def test_a_lone_rider_on_the_same_route_is_not_flagged():
+    solo = [_cand("v1", 39.75, -104.99, 39.70, -104.95, 1_000_000)]
+    assert battery_model._rebalance_keys(solo) == set()
+
+
+def test_same_vehicle_repeated_is_not_a_batch():
+    """Grouping counts DISTINCT vehicles — one scooter doing the same trip
+    repeatedly is a popular route, not a van."""
+    repeats = [_cand("v1", 39.75, -104.99, 39.70, -104.95, 1_000_000) for _ in range(5)]
+    assert battery_model._rebalance_keys(repeats) == set()
+
+
+def test_disabled_vehicles_are_excluded_in_sql():
+    assert "NOT is_disabled" in battery_model._PAIRS_SQL
+
+
+# --- temperature bounding ----------------------------------------------------
+
+def test_temperature_lookup_is_bounded():
+    """Unbounded, a hole in the cache hands a trip a reading from days away and
+    beta_3 absorbs the error as if it were signal."""
+    assert battery_model.MAX_TEMPERATURE_GAP_SECONDS == 2 * 3600
+    src = __import__("inspect").getsource(battery_model._temperature_at)
+    assert "BETWEEN" in src
+
+
+# --- per-model offsets -------------------------------------------------------
+
+def _model_with_offsets(offsets):
+    return {
+        "intercept": 1.0, "beta_distance": 0.0, "beta_elevation": 0.0,
+        "beta_temperature": 0.0, "mean_temperature_c": 20.0,
+        "r_squared": None, "n_observations": 100, "fitted_at": None,
+        "model_offsets": offsets,
+    }
+
+
+def test_named_vehicle_model_uses_its_own_offset(monkeypatch):
+    monkeypatch.setattr(battery_model, "latest_model", lambda refresh=False:
+                        _model_with_offsets({"Cosmo": 0.0, "Astro": 2.0, "_default": 0.5}))
+    monkeypatch.setattr(battery_model.weather, "current_temperature_c", lambda: 20.0)
+    out = battery_model.estimate_burn_percent(1000.0, 0.0, vehicle_model="Astro")
+    assert out["percent"] == pytest.approx(3.0)
+    assert out["model_offset"] == pytest.approx(2.0)
+
+
+def test_unnamed_model_uses_the_fleet_weighted_default(monkeypatch):
+    """The route endpoint prices a route, not a vehicle, so it usually cannot
+    name a model."""
+    monkeypatch.setattr(battery_model, "latest_model", lambda refresh=False:
+                        _model_with_offsets({"Cosmo": 0.0, "Astro": 2.0, "_default": 0.5}))
+    monkeypatch.setattr(battery_model.weather, "current_temperature_c", lambda: 20.0)
+    out = battery_model.estimate_burn_percent(1000.0, 0.0)
+    assert out["percent"] == pytest.approx(1.5)
+
+
+def test_unknown_model_name_falls_back_to_default(monkeypatch):
+    monkeypatch.setattr(battery_model, "latest_model", lambda refresh=False:
+                        _model_with_offsets({"Cosmo": 0.0, "_default": 0.5}))
+    monkeypatch.setattr(battery_model.weather, "current_temperature_c", lambda: 20.0)
+    out = battery_model.estimate_burn_percent(1000.0, 0.0, vehicle_model="Nonesuch")
+    assert out["percent"] == pytest.approx(1.5)
+
+
+# --- elevation ---------------------------------------------------------------
+
+def test_partial_elevation_is_unknown_not_undercounted():
+    """A leg without samples must not silently reduce the reported climb — the
+    battery model would read that as a flat route."""
+    trip = {"legs": [{"shape": "a", "elevation": [1600.0, 1620.0]}, {"shape": "b"}],
+            "summary": {"length": 1.0, "time": 60.0}}
+    assert valhalla.elevation_gain_meters(trip) is None

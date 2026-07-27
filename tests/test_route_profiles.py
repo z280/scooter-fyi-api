@@ -185,9 +185,13 @@ def test_missing_canopy_sidecar_leaves_valhalla_ranking_intact(monkeypatch):
     assert out["properties"]["distance_meters"] == pytest.approx(2000.0)
 
 
-def test_unmeasured_ways_score_as_unshaded(monkeypatch):
-    """Arterials and cycleways are absent from the table (only residentials are
-    measured) and must count as 0, not be skipped from the denominator."""
+def test_unmeasured_ways_are_excluded_from_both_sides(monkeypatch):
+    """An unmeasured way is unknown, not treeless.
+
+    Scoring it 0 penalised whole route classes for a gap in the input data —
+    with only residential ways measured, that made the shade profile avoid
+    tree-lined cycleways, which are Denver's shadiest routes.
+    """
     monkeypatch.setattr(
         api_route.valhalla, "trip_shape", lambda trip: [(1.0, 1.0), (2.0, 2.0)])
     monkeypatch.setattr(
@@ -195,8 +199,67 @@ def test_unmeasured_ways_score_as_unshaded(monkeypatch):
         lambda *a, **kw: [{"way_id": 1, "length": 1.0}, {"way_id": 99, "length": 3.0}])
     api_route._CANOPY = {1: 1.0}
 
-    score = api_route.shade_score(_trip(), {})
-    assert score == pytest.approx(0.25)
+    # way 99 is unmeasured: dropped from numerator AND denominator, so the score
+    # is the mean over what was actually measured, not 1/(1+3).
+    assert api_route.shade_score(_trip(), {}) == pytest.approx(1.0)
+
+
+def test_score_is_none_when_nothing_on_the_route_was_measured(monkeypatch):
+    monkeypatch.setattr(
+        api_route.valhalla, "trip_shape", lambda trip: [(1.0, 1.0), (2.0, 2.0)])
+    monkeypatch.setattr(
+        api_route.valhalla, "trace_attributes",
+        lambda *a, **kw: [{"way_id": 99, "length": 3.0}])
+    api_route._CANOPY = {1: 1.0}
+    assert api_route.shade_score(_trip(), {}) is None
+
+
+def test_empty_canopy_load_is_retried_not_cached_forever(monkeypatch):
+    """pipeline_worker does not depend on valhalla_map_fetch, so on a cold start
+    the sidecar may not have landed yet. Caching that miss for the process
+    lifetime would disable shade re-ranking silently."""
+    calls = []
+
+    def loader():
+        calls.append(1)
+        return {} if len(calls) == 1 else {7: 0.5}
+
+    monkeypatch.setattr(api_route, "load_canopy_coverage", loader)
+    api_route._CANOPY = None
+    api_route._CANOPY_LOADED_AT = 0.0
+
+    assert api_route._canopy() == {}          # miss
+    api_route._CANOPY_LOADED_AT = 0.0          # simulate the retry interval elapsing
+    assert api_route._canopy() == {7: 0.5}     # retried and succeeded
+    assert api_route._canopy() == {7: 0.5}     # success is cached
+    assert len(calls) == 2
+
+
+def test_shade_includes_the_default_profile_route_as_a_candidate(monkeypatch):
+    """Shade's costing generates a different route family from the default, so
+    re-ranking only within it can return LESS canopy than not asking for shade.
+    Measured at -0.0026 on a real Denver pair before this was added."""
+    seen_costings = []
+
+    def fake_route(points, costing_options, alternates=0, radius=None, **kw):
+        seen_costings.append(costing_options)
+        return {"trip": _trip(shape=str(costing_options))}
+
+    monkeypatch.setattr(api_route.valhalla, "route", fake_route)
+    monkeypatch.setattr(api_route.valhalla, "trip_shape", lambda t: [(1.0, 1.0), (2.0, 2.0)])
+    monkeypatch.setattr(api_route.valhalla, "trace_attributes",
+                        lambda *a, **kw: [{"way_id": 1, "length": 1.0}])
+    monkeypatch.setattr(api_route.valhalla, "to_geojson",
+                        lambda pts: {"type": "LineString", "coordinates": []})
+    api_route._CANOPY = {1: 0.5}
+
+    out = api_route.route(from_="39.74,-104.99", to="39.70,-104.95",
+                          profile="shade", explain=True)
+    # Two route calls: the shade costing and the default profile's.
+    assert len(seen_costings) == 2
+    default_opts = load().valhalla.profile(load().valhalla.default_profile).costing_options
+    assert default_opts in seen_costings
+    assert out["properties"]["diagnostics"]["alternates_considered"] >= 2
 
 
 # --- elevation ---------------------------------------------------------------

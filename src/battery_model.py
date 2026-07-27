@@ -28,6 +28,7 @@ terms does not justify a scikit-learn dependency, in the spirit of
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -115,6 +116,10 @@ WITH obs AS (
         LEAD(current_range_meters) OVER w AS range2
     FROM raw_telemetry_points
     WHERE spatial_status = 'denver_core'
+      -- A disabled vehicle that vanishes and reappears elsewhere was moved by
+      -- an operator van, not ridden. Its battery drain is real but has a
+      -- different cause, so it must not train a rider-facing model.
+      AND NOT is_disabled
       AND snapshot_time >= %(window_start)s
       AND snapshot_time <  %(window_end)s
     WINDOW w AS (PARTITION BY vehicle_identifier ORDER BY snapshot_time)
@@ -145,18 +150,66 @@ LIMIT %(limit)s
 """
 
 
+# How far from a trip a cached hourly reading may be and still be used. Without
+# a bound, a hole in the cache silently hands a trip a temperature from days
+# away and beta_3 absorbs the error as if it were signal.
+MAX_TEMPERATURE_GAP_SECONDS = 2 * 3600
+
+
 def _temperature_at(conn, when: datetime) -> float | None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT temperature_c FROM hourly_temperature
-            ORDER BY ABS(EXTRACT(EPOCH FROM (observed_hour - %s)))
+            SELECT temperature_c
+            FROM hourly_temperature
+            WHERE observed_hour BETWEEN %(when)s - %(gap)s * INTERVAL '1 second'
+                                    AND %(when)s + %(gap)s * INTERVAL '1 second'
+            ORDER BY ABS(EXTRACT(EPOCH FROM (observed_hour - %(when)s)))
             LIMIT 1
             """,
-            (when,),
+            {"when": when, "gap": MAX_TEMPERATURE_GAP_SECONDS},
         )
         row = cur.fetchone()
     return float(row[0]) if row else None
+
+
+# A van rebalancing a batch moves several scooters between the same two places
+# at the same time; a rider moves one. Any group of this many candidates sharing
+# an origin cell, a destination cell and an overlapping time window is treated
+# as a rebalance and dropped. The 8 mph floor does not catch these — a van
+# easily clears it.
+REBALANCE_MIN_GROUP = 3
+# ~250 m of latitude. Coarse enough that a van's drop-offs land in one cell,
+# fine enough that unrelated riders rarely collide.
+REBALANCE_CELL_DEGREES = 0.0025
+REBALANCE_WINDOW_SECONDS = 20 * 60
+
+
+def _rebalance_keys(candidates: list[dict]) -> set:
+    """Group keys that look like operator rebalancing rather than rides."""
+    from collections import defaultdict
+
+    groups: dict[tuple, set] = defaultdict(set)
+    for c in candidates:
+        key = (
+            round(float(c["latitude"]) / REBALANCE_CELL_DEGREES),
+            round(float(c["longitude"]) / REBALANCE_CELL_DEGREES),
+            round(float(c["lat2"]) / REBALANCE_CELL_DEGREES),
+            round(float(c["lon2"]) / REBALANCE_CELL_DEGREES),
+            int(c["departed_at"].timestamp() // REBALANCE_WINDOW_SECONDS),
+        )
+        groups[key].add(c["vehicle_identifier"])
+    return {k for k, vehicles in groups.items() if len(vehicles) >= REBALANCE_MIN_GROUP}
+
+
+def _rebalance_key(candidate: dict) -> tuple:
+    return (
+        round(float(candidate["latitude"]) / REBALANCE_CELL_DEGREES),
+        round(float(candidate["longitude"]) / REBALANCE_CELL_DEGREES),
+        round(float(candidate["lat2"]) / REBALANCE_CELL_DEGREES),
+        round(float(candidate["lon2"]) / REBALANCE_CELL_DEGREES),
+        int(candidate["departed_at"].timestamp() // REBALANCE_WINDOW_SECONDS),
+    )
 
 
 def _accept_pair(candidate: dict, stats: dict) -> dict | None:
@@ -262,7 +315,7 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
     stats = {
         "candidates": 0, "accepted": 0, "zero_delta": 0,
         "rejected_soc": 0, "rejected_distance": 0, "rejected_speed": 0,
-        "rejected_swap": 0, "no_route": 0,
+        "rejected_swap": 0, "rejected_rebalance": 0, "no_route": 0,
     }
 
     with connection() as conn:
@@ -279,10 +332,14 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
             candidates = [dict(zip(cols, row)) for row in cur.fetchall()]
 
         stats["candidates"] = len(candidates)
-        log.info("battery extraction: %d candidate pairs in the last %dh",
-                 len(candidates), hours)
+        rebalanced = _rebalance_keys(candidates)
+        log.info("battery extraction: %d candidate pairs in the last %dh "
+                 "(%d rebalance groups excluded)", len(candidates), hours, len(rebalanced))
 
         for cand in candidates:
+            if _rebalance_key(cand) in rebalanced:
+                stats["rejected_rebalance"] += 1
+                continue
             enriched = _accept_pair(cand, stats)
             if enriched is None:
                 continue
@@ -358,7 +415,7 @@ def _pairs_from_archive_file(con, url: str) -> list[dict]:
                LEAD(longitude)            OVER w AS lon2,
                LEAD(current_range_meters) OVER w AS range2
         FROM read_parquet('{url}')
-        WHERE spatial_status = 'denver_core'
+        WHERE spatial_status = 'denver_core' AND NOT is_disabled
         WINDOW w AS (PARTITION BY vehicle_identifier ORDER BY snapshot_time)
     )
     SELECT vehicle_identifier, vehicle_model_name,
@@ -409,7 +466,7 @@ def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
     stats = {
         "files": 0, "candidates": 0, "accepted": 0, "zero_delta": 0,
         "rejected_soc": 0, "rejected_distance": 0, "rejected_speed": 0,
-        "rejected_swap": 0, "no_route": 0,
+        "rejected_swap": 0, "rejected_rebalance": 0, "no_route": 0,
     }
 
     con = duckdb.connect(":memory:")
@@ -444,6 +501,11 @@ def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
                 for cand in candidates:
                     cand["departed_at"] = datetime.fromisoformat(cand["departed_at"])
                     cand["arrived_at"] = datetime.fromisoformat(cand["arrived_at"])
+                rebalanced = _rebalance_keys(candidates)
+                for cand in candidates:
+                    if _rebalance_key(cand) in rebalanced:
+                        stats["rejected_rebalance"] += 1
+                        continue
                     enriched = _accept_pair(cand, stats)
                     if enriched is None:
                         continue
@@ -473,7 +535,8 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
             cur.execute(
                 """
                 SELECT route_distance_meters, elevation_gain_meters,
-                       temperature_c, burn_percent, departed_at
+                       temperature_c, burn_percent, departed_at,
+                       vehicle_model_name
                 FROM battery_trip_observations
                 WHERE departed_at >= %s
                   AND elevation_gain_meters IS NOT NULL
@@ -494,8 +557,22 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
     if len(train_rows) < 100:
         train_rows, test_rows = rows, []
 
+    # Per-model intercept offsets. A standing Astro and a seated Cosmo do not
+    # consume alike, and the fleet mixes all three, so one intercept averages
+    # over a real difference. Dummy-coded against the most common model as
+    # reference, which keeps `intercept` interpretable on its own.
+    counts: dict[str, int] = {}
+    for r in train_rows:
+        counts[r[5] or "unknown"] = counts.get(r[5] or "unknown", 0) + 1
+    reference = max(counts, key=counts.get) if counts else "unknown"
+    dummies = [m for m in sorted(counts) if m != reference]
+
     def design(subset):
-        X = np.array([[1.0, float(r[0]), float(r[1]), float(r[2])] for r in subset])
+        X = np.array([
+            [1.0, float(r[0]), float(r[1]), float(r[2])]
+            + [1.0 if (r[5] or "unknown") == m else 0.0 for m in dummies]
+            for r in subset
+        ])
         y = np.array([float(r[3]) for r in subset])
         return X, y
 
@@ -513,6 +590,16 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
     if test_rows:
         Xt, yt = design(test_rows)
         holdout_mae = float(np.mean(np.abs(yt - Xt @ beta)))
+
+    # Reference model is 0 by construction; "_default" is the
+    # observation-weighted mean, used when the caller can't name a model — which
+    # the route endpoint usually can't, since it prices a route, not a vehicle.
+    model_offsets = {reference: 0.0}
+    for i, m in enumerate(dummies):
+        model_offsets[m] = float(beta[4 + i])
+    total_n = sum(counts.values()) or 1
+    model_offsets["_default"] = round(
+        sum(model_offsets[m] * counts[m] for m in counts) / total_n, 6)
 
     # Zero-delta share is a property of extraction, not of the stored rows
     # (zeros are never stored), so read back what the last extraction recorded.
@@ -542,12 +629,13 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
                     window_start, window_end, n_observations,
                     intercept, beta_distance, beta_elevation, beta_temperature,
                     r_squared, residual_std, mean_temperature_c,
-                    zero_delta_fraction, notes
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    zero_delta_fraction, model_offsets, notes
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (window_start, now, len(train_rows),
                  float(beta[0]), float(beta[1]), float(beta[2]), float(beta[3]),
-                 r2, residual_std, mean_temp, zero_delta_fraction, notes),
+                 r2, residual_std, mean_temp, zero_delta_fraction,
+                 json.dumps(model_offsets), notes),
             )
         conn.commit()
 
@@ -562,6 +650,7 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
         "residual_std": residual_std,
         "mean_temperature_c": mean_temp,
         "holdout_mae_percentage_points": holdout_mae,
+        "model_offsets": model_offsets,
     }
     log.info("battery train: %r", result)
     if beta[1] <= 0 or beta[2] <= 0:
@@ -600,7 +689,7 @@ def latest_model(refresh: bool = False) -> dict[str, Any] | None:
                     """
                     SELECT intercept, beta_distance, beta_elevation,
                            beta_temperature, mean_temperature_c, r_squared,
-                           n_observations, fitted_at
+                           n_observations, fitted_at, model_offsets
                     FROM battery_model_coefficients
                     ORDER BY fitted_at DESC LIMIT 1
                     """
@@ -622,13 +711,19 @@ def latest_model(refresh: bool = False) -> dict[str, Any] | None:
         "r_squared": float(row[5]) if row[5] is not None else None,
         "n_observations": int(row[6]),
         "fitted_at": row[7].isoformat() if row[7] else None,
+        "model_offsets": row[8] or {},
     }
     return _MODEL_CACHE
 
 
 def estimate_burn_percent(distance_meters: float | None,
-                          elevation_gain_meters: float | None) -> dict[str, Any]:
+                          elevation_gain_meters: float | None,
+                          vehicle_model: str | None = None) -> dict[str, Any]:
     """Predicted battery burn for a route, as a percentage of full charge.
+
+    ``vehicle_model`` selects the per-model intercept offset; without it the
+    observation-weighted fleet mean is used, which is the right default for the
+    route endpoint (it prices a route, not a particular scooter).
 
     Returns ``{"percent": float|None, "source": str}``. ``source`` is
     ``"regression"`` once a model exists and ``"unavailable"`` before then —
@@ -648,7 +743,12 @@ def estimate_burn_percent(distance_meters: float | None,
         temp = model["mean_temperature_c"]
 
     climb = elevation_gain_meters if elevation_gain_meters is not None else 0.0
-    percent = (model["intercept"]
+    offsets = model.get("model_offsets") or {}
+    if vehicle_model and vehicle_model in offsets:
+        offset = float(offsets[vehicle_model])
+    else:
+        offset = float(offsets.get("_default", 0.0))
+    percent = (model["intercept"] + offset
                + model["beta_distance"] * distance_meters
                + model["beta_elevation"] * climb
                + model["beta_temperature"] * temp)
@@ -661,6 +761,8 @@ def estimate_burn_percent(distance_meters: float | None,
         "temperature_c": round(temp, 1) if temp is not None else None,
         "temperature_fallback": used_fallback,
         "elevation_gain_meters": climb,
+        "vehicle_model": vehicle_model,
+        "model_offset": round(offset, 4),
         "model_fitted_at": model["fitted_at"],
         "model_r_squared": model["r_squared"],
         "model_n": model["n_observations"],

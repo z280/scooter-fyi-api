@@ -218,9 +218,12 @@ def cleanup_receipts() -> dict:
 def _cli_fetch_map_pbf() -> dict:
     """One-shot sidecar: pull the routing assets into the Valhalla volume.
 
-    Deliberately exits 0 even when R2 credentials are absent — compose gates the
-    valhalla service on this completing, and a missing credential should not
-    wedge the whole stack. sync_map_assets logs loudly in that case.
+    Always exits 0. `valhalla` gates on this via
+    service_completed_successfully, and the deploy script runs under `set -e`,
+    so a non-zero exit here fails `docker compose up -d` and aborts the deploy
+    of everything else in the push. A missing credential or an R2 outage must
+    degrade routing, not block a deploy. sync_map_assets logs loudly and
+    reports `pbf_present` so the failure is visible.
     """
     return sync_map_assets()
 
