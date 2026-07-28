@@ -82,3 +82,71 @@ def search_adjectives(
             )
             rows = cur.fetchall()
     return {"adjectives": [word for (word,) in rows]}
+
+
+@router.get("/api/v1/royalty-titles")
+def list_royalty_titles(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
+    """The curated titles that can prefix a public username (sql/044).
+
+    Ordered by the list's own sort_order, not alphabetically: the seed
+    groups related titles together (the gendered pairs and their neutral
+    form adjacent), which is the order a picker wants to render.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT title FROM royalty_titles ORDER BY sort_order, title")
+            rows = cur.fetchall()
+    return {"royalty_titles": [title for (title,) in rows]}
+
+
+@router.get("/api/v1/royalty-titles/search")
+def search_royalty_titles(
+    user: SessionUser = Depends(require_session),
+    q: str = Query(..., min_length=1, max_length=64, description="Partial match, e.g. 'high'"),
+) -> dict[str, Any]:
+    """Case-insensitive substring match on the title."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT title FROM royalty_titles WHERE title ILIKE %s "
+                "ORDER BY sort_order, title",
+                (f"%{q}%",),
+            )
+            rows = cur.fetchall()
+    return {"royalty_titles": [title for (title,) in rows]}
+
+
+@router.get("/api/v1/ruling-colors")
+def list_ruling_colors(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
+    """The curated leaderboard-map palette, plus the pairs already claimed.
+
+    `taken_pairs` exists so a picker can grey out unavailable combinations
+    instead of discovering them by 409 on save. It is bounded by the number
+    of accounts that have chosen colours — NOT by the 16 256 possible
+    pairs — so it stays small no matter how large the palette gets.
+
+    Which accounts hold which pair is deliberately NOT exposed: the
+    frontend needs to know a combination is gone, not who has it. That
+    would be a cross-account identity read this endpoint has no reason to
+    offer, and it would leak past show_public_username.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT hex, name, hue_family FROM ruling_colors ORDER BY sort_order"
+            )
+            colors = cur.fetchall()
+            cur.execute(
+                "SELECT ruling_color, ruling_border_color FROM accounts "
+                "WHERE ruling_color IS NOT NULL AND ruling_border_color IS NOT NULL"
+            )
+            taken = cur.fetchall()
+    return {
+        "ruling_colors": [
+            {"hex": hex_value, "name": name, "hue_family": family}
+            for hex_value, name, family in colors
+        ],
+        "taken_pairs": [
+            {"fill": fill, "border": border} for fill, border in taken
+        ],
+    }

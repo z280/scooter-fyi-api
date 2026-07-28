@@ -26,6 +26,7 @@ from .api_legal import router as legal_router
 from .api_lexicon import router as lexicon_router
 from .api_meta import router as meta_router
 from .api_points import router as points_router
+from .api_preferences import router as preferences_router
 from .api_qr import router as qr_router
 from .api_rides import router as rides_router
 from .api_ride_screenshots import router as ride_screenshots_router
@@ -102,6 +103,7 @@ app.include_router(private_router)
 app.include_router(reports_router)
 app.include_router(auth_router)
 app.include_router(profile_router)
+app.include_router(preferences_router)
 app.include_router(frontend_reports_router)
 app.include_router(rides_router)
 app.include_router(tracked_rides_router)
@@ -138,10 +140,16 @@ def root():
             "/api/v1/auth/{google,magic-link,redeem,code,code/verify,refresh,session,signout}",
             "/api/v1/profile",
             "/api/v1/profile/username/regenerate",
+            "/api/v1/profile/map-settings",
+            "/api/v1/profile/map-settings/{name}",
+            "/api/v1/profile/find-ride-pref",
             "/api/v1/emoji-nouns",
             "/api/v1/emoji-nouns/search?q=…",
             "/api/v1/adjectives",
             "/api/v1/adjectives/search?q=…",
+            "/api/v1/royalty-titles",
+            "/api/v1/royalty-titles/search?q=…",
+            "/api/v1/ruling-colors",
             "/api/v1/reports/{device,discount,summary,export/monthly.csv}",
             "/api/v1/rides",
             "/api/v1/rides/start",

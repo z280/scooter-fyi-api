@@ -59,6 +59,12 @@ router = APIRouter()
 _RATE_PLANS = ("resident", "visitor", "equity")
 _MAX_FAVORITES = 100
 _MAX_THEME_LEN = 64
+_MAX_TITLE_LEN = 64
+# Mirrors accounts_ruling_alpha_range (sql/044). Duplicated here only so
+# the rejection is a 422 naming the field rather than a CheckViolation
+# surfacing as a 500 — the DB remains the enforcement point.
+_MIN_RULING_ALPHA = 0.10
+_MAX_RULING_ALPHA = 1.00
 # Shared by both username-mutating endpoints below — they change the same
 # field, so one combined cap (not one each) is what actually limits abuse.
 _LIMIT_USERNAME_REROLL_PER_ACCOUNT = (10, 3600)
@@ -76,6 +82,16 @@ class ProfileUpdate(BaseModel):
     home_lng: float | None = Field(default=None, ge=-180, le=180)
     work_lat: float | None = Field(default=None, ge=-90, le=90)
     work_lng: float | None = Field(default=None, ge=-180, le=180)
+    # sql/044. royalty_title and the two colours are validated by FK
+    # against the curated tables rather than by a list in this module —
+    # extending the palette is then a migration, not a code change, and
+    # the two cannot disagree about what is choosable.
+    royalty_title: str | None = Field(default=None, max_length=_MAX_TITLE_LEN)
+    ruling_color: str | None = Field(default=None, max_length=7)
+    ruling_border_color: str | None = Field(default=None, max_length=7)
+    ruling_alpha: float | None = Field(
+        default=None, ge=_MIN_RULING_ALPHA, le=_MAX_RULING_ALPHA
+    )
 
 
 class UsernameChoice(BaseModel):
@@ -88,7 +104,9 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
         """
         SELECT email, phone_number, public_username, show_public_username,
                show_in_leaderboards, rate_plan, theme, favorites,
-               home_lat, home_lng, work_lat, work_lng
+               home_lat, home_lng, work_lat, work_lng,
+               royalty_title, ruling_color, ruling_border_color, ruling_alpha,
+               display_name
         FROM accounts WHERE id = %s
         """,
         (user.account_id,),
@@ -98,11 +116,21 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
         raise HTTPException(401, "account no longer exists")
     (email, phone_number, public_username, show_public_username,
      show_in_leaderboards, rate_plan, theme, favorites,
-     home_lat, home_lng, work_lat, work_lng) = row
+     home_lat, home_lng, work_lat, work_lng,
+     royalty_title, ruling_color, ruling_border_color, ruling_alpha,
+     display_name) = row
     return {
         "email": email,
         "phone_number": phone_number,
         "public_username": public_username,
+        # Server-computed (sql/044): title + public_username, or just the
+        # username when no title is set. Read-only here — it moves by
+        # changing royalty_title or the username, never on its own.
+        "display_name": display_name,
+        "royalty_title": royalty_title,
+        "ruling_color": ruling_color,
+        "ruling_border_color": ruling_border_color,
+        "ruling_alpha": float(ruling_alpha) if ruling_alpha is not None else None,
         "show_public_username": bool(show_public_username),
         "show_in_leaderboards": bool(show_in_leaderboards),
         "rate_plan": rate_plan,
@@ -242,6 +270,52 @@ def put_profile(
             _apply_coord_pair(sets, params, provided, payload, "home_lat", "home_lng")
             _apply_coord_pair(sets, params, provided, payload, "work_lat", "work_lng")
 
+            if "royalty_title" in provided:
+                # NULL clears the title; display_name falls back to the bare
+                # username. Membership is the FK's job (see below).
+                sets.append("royalty_title = %s")
+                params.append(payload.royalty_title)
+
+            # Fill and border move together for the same reason home_lat and
+            # home_lng do — accounts_ruling_colors_coherent rejects a half-set
+            # pair, so allowing a one-sided update would just turn a rider's
+            # save into a 500 from a constraint they can't see. Both-null
+            # clears the pair and gives up the claim.
+            colour_fields = {"ruling_color", "ruling_border_color"} & provided
+            if colour_fields:
+                if len(colour_fields) != 2:
+                    raise HTTPException(
+                        400,
+                        "ruling_color and ruling_border_color must be set together "
+                        "(both, or both null to clear)",
+                    )
+                if (payload.ruling_color is None) != (payload.ruling_border_color is None):
+                    raise HTTPException(
+                        400,
+                        "ruling_color and ruling_border_color must both be set or both be null",
+                    )
+                if (payload.ruling_color is not None
+                        and payload.ruling_color == payload.ruling_border_color):
+                    raise HTTPException(
+                        400,
+                        "the border colour must differ from the fill colour — "
+                        "a border in the fill's own colour isn't visible",
+                    )
+                sets.append("ruling_color = %s")
+                params.append(payload.ruling_color)
+                sets.append("ruling_border_color = %s")
+                params.append(payload.ruling_border_color)
+
+            if "ruling_alpha" in provided:
+                if payload.ruling_alpha is None:
+                    raise HTTPException(
+                        400,
+                        f"ruling_alpha must be a number between {_MIN_RULING_ALPHA} "
+                        f"and {_MAX_RULING_ALPHA}",
+                    )
+                sets.append("ruling_alpha = %s")
+                params.append(payload.ruling_alpha)
+
             if sets:
                 params.append(user.account_id)
                 try:
@@ -258,7 +332,32 @@ def put_profile(
                         raise HTTPException(
                             409, "that email address is already in use by another account"
                         )
+                    if constraint == "accounts_ruling_pair_key":
+                        raise HTTPException(
+                            409,
+                            "that fill and border colour combination is already "
+                            "claimed — pick a different border, or a different fill",
+                        )
                     raise HTTPException(409, "that value is already in use by another account")
+                except psycopg.errors.ForeignKeyViolation as e:
+                    # The curated lists are the single source of truth for
+                    # what's choosable (sql/044), so an unknown value is
+                    # caught by the FK rather than by a second copy of the
+                    # list in this module that could fall out of date.
+                    constraint = getattr(e.diag, "constraint_name", None) or ""
+                    if "royalty_title" in constraint:
+                        raise HTTPException(
+                            400,
+                            "that isn't one of the available titles — "
+                            "see GET /api/v1/royalty-titles",
+                        )
+                    if "ruling_color" in constraint or "ruling_border_color" in constraint:
+                        raise HTTPException(
+                            400,
+                            "that isn't one of the available colours — "
+                            "see GET /api/v1/ruling-colors",
+                        )
+                    raise
                 # Requirement #10's "complete missing profile information"
                 # bonus — checked after any successful accounts write since
                 # this update could be the one that newly satisfies it.

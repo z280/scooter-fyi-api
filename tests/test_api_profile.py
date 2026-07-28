@@ -24,10 +24,13 @@ _USER = SessionUser(
 # _profile_payload's SELECT tuple shape:
 # (email, phone_number, public_username, show_public_username,
 #  show_in_leaderboards, rate_plan, theme, favorites,
-#  home_lat, home_lng, work_lat, work_lng)
+#  home_lat, home_lng, work_lat, work_lng,
+#  royalty_title, ruling_color, ruling_border_color, ruling_alpha,
+#  display_name)
 _PROFILE_ROW = (
     "rider@example.com", None, "brave🦉", True, True,
     "visitor", None, [], None, None, None, None,
+    None, None, None, 0.60, "brave🦉",
 )
 
 

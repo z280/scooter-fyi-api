@@ -27,6 +27,7 @@ psycopg = pytest.importorskip("psycopg")
 from src import api_tracked_rides, ride_watch  # noqa: E402
 from src.accounts import SessionUser, require_session, upsert_account  # noqa: E402
 from src.ingest import TaggedDevice  # noqa: E402
+from src.points import h3_8_index_for  # noqa: E402
 
 SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 VID = "aaaa000000000000"
@@ -189,13 +190,14 @@ def test_full_lifecycle_with_gbfs_watch_and_anti_fraud_redaction(pg_conn):
     }).status_code == 409
 
 
-def test_one_early_waypoint_still_measures_the_whole_ride(pg_conn):
+def test_one_early_waypoint_then_an_implausible_final_leg(pg_conn):
     """Mirror of the off-feed test of the same name, and it has to give the
     same answer: src/badges.py sums distance across both tables, so a
     rider's mileage must not depend on which mechanism logged the ride.
 
-    One fix 20 m from the start, then the rider parks 10 km away. Measuring
-    only start -> last fix recorded ~20 m and tagged it 'waypoints'.
+    One fix 20 m from the start, then the rider parks 10 km away. The
+    operator's 3 km leg cap declines to measure that final jump, so the
+    ride records only the track it believes and says the path is partial.
     """
     client = _client(pg_conn)
     now = datetime.now(timezone.utc)
@@ -212,10 +214,42 @@ def test_one_early_waypoint_still_measures_the_whole_ride(pg_conn):
         "ended_at": (now + timedelta(minutes=40)).isoformat(),
         "end_lat": 39.74 + 10_000 * step, "end_lon": -104.98,
     }).json()
-    assert done["distance_source"] == "waypoints"
-    assert 9_900 <= done["distance_meters"] <= 10_100, done["distance_meters"]
-    # Path and distance describe the same three points.
-    assert len(done["path_geojson"]["coordinates"]) == 3
+    # RECONCILED with the operator's 3 km leg cap: a 10 km jump between the
+    # last fix and the reported end is no longer a leg we will measure. The
+    # ride still COMPLETES — it is only the disbelieved leg that is dropped
+    # — and distance_source says the path is partial so the short number is
+    # never mistaken for a whole-path measurement.
+    assert done["distance_source"] == "waypoints_partial"
+    assert 15 <= done["distance_meters"] <= 25, done["distance_meters"]
+    # Path and distance still describe the same points; the excluded end is
+    # in neither.
+    assert len(done["path_geojson"]["coordinates"]) == 2
+
+    # ...and neither does the POINTS ledger. The award is filed at the last
+    # location the measurement stands behind — the surviving fix — not at
+    # the reported end this same request just declined to measure a leg to.
+    # user_points.lat/lng and the h3_8_index derived from them are the
+    # per-area points geography, so filing at the disbelieved coordinate
+    # would credit the rider in a cell the ride itself refused to claim
+    # they reached, 10 km from anywhere they were observed.
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT lat, lng, h3_8_index FROM user_points "
+            "WHERE source_table = 'tracked_rides' AND source_id = %s "
+            "AND action = 'waypoint'",
+            (ride_id,),
+        )
+        row = cur.fetchone()
+    assert row is not None, "the completed ride credited no waypoint points"
+    award_lat, award_lng, award_h3 = row
+    assert award_lat == pytest.approx(39.74 + 20 * step), (
+        "points filed away from the last believed fix"
+    )
+    assert award_lng == pytest.approx(-104.98)
+    assert award_h3 == h3_8_index_for(39.74 + 20 * step, -104.98)
+    assert award_h3 != h3_8_index_for(39.74 + 10_000 * step, -104.98), (
+        "the award landed in the disbelieved end's cell"
+    )
 
 
 def test_waypoint_pagination_reaches_every_page(pg_conn):

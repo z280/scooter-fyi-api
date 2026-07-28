@@ -90,8 +90,8 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql … 040_off_feed_ride_expiry.sql
-│                              40 migrations, applied idempotently at boot
+├── sql/001_init.sql … 041_ride_hard_caps.sql
+│                              41 migrations, applied idempotently at boot
 ├── src/
 │   ├── main.py                 FastAPI app, lifespan, migrations, router mounts
 │   ├── cli.py                  subcommands run by the scheduler container
@@ -135,7 +135,11 @@ agent process).
 │   ├── device_photos.py         device photo upload → PUBLIC R2 bucket
 │   ├── ride_screenshots.py      ride transaction screenshot upload → PRIVATE R2 bucket
 │   ├── qr.py                    QR payload plate extraction + vehicle_identifier validation
-│   ├── points.py                points ledger primitives (credit_points + per-action wrappers)
+│   ├── points.py                points ledger primitives (credit_points + per-action wrappers;
+│   │                            credit_points is where the 100-points-per-ride cap is enforced)
+│   ├── ride_limits.py           the operator's three hard ride invariants — 100 points/ride,
+│   │                            3 km between consecutive path points, 80 km/ride — plus the
+│   │                            shared path measurement both ride modules close out with
 │   ├── polyline.py              Google polyline encode/decode (ride paths)
 │   ├── badges.py                server-computed profile badges (recomputed on every read;
 │   │                            mileage/streak badges union tracked_rides.distance_meters
@@ -303,14 +307,24 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `POST /api/v1/auth/refresh` | Rotate the presented bearer token |
 | `GET /api/v1/auth/session` | Session introspection for UI state |
 | `POST /api/v1/auth/signout` | Revoke the presented token |
-| `GET /api/v1/profile` | Full rider profile incl. server-computed badges/public username |
-| `PUT /api/v1/profile` | Partial update of `rate_plan`/`theme`/`favorites`/`email`/`phone_number`/`show_public_username`/`show_in_leaderboards`/`home_lat`/`home_lng`/`work_lat`/`work_lng` |
+| `GET /api/v1/profile` | Full rider profile incl. server-computed badges/public username/`display_name` |
+| `PUT /api/v1/profile` | Partial update of `rate_plan`/`theme`/`favorites`/`email`/`phone_number`/`show_public_username`/`show_in_leaderboards`/`home_lat`/`home_lng`/`work_lat`/`work_lng`/`royalty_title`/`ruling_color`/`ruling_border_color`/`ruling_alpha` |
 | `POST /api/v1/profile/username/regenerate` | Re-roll your public username to a new random adjective+emoji pair |
 | `PUT /api/v1/profile/username` | Choose a specific adjective and/or emoji (partial update) |
+| `GET /api/v1/profile/map-settings` | Every saved map setting for the caller |
+| `GET /api/v1/profile/map-settings/{name}` | One saved map setting |
+| `PUT /api/v1/profile/map-settings/{name}` | Create or replace a named map setting (opaque JSON blob) |
+| `DELETE /api/v1/profile/map-settings/{name}` | Delete a named map setting |
+| `GET /api/v1/profile/find-ride-pref` | The caller's find-ride preference, or `null` if never set |
+| `PUT /api/v1/profile/find-ride-pref` | Create or replace the find-ride preference (at most one per rider) |
+| `DELETE /api/v1/profile/find-ride-pref` | Clear the find-ride preference (idempotent) |
 | `GET /api/v1/emoji-nouns` | Full emoji → noun-word list, for building a username picker |
 | `GET /api/v1/emoji-nouns/search?q=…` | Partial word match on the emoji-noun list |
 | `GET /api/v1/adjectives` | Full curated adjective list |
 | `GET /api/v1/adjectives/search?q=…` | Partial word match on the adjective list |
+| `GET /api/v1/royalty-titles` | Curated titles that can prefix a public username |
+| `GET /api/v1/royalty-titles/search?q=…` | Partial match on the title list |
+| `GET /api/v1/ruling-colors` | The 128-colour leaderboard palette + already-claimed (fill, border) pairs |
 | `GET /api/v1/user/devices/current` | Signed-in device map feed; adds plate/admin fields for admin-allowlisted sessions |
 | `POST /api/v1/reports/discount` | Missed-discount evidence, optional receipt upload |
 
