@@ -28,7 +28,7 @@
 </header>
 <main>
 <h1>Privacy Policy</h1>
-<p class="updated">Last updated: July 5, 2026</p>
+<p class="updated">Last updated: July 28, 2026</p>
 
 <p>This Privacy Policy explains how <strong>Mile High Technology
 Consulting, LLC</strong>, doing business as <strong>"scooter.fyi"</strong>
@@ -55,8 +55,13 @@ preferences</td></tr>
 <tr><td>Sessions</td><td>A hashed bearer token, issuing IP address, user
 agent</td><td>Keeping you signed in; detecting abuse</td></tr>
 <tr><td>Reports</td><td>Device failure reports, missed-discount reports,
-optional receipt images, optional GPS coordinates you provide</td>
-<td>Building the public compliance/reliability dataset</td></tr>
+and vehicle-model corrections. Alongside the report itself: optional
+receipt images, optional model photos, the free-text description you
+write, optional GPS coordinates you provide, and the IP address and
+browser user-agent string the report arrived with</td>
+<td>Building the public compliance/reliability dataset; correcting the
+vehicle catalog. IP and user-agent are kept to detect abuse of the report
+forms, which accept anonymous submissions</td></tr>
 <tr><td>Ride history</td><td>Ride start/end time, duration, distance,
 estimated cost, route polyline, and any GPS waypoints you upload</td>
 <td>Your own ride log — opt-in, and deletable by you at any
@@ -93,8 +98,9 @@ account email, only if you use "Sign in with Google"</td></tr>
 <tr><td>Postmark</td><td>Sending magic-link sign-in emails</td>
 <td>Your email address, transactional email content</td></tr>
 <tr><td>Cloudflare</td><td>Hosting, CDN, tunnel, and private object
-storage (receipt images)</td><td>Network-level request metadata; receipt
-images in a private, non-public bucket</td></tr>
+storage (receipt images, model-report photos)</td><td>Network-level
+request metadata; receipt images and model-report photos in a private,
+non-public bucket</td></tr>
 <tr><td>Sentry</td><td>Error monitoring</td><td>Application error
 reports, which may incidentally include request metadata</td></tr>
 </table>
@@ -120,10 +126,20 @@ Deleted automatically after 18 months; the report record itself is kept
 are the most sensitive data we hold. Deleting a ride (or all your rides)
 is an immediate, permanent hard delete — no soft-delete, no backup
 retention, never reused for analytics.</td></tr>
-<tr><td>Reports (device/discount)</td><td>Indefinite, aggregated</td>
-<td>Kept as the audit evidence base. Public aggregates and the CSV
-export never include reporter identity — only an authenticated yes/no
-signal contributes to the aggregate.</td></tr>
+<tr><td>Model-report photos</td><td>18 months</td><td>A photo attached to
+a vehicle-model correction. Same private bucket, same full re-encode that
+strips EXIF/GPS/camera metadata, and the same 18-month deletion job as
+receipt images — a photo of a scooter is a photo of wherever you were
+standing. The correction itself is kept without the image.</td></tr>
+<tr><td>Reports (device / discount / model)</td><td>Indefinite,
+aggregated</td>
+<td>Kept as the audit evidence base and the vehicle-catalog history. This
+includes the description you wrote, any coordinates you sent, and the IP
+address and user-agent the report arrived with, which are retained for
+abuse detection because these forms accept anonymous submissions. Public
+aggregates and the CSV export never include reporter identity — no IP, no
+email, no user-agent; only an authenticated yes/no signal contributes to
+the aggregate.</td></tr>
 <tr><td>Accounts</td><td>Until you ask us to delete it</td><td>Email us
 at the address below to delete your account and associated
 preferences.</td></tr>
@@ -148,8 +164,9 @@ project.</p>
 
 <h2>6. Security</h2>
 <p>Session tokens and magic-link tokens are stored hashed, never in
-plaintext. All traffic is served over HTTPS. Receipt images live in a
-private storage bucket that is never publicly readable. No system is
+plaintext. All traffic is served over HTTPS. Receipt images and
+model-report photos live in a private storage bucket that is never
+publicly readable. No system is
 perfectly secure; if you discover a vulnerability, please report it to
 us directly before disclosing it publicly.</p>
 

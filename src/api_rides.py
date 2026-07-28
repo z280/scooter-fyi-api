@@ -37,10 +37,30 @@ points faucet. See src/points.py.
 Privacy stance (stronger than most of this codebase, inherited from
 sql/014 and unchanged by the repurposing): route polylines are the most
 sensitive data the system holds. Deletes are immediate hard DELETEs — no
-soft-delete column, no tombstone — the waypoint rows cascade with them,
-and no other module may query these tables for analytics. Both commitments
-are stated publicly in /api/v1/meta/privacy; breaking either is a breach
-of that page.
+soft-delete column, no tombstone — and the waypoint rows cascade with
+them. Both commitments are stated publicly in /api/v1/meta/privacy;
+breaking either is a breach of that page.
+
+The third commitment on that page is narrower than it used to be written
+here, and is stated precisely because the old wording ("no other module
+may query these tables for analytics") is contradicted by the code:
+src/badges.py reads BOTH `rides` and `tracked_rides` to compute a rider's
+own mileage and streak badges. sql/027 was honest about this and called it
+a pre-existing inconsistency; asserting a commitment the repo already
+breaks is worse than a narrower one it keeps. What is actually promised,
+and what badges.py satisfies:
+
+    NO ROUTE EVER LEAVES ITS OWNER. Waypoints, polylines and ride
+    endpoints are readable only on behalf of the account that recorded
+    them. They are never aggregated across riders, never published,
+    never exported to the compliance dataset, and never used to describe
+    the fleet or the city.
+
+badges.py is an owner-scoped read on one account's own history, returning
+a boolean-shaped badge to that same rider — not third-party analytics —
+and it reads distances and end timestamps, never a coordinate or a
+polyline. A module that wants ride ROUTES, or wants any of this across
+accounts, is the thing this rule forbids.
 """
 
 from __future__ import annotations
@@ -74,6 +94,58 @@ _LIMIT_START_PER_ACCOUNT = (20, 3600)
 _LIMIT_WAYPOINT_PER_ACCOUNT = (600, 3600)
 _MAX_POLYLINE_CHARS = 100_000
 _VEHICLE_KINDS = "^(scooter|bicycle|other)$"
+
+# ---------------------------------------------------------------------------
+# Plausibility bounds for a CLIENT-ASSERTED ride (POST /api/v1/rides only).
+# ---------------------------------------------------------------------------
+# The lifecycle path measures distance server-side from the rider's own
+# track. The one-shot path does not: the client hands us a finished number
+# and we store it. src/badges.py sums that number, and miles_100 is 160 934 m
+# — inside the 200 000 m per-ride ceiling — so before these checks a SINGLE
+# request earned the top mileage badge, and the 120/day limit allowed 24 000
+# km/day of fiction. Badges must keep counting off-feed rides (a rider's
+# mileage is the miles they rode, whichever mechanism recorded them), so the
+# fix cannot be to stop counting them; it has to be to stop believing
+# impossible ones.
+#
+# Both bounds below reject rather than clamp. A silent clamp would tell an
+# honest client
+# with a unit bug (feet for metres, centimetres for metres) that its upload
+# succeeded while quietly rewriting the ride, and the rider would never find
+# out their history is wrong. A 422 naming the bound is fixable.
+
+# Ride-AVERAGE speed ceiling: 20 m/s = 72 km/h = 45 mph.
+#
+# Chosen as "no micromobility trip averages this, and no honest client is
+# anywhere near it", not as a legal limit. Shared e-scooters are governed at
+# ~24 km/h (6.7 m/s); a class-3 e-bike tops out at 45 km/h (12.5 m/s); the
+# UCI hour record — a professional, on a track, for exactly one hour — is
+# 15.7 m/s. Averaging 20 m/s over a whole ride, stops and lights included,
+# is a car on a highway. Deliberately ~3x the fastest thing this table is
+# for, because it is an AVERAGE: a downhill sprint, a stretch of GPS drift,
+# or a ride that is briefly carried in a vehicle must not cost an honest
+# rider their log. The vector it closes is 200 km in 90 seconds, which
+# misses by three orders of magnitude, not by a factor of two.
+_MAX_AVG_SPEED_MPS = 20.0
+
+# Consistency between the claimed distance and the route actually shown.
+# `polyline` is required on this path, so there is always something to check
+# against. An encoded polyline is a SAMPLED path and therefore a chord-wise
+# UNDERCOUNT of the true route, so the tolerance has to be one-sided and
+# loose: we only reject claiming far MORE than the route supports. Claiming
+# LESS is never rejected — undercounting is not a farming vector, and a
+# client reporting a vehicle odometer reading is being honest, not evasive.
+#
+# Reject when distance_m exceeds BOTH:
+#   * the decoded route length x 3     (proportional: a coarsely sampled
+#     track of a winding route can easily read 2-2.5x short), and
+#   * the decoded route length + 1 km  (absolute: the multiplicative rule
+#     alone collapses to zero on a degenerate polyline, which would reject
+#     every short ride whose two points nearly coincide).
+# The absolute floor is what a farmer is left with: a two-identical-points
+# polyline now buys 1 km per request instead of 200.
+_POLYLINE_DISTANCE_FACTOR = 3.0
+_POLYLINE_DISTANCE_SLACK_M = 1000.0
 
 
 class RideIn(BaseModel):
@@ -281,6 +353,16 @@ def start_ride(
 
 @router.get("/api/v1/rides/active")
 def active_ride(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
+    """The caller's one active ride, or null.
+
+    Filters on status = 'active', which is the same predicate as
+    idx_rides_one_active_per_account — so the moment the sql/040 sweep
+    expires an abandoned ride this goes back to null and
+    POST /api/v1/rides/start succeeds again. The two can never disagree
+    about whether the slot is occupied, because they read the same column.
+    An expired ride is still in GET /api/v1/rides (?status=expired); it is
+    just no longer the ride you are on.
+    """
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -432,6 +514,19 @@ def end_ride(
             if row is None:
                 raise HTTPException(404, "no such ride")
             status, started_at, start_lat, start_lon = row
+            if status == "expired":
+                # Distinguished from 'completed' because the fix is
+                # different: there is nothing to reconcile, the rider just
+                # needs to know the ride is closed and their slot is free.
+                # Not endable — an end reported a day late would attach a
+                # bogus duration to a ride nobody was on (sql/040).
+                raise HTTPException(409, {
+                    "error": "ride_expired",
+                    "detail": "this ride was left active for over 24 hours and "
+                              "has expired; it can no longer be ended. Its "
+                              "waypoints are kept and still export, and you "
+                              "can start a new ride.",
+                })
             if status != "active":
                 raise HTTPException(409, "this ride has already ended")
             if payload.ended_at < started_at:
@@ -491,6 +586,51 @@ def end_ride(
 # One-shot log + history
 # ---------------------------------------------------------------------------
 
+def _check_plausible(distance_m: int, duration_s: int, route: list[tuple[float, float]]) -> None:
+    """Refuse a client-asserted ride that could not have happened.
+
+    Raises 422 with a machine-readable `error` and a detail that names the
+    bound and the numbers that broke it, so a client with a unit bug can see
+    what it did instead of guessing. See the bounds' rationale above.
+
+    A zero-distance ride is always plausible (a cancelled unlock, a ride
+    that went nowhere) and is checked first, because it is also the only
+    case where a zero duration is legitimate.
+    """
+    if distance_m <= 0:
+        return
+
+    if duration_s <= 0:
+        raise HTTPException(422, {
+            "error": "implausible_speed",
+            "detail": f"{distance_m} m in {duration_s} s is infinite speed; "
+                      "a ride that covered distance took time",
+        })
+
+    speed = distance_m / duration_s
+    if speed > _MAX_AVG_SPEED_MPS:
+        raise HTTPException(422, {
+            "error": "implausible_speed",
+            "detail": f"{distance_m} m in {duration_s} s averages "
+                      f"{speed:.1f} m/s, above the {_MAX_AVG_SPEED_MPS:.0f} m/s "
+                      f"({_MAX_AVG_SPEED_MPS * 3.6:.0f} km/h) ceiling for a "
+                      "scooter or bike ride. Check the units on distance_m "
+                      "(metres) and duration_s (seconds).",
+        })
+
+    route_m = path_length_meters(route)
+    ceiling = max(route_m * _POLYLINE_DISTANCE_FACTOR,
+                  route_m + _POLYLINE_DISTANCE_SLACK_M)
+    if distance_m > ceiling:
+        raise HTTPException(422, {
+            "error": "distance_exceeds_polyline",
+            "detail": f"distance_m {distance_m} is more than the route in "
+                      f"`polyline` supports — it decodes to {route_m:.0f} m. "
+                      "Send the track you actually rode; a distance is only "
+                      "believable next to the route it was measured over.",
+        })
+
+
 @router.post("/api/v1/rides")
 def create_ride(
     user: SessionUser = Depends(require_session),
@@ -501,9 +641,15 @@ def create_ride(
     if payload.ended_at < payload.started_at:
         raise HTTPException(400, "ended_at < started_at")
     try:
-        decode_polyline(payload.polyline)
+        route = decode_polyline(payload.polyline)
     except PolylineError as e:
         raise HTTPException(400, f"polyline won't decode: {e}")
+    # Sits with the rest of the input validation, which already runs ahead of
+    # enforce() on this endpoint: these are pure checks on an already-parsed
+    # body that store nothing and call nothing, so unlike the upload paths
+    # (where the limiter deliberately precedes the expensive work) there is
+    # no work here for a quota to be protecting.
+    _check_plausible(payload.distance_m, payload.duration_s, route)
 
     with connection() as conn:
         with conn.cursor() as cur:
@@ -535,7 +681,10 @@ def list_rides(
     user: SessionUser = Depends(require_session),
     limit: int = Query(50, ge=1, le=500),
     before: str | None = Query(None, description="ISO timestamp — return rides started before this"),
-    status: str | None = Query(None, pattern="^(active|completed)$"),
+    # 'expired' included since sql/040: the list returns those rows whether
+    # or not you filter, so refusing them as a filter value would 422 a
+    # client for asking about rides this endpoint hands it anyway.
+    status: str | None = Query(None, pattern="^(active|completed|expired)$"),
 ) -> dict[str, Any]:
     where = ["account_id = %s"]
     params: list[Any] = [user.account_id]

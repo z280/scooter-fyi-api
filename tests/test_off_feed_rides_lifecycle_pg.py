@@ -273,3 +273,207 @@ def test_one_shot_log_is_stored_as_client_measured(pg_conn):
     assert body["operator"] == "personal"
     # A one-shot log does not occupy the active slot.
     assert c.get("/api/v1/rides/active").json() == {"active": None}
+
+
+# ---------------------------------------------------------------------------
+# 24-hour expiry (sql/040 + src/cli.py:expire_stale_off_feed_rides)
+# ---------------------------------------------------------------------------
+# The whole point is the interaction with idx_rides_one_active_per_account,
+# a partial UNIQUE index — which is exactly what a fake cursor can't have.
+
+def _expire(pg_conn, monkeypatch):
+    """Run the real sweep against this test's connection."""
+    from contextlib import contextmanager as _cm
+
+    from src import cli
+
+    @_cm
+    def _conn():
+        yield pg_conn
+
+    monkeypatch.setattr(cli, "connection", _conn)
+    return cli.expire_stale_off_feed_rides()
+
+
+def test_expiry_frees_the_active_slot(pg_conn, monkeypatch):
+    """THE BUG. Before sql/040 a rider who started a ride and never ended it
+    was 409'd out of POST /api/v1/rides/start permanently, because the only
+    thing that could release the partial unique index was DELETE — which
+    destroys the ride and its whole track."""
+    c, account_id = _client(pg_conn)
+
+    first = c.post("/api/v1/rides/start",
+                   json={"start_lat": 39.74, "start_lon": -104.98})
+    assert first.status_code == 200, first.text
+    rid = first.json()["id"]
+    c.post(f"/api/v1/rides/{rid}/waypoints", json={
+        "waypoint_at": _NOW.isoformat(), "lat": 39.741, "lon": -104.981,
+    })
+
+    # Still inside the window: the slot is occupied and stays occupied.
+    assert _expire(pg_conn, monkeypatch) == {"rides_expired": 0}
+    blocked = c.post("/api/v1/rides/start",
+                     json={"start_lat": 39.75, "start_lon": -104.99})
+    assert blocked.status_code == 409
+    # The UniqueViolation aborts the transaction. In production each request
+    # holds its own connection and this is the pool's problem; here every
+    # request shares one, so the test has to clear it.
+    pg_conn.rollback()
+
+    # Age it past 24h. created_at is server-assigned, so this is the only
+    # way to simulate the passage of a day.
+    with pg_conn.cursor() as cur:
+        cur.execute("UPDATE rides SET created_at = NOW() - INTERVAL '25 hours' "
+                    "WHERE id = %s", (rid,))
+    pg_conn.commit()
+
+    assert _expire(pg_conn, monkeypatch) == {"rides_expired": 1}
+
+    # The slot is free and the rider can ride again.
+    assert c.get("/api/v1/rides/active").json() == {"active": None}
+    again = c.post("/api/v1/rides/start",
+                   json={"start_lat": 39.75, "start_lon": -104.99})
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] != rid
+
+
+def test_an_expired_ride_keeps_its_data_and_gains_no_invented_end(pg_conn, monkeypatch):
+    """Expiry frees a slot; it never deletes rider data and never guesses at
+    an ending. Same terminal shape as an expired tracked ride."""
+    c, _ = _client(pg_conn)
+    rid = c.post("/api/v1/rides/start",
+                 json={"start_lat": 39.74, "start_lon": -104.98}).json()["id"]
+    step = 100.0 / 111_320.0
+    for i in range(1, 4):
+        c.post(f"/api/v1/rides/{rid}/waypoints", json={
+            "waypoint_at": (_NOW + timedelta(seconds=30 * i)).isoformat(),
+            "lat": 39.74 + i * step, "lon": -104.98,
+        })
+    measured = c.get("/api/v1/rides", params={"status": "active"}).json()["rides"][0]
+    assert measured["distance_m"] > 0
+
+    with pg_conn.cursor() as cur:
+        cur.execute("UPDATE rides SET created_at = NOW() - INTERVAL '25 hours' "
+                    "WHERE id = %s", (rid,))
+    pg_conn.commit()
+    _expire(pg_conn, monkeypatch)
+
+    listed = c.get("/api/v1/rides", params={"status": "expired"}).json()
+    assert listed["count"] == 1
+    ride = listed["rides"][0]
+    assert ride["id"] == rid
+    assert ride["status"] == "expired"
+    # Never observed, never invented.
+    assert ride["ended_at"] is None
+    assert ride["duration_s"] is None
+    assert ride["end_lat"] is None and ride["end_lon"] is None
+    # Measured up to the last fix, left exactly as it stood.
+    assert ride["distance_m"] == measured["distance_m"]
+    assert ride["distance_source"] == "waypoints"
+
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM off_feed_ride_waypoints WHERE ride_id = %s",
+                    (rid,))
+        assert cur.fetchone()[0] == 3
+
+
+def test_an_expired_ride_cannot_be_ended_or_appended_to(pg_conn, monkeypatch):
+    c, _ = _client(pg_conn)
+    rid = c.post("/api/v1/rides/start",
+                 json={"start_lat": 39.74, "start_lon": -104.98}).json()["id"]
+    with pg_conn.cursor() as cur:
+        cur.execute("UPDATE rides SET created_at = NOW() - INTERVAL '25 hours' "
+                    "WHERE id = %s", (rid,))
+    pg_conn.commit()
+    _expire(pg_conn, monkeypatch)
+
+    end = c.patch(f"/api/v1/rides/{rid}/end", json={
+        "ended_at": (_NOW + timedelta(minutes=20)).isoformat(),
+        "end_lat": 39.75, "end_lon": -104.99,
+    })
+    assert end.status_code == 409
+    assert end.json()["detail"]["error"] == "ride_expired"
+    pg_conn.rollback()  # releases the SELECT ... FOR UPDATE the handler took
+
+    wp = c.post(f"/api/v1/rides/{rid}/waypoints", json={
+        "waypoint_at": _NOW.isoformat(), "lat": 39.741, "lon": -104.981,
+    })
+    assert wp.status_code == 409
+    assert wp.json()["detail"]["error"] == "ride_not_active"
+
+
+def test_expiry_is_idempotent(pg_conn, monkeypatch):
+    """cron re-runs this every 15 minutes."""
+    c, _ = _client(pg_conn)
+    rid = c.post("/api/v1/rides/start",
+                 json={"start_lat": 39.74, "start_lon": -104.98}).json()["id"]
+    with pg_conn.cursor() as cur:
+        cur.execute("UPDATE rides SET created_at = NOW() - INTERVAL '25 hours' "
+                    "WHERE id = %s", (rid,))
+    pg_conn.commit()
+    assert _expire(pg_conn, monkeypatch) == {"rides_expired": 1}
+    assert _expire(pg_conn, monkeypatch) == {"rides_expired": 0}
+
+
+def test_an_expired_ride_earns_no_badge_mileage(pg_conn, monkeypatch):
+    """src/badges.py unions `status = 'completed'` from this table against
+    tracked_rides' `user_reported_ended_at IS NOT NULL`. Both drop their
+    expired rows for the same reason: a ride nobody ended is not evidence
+    of a distance ridden, however far its waypoints got."""
+    from src.badges import _ride_badges
+
+    c, account_id = _client(pg_conn)
+    rid = c.post("/api/v1/rides/start", json={
+        "start_lat": 39.74, "start_lon": -104.98,
+        "started_at": _NOW.isoformat(),
+    }).json()["id"]
+    # ~20 km of waypoints — well past miles_10 (16 093 m) had it counted.
+    step = 20_000.0 / 111_320.0
+    c.post(f"/api/v1/rides/{rid}/waypoints", json={
+        "waypoint_at": _NOW.isoformat(), "lat": 39.74 + step, "lon": -104.98,
+    })
+    with pg_conn.cursor() as cur:
+        cur.execute("UPDATE rides SET created_at = NOW() - INTERVAL '25 hours' "
+                    "WHERE id = %s", (rid,))
+    pg_conn.commit()
+    _expire(pg_conn, monkeypatch)
+
+    with pg_conn.cursor() as cur:
+        assert _ride_badges(cur, account_id) == []
+
+
+def test_status_check_accepts_expired_and_still_rejects_nonsense(pg_conn):
+    """sql/040 widened the CHECK; it did not remove it."""
+    import psycopg
+
+    c, _ = _client(pg_conn)
+    rid = c.post("/api/v1/rides/start",
+                 json={"start_lat": 39.74, "start_lon": -104.98}).json()["id"]
+    with pg_conn.cursor() as cur:
+        cur.execute("UPDATE rides SET status = 'expired' WHERE id = %s", (rid,))
+    pg_conn.commit()
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with pg_conn.cursor() as cur:
+            cur.execute("UPDATE rides SET status = 'abandoned' WHERE id = %s", (rid,))
+    pg_conn.rollback()
+
+
+def test_completed_is_complete_still_holds_and_does_not_bind_expired(pg_conn):
+    """rides_completed_is_complete is scoped to 'completed' on purpose, so
+    'expired' satisfies it with every end column NULL — while a half-filled
+    *completed* ride is still refused."""
+    import psycopg
+
+    c, _ = _client(pg_conn)
+    rid = c.post("/api/v1/rides/start",
+                 json={"start_lat": 39.74, "start_lon": -104.98}).json()["id"]
+
+    with pg_conn.cursor() as cur:
+        cur.execute("UPDATE rides SET status = 'expired' WHERE id = %s", (rid,))
+    pg_conn.commit()
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with pg_conn.cursor() as cur:
+            cur.execute("UPDATE rides SET status = 'completed' WHERE id = %s", (rid,))
+    pg_conn.rollback()

@@ -4,6 +4,19 @@ GET /api/v1/meta/privacy — machine-readable retention policy. The frontend
 privacy page renders this, so the published policy and the enforced policy
 share one source of truth. When a retention rule changes in code (e.g.
 cleanup_receipts), CHANGE THIS PAYLOAD IN THE SAME COMMIT.
+
+That instruction has one more address than it used to admit. There are
+THREE places a retention rule is written down and they must move together:
+
+  1. the cleanup job in src/cli.py, which is what actually happens;
+  2. this payload, which is what the API says happens;
+  3. src/templates/legal/privacy_policy.html, the human-readable policy
+     served at /legal/privacy — the version a rider or a regulator reads.
+
+sql/038 stored model-report photos and touched none of the three, so the
+photos were retained forever while all three documents were silent. A new
+STORED FIELD counts as a retention rule, not just a new deletion schedule:
+if the system starts keeping something, it belongs here.
 """
 
 from __future__ import annotations
@@ -15,7 +28,7 @@ from fastapi import APIRouter, Response
 router = APIRouter()
 
 _PRIVACY = {
-    "updated": "2026-07-27",
+    "updated": "2026-07-28",
     "contact": "zneill@gmail.com",
     "retention": [
         {
@@ -85,6 +98,22 @@ _PRIVACY = {
                       "EXIF/GPS is stripped on upload. Kept indefinitely as "
                       "community reference material, same as device and "
                       "discount reports.",
+        },
+        {
+            "data": "model_reports",
+            "retention": "report indefinite; photo 18 months",
+            "detail": "A model report is a catalog correction — 'you're "
+                      "showing this scooter as the wrong model'. The "
+                      "correction itself (your description, the device id, "
+                      "coordinates if you sent them, and the IP and user "
+                      "agent the report arrived with) is kept indefinitely "
+                      "as part of the catalog's history; anonymous reports "
+                      "are accepted and carry no account. An attached photo "
+                      "lives in the same private bucket as receipts, is "
+                      "EXIF-stripped on upload (full re-encode — GPS and "
+                      "camera metadata cannot survive), and is deleted by a "
+                      "daily job after 18 months, matching the receipts "
+                      "window; the report row outlives the image.",
         },
         {
             "data": "ride_transaction_screenshots",

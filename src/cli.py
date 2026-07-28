@@ -15,6 +15,11 @@ Available commands:
     cleanup_ride_screenshots
                       Delete ride transaction screenshots (+ their row)
                       past the 18-month retention (/api/v1/meta/privacy).
+    cleanup_model_report_photos
+                      Delete model-report photos past the same 18-month
+                      retention as receipts, stamping photo_deleted_at.
+                      The report row (the catalog correction itself)
+                      outlives the image.
     backfill_public_usernames
                       One-time: assign a public_username to every account
                       created before sql/025 (idempotent — already-
@@ -25,6 +30,10 @@ Available commands:
                       resolution (src/ride_watch.py handles the two live
                       transitions every 2-min cycle; this just terminates
                       the ones that timed out).
+    expire_stale_off_feed_rides
+                      Close out off-feed `rides` left 'active' for more
+                      than 24 hours with no end report, freeing the
+                      one-active-ride slot they were holding.
     fetch_map_pbf     Sync the routing .pbf + canopy sidecar from R2 into the
                       Valhalla volume. Runs as a one-shot sidecar before the
                       valhalla service starts.
@@ -266,6 +275,63 @@ def cleanup_ride_screenshots() -> dict:
     return {"deleted": deleted, "failed": failed}
 
 
+_MODEL_PHOTO_RETENTION_MONTHS = 18
+
+
+def cleanup_model_report_photos() -> dict:
+    """Purge model-report photos older than the 18-month retention.
+
+    sql/038 added model_reports.photo_deleted_at and nothing ever set it:
+    cleanup_receipts scans discount_reports only, so every `model-reports/`
+    object ever uploaded was retained forever, in the same private bucket
+    and under the same published 18-month promise as receipts. A photo of a
+    scooter is a photo of wherever the rider was standing, so "forever" was
+    not a defensible default and definitely not the documented one.
+
+    Mirrors cleanup_receipts rather than cleanup_ride_screenshots: the row
+    is KEPT and stamped, because a model report carries the correction
+    itself (description, resolved_model_name, the operator queue state)
+    which outlives the image. A ride_transaction_screenshots row, by
+    contrast, is nothing but its image, so that job deletes the row.
+
+    Idempotent — rows already stamped are skipped by the WHERE clause.
+    """
+    from .receipts import ReceiptError, delete_receipt
+
+    cutoff = _months_ago(datetime.now(timezone.utc), _MODEL_PHOTO_RETENTION_MONTHS)
+    deleted = failed = 0
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, photo_r2_key FROM model_reports
+                WHERE photo_r2_key IS NOT NULL
+                  AND photo_deleted_at IS NULL
+                  AND created_at < %s
+                """,
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+            for row_id, key in rows:
+                try:
+                    delete_receipt(key)
+                except ReceiptError:
+                    log.exception("cleanup_model_report_photos: R2 not configured — aborting")
+                    raise
+                except Exception:  # noqa: BLE001 — keep going, retry next run
+                    log.exception("cleanup_model_report_photos: delete failed for %s", key)
+                    failed += 1
+                    continue
+                cur.execute(
+                    "UPDATE model_reports SET photo_deleted_at = NOW() WHERE id = %s",
+                    (row_id,),
+                )
+                deleted += 1
+        conn.commit()
+    log.info("cleanup_model_report_photos: deleted=%d failed=%d", deleted, failed)
+    return {"deleted": deleted, "failed": failed}
+
+
 def backfill_public_usernames() -> dict:
     """One-time backfill: assign a public_username to every account that
     doesn't have one yet (pre-sql/025 accounts). Idempotent — accounts
@@ -326,6 +392,52 @@ def expire_stale_watches() -> dict:
     return {"watches_expired": watches_expired, "rides_expired": rides_expired}
 
 
+_OFF_FEED_RIDE_MAX_ACTIVE_HOURS = 24
+
+
+def expire_stale_off_feed_rides() -> dict:
+    """Close out off-feed rides (sql/035) left 'active' for 24 hours.
+
+    UNLIKE expire_stale_watches, this one IS required for correctness, not
+    just for tidy state. idx_rides_one_active_per_account is a partial
+    UNIQUE index on WHERE status = 'active', so a single abandoned ride
+    409s its owner out of POST /api/v1/rides/start permanently — the rider
+    can never start another ride, and before this job the only escape was
+    DELETE, which destroys the abandoned ride's whole waypoint track.
+    Expiry frees the slot without touching rider data.
+
+    THE CLOCK RUNS FROM created_at, NOT started_at. RideStartIn lets a
+    client backdate started_at (so a rider who noticed late doesn't lose
+    the first minutes of the ride), which makes it spoofable in both
+    directions: backdating 25h would otherwise expire a ride the instant
+    it began, and post-dating it would exempt the ride forever. created_at
+    is DEFAULT NOW() and nothing outside Postgres writes it, so the
+    guarantee this job actually makes is "no active ride survives 24h past
+    the moment the server learned about it".
+
+    Terminal-state semantics are sql/040's: ended_at/duration_s/end_lat/
+    end_lon stay NULL (we never observed an end and will not invent one),
+    the waypoint-measured distance is left exactly as it stood, the row and
+    its waypoints are kept and still export, and src/badges.py counts none
+    of it — its union takes `status = 'completed'` only, mirroring the way
+    tracked_rides' expired rows fall out on user_reported_ended_at IS NULL.
+
+    Idempotent: an already-expired ride no longer matches status = 'active'.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_OFF_FEED_RIDE_MAX_ACTIVE_HOURS)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE rides SET status = 'expired' "
+                "WHERE status = 'active' AND created_at < %s",
+                (cutoff,),
+            )
+            rides_expired = cur.rowcount
+        conn.commit()
+    log.info("expire_stale_off_feed_rides: rides=%d", rides_expired)
+    return {"rides_expired": rides_expired}
+
+
 def _cli_fetch_map_pbf() -> dict:
     """One-shot sidecar: pull the routing assets into the Valhalla volume.
 
@@ -379,8 +491,10 @@ COMMANDS = {
     "daily_trips":           _cli_daily_trips,
     "cleanup_receipts":      cleanup_receipts,
     "cleanup_ride_screenshots": cleanup_ride_screenshots,
+    "cleanup_model_report_photos": cleanup_model_report_photos,
     "backfill_public_usernames": backfill_public_usernames,
     "expire_stale_watches":  expire_stale_watches,
+    "expire_stale_off_feed_rides": expire_stale_off_feed_rides,
     "fetch_map_pbf":         _cli_fetch_map_pbf,
     "refresh_routing_graph": _cli_refresh_routing_graph,
     "extract_battery_trips": _cli_extract_battery_trips,

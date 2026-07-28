@@ -455,3 +455,148 @@ def test_export_emits_valid_geojson_for_a_waypointless_ride(monkeypatch):
     feature = r.json()["features"][0]
     assert feature["geometry"]["type"] == "LineString"
     assert len(feature["geometry"]["coordinates"]) == 2
+
+
+# ---------- 24-hour expiry (sql/040) ----------------------------------------
+# An off-feed ride left 'active' forever holds the account's only
+# one-active-ride slot (idx_rides_one_active_per_account), which used to 409
+# its owner out of POST /api/v1/rides/start permanently. The sweep is
+# src/cli.py:expire_stale_off_feed_rides; these cover the API's half.
+
+def test_end_ride_409s_with_ride_expired_once_it_has_expired(monkeypatch):
+    """Distinguished from 'already ended': nothing was ended, the window
+    simply closed, and the rider needs to be told their slot is free."""
+    c, _ = _seq_client(monkeypatch, [("expired", _NOW, 39.74, -104.98)])
+    r = c.patch(f"/api/v1/rides/{_RIDE_ID}/end", json={
+        "ended_at": "2026-07-27T16:45:00Z", "end_lat": 39.75, "end_lon": -104.99,
+    })
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "ride_expired"
+
+
+def test_active_lookup_ignores_expired_rides(monkeypatch):
+    """The endpoint and the unique index read the same column, so an expired
+    ride can never show as active while the slot it held is free."""
+    c, conn = _seq_client(monkeypatch, [None])
+    assert c.get("/api/v1/rides/active").json() == {"active": None}
+    select = next(q for q, _ in conn.cur.executed if q.lstrip().startswith("SELECT"))
+    assert "status = 'active'" in select
+
+
+def test_list_accepts_expired_as_a_status_filter(monkeypatch):
+    c, _ = _seq_client(monkeypatch, [])
+    assert c.get("/api/v1/rides", params={"status": "expired"}).status_code == 200
+
+
+def test_list_still_rejects_an_unknown_status(monkeypatch):
+    c, _ = _seq_client(monkeypatch, [])
+    assert c.get("/api/v1/rides", params={"status": "abandoned"}).status_code == 422
+
+
+# ---------- Plausibility of a client-asserted ride --------------------------
+# POST /api/v1/rides stores whatever distance the client sends, and
+# src/badges.py counts it: miles_100 is 160 934 m, inside the 200 000 m
+# per-ride ceiling, so one request used to earn the top mileage badge.
+# Badges must keep counting off-feed rides, so the fix is to disbelieve
+# impossible ones rather than to stop counting real ones.
+
+from src.polyline import encode as _encode  # noqa: E402
+
+_DEG_PER_M = 1.0 / 111_320.0
+
+
+def _route(meters: float) -> str:
+    """A two-point north-south polyline of about `meters` metres."""
+    return _encode([(39.74, -104.98), (39.74 + meters * _DEG_PER_M, -104.98)])
+
+
+def _one_shot(c, **overrides):
+    body = {
+        "started_at": "2026-07-27T16:20:00Z", "ended_at": "2026-07-27T16:45:00Z",
+        "duration_s": 1500, "distance_m": 2000, "started_in_zone": True,
+        "ended_in_zone": False, "polyline": _route(2000),
+    }
+    body.update(overrides)
+    return c.post("/api/v1/rides", json=body)
+
+
+def test_a_normal_ride_is_still_accepted(monkeypatch):
+    """5 km in 20 minutes (4.2 m/s), route matching. The guard must not cost
+    an honest rider their log."""
+    c, _ = _seq_client(monkeypatch, [_ride_row(status="completed", ended=True)])
+    r = _one_shot(c, distance_m=5000, duration_s=1200, polyline=_route(5000))
+    assert r.status_code == 200, r.text
+
+
+def test_the_badge_farming_request_is_rejected(monkeypatch):
+    """The exact vector: 160 934 m — miles_100 in one request — claimed over
+    a 90-second ride."""
+    c, conn = _seq_client(monkeypatch, [])
+    r = _one_shot(c, distance_m=160_934, duration_s=90, polyline=_route(160_934))
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "implausible_speed"
+    # No cursor was ever opened: the ride is refused at the door, so nothing
+    # is stored and then argued about.
+    assert conn.cur is None
+
+
+def test_distance_with_zero_duration_is_rejected(monkeypatch):
+    c, _ = _seq_client(monkeypatch, [])
+    r = _one_shot(c, distance_m=50_000, duration_s=0, polyline=_route(50_000))
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "implausible_speed"
+
+
+def test_speed_ceiling_leaves_headroom_for_a_fast_real_ride(monkeypatch):
+    """A 45 km/h class-3 e-bike average — legal, and comfortably inside the
+    20 m/s bound, which is deliberately ~3x the fastest thing this table is
+    for because it applies to a whole-ride average."""
+    c, _ = _seq_client(monkeypatch, [_ride_row(status="completed", ended=True)])
+    r = _one_shot(c, distance_m=12_500, duration_s=1000, polyline=_route(12_500))
+    assert r.status_code == 200, r.text
+
+
+def test_distance_far_beyond_the_submitted_route_is_rejected(monkeypatch):
+    """Slow enough to clear the speed bound, but the polyline shows 100 m."""
+    c, _ = _seq_client(monkeypatch, [])
+    r = _one_shot(c, distance_m=60_000, duration_s=20_000, polyline=_route(100))
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "distance_exceeds_polyline"
+
+
+def test_a_degenerate_polyline_buys_at_most_the_absolute_slack(monkeypatch):
+    """Two coincident points decode to a zero-length route, which would make
+    the multiplicative rule reject every short ride. The absolute floor is
+    what a farmer is left with: 1 km per request, not 200."""
+    c, _ = _seq_client(monkeypatch, [])
+    flat = _encode([(39.74, -104.98), (39.74, -104.98)])
+    assert _one_shot(c, distance_m=5000, duration_s=3600,
+                     polyline=flat).status_code == 422
+
+    c2, _ = _seq_client(monkeypatch, [_ride_row(status="completed", ended=True)])
+    assert _one_shot(c2, distance_m=800, duration_s=600,
+                     polyline=flat).status_code == 200
+
+
+def test_a_coarsely_sampled_track_is_not_punished(monkeypatch):
+    """An encoded polyline is a SAMPLED path, so its decoded length
+    undercounts the real route. 2.5x short is well within normal."""
+    c, _ = _seq_client(monkeypatch, [_ride_row(status="completed", ended=True)])
+    r = _one_shot(c, distance_m=5000, duration_s=1800, polyline=_route(2000))
+    assert r.status_code == 200, r.text
+
+
+def test_claiming_less_than_the_route_is_never_rejected(monkeypatch):
+    """One-sided on purpose: undercounting is not a farming vector, and a
+    client reporting a vehicle odometer is being honest, not evasive."""
+    c, _ = _seq_client(monkeypatch, [_ride_row(status="completed", ended=True)])
+    r = _one_shot(c, distance_m=100, duration_s=1800, polyline=_route(9000))
+    assert r.status_code == 200, r.text
+
+
+def test_a_zero_distance_ride_is_plausible(monkeypatch):
+    """A cancelled unlock that went nowhere — the one case where a zero
+    duration is legitimate too."""
+    c, _ = _seq_client(monkeypatch, [_ride_row(status="completed", ended=True)])
+    r = _one_shot(c, distance_m=0, duration_s=0, polyline=_route(0))
+    assert r.status_code == 200, r.text
