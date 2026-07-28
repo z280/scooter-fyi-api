@@ -521,11 +521,36 @@ def end_tracked_ride(
                 (str(rid),),
             )
             (waypoint_count,) = cur.fetchone()
+            # Attribute the award to the last location the MEASUREMENT is
+            # willing to stand behind, which is not always the reported end.
+            # When the final leg was too long to believe, _close_out dropped
+            # the reported end from the measured path — and filing the
+            # ledger row at that same coordinate would record the rider
+            # earning points in a cell the ride itself just declined to
+            # claim they reached. That is not cosmetic: user_points.lat/lng
+            # and the h3_8_index derived from them ARE the per-area points
+            # geography, so one bad GPS fix would otherwise plant a rider's
+            # whole ride payout in a hexagon they were never in.
+            #
+            # The rider's reported end is still stored in end_lat/end_lon
+            # untouched — it is their report and we keep it. This governs
+            # only where the AWARD is filed.
+            award_lat, award_lng = (
+                points[-1] if points else (payload.end_lat, payload.end_lon)
+            )
             credit_waypoint_points(
                 cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
-                waypoint_count=waypoint_count, end_lat=payload.end_lat, end_lng=payload.end_lon,
+                waypoint_count=waypoint_count, end_lat=award_lat, end_lng=award_lng,
                 ride_id=str(rid),
             )
+            # Deliberately the REPORTED end, not award_lat/award_lng above.
+            # This award exists because an independent observation — the
+            # vehicle reappearing on GBFS within 20 m — corroborates the
+            # reported end, which makes it the best-attested point on the
+            # whole ride even in the case where the track's last fix
+            # disagrees with it. The two awards can therefore land in
+            # different cells, and that is the correct outcome: each is
+            # filed where its own evidence puts it.
             credit_gbfs_validation_points(
                 cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
                 end_lat=payload.end_lat, end_lng=payload.end_lon,
@@ -595,7 +620,15 @@ def add_waypoint(
             # end coordinates. Off-feed rides do exactly the same
             # (api_rides.py:_rebuild_track) — badges sum distance across
             # both tables, so the two must measure the same way.
-            rebuilt = _measured_path(start_lat, start_lon, _track_points(cur, rid))
+            #
+            # `points` from _prospective_path IS that full ordered set: it
+            # is the existing track with this fix inserted at the position
+            # the same ORDER BY (waypoint_at, id) puts it in, which is what
+            # the row we just INSERTed now occupies. Re-reading the track to
+            # rebuild the identical list walked it a second time on every
+            # append — doubling an already-quadratic cost over a 600-fix
+            # ride, for a value that cannot differ inside one transaction.
+            rebuilt = points
             # Distance is recomputed from the same full ordered set, for the
             # same reason: an incremental += would be wrong the moment a
             # waypoint arrives out of order. Measured under the operator's

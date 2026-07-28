@@ -17,6 +17,7 @@ VEO_TEST_PG_DSN (see tests/test_tracked_rides_lifecycle_pg.py).
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,26 @@ SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 _NOW = datetime.now(timezone.utc)
 _DEG_PER_M = 1.0 / 111_320.0
 _LAT, _LON = 39.74, -104.98
+
+
+# Numeric literals in a constraint definition, e.g. the 80000 in
+# "CHECK ((distance_m IS NULL) OR (distance_m <= (80000)::double precision))".
+# The negative lookarounds keep the digits of a type name or a qualified
+# identifier from being read as a bound.
+_NUMERIC_LITERAL_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\w.])")
+
+
+def _cap_literal(definition: str) -> float:
+    """The single numeric bound written into a distance-cap CHECK.
+
+    Parsed and compared as a NUMBER. A substring test on the rendered
+    definition silently accepts any value the real one merely contains.
+    """
+    found = {float(m) for m in _NUMERIC_LITERAL_RE.findall(definition)}
+    assert len(found) == 1, (
+        f"expected exactly one numeric literal in {definition!r}, found {sorted(found)}"
+    )
+    return found.pop()
 
 
 def _reachable(dsn: str) -> bool:
@@ -152,23 +173,39 @@ def test_tracked_rides_carries_the_same_constraint(pg_conn):
         )
         row = cur.fetchone()
     assert row is not None, "tracked_rides has no distance cap"
-    assert "80000" in row[0]
+    assert _cap_literal(row[0]) == MAX_RIDE_DISTANCE_METERS
 
 
 def test_the_sql_cap_matches_the_python_constant(pg_conn):
     """A CHECK cannot read src/ride_limits.py, so 80000 is written twice.
     This is the test the migration's closing note points at: the two copies
-    cannot drift without a failure here."""
-    with pg_conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT pg_get_constraintdef(oid) FROM pg_constraint
-             WHERE conname = 'rides_distance_within_cap'
-               AND conrelid = 'rides'::regclass
-            """
+    cannot drift without a failure here.
+
+    Asserted by EQUALITY on the parsed literal, not by substring. `str(int(
+    MAX_RIDE_DISTANCE_METERS)) in definition` — what this used to do —
+    passes with the Python constant at 8000 or 800 against a SQL literal of
+    80000, because both are substrings of it. That is the direction the
+    drift would actually go (someone lowers the cap in Python and doesn't
+    touch the migration), so the check was blind to the failure it existed
+    to catch.
+    """
+    for table, conname in (
+        ("rides", "rides_distance_within_cap"),
+        ("tracked_rides", "tracked_rides_distance_within_cap"),
+    ):
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                 WHERE conname = %s AND conrelid = %s::regclass
+                """,
+                (conname, table),
+            )
+            row = cur.fetchone()
+        assert row is not None, f"{table} has no distance cap"
+        assert _cap_literal(row[0]) == MAX_RIDE_DISTANCE_METERS, (
+            f"{table}'s SQL cap disagrees with MAX_RIDE_DISTANCE_METERS"
         )
-        definition = cur.fetchone()[0]
-    assert str(int(MAX_RIDE_DISTANCE_METERS)) in definition
 
 
 def test_distance_source_accepts_the_partial_marker(pg_conn):

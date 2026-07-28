@@ -162,9 +162,22 @@ END $$;
 -- one. The cap is a statement about recorded distances, not a requirement
 -- that one exist.
 --
--- Guarded on conname so a replay doesn't error on the duplicate; the value
--- is checked too, so a later migration that raises the cap isn't reverted
--- by this file being re-run afterwards.
+-- Guarded on conname ALONE — deliberately unlike step 3, which also
+-- inspects the value. The two guards protect against opposite things and
+-- must not be made to match:
+--
+--   Step 3 widens an enumerated list. A replay has to be able to tell "the
+--   value I need is missing" from "already fine", so it reads the
+--   definition for 'waypoints_partial'.
+--   Step 4 installs a numeric BOUND. If a later migration raises the cap to
+--   100000, a value check here would see "80000 is absent", fire, and
+--   revert the raise — the exact regression step 3's value check exists to
+--   prevent. Leaving any existing constraint of this name untouched is what
+--   makes a later change stick.
+--
+-- Net effect either way: replay is a no-op, and a later migration owns the
+-- cap once it changes it. (An earlier revision of this comment claimed the
+-- value was checked here. It never was, and it must not be.)
 DO $$
 DECLARE
     current_def text;

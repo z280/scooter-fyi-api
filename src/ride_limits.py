@@ -26,8 +26,31 @@ WHY EACH ONE EXISTS
 -------------------
 * MAX_POINTS_PER_RIDE — `end_tracked_ride` credited 2 points per waypoint
   with no ceiling plus a flat 20 for GBFS validation, so a 600-waypoint
-  ride paid out 1220. Waypoint count is rider-controlled, which made the
-  points economy an unbounded faucet driven by how often a phone posts.
+  ride paid out 1220. This cap bounds what a single RIDE can be worth. It
+  is a statement about rides, not a lever on the points economy, and it
+  must not be described as one:
+
+      Sustained ceiling BEFORE this cap: 600 waypoints/hr
+      (_LIMIT_WAYPOINT_PER_ACCOUNT) x 2 = 1200, plus 20 ride starts/hr
+      (_LIMIT_START_RIDE_PER_ACCOUNT) x 20 GBFS = 400. Total 1600/hr.
+
+      Sustained ceiling AFTER it: 20 rides x 100 = 2000 would need 1000
+      waypoints and only 600 are available, so the best allocation is 30
+      waypoints/ride = 60 + 20 GBFS = 80/ride, under the cap. Still
+      1600/hr.
+
+  Identical. The rate was always bounded by the per-account waypoint rate
+  limit, and that — not this constant — is the lever if the earn RATE
+  ever needs to come down. What the cap does change is shape: no single
+  ride can display 1220 any more, which required stacking all 600
+  waypoints onto one ride. That is worth having on its own terms.
+
+  Not covered by this cap, and larger: `qr_scan` at 100 points x 20
+  scans/hr (_LIMIT_QR_SCAN_PER_ACCOUNT) = 2000/hr, deliberately exempt
+  because a device scan is not a ride award. It is bounded over a
+  lifetime rather than per hour — credit_qr_scan_points pays once per
+  (account, vehicle), so a fleet of ~8000 devices caps one account's
+  total scan earnings, but the hourly rate stands.
 * MAX_LEG_METERS — a ride's path was summed over consecutive fixes with no
   sanity check on the gap between them, so two waypoints on opposite sides
   of the world recorded ~15 000 km of "riding". A real sampling gap on a
@@ -156,10 +179,20 @@ def close_out_path(
 
       * A ride WITH a track whose final leg (last fix -> reported end) is
         over the leg cap. That leg is dropped, along with the reported end
-        point, so distance and polyline still cover exactly the same
-        points. Source becomes '..._partial'. The rider's reported end is
-        still stored in end_lat/end_lon — it is their report and we keep
-        it; we simply decline to measure a leg we don't believe.
+        point, so the polyline does not end at a point no leg reaches.
+        Source becomes '..._partial'. The rider's reported end is still
+        stored in end_lat/end_lon — it is their report and we keep it; we
+        simply decline to measure a leg we don't believe.
+
+        Note the narrower guarantee here than "polyline and distance
+        describe the same points": that holds for the FINAL leg, because
+        the disbelieved endpoint leaves the path with it. A disbelieved
+        leg in the MIDDLE keeps both of its endpoints in the polyline
+        (dropping either would break the path in two) and contributes
+        zero to the distance. So a '..._partial' polyline can contain a
+        segment the distance does not count. That asymmetry is why the
+        suffix exists — it marks a measurement with a hole in it, and a
+        consumer must not read the polyline's length as the distance.
       * A ride with NO track at all. start -> end is the whole ride, not a
         sampling gap, so the leg cap does not apply (see measure_path) and
         'straight_line' stands however long it is. Bounding it is the ride
