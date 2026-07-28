@@ -83,7 +83,7 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql … 037_not_rideable_report_type.sql
+├── sql/001_init.sql … 039_backfill_tracked_ride_distance.sql
 │                              37 migrations, applied idempotently at boot
 ├── src/
 │   ├── main.py                 FastAPI app, lifespan, migrations, router mounts

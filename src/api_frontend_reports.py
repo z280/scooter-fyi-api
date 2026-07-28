@@ -23,7 +23,7 @@ from typing import Any
 
 import h3
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import geo
 from .accounts import SessionUser, optional_session, require_session
@@ -51,6 +51,34 @@ router = APIRouter()
 # the scooter rides. 'not_found' (sql/029) is NOT excluded — see that
 # migration's header for why a missing vehicle IS a reliability signal.
 _REPORT_TYPES = ("not_rideable", "dead_battery", "damaged", "improperly_parked", "not_found")
+
+# DEPRECATED input aliases — accepted on the wire, normalised to the
+# canonical spelling before anything reads them. REMOVE once no client
+# sends the old spelling.
+#
+# sql/037 renamed 'failed_unlock' -> 'not_rideable'. The button that sends
+# it lives in a DIFFERENT repository, so backend and frontend cannot deploy
+# atomically, and report_type is validated by a pydantic `pattern`: a
+# mismatch is a 422, not a soft failure. Without this alias there is no
+# safe merge order — ship the backend first and every rider on the old
+# frontend gets "Couldn't send — please try again" forever; ship the
+# frontend first and it breaks against the old backend the same way. Either
+# way the single most important reliability signal we collect stops
+# flowing, and nothing in the response tells anyone why.
+#
+# REMOVAL: delete this dict (and the `_ACCEPTED_REPORT_TYPES` seam) once
+# the frontend rename has been live long enough that no client sends the
+# old spelling. The database can't answer that question — the alias is
+# normalised away before storage, by design — so the signal is the
+# WARNING logged by _normalise_report_type below. When 30 days pass with
+# none of those lines, delete this and the alias becomes a 422 again.
+_DEPRECATED_REPORT_TYPE_ALIASES = {"failed_unlock": "not_rideable"}
+
+# What the endpoint ACCEPTS, as opposed to what it stores. Storage only
+# ever sees _REPORT_TYPES — sql/037's CHECK constraint would reject
+# anything else, which is exactly the safety net we want behind the
+# normalisation.
+_ACCEPTED_REPORT_TYPES = _REPORT_TYPES + tuple(_DEPRECATED_REPORT_TYPE_ALIASES)
 
 # Report types that must NOT drive has_negative_report / reliability_tier.
 # Single source of truth for the exclusion applied in the /devices/current
@@ -81,6 +109,14 @@ _LIMIT_EXPORT_PER_IP = (10, 3600)
 _LIMIT_MODEL_ANON_PER_IP = (5, 3600)
 _LIMIT_MODEL_AUTH_PER_ACCOUNT = (20, 3600)
 _MAX_MODEL_DESCRIPTION = 2000
+# Ceiling on the whole request body an ANONYMOUS model report may declare.
+# A text-only report is a device_id, a <=2000 char description, an optional
+# vehicle_identifier and two coordinates — kilobytes. 64 KB leaves room for
+# multipart framing and a generous UTF-8 description while being far too
+# small to smuggle a photo through, which is the point: the endpoint's rule
+# is "a photo requires a session", and this is that rule enforced BEFORE we
+# buffer the body rather than after.
+_MAX_ANON_MODEL_REPORT_BYTES = 64 * 1024
 _VEHICLE_IDENTIFIER_RE = re.compile(r"^[0-9a-f]{16}$")
 
 # §3.3 est_overcharge_cents: without Veo's rate card we can't compute the
@@ -117,10 +153,27 @@ _summary_cache = _SummaryCache()
 # ---------------------------------------------------------------------------
 class DeviceReportIn(BaseModel):
     vehicle_identifier: str = Field(..., min_length=16, max_length=16, pattern=r"^[0-9a-f]{16}$")
-    report_type: str = Field(..., pattern=f"^({'|'.join(_REPORT_TYPES)})$")
+    report_type: str = Field(..., pattern=f"^({'|'.join(_ACCEPTED_REPORT_TYPES)})$")
     observed_at: datetime | None = None
     lat: float | None = Field(default=None, ge=-90, le=90)
     lng: float | None = Field(default=None, ge=-180, le=180)
+
+    @field_validator("report_type")
+    @classmethod
+    def _normalise_report_type(cls, value: str) -> str:
+        """Fold a deprecated spelling onto its canonical one at the edge, so
+        exactly one value reaches dedupe, storage and points — see
+        _DEPRECATED_REPORT_TYPE_ALIASES. Doing it here rather than in the
+        handler means every future reader of a DeviceReportIn inherits it
+        instead of having to remember."""
+        canonical = _DEPRECATED_REPORT_TYPE_ALIASES.get(value)
+        if canonical is None:
+            return value
+        log.warning(
+            "deprecated report_type %r accepted and stored as %r — a client "
+            "is still on the pre-sql/037 spelling", value, canonical,
+        )
+        return canonical
 
 
 @router.post("/api/v1/reports/device")
@@ -289,6 +342,19 @@ async def submit_discount_report(
     ip = real_client_ip(request)
     ua = request.headers.get("user-agent")
 
+    # Rate limit BEFORE storing the receipt, in its own committed
+    # transaction — same reasoning as POST /api/v1/reports/model above.
+    # store_receipt is an EXIF strip + re-encode plus an R2 PUT (and an R2
+    # DELETE on the rollback path); metering after it left all of that
+    # unpriced, and sharing the insert's transaction would refund the quota
+    # of every attempt that failed on the expensive path.
+    with connection() as conn:
+        with conn.cursor() as cur:
+            enforce(cur, bucket="discount_report_account", key=str(user.account_id),
+                    limit=_LIMIT_DISCOUNT_PER_ACCOUNT[0],
+                    window_seconds=_LIMIT_DISCOUNT_PER_ACCOUNT[1])
+        conn.commit()
+
     receipt_key: str | None = None
     if receipt_bytes:
         if not receipts_bucket():
@@ -301,9 +367,6 @@ async def submit_discount_report(
     try:
         with connection() as conn:
             with conn.cursor() as cur:
-                enforce(cur, bucket="discount_report_account", key=str(user.account_id),
-                        limit=_LIMIT_DISCOUNT_PER_ACCOUNT[0],
-                        window_seconds=_LIMIT_DISCOUNT_PER_ACCOUNT[1])
                 cur.execute(
                     """
                     INSERT INTO discount_reports (
@@ -367,7 +430,10 @@ async def submit_model_report(
     free and the liability of hosting whatever they upload is not. This is
     the only endpoint in the project that takes an upload alongside an
     optional session, so it is the only one where the rule has to be stated
-    rather than inherited from require_session.
+    rather than inherited from require_session. An anonymous request is
+    additionally capped at _MAX_ANON_MODEL_REPORT_BYTES of declared body
+    BEFORE the form is parsed, so rejecting one costs a header read rather
+    than a 10 MB spool.
 
     multipart/form-data: `device_id` and `description` required;
     `vehicle_identifier`, `lat`, `lng`, and a `photo` part optional.
@@ -381,6 +447,42 @@ async def submit_model_report(
     if not (ctype.startswith("multipart/form-data")
             or ctype.startswith("application/x-www-form-urlencoded")):
         raise HTTPException(415, "send multipart/form-data or application/x-www-form-urlencoded")
+
+    # BODY SIZE GATE FOR ANONYMOUS CALLERS — must happen here, before
+    # request.form().
+    #
+    # request.form() parses and spools the ENTIRE body, file parts included,
+    # before returning. Any check written after it (including the 401 below)
+    # has already cost us the buffering it was supposed to prevent: an
+    # anonymous caller could make us take 10 MB per request and pay for it
+    # only in a rejection. The only thing available before parsing is the
+    # declared length, so that is what the gate uses.
+    #
+    # Content-Length is trustworthy here in the way that matters. For a
+    # non-chunked HTTP/1.1 request the ASGI server reads exactly that many
+    # body bytes and no more, so a client cannot under-declare its way past
+    # this and then stream more. A chunked request declares no length at
+    # all, which is why anonymous chunked uploads are refused outright
+    # rather than parsed and hoped about; every real client of this endpoint
+    # (browser form post, the mobile app) sends a length.
+    #
+    # A signed-in caller is past the gate because they are already bounded
+    # by the per-account rate limit below and by an identity we can revoke.
+    if user is None:
+        declared = request.headers.get("content-length")
+        if declared is None:
+            raise HTTPException(
+                411, "Content-Length required — anonymous model reports must "
+                     "declare their size (sign in to attach a photo)")
+        try:
+            declared_bytes = int(declared)
+        except ValueError:
+            raise HTTPException(400, "malformed Content-Length")
+        if declared_bytes > _MAX_ANON_MODEL_REPORT_BYTES:
+            raise HTTPException(
+                413, "sign in to attach a photo — anonymous model reports are "
+                     f"text-only (max {_MAX_ANON_MODEL_REPORT_BYTES // 1024} KB)")
+
     form = await request.form()
 
     def _text(name: str) -> str | None:
@@ -422,8 +524,11 @@ async def submit_model_report(
     photo = form.get("photo")
     photo_bytes: bytes | None = None
     if photo is not None and not isinstance(photo, str):
-        # Checked BEFORE reading the body: an anonymous caller must not be
-        # able to make us buffer a 10 MB upload just to reject it.
+        # Belt to the size gate's braces. An anonymous caller can no longer
+        # get a photo-sized body this far (see _MAX_ANON_MODEL_REPORT_BYTES
+        # above), so this now rejects the small-but-present photo part
+        # rather than being the only thing standing between an anonymous
+        # stranger and a 10 MB buffer.
         if user is None:
             raise HTTPException(401, "sign in to attach a photo — "
                                      "text-only model reports are accepted anonymously")
@@ -432,6 +537,34 @@ async def submit_model_report(
             raise HTTPException(413, "photo too large (max 10 MB)")
 
     ip = real_client_ip(request)
+
+    # RATE LIMIT BEFORE THE EXPENSIVE WORK, in its own committed
+    # transaction.
+    #
+    # store_model_photo is a Pillow decode + re-encode of up to 10 MB
+    # followed by an R2 PUT, and the failure path adds an R2 DELETE. Running
+    # the limiter after that made the 20/hour cap protect only the INSERT —
+    # the cheapest thing in the handler — while the CPU and the paid object
+    # storage round-trips stayed unmetered. Metering first is the whole
+    # point of having a cap here.
+    #
+    # The separate commit is deliberate. Sharing the insert's transaction
+    # would roll the consumed quota back whenever the upload or the insert
+    # failed, so a caller whose uploads keep failing would get unlimited
+    # free attempts at exactly the expensive path. Quota is spent on the
+    # attempt, not on the success.
+    with connection() as conn:
+        with conn.cursor() as cur:
+            if user is not None:
+                enforce(cur, bucket="model_report_account", key=str(user.account_id),
+                        limit=_LIMIT_MODEL_AUTH_PER_ACCOUNT[0],
+                        window_seconds=_LIMIT_MODEL_AUTH_PER_ACCOUNT[1])
+            else:
+                enforce(cur, bucket="model_report_ip", key=ip or "unknown",
+                        limit=_LIMIT_MODEL_ANON_PER_IP[0],
+                        window_seconds=_LIMIT_MODEL_ANON_PER_IP[1])
+        conn.commit()
+
     photo_key: str | None = None
     if photo_bytes:
         if not receipts_bucket():
@@ -444,14 +577,6 @@ async def submit_model_report(
     try:
         with connection() as conn:
             with conn.cursor() as cur:
-                if user is not None:
-                    enforce(cur, bucket="model_report_account", key=str(user.account_id),
-                            limit=_LIMIT_MODEL_AUTH_PER_ACCOUNT[0],
-                            window_seconds=_LIMIT_MODEL_AUTH_PER_ACCOUNT[1])
-                else:
-                    enforce(cur, bucket="model_report_ip", key=ip or "unknown",
-                            limit=_LIMIT_MODEL_ANON_PER_IP[0],
-                            window_seconds=_LIMIT_MODEL_ANON_PER_IP[1])
                 cur.execute(
                     """
                     INSERT INTO model_reports (

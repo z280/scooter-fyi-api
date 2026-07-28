@@ -1330,12 +1330,17 @@ consecutive days). Badges are recomputed on every read, so
 new thresholds apply retroactively.
 
 The mileage and streak badges (`miles_10`, `miles_100`, `streak_7`) are
-computed from [tracked rides](#tracked-rides-gbfs-detected) — every ride
-where you reported an end. Both distance sources count toward mileage, so
-a rider who uploads no waypoints still earns badges; their miles just
-accrue more slowly, since a `straight_line` distance undercounts. A ride
-with `distance_meters: null` still counts toward `streak_7` (it happened)
-but adds nothing to mileage.
+computed from [tracked rides](#tracked-rides-gbfs-detected) **and**
+[off-feed rides](#off-feed-rides) together — every ride where you reported
+an end. Which mechanism logged a ride is an implementation detail you
+never chose, so both measure identically and both count. Every distance
+source counts toward mileage, so a rider who uploads no waypoints still
+earns badges; their miles just accrue more slowly, since a
+`straight_line` distance undercounts. A ride with `distance_meters: null`
+still counts toward `streak_7` (it happened) but adds nothing to mileage.
+
+Tracked rides that ended before distance was recorded at all have been
+backfilled with their start → end straight line, tagged `straight_line`.
 
 ### Public usernames
 
@@ -1380,7 +1385,18 @@ weighs it double in the public aggregates.
 ```
 
 `report_type`: `not_rideable` | `dead_battery` | `damaged` |
-`improperly_parked` | `not_found`. `observed_at`,
+`improperly_parked` | `not_found`.
+
+> **Deprecated alias.** `failed_unlock` is still accepted and is stored,
+> deduped and scored as `not_rideable` — it was renamed because the
+> rider-facing question is broader than "did the unlock work": could you
+> ride it or not? Send `not_rideable`. The alias exists only so a frontend
+> and backend that deploy at different times can't 422 each other's
+> riders, and it will be removed once no client sends the old spelling.
+> Nothing ever reads `failed_unlock` back out — exports, aggregates and
+> the points ledger only ever show `not_rideable`.
+
+`observed_at`,
 `lat`, `lng` optional — without coordinates the report is anchored to the
 scooter's last known cell. →
 `{ "id": 17, "reported_at": "...", "deduped": false, "points_awarded": 10 }`.
@@ -1425,6 +1441,10 @@ ingest — EXIF/GPS metadata is destroyed, not just hidden — stored in a
 private bucket, and deleted after 18 months (see `/api/v1/meta/privacy`).
 → `{ "id": 3, "created_at": "...", "receipt_stored": true }`
 
+The 20/day limit is applied **before** the receipt is processed or stored,
+so a `429` never costs you an upload. Quota is consumed by the attempt,
+not by the success.
+
 ### `POST /api/v1/reports/model`
 
 "We're showing this as an unrecognized model — tell us what it actually
@@ -1456,6 +1476,20 @@ corrections. Attaching a `photo` while signed out returns **`401`**: we do
 not accept binary uploads from unauthenticated callers, because IPs are
 free and hosting whatever gets uploaded is not. Signed-in callers get
 20/hour per account and may attach a photo.
+
+Two things follow for signed-out callers, both enforced *before* the body
+is parsed rather than after:
+
+- The whole request body is capped at **64 KB** — plenty for a text
+  report, far too small for a photo. Over that is a **`413`**, and we
+  never buffer the upload to find out.
+- The request must declare a `Content-Length`. A chunked signed-out
+  request is refused with **`411`**, since there is nothing to check
+  against. Signed-in callers are exempt from both.
+
+The rate limit is applied **before** the photo is processed or stored, so
+a `429` costs you nothing and burns none of our storage — and quota is
+consumed by the attempt, not by the success.
 
 Photos are re-encoded on ingest (EXIF/GPS destroyed, not hidden) and
 stored in the same private bucket as receipts. `503` if photo storage
@@ -1549,11 +1583,11 @@ unverifiable ride would be an unbounded points faucet.
 | `POST /api/v1/rides/start` | `{start_lat, start_lon, vehicle_kind?, operator?, started_at?}` → the created ride, `status: "active"`. `409` if you already have an active off-feed ride. 20/hour. |
 | `GET /api/v1/rides/active` | → `{ "active": <ride> }` or `{ "active": null }` — always wrapped. |
 | `POST /api/v1/rides/{id}/waypoints` | `{waypoint_at, lat, lon, metadata?}`. Rebuilds the polyline and distance. 600/hour. `409 {"error": "ride_not_active"}` once ended. |
-| `GET /api/v1/rides/{id}/waypoints?limit=&before=` | → `{count, waypoints: [...]}`, oldest first. |
+| `GET /api/v1/rides/{id}/waypoints?limit=&after=&before=` | → `{count, waypoints: [...]}`, oldest first. Paginate with `after` — see [below](#paginating-waypoints). |
 | `PATCH /api/v1/rides/{id}/end` | `{ended_at, end_lat, end_lon, est_cost_cents?, rate_plan?, started_in_zone?, ended_in_zone?}` → the completed ride. `409` if already ended. |
 | `POST /api/v1/rides` | One-shot log of a finished ride (fields below). 120/day. |
 | `GET /api/v1/rides?limit=&before=&status=` | Owner-only, newest first. → `{count, rides: [...]}` |
-| `GET /api/v1/rides/export?format=geojson\|csv` | Owner-only full export. GeoJSON decodes each polyline to a `LineString`. |
+| `GET /api/v1/rides/export?format=geojson\|csv` | Owner-only full export. GeoJSON decodes each polyline to a `LineString`; see [Export geometry](#export-geometry). |
 | `DELETE /api/v1/rides/{id}` | **Immediate hard delete**, cascading to the ride's waypoints. → `{"deleted": true}` |
 | `DELETE /api/v1/rides` | **Immediate hard delete of everything you own.** → `{"deleted_count": n}` |
 
@@ -1589,13 +1623,42 @@ Same two-field contract as tracked rides, plus a third source:
 
 | `distance_source` | Meaning |
 |---|---|
-| `"waypoints"` | Summed over your start point followed by the track you uploaded. Good. |
-| `"straight_line"` | Start → your reported end, crow-flies. The fallback when a lifecycle ride ends with no waypoints. Undercounts. |
+| `"waypoints"` | Measured along your **whole** path: start point → every fix you uploaded → the end you reported. Good. |
+| `"straight_line"` | Start → your reported end, crow-flies. The fallback when a lifecycle ride ends with no waypoints at all. Undercounts. |
 | `"client"` | Your app computed it and we stored what you sent. Unverifiable. |
 | `null` | Ride still active with no waypoints yet. |
 
-Ending a ride never overwrites a waypoint-derived distance with the
-straight line — the better measurement wins.
+**Ending a ride re-measures it.** The distance you see while a ride is
+still active covers start → last fix, because that is all we know yet;
+`PATCH .../end` recomputes over the same points *plus your reported end*.
+That final leg matters more than it sounds: a phone that backgrounds,
+saves battery, or loses signal in a tunnel stops producing fixes long
+before you stop riding, and a ride with one early fix is otherwise
+recorded as a few metres. A ride that uploaded any waypoints keeps
+`"waypoints"` and has its `polyline` re-encoded over exactly the points
+the distance was measured over, so the two can never disagree.
+
+### Export geometry
+
+A GeoJSON `LineString` needs at least two positions. A ride with no
+waypoints has an empty `polyline`, so the export builds its geometry from
+the ride's start and end coordinates instead. A ride with neither (an
+active ride with no end yet) exports with `"geometry": null`, which is
+valid GeoJSON — its properties still export. The export never emits an
+empty `LineString`, which QGIS, GDAL and geojson.io all reject.
+
+### Paginating waypoints
+
+Waypoints come back oldest first, so the cursor that pages **forward** is
+`after`: pass the `waypoint_at` of the last waypoint you received to get
+the next page, and stop when `count` is 0.
+
+`before` pages **backward** — the last `limit` waypoints *older* than the
+cursor, still returned oldest-first. Passing both narrows to an open
+interval and takes the newest rows in it.
+
+Both cursors require an explicit UTC offset (a trailing `Z` is fine); a
+naive timestamp is a `400`.
 
 ### Status
 
@@ -1716,17 +1779,27 @@ equally good:
 
 | `distance_source` | Meaning |
 |---|---|
-| `"waypoints"` | Summed over your ride's start point followed by your uploaded GPS fixes. Good. Still a slight undercount: sampling measures each curve as a chord. |
-| `"straight_line"` | Start → your reported end, as the crow flies. This is the fallback when you uploaded **no** waypoints, and it undercounts badly on any route that isn't a straight line. |
+| `"waypoints"` | Measured along your **whole** path: the ride's start point → every GPS fix you uploaded → the end you reported. Good. Still a slight undercount: sampling measures each curve as a chord. |
+| `"straight_line"` | Start → your reported end, as the crow flies. This is the fallback when you uploaded **no** waypoints at all, and it undercounts badly on any route that isn't a straight line. |
 | `null` | Not computed yet — the ride hasn't ended and has no waypoints. |
 
 Distance appears as soon as your first waypoint lands and updates on every
-append, so an in-progress ride shows a live figure. The path is measured from
-the ride's **start point** through every waypoint — the leg between where
-you started and your first GPS fix is real distance, and dropping it would
-undercount every ride by the first sampling gap. Reporting your end
-never overwrites a waypoint-derived distance with the straight line — the
-better measurement always wins.
+append, so an in-progress ride shows a live figure — covering start → your
+last fix, because that is all we know yet.
+
+**Reporting your end re-measures the ride**, adding the leg from your last
+fix to where you actually parked. Both end legs are real distance and both
+are measured: dropping the first would undercount every ride by the
+opening sampling gap, and dropping the last is worse, because a phone that
+backgrounds, saves battery or loses signal in a tunnel stops producing
+fixes long before you stop riding — a ride with one early fix would
+otherwise be recorded as a few metres. `path_polyline` is re-encoded over
+exactly the points the final distance was measured over, so path and
+distance can never disagree.
+
+A ride that uploaded no waypoints keeps `path_polyline: null` rather than
+gaining a two-point line we never observed; only its distance falls back
+to `straight_line`.
 
 Unlike the `gbfs_*` fields, distance is **not** redacted before you report
 your end: it is derived entirely from your own waypoints and your own
@@ -1745,7 +1818,7 @@ waypoints makes it accurate.
 | `GET /api/v1/tracked-rides/{id}` | Full detail incl. `path_geojson`. `404` if it isn't yours. |
 | `PATCH /api/v1/tracked-rides/{id}/end` | See below. |
 | `POST /api/v1/tracked-rides/{id}/waypoints` | See below. |
-| `GET /api/v1/tracked-rides/{id}/waypoints?limit=&before=` | → `{ count, waypoints: [ { id, waypoint_at, lat, lon, metadata, created_at } ] }`, oldest first. |
+| `GET /api/v1/tracked-rides/{id}/waypoints?limit=&after=&before=` | → `{ count, waypoints: [ { id, waypoint_at, lat, lon, metadata, created_at } ] }`, oldest first. Page **forward** with `after` (the `waypoint_at` of the last waypoint you received) and backward with `before` (the last `limit` waypoints older than the cursor). Both cursors need an explicit UTC offset. Identical contract to `GET /api/v1/rides/{id}/waypoints`. |
 | `DELETE /api/v1/tracked-rides/{id}` | **Immediate hard delete**, cascades to waypoints and the watch list. → `{ "deleted": true }` |
 | `DELETE /api/v1/tracked-rides` | **Immediate hard delete of every tracked ride you own.** → `{ "deleted_count": n }` |
 

@@ -112,8 +112,9 @@ def _ride_row(
 
 
 class _SeqCursor:
-    def __init__(self, fetches):
+    def __init__(self, fetches, waypoints=()):
         self._fetches = list(fetches)
+        self._waypoints = list(waypoints)
         self.executed: list[tuple[str, tuple]] = []
 
     def execute(self, sql, params=()):
@@ -123,7 +124,8 @@ class _SeqCursor:
         return self._fetches.pop(0)
 
     def fetchall(self):
-        return []
+        # The only fetchall in this module is the waypoint track read.
+        return list(self._waypoints)
 
     def __enter__(self):
         return self
@@ -133,20 +135,21 @@ class _SeqCursor:
 
 
 class _SeqConn:
-    def __init__(self, fetches):
+    def __init__(self, fetches, waypoints=()):
         self._fetches = fetches
+        self._waypoints = waypoints
         self.cur: _SeqCursor | None = None
 
     def cursor(self):
-        self.cur = _SeqCursor(self._fetches)
+        self.cur = _SeqCursor(self._fetches, self._waypoints)
         return self.cur
 
     def commit(self):
         pass
 
 
-def _seq_client(monkeypatch, fetches):
-    conn = _SeqConn(fetches)
+def _seq_client(monkeypatch, fetches, waypoints=()):
+    conn = _SeqConn(fetches, waypoints)
 
     @contextmanager
     def _conn():
@@ -254,16 +257,23 @@ def test_waypoint_requires_tz_aware_timestamp():
 
 
 def test_end_ride_409_when_already_completed(monkeypatch):
-    c, _ = _seq_client(monkeypatch, [("completed", _NOW, 39.74, -104.98, "waypoints")])
+    c, _ = _seq_client(monkeypatch, [("completed", _NOW, 39.74, -104.98)])
     r = c.patch(f"/api/v1/rides/{_RIDE_ID}/end", json={
         "ended_at": "2026-07-27T16:45:00Z", "end_lat": 39.75, "end_lon": -104.99,
     })
     assert r.status_code == 409
 
 
+def _end_distance(conn) -> tuple[int, str]:
+    """(distance_m, distance_source) as written by PATCH .../end. They are
+    the last two params before the ride id."""
+    params = _end_update(conn)[1]
+    return params[-3], params[-2]
+
+
 def test_end_ride_without_waypoints_falls_back_to_straight_line(monkeypatch):
     c, conn = _seq_client(monkeypatch, [
-        ("active", _NOW, 39.74, -104.98, None),
+        ("active", _NOW, 39.74, -104.98),
         _ride_row(status="completed", ended=True, distance_m=1113,
                   distance_source="straight_line"),
     ])
@@ -271,31 +281,76 @@ def test_end_ride_without_waypoints_falls_back_to_straight_line(monkeypatch):
         "ended_at": "2026-07-27T16:45:00Z", "end_lat": 39.75, "end_lon": -104.98,
     })
     assert r.status_code == 200, r.text
-    sql, params = _end_update(conn)
-    assert "distance_source = 'straight_line'" in sql
+    distance, source = _end_distance(conn)
+    assert source == "straight_line"
     # 39.74 -> 39.75 at constant longitude is ~1113 m.
-    assert any(isinstance(p, int) and 1100 < p < 1120 for p in params)
+    assert 1100 < distance < 1120
+    # No track, so no fabricated polyline — the '' the schema needs stands.
+    assert "polyline = COALESCE(polyline, '')" in _end_update(conn)[0]
 
 
-def test_end_ride_keeps_waypoint_distance(monkeypatch):
-    c, conn = _seq_client(monkeypatch, [
-        ("active", _NOW, 39.74, -104.98, "waypoints"),
-        _ride_row(status="completed", ended=True, distance_m=4321,
-                  distance_source="waypoints"),
-    ])
+def test_end_ride_measures_the_leg_from_the_last_waypoint_to_the_end(monkeypatch):
+    """THE regression this file exists for: a rider whose phone stopped
+    reporting early (backgrounded, battery saver, tunnel) sends ONE waypoint
+    20 m from the start and then parks 10 km away.
+
+    The old code took whatever the last waypoint upload had measured and
+    called it 'waypoints', recording ~20 m for a 10 km ride and tagging it
+    high-confidence. The reported end has to close the path.
+    """
+    step = 1.0 / 111_320.0  # metres of latitude
+    c, conn = _seq_client(
+        monkeypatch,
+        [
+            ("active", _NOW, 39.74, -104.98),
+            _ride_row(status="completed", ended=True, distance_m=10_019,
+                      distance_source="waypoints"),
+        ],
+        waypoints=[(39.74 + 20 * step, -104.98)],  # one fix, 20 m along
+    )
     r = c.patch(f"/api/v1/rides/{_RIDE_ID}/end", json={
-        "ended_at": "2026-07-27T16:45:00Z", "end_lat": 39.75, "end_lon": -104.98,
+        "ended_at": "2026-07-27T16:45:00Z",
+        "end_lat": 39.74 + 10_000 * step, "end_lon": -104.98,
     })
     assert r.status_code == 200, r.text
-    sql, _ = _end_update(conn)
-    assert "distance_source = 'waypoints'" in sql
-    assert "straight_line" not in sql
-    # The tracked length must not be overwritten by the fallback.
-    assert "distance_m = %s" not in sql
+    distance, source = _end_distance(conn)
+    assert source == "waypoints"
+    assert 9_900 < distance < 10_100, "the final leg was not measured"
+    # The stored polyline is re-encoded over the same points as the
+    # distance, so the two can't disagree.
+    sql, params = _end_update(conn)
+    assert "polyline = %s" in sql
+    from src.polyline import decode as decode_polyline
+    assert len(decode_polyline(params[-4])) == 3  # start, fix, reported end
+
+
+def test_end_ride_with_waypoints_still_reports_a_tracked_length(monkeypatch):
+    """A well-behaved client that streamed the whole route keeps measuring
+    along the track, not the crow-flies line between its ends."""
+    step = 1.0 / 111_320.0
+    # An L: 300 m north, then 300 m east. Straight line ≈ 424 m.
+    c, conn = _seq_client(
+        monkeypatch,
+        [
+            ("active", _NOW, 39.74, -104.98),
+            _ride_row(status="completed", ended=True, distance_m=600,
+                      distance_source="waypoints"),
+        ],
+        waypoints=[(39.74 + 300 * step, -104.98)],
+    )
+    east = 300.0 / (111_320.0 * 0.7677)  # cos(39.74°)
+    r = c.patch(f"/api/v1/rides/{_RIDE_ID}/end", json={
+        "ended_at": "2026-07-27T16:45:00Z",
+        "end_lat": 39.74 + 300 * step, "end_lon": -104.98 + east,
+    })
+    assert r.status_code == 200, r.text
+    distance, source = _end_distance(conn)
+    assert source == "waypoints"
+    assert 580 < distance < 620, "measured the straight line, not the track"
 
 
 def test_end_ride_rejects_end_before_start(monkeypatch):
-    c, _ = _seq_client(monkeypatch, [("active", _NOW, 39.74, -104.98, None)])
+    c, _ = _seq_client(monkeypatch, [("active", _NOW, 39.74, -104.98)])
     r = c.patch(f"/api/v1/rides/{_RIDE_ID}/end", json={
         "ended_at": "2026-07-27T10:00:00Z", "end_lat": 39.75, "end_lon": -104.99,
     })
@@ -339,3 +394,64 @@ def test_one_shot_post_rejects_undecodable_polyline(monkeypatch):
         "ended_in_zone": False, "polyline": "!!!not-a-polyline!!!",
     })
     assert r.status_code == 400
+
+
+# ---------- GeoJSON export geometry -----------------------------------------
+# A LineString needs >= 2 positions (RFC 7946 §3.1.4). Emitting an empty one
+# doesn't degrade a single feature — QGIS/GDAL/geojson.io reject the whole
+# FeatureCollection, so one waypoint-less ride used to break the rider's
+# entire export.
+
+def _exported(ride: dict) -> dict:
+    return api_rides._ride_geometry(ride)
+
+
+def _export_ride(**overrides) -> dict:
+    ride = api_rides._row_to_ride(_ride_row(status="completed", ended=True,
+                                            distance_m=1113,
+                                            distance_source="straight_line"))
+    ride.update(overrides)
+    return ride
+
+
+def test_export_geometry_uses_the_polyline_when_there_is_one():
+    from src.polyline import encode as encode_polyline
+    geom = _exported(_export_ride(
+        polyline=encode_polyline([(39.74, -104.98), (39.75, -104.98), (39.76, -104.97)])))
+    assert geom["type"] == "LineString"
+    assert len(geom["coordinates"]) == 3
+    assert geom["coordinates"][0] == pytest.approx([-104.98, 39.74])  # lon, lat
+
+
+def test_export_geometry_falls_back_to_the_ride_endpoints():
+    """A ride with no waypoints stores polyline '' but still knows where it
+    started and ended — that IS its geometry."""
+    geom = _exported(_export_ride(polyline=""))
+    assert geom["type"] == "LineString"
+    assert geom["coordinates"] == [[-104.98, 39.74], [-104.99, 39.75]]
+
+
+def test_export_geometry_never_emits_an_empty_linestring():
+    for polyline in ("", None, "!!!undecodable!!!"):
+        geom = _exported(_export_ride(polyline=polyline))
+        assert geom is None or len(geom["coordinates"]) >= 2
+
+
+def test_export_geometry_is_null_when_there_is_nothing_to_draw():
+    """An active ride has no end yet. `null` geometry is valid GeoJSON for a
+    Feature, so the row's properties still export."""
+    geom = _exported(_export_ride(polyline="", end_lat=None, end_lon=None))
+    assert geom is None
+
+
+def test_export_emits_valid_geojson_for_a_waypointless_ride(monkeypatch):
+    c, _ = _seq_client(monkeypatch, [])
+    monkeypatch.setattr(_SeqCursor, "fetchall",
+                        lambda self: [_ride_row(status="completed", ended=True,
+                                                distance_m=1113,
+                                                distance_source="straight_line")])
+    r = c.get("/api/v1/rides/export", params={"format": "geojson"})
+    assert r.status_code == 200, r.text
+    feature = r.json()["features"][0]
+    assert feature["geometry"]["type"] == "LineString"
+    assert len(feature["geometry"]["coordinates"]) == 2

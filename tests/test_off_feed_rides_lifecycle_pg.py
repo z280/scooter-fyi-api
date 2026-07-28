@@ -173,6 +173,69 @@ def test_end_without_waypoints_uses_the_straight_line(pg_conn):
     assert 1100 <= done["distance_m"] <= 1120
 
 
+def test_one_early_waypoint_still_measures_the_whole_ride(pg_conn):
+    """The common real-world case: the phone backgrounds (or saves battery,
+    or goes into a tunnel) after one fix, and the rider parks 10 km later.
+
+    Measuring only start -> last fix recorded ~20 m for that ride and
+    tagged it 'waypoints' — high confidence in a number off by three orders
+    of magnitude. The reported end has to close the path.
+    """
+    c, _ = _client(pg_conn)
+    step = 1.0 / 111_320.0  # metres of latitude
+    rid = c.post("/api/v1/rides/start",
+                 json={"start_lat": 39.74, "start_lon": -104.98}).json()["id"]
+    c.post(f"/api/v1/rides/{rid}/waypoints", json={
+        "waypoint_at": (_NOW + timedelta(seconds=15)).isoformat(),
+        "lat": 39.74 + 20 * step, "lon": -104.98,   # one fix, 20 m along
+    })
+    done = c.patch(f"/api/v1/rides/{rid}/end", json={
+        "ended_at": (_NOW + timedelta(minutes=40)).isoformat(),
+        "end_lat": 39.74 + 10_000 * step, "end_lon": -104.98,
+    }).json()
+    assert done["distance_source"] == "waypoints"
+    assert 9_900 <= done["distance_m"] <= 10_100, done["distance_m"]
+    # The polyline covers the same three points the distance was measured
+    # over, so an export can't disagree with the badge.
+    from src.polyline import decode as decode_polyline
+    assert len(decode_polyline(done["polyline"])) == 3
+
+
+def test_waypoint_pagination_reaches_every_page(pg_conn):
+    """`before` paired with an ascending sort re-served the OLDEST rows on
+    every call: page 2 was the front of page 1, and waypoints past the
+    first page were unreachable. Forward paging is `after`."""
+    c, _ = _client(pg_conn)
+    rid = c.post("/api/v1/rides/start",
+                 json={"start_lat": 39.74, "start_lon": -104.98}).json()["id"]
+    for i in range(5):
+        r = c.post(f"/api/v1/rides/{rid}/waypoints", json={
+            "waypoint_at": (_NOW + timedelta(seconds=30 * i)).isoformat(),
+            "lat": 39.74 + i * 0.001, "lon": -104.98,
+        })
+        assert r.status_code == 200, r.text
+
+    seen: list[str] = []
+    cursor: str | None = None
+    for _ in range(5):  # bounded: 5 waypoints, 2 per page
+        params = {"limit": 2}
+        if cursor:
+            params["after"] = cursor
+        page = c.get(f"/api/v1/rides/{rid}/waypoints", params=params).json()
+        if not page["count"]:
+            break
+        seen += [w["waypoint_at"] for w in page["waypoints"]]
+        cursor = page["waypoints"][-1]["waypoint_at"]
+    assert len(seen) == 5, seen
+    assert seen == sorted(seen), "waypoints must come back oldest-first"
+
+    # `before` is the inverse: the last `limit` rows older than the cursor,
+    # still returned oldest-first.
+    back = c.get(f"/api/v1/rides/{rid}/waypoints",
+                 params={"limit": 2, "before": seen[4]}).json()
+    assert [w["waypoint_at"] for w in back["waypoints"]] == seen[2:4]
+
+
 def test_delete_cascades_to_waypoints(pg_conn):
     """The hard-delete privacy commitment covers the whole route, not just
     the ride row."""

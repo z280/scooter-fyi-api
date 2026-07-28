@@ -37,7 +37,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .accounts import SessionUser, require_session
-from .geo import distance_meters, path_length_meters
+from .geo import path_length_meters
 from .identity import plate_display_code
 from .pg import connection
 from .points import credit_gbfs_validation_points, credit_waypoint_points
@@ -155,16 +155,58 @@ def _parse_ride_id(ride_id: str) -> UUID:
         raise HTTPException(400, "ride id must be a UUID")
 
 
-def _parse_before(before: str | None) -> datetime | None:
+def _parse_before(before: str | None, field: str = "before") -> datetime | None:
     if not before:
         return None
     try:
         parsed = datetime.fromisoformat(before.replace("Z", "+00:00"))
     except ValueError as e:
-        raise HTTPException(400, f"bad before timestamp: {e}")
+        raise HTTPException(400, f"bad {field} timestamp: {e}")
     if parsed.tzinfo is None:
-        raise HTTPException(400, "before must include a timezone (e.g. trailing Z)")
+        raise HTTPException(400, f"{field} must include a timezone (e.g. trailing Z)")
     return parsed
+
+
+def _track_points(cur, rid: UUID) -> list[tuple[float, float]]:
+    """The ride's waypoints as (lat, lon), oldest first. Read whole rather
+    than appended incrementally because waypoints can arrive out of order
+    (client retry/offline buffering)."""
+    cur.execute(
+        "SELECT lat, lon FROM ride_waypoints WHERE tracked_ride_id = %s "
+        "ORDER BY waypoint_at ASC, id ASC",
+        (str(rid),),
+    )
+    return [(r[0], r[1]) for r in cur.fetchall()]
+
+
+def _measured_path(
+    start_lat: float | None, start_lon: float | None,
+    track: list[tuple[float, float]],
+    end_lat: float | None = None, end_lon: float | None = None,
+) -> list[tuple[float, float]]:
+    """The full path we are willing to claim we measured, in order:
+
+        ride start -> every uploaded GPS fix -> rider-reported end
+
+    BOTH ends matter, for the same reason. The rider was already moving
+    between where they started and wherever their first GPS fix landed, and
+    they kept moving between their LAST fix and where they parked — a phone
+    that backgrounded, saved battery or went through a tunnel stops
+    producing fixes long before the ride stops. Dropping either leg
+    undercounts the ride by a sampling gap, and the trailing gap is
+    routinely the whole ride.
+
+    Byte-for-byte the same rule as src/api_rides.py:_measured_path, and it
+    has to stay that way: src/badges.py sums distance across both tables, so
+    a rider's mileage must not depend on which mechanism logged the ride.
+    """
+    points: list[tuple[float, float]] = []
+    if start_lat is not None and start_lon is not None:
+        points.append((start_lat, start_lon))
+    points.extend(track)
+    if end_lat is not None and end_lon is not None:
+        points.append((end_lat, end_lon))
+    return points
 
 
 @router.post("/api/v1/tracked-rides")
@@ -329,7 +371,7 @@ def end_tracked_ride(
             cur.execute(
                 "SELECT user_reported_ended_at, vehicle_identifier, "
                 "gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon, "
-                "start_lat, start_lon, distance_meters, distance_source "
+                "start_lat, start_lon "
                 "FROM tracked_rides WHERE id = %s AND account_id = %s FOR UPDATE",
                 (str(rid), user.account_id),
             )
@@ -337,25 +379,34 @@ def end_tracked_ride(
             if row is None:
                 raise HTTPException(404, "no such ride")
             (already_ended, vehicle_identifier, _gbfs_reappeared_at,
-             gbfs_end_lat, gbfs_end_lon, start_lat, start_lon,
-             existing_distance, existing_source) = row
+             gbfs_end_lat, gbfs_end_lon, start_lat, start_lon) = row
             if already_ended is not None:
                 raise HTTPException(409, "this ride's end has already been reported")
 
-            # Waypoint-derived distance is strictly better than the crow-flies
-            # fallback, so a ride that uploaded waypoints keeps what it has.
-            # Only a ride with no waypoints at all falls back to start->end,
-            # which undercounts any route that isn't a straight line — hence
-            # the recorded distance_source (sql/034).
-            if existing_source == "waypoints":
-                new_distance, new_source = existing_distance, "waypoints"
-            else:
-                new_distance = distance_meters(
-                    start_lat, start_lon, payload.end_lat, payload.end_lon)
-                new_source = "straight_line"
+            # Measure the WHOLE path, start -> fixes -> reported end. The end
+            # report is the last thing we learn about the ride, so it is the
+            # only chance to close the trailing sampling gap; keeping the
+            # distance the last waypoint upload happened to leave behind
+            # meant the final leg was never measured at all.
+            #
+            # distance_source stays honest about how the number was reached:
+            # 'waypoints' when the rider actually handed us a track,
+            # 'straight_line' when the only two points we have are the ends
+            # — which undercounts any route that isn't straight (sql/034).
+            track = _track_points(cur, rid)
+            points = _measured_path(start_lat, start_lon, track,
+                                    payload.end_lat, payload.end_lon)
+            new_distance = path_length_meters(points)
+            new_source = "waypoints" if track else "straight_line"
+            # Re-encode the stored path over the same points the distance was
+            # measured over, so polyline and distance can't disagree. A ride
+            # with no track keeps path_polyline NULL rather than gaining a
+            # fabricated two-point "route" it never observed.
+            path_sql = "path_polyline = %s," if track else ""
+            path_params: tuple = (encode_polyline(points),) if track else ()
 
             cur.execute(
-                """
+                f"""
                 UPDATE tracked_rides SET
                     status = 'completed',
                     user_reported_ended_at = %s,
@@ -364,6 +415,7 @@ def end_tracked_ride(
                     reported_battery_percent = %s,
                     total_cost_cents = %s,
                     metadata = %s::jsonb,
+                    {path_sql}
                     distance_meters = %s,
                     distance_source = %s,
                     updated_at = NOW()
@@ -371,8 +423,8 @@ def end_tracked_ride(
                 """,
                 (payload.ended_at, payload.end_lat, payload.end_lon,
                  payload.reported_battery_percent, payload.total_cost_cents,
-                 json.dumps(payload.metadata or {}), new_distance, new_source,
-                 str(rid)),
+                 json.dumps(payload.metadata or {}), *path_params,
+                 new_distance, new_source, str(rid)),
             )
 
             # Points (requirement #10), credited now that the ride is
@@ -443,11 +495,11 @@ def add_waypoint(
 
             # Rebuild path_polyline from the full ordered set — waypoints
             # can arrive out of order (client retry/offline buffering), so
-            # an incremental append would silently corrupt the path.
-            # The ride's start point leads the path: the rider was already
-            # moving between where they started and wherever their first GPS
-            # fix landed, so dropping that leg undercounts every ride by the
-            # first sampling gap. Off-feed rides do the same
+            # an incremental append would silently corrupt the path. The
+            # ride's start point leads it (see _measured_path); the ride is
+            # still active, so there is no reported end to close it with yet
+            # — PATCH .../end recomputes over these same points plus its own
+            # end coordinates. Off-feed rides do exactly the same
             # (api_rides.py:_rebuild_track) — badges sum distance across
             # both tables, so the two must measure the same way.
             cur.execute(
@@ -455,17 +507,11 @@ def add_waypoint(
                 (str(rid),),
             )
             srow = cur.fetchone()
-            head = [(srow[0], srow[1])] if srow and srow[0] is not None else []
-            cur.execute(
-                "SELECT lat, lon FROM ride_waypoints WHERE tracked_ride_id = %s "
-                "ORDER BY waypoint_at ASC, id ASC",
-                (str(rid),),
-            )
-            points = head + cur.fetchall()
+            start_lat, start_lon = (srow[0], srow[1]) if srow else (None, None)
+            points = _measured_path(start_lat, start_lon, _track_points(cur, rid))
             # Distance is recomputed from the same full ordered set, for the
             # same reason: an incremental += would be wrong the moment a
-            # waypoint arrives out of order. 'waypoints' always wins over the
-            # straight-line fallback PATCH .../end would otherwise apply.
+            # waypoint arrives out of order.
             cur.execute(
                 "UPDATE tracked_rides SET path_polyline = %s, distance_meters = %s, "
                 "distance_source = 'waypoints', updated_at = NOW() WHERE id = %s",
@@ -486,9 +532,21 @@ def list_waypoints(
     ride_id: str,
     user: SessionUser = Depends(require_session),
     limit: int = Query(500, ge=1, le=5000),
-    before: str | None = Query(None, description="ISO timestamp — return waypoints recorded before this"),
+    after: str | None = Query(None, description="ISO timestamp — the NEXT page: waypoints recorded after this"),
+    before: str | None = Query(None, description="ISO timestamp — the PREVIOUS page: the last `limit` waypoints recorded before this"),
 ) -> dict[str, Any]:
+    """Waypoints oldest-first.
+
+    Pagination pairs the cursor with the sort direction, which it did not
+    used to: `before` with an ascending sort re-served the OLDEST rows on
+    every call, so page 2 was the start of page 1 and nothing past the first
+    page was reachable at all. Page forward with `after` (the last
+    waypoint_at you received); `before` walks backwards by taking the last
+    `limit` rows older than the cursor and returning them oldest-first.
+    Same contract as GET /api/v1/rides/{id}/waypoints.
+    """
     rid = _parse_ride_id(ride_id)
+    parsed_after = _parse_before(after, "after")
     parsed_before = _parse_before(before)
 
     with connection() as conn:
@@ -502,21 +560,30 @@ def list_waypoints(
 
             where = ["tracked_ride_id = %s"]
             params: list[Any] = [str(rid)]
+            if parsed_after is not None:
+                where.append("waypoint_at > %s")
+                params.append(parsed_after)
             if parsed_before is not None:
                 where.append("waypoint_at < %s")
                 params.append(parsed_before)
+            # Walking backwards means "the newest rows older than the
+            # cursor", so the LIMIT has to bite from the far end.
+            backwards = parsed_before is not None
+            order = "DESC" if backwards else "ASC"
             params.append(limit)
             cur.execute(
                 f"""
                 SELECT id, waypoint_at, lat, lon, metadata, created_at
                 FROM ride_waypoints
                 WHERE {' AND '.join(where)}
-                ORDER BY waypoint_at ASC, id ASC
+                ORDER BY waypoint_at {order}, id {order}
                 LIMIT %s
                 """,
                 params,
             )
             rows = cur.fetchall()
+    if backwards:
+        rows = list(reversed(rows))
     waypoints = [
         {"id": int(r[0]), "waypoint_at": r[1].isoformat(), "lat": r[2], "lon": r[3],
          "metadata": r[4] if isinstance(r[4], dict) else {}, "created_at": r[5].isoformat()}

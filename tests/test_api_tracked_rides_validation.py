@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from src import api_tracked_rides
 from src.accounts import SessionUser, require_session
-from src.polyline import encode as encode_polyline
+from src.polyline import decode as decode_polyline, encode as encode_polyline
 
 _RIDE_ID = uuid.uuid4()
 _NOW = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
@@ -49,10 +49,7 @@ def _row(
     )
 
 
-def _end_select(
-    *, already_ended: bool = False, gbfs_end: tuple | None = None,
-    distance_meters: float | None = None, distance_source: str | None = None,
-) -> tuple:
+def _end_select(*, already_ended: bool = False, gbfs_end: tuple | None = None) -> tuple:
     """The narrower SELECT ... FOR UPDATE that PATCH .../end issues before
     it writes. Distinct from _row above — different column list."""
     gbfs_lat, gbfs_lon = gbfs_end if gbfs_end else (None, None)
@@ -62,7 +59,6 @@ def _end_select(
         None,                              # gbfs_reappeared_at
         gbfs_lat, gbfs_lon,
         39.74, -104.98,                    # start_lat, start_lon
-        distance_meters, distance_source,
     )
 
 
@@ -112,8 +108,9 @@ def test_path_geojson_omitted_when_requested():
 # ---------- request validation (fake cursor) --------------------------------
 
 class _FakeCursor:
-    def __init__(self, fetches):
+    def __init__(self, fetches, waypoints=()):
         self._fetches = list(fetches)
+        self._waypoints = list(waypoints)
         self.executed: list[tuple[str, tuple]] = []
 
     def execute(self, sql, params=()):
@@ -123,7 +120,8 @@ class _FakeCursor:
         return self._fetches.pop(0)
 
     def fetchall(self):
-        return []
+        # The only fetchall in this module is the waypoint track read.
+        return list(self._waypoints)
 
     def __enter__(self):
         return self
@@ -133,12 +131,13 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, fetches):
+    def __init__(self, fetches, waypoints=()):
         self._fetches = fetches
+        self._waypoints = waypoints
         self.cur: _FakeCursor | None = None
 
     def cursor(self):
-        self.cur = _FakeCursor(self._fetches)
+        self.cur = _FakeCursor(self._fetches, self._waypoints)
         return self.cur
 
     def commit(self):
@@ -152,8 +151,8 @@ def _app():
     return app
 
 
-def _client(monkeypatch, fetches):
-    conn = _FakeConn(fetches)
+def _client(monkeypatch, fetches, waypoints=()):
+    conn = _FakeConn(fetches, waypoints)
 
     @contextmanager
     def _fake_connection():
@@ -269,21 +268,46 @@ def test_end_ride_without_waypoints_falls_back_to_straight_line(monkeypatch):
     assert 1100 < distance < 1120
 
 
-def test_end_ride_keeps_waypoint_distance_and_does_not_overwrite_it(monkeypatch):
-    """A ride with waypoints already has the better number — reporting the
-    end must not clobber it with the straight line."""
+def test_end_ride_measures_the_leg_from_the_last_waypoint_to_the_end(monkeypatch):
+    """Same regression as tests/test_api_rides_validation.py's namesake, and
+    it has to behave identically: src/badges.py sums distance across both
+    tables, so a rider's mileage must not depend on which mechanism logged
+    the ride.
+
+    One waypoint 20 m from the start, then the rider parks 10 km away. The
+    old code kept the ~20 m the last waypoint upload had measured and
+    tagged it 'waypoints'.
+    """
+    step = 1.0 / 111_320.0  # metres of latitude
     c, conn = _client(
         monkeypatch,
-        [_end_select(distance_meters=4321.0, distance_source="waypoints"), (0,), _row()],
+        # end SELECT, waypoint COUNT, the waypoint points INSERT, final SELECT
+        [_end_select(), (1,), (77, _NOW), _row()],
+        waypoints=[(39.74 + 20 * step, -104.98)],
     )
+    r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
+        "ended_at": "2026-07-01T12:00:00Z",
+        "end_lat": 39.74 + 10_000 * step, "end_lon": -104.98,
+    })
+    assert r.status_code == 200, r.text
+    sql, params = _end_update(conn)
+    assert "waypoints" in params
+    distance = next(p for p in params if isinstance(p, float) and p > 100)
+    assert 9_900 < distance < 10_100, "the final leg was not measured"
+    # path_polyline is re-encoded over the same points as the distance.
+    assert "path_polyline = %s" in sql
+    assert len(decode_polyline(params[6])) == 3  # start, fix, reported end
+
+
+def test_end_ride_without_waypoints_does_not_fabricate_a_path(monkeypatch):
+    """A straight-line distance is an honest fallback; a two-point
+    path_polyline would be a route we never observed."""
+    c, conn = _client(monkeypatch, [_end_select(), (0,), _row()])
     r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
         "ended_at": "2026-07-01T12:00:00Z", "end_lat": 39.75, "end_lon": -104.98,
     })
     assert r.status_code == 200, r.text
-    params = _end_update(conn)[1]
-    assert 4321.0 in params
-    assert "waypoints" in params
-    assert "straight_line" not in params
+    assert "path_polyline" not in _end_update(conn)[0]
 
 
 def test_row_to_ride_exposes_distance_without_redacting_it():

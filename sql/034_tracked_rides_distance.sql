@@ -14,8 +14,15 @@
 --
 -- Keeping the provenance means a later backfill, a badge threshold change,
 -- or an analytics query can exclude the weak measurement instead of
--- silently averaging it in with the good one. NULL = ride never ended, so
--- distance was never computed.
+-- silently averaging it in with the good one.
+--
+-- NULL means "distance was never computed", which covers TWO cases, not
+-- one: a ride that never ended, and — because this migration adds the
+-- columns without backfilling — every ride that ended BEFORE it ran. Those
+-- historical rows have user_reported_ended_at set and distance_meters
+-- NULL, and src/badges.py counts them as 0 m while still feeding their
+-- dates into the streak set. sql/039_backfill_tracked_ride_distance.sql
+-- closes that gap; this file is left as it was applied.
 ALTER TABLE tracked_rides
     ADD COLUMN IF NOT EXISTS distance_meters DOUBLE PRECISION
         CHECK (distance_meters >= 0);

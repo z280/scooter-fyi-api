@@ -58,20 +58,32 @@ class _FakeConn:
 @pytest.fixture
 def ctx(monkeypatch):
     """Returns (client_factory, state). state['stored'] records any photo
-    that reached storage — it must stay empty for anonymous callers."""
-    state: dict = {"sql": [], "stored": [], "limits": []}
+    that reached storage — it must stay empty for anonymous callers.
+    state['order'] records the sequence of expensive/metered operations, so
+    a test can assert the rate limit ran BEFORE the upload rather than
+    after it."""
+    state: dict = {"sql": [], "stored": [], "limits": [], "order": []}
 
     @contextmanager
     def _conn():
         yield _FakeConn(state["sql"])
 
+    def _enforce(cur, **kw):
+        state["limits"].append(kw)
+        state["order"].append("RATELIMIT")
+
+    def _store(account_id, data):
+        state["stored"].append((account_id, data))
+        state["order"].append("R2_PUT")
+        return "key.jpg"
+
     monkeypatch.setattr(api_frontend_reports, "connection", _conn)
-    monkeypatch.setattr(api_frontend_reports, "enforce",
-                        lambda cur, **kw: state["limits"].append(kw))
+    monkeypatch.setattr(api_frontend_reports, "enforce", _enforce)
     monkeypatch.setattr(api_frontend_reports, "receipts_bucket", lambda: "bucket")
+    monkeypatch.setattr(api_frontend_reports, "store_model_photo", _store)
     monkeypatch.setattr(
-        api_frontend_reports, "store_model_photo",
-        lambda account_id, data: state["stored"].append((account_id, data)) or "key.jpg")
+        api_frontend_reports, "delete_receipt",
+        lambda key: state["order"].append("R2_DELETE"))
 
     def _client(user=None):
         app = FastAPI()
@@ -159,6 +171,97 @@ def test_coordinates_are_passed_through(ctx):
     assert r.status_code == 200, r.text
     insert = next(p for sql, p in state["sql"] if "INSERT INTO model_reports" in sql)
     assert 39.74 in insert and -104.98 in insert and _VID in insert
+
+
+def test_rate_limit_runs_before_the_upload(ctx):
+    """The 20/hour cap has to meter the EXPENSIVE work. Storing first meant
+    the limiter only ever protected the INSERT, while a Pillow decode of up
+    to 10 MB plus an R2 PUT (and a DELETE on the failure path) stayed
+    unmetered — an authenticated caller could drive those without bound."""
+    client, state = ctx
+    r = client(_USER).post(
+        "/api/v1/reports/model", data=_TEXT,
+        files={"photo": ("scooter.jpg", b"\xff\xd8\xff-not-really", "image/jpeg")},
+    )
+    assert r.status_code == 200, r.text
+    assert state["order"] == ["RATELIMIT", "R2_PUT"]
+
+
+def test_a_rejected_caller_never_reaches_storage(ctx, monkeypatch):
+    """And when the limiter says no, the upload must not happen at all."""
+    from fastapi import HTTPException
+
+    def _deny(cur, **kw):
+        state["order"].append("RATELIMIT")
+        raise HTTPException(429, "rate limit exceeded — try again later")
+
+    client, state = ctx
+    monkeypatch.setattr(api_frontend_reports, "enforce", _deny)
+    r = client(_USER).post(
+        "/api/v1/reports/model", data=_TEXT,
+        files={"photo": ("scooter.jpg", b"\xff\xd8\xff-not-really", "image/jpeg")},
+    )
+    assert r.status_code == 429
+    assert state["order"] == ["RATELIMIT"]
+    assert state["stored"] == []
+
+
+def test_anonymous_oversized_body_is_refused_before_it_is_parsed(ctx):
+    """The load-bearing half of the anonymous-upload rule. request.form()
+    spools the WHOLE body, photo included, so a check written after it has
+    already paid the cost it was meant to avoid. The gate is the declared
+    Content-Length, read before any parsing."""
+    client, state = ctx
+    big = b"x" * (api_frontend_reports._MAX_ANON_MODEL_REPORT_BYTES + 1)
+    r = client(None).post(
+        "/api/v1/reports/model", data=_TEXT,
+        files={"photo": ("scooter.jpg", big, "image/jpeg")},
+    )
+    assert r.status_code == 413
+    assert state["stored"] == []
+    # Nothing was metered or written either — we never got that far.
+    assert state["order"] == []
+    assert state["sql"] == []
+
+
+def test_a_signed_in_caller_may_still_send_a_large_body(ctx):
+    """The size gate is about anonymity, not about photos being big."""
+    client, state = ctx
+    big = b"\xff\xd8\xff" + b"x" * api_frontend_reports._MAX_ANON_MODEL_REPORT_BYTES
+    r = client(_USER).post(
+        "/api/v1/reports/model", data=_TEXT,
+        files={"photo": ("scooter.jpg", big, "image/jpeg")},
+    )
+    assert r.status_code == 200, r.text
+    assert state["stored"]
+
+
+def test_anonymous_text_report_is_unaffected_by_the_size_gate(ctx):
+    """A real anonymous report is a few hundred bytes — the gate must not
+    cost us the corrections it exists to keep collecting."""
+    client, state = ctx
+    r = client(None).post(
+        "/api/v1/reports/model",
+        data={**_TEXT, "description": "x" * 2000},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_anonymous_request_without_a_declared_length_is_refused(ctx):
+    """A chunked request declares no length, so the gate has nothing to
+    check — refuse rather than parse-and-hope. Every real client of this
+    endpoint sends a Content-Length."""
+    client, state = ctx
+
+    def _chunks():
+        yield b"device_id=dev-1&description=hi"
+
+    r = client(None).post(
+        "/api/v1/reports/model", content=_chunks(),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert r.status_code == 411
+    assert state["sql"] == []
 
 
 def test_json_body_is_refused(ctx):
