@@ -1,7 +1,7 @@
 # API Requirements — data.scooter.fyi backend
 
-Requirements for the API repo (currently `veo-audit`, proposed rename
-`scooter-fyi-api`) to unblock the frontend phases in
+Requirements for the API repo (`scooter-fyi-api`, renamed from `veo-audit`;
+old URLs auto-redirect) to unblock the frontend phases in
 UX_PLAN.md (lives in the frontend repo).
 Grouped by the frontend phase each item unblocks; items within a group are
 ordered by dependency.
@@ -314,7 +314,7 @@ By early August there will be a full month. Then:
 | §3 reports + aggregates | Implemented (PR #9): `src/api_frontend_reports.py`, `src/receipts.py`, `src/geo.py`, `sql/013`. Device reports feed `has_negative_report`/`reliability_tier`. |
 | §4 Stripe + rides + badges | Implemented (PR #9): `src/stripe_webhook.py`, `src/api_rides.py`, `src/badges.py`, `sql/014`. |
 | §5 rate limits, env, privacy endpoint | Implemented (PR #9): `src/ratelimit.py`, `src/api_meta.py`, `.env.example`. |
-| Repo rename | Pending — GitHub settings change (`veo-audit` → `scooter-fyi-api`), operator action. |
+| Repo rename | **Done** — repo renamed `veo-audit` → `scooter-fyi-api`; GitHub redirects old URLs, and in-repo references (compose image fallbacks, doc links, image names) are updated. The Compose project name `veo-audit` and the `/opt/veo-audit` deploy dir deliberately keep the old name — see the post-rename checklist in MIGRATION.md. |
 | Equity boundary migration (new §1.1a) | In progress — see note below. `er1`–`er6` per-rank layers now tracked with full metric parity to v1/v2 (snapshot + daily SLA). `v1` retirement and the compliance-metric cutoff are still pending a DOTI decision. |
 | Vehicle classification + trip tracking (new §1.1b) | Implemented — see note below. `vehicle_use_type`/`vehicle_model_name` on devices/current + device_state/history; `sitting`/`standing` compliance parity with `bicycle`/`scooter`; `trip_events` + daily popularity rollup at 9am. |
 | §7 real range + battery percent | §7.1 implemented (2026-07-07): rank-based `battery_percent` via `data/range_soc_lut.json`, quality tiers re-expressed in SoC percent ('great' now reachable for bicycles). §7.2 buildable now; §7.3 revisit gated on ≥30 days of post-016 archive (≥ 2026-08-05). |

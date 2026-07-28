@@ -1,4 +1,4 @@
-# veo-audit
+# scooter-fyi-api
 
 Denver micromobility spatial analytics pipeline. Polls the Veo GBFS feed
 every 2 minutes, geo-tags each device against five boundary layers
@@ -6,6 +6,13 @@ every 2 minutes, geo-tags each device against five boundary layers
 Networks), and stores cycle-by-cycle metadata + per-region counts in
 Postgres. Cold storage of raw points goes to Cloudflare R2 as Parquet
 every 48 hours.
+
+> Formerly the `veo-audit` repo. **"Veo Audit" remains the public
+> dataset/report brand** — only the repo/image names moved. Names that
+> identify live resources deliberately did *not*: the Compose project
+> (`veo-audit`, the prefix on every volume), the `/opt/veo-audit` deploy
+> dir, the `veo-audit` Cloudflare tunnel, and the `veo_audit` database.
+> See [MIGRATION.md](MIGRATION.md#post-rename-operator-checklist).
 
 The original purpose was tracking compliance with Denver RFP §3.0 (30%
 of fleet in Equity Areas) — see `VEO_AUDIT.md` for that history. The
@@ -440,10 +447,15 @@ python3.11 -m pytest -v
 
 Push to `main`. `.github/workflows/deploy.yml`:
 
-1. Builds the image, pushes to `ghcr.io/z280/veo-audit:latest`
+1. Builds the image, pushes to `ghcr.io/z280/scooter-fyi-api:latest`
 2. SCPs `docker-compose.yml`, `config.json`, `sql/` to `/opt/veo-audit/`
-3. SSHes in, writes `.env` from GitHub Secrets, pulls and rolls containers
+3. SSHes in, renders `.env.new` from GitHub Secrets, `docker compose pull`s
+   with it, and only then `mv`s it over `.env` and rolls containers — a
+   failed pull leaves the live `.env` (and the running stack) untouched
 4. `curl /health` — fails the workflow if not green
+
+Renaming the repo? See the
+[post-rename operator checklist](MIGRATION.md#post-rename-operator-checklist).
 
 Required GitHub Secrets:
 

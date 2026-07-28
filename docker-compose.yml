@@ -46,7 +46,7 @@ services:
       - "127.0.0.1:5432:5432"
 
   pipeline_worker:
-    image: ${WORKER_IMAGE:-ghcr.io/z280/veo-audit:latest}
+    image: ${WORKER_IMAGE:-ghcr.io/z280/scooter-fyi-api:latest}
     build:
       context: .
     container_name: pipeline_worker
@@ -118,7 +118,7 @@ services:
   # The schedule keeps firing even when uvicorn crashes; the worker can
   # restart freely without resetting cron timing.
   scheduler:
-    image: ${WORKER_IMAGE:-ghcr.io/z280/veo-audit:latest}
+    image: ${WORKER_IMAGE:-ghcr.io/z280/scooter-fyi-api:latest}
     build:
       context: .
     container_name: scheduler
@@ -173,7 +173,7 @@ services:
   # unsigned HTTP GET and cannot read a private bucket, and we would rather not
   # make a 26 MB routing graph world-readable just to feed it.
   valhalla_map_fetch:
-    image: ${WORKER_IMAGE:-ghcr.io/z280/veo-audit:latest}
+    image: ${WORKER_IMAGE:-ghcr.io/z280/scooter-fyi-api:latest}
     build:
       context: .
     container_name: valhalla_map_fetch

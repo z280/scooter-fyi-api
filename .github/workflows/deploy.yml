@@ -46,6 +46,12 @@ jobs:
     needs: build-push
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
+    # The script below does `docker login ghcr.io` with GITHUB_TOKEN and pulls
+    # the private image onto the VPS. Don't inherit whatever the repo/org
+    # default happens to be — ask for packages:read explicitly.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -110,7 +116,14 @@ jobs:
             set -e
             cd /opt/veo-audit
             umask 077
-            cat > .env <<EOF
+            # Render into .env.new and only promote it once the image it names
+            # has actually been pulled. Overwriting .env first makes a failed
+            # pull destructive: `set -e` aborts with .env pointing at an image
+            # the box cannot fetch, and the next `docker compose up -d` can no
+            # longer create the containers at all. Rendering aside keeps a
+            # failed deploy a red CI run instead of an outage.
+            trap 'rm -f /opt/veo-audit/.env.new' EXIT
+            cat > .env.new <<EOF
             POSTGRES_USER=$POSTGRES_USER
             POSTGRES_PASSWORD=$POSTGRES_PASSWORD
             POSTGRES_DB=$POSTGRES_DB
@@ -139,7 +152,8 @@ jobs:
             WORKER_IMAGE=ghcr.io/$REPO:latest
             EOF
             echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
-            docker compose pull
+            docker compose --env-file .env.new pull
+            mv .env.new .env
             docker compose up -d --remove-orphans
             sleep 8
             # Fire one ingest cycle synchronously so /health has data to report,
