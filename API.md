@@ -1294,9 +1294,21 @@ Bearer required. GET returns:
   "home_lng": -104.9876,
   "work_lat": null,
   "work_lng": null,
+  "royalty_title": "Queen",
+  "display_name": "Queen brave🦉owl",
+  "ruling_color": "#c53637",
+  "ruling_border_color": "#026fd7",
+  "ruling_alpha": 0.6,
   "badges": [ { "id": "first_report", "label": "Filed a report", "earned_at": "2026-07-01T18:00:00+00:00" } ]
 }
 ```
+
+`display_name` is **read-only and server-computed**: your `royalty_title`,
+a space, then your `public_username` — or just the username when you have
+no title. It is a generated column, so it cannot drift out of step with
+either part; re-rolling your username changes it immediately. Unlike
+`public_username` it is *not* unique — the title is decoration, and two
+riders can both be Queen.
 
 PUT accepts any subset of the client-writable fields — omitted fields are
 untouched, `"theme": null` clears the theme:
@@ -1381,6 +1393,62 @@ The curated word lists, for building a username picker. Bearer required
 | `GET /api/v1/emoji-nouns/search?q=owl` | Same shape, case-insensitive substring match on the word. `q` is 1–64 chars. |
 | `GET /api/v1/adjectives` | `{ "adjectives": ["brave", "bright", …] }`, sorted. |
 | `GET /api/v1/adjectives/search?q=bra` | Same shape, case-insensitive substring match. |
+| `GET /api/v1/royalty-titles` | `{ "royalty_titles": ["King", "Queen", "Monarch", …] }`, in picker order (related titles adjacent), not alphabetical. |
+| `GET /api/v1/royalty-titles/search?q=high` | Same shape, case-insensitive substring match. |
+| `GET /api/v1/ruling-colors` | The palette + claimed pairs — see below. |
+
+### Ruling colours
+
+Your territory on the leaderboard map is drawn with a **fill** and an
+**inner border**, both chosen from a curated 128-colour palette, plus an
+opacity you control.
+
+```json
+{
+  "ruling_colors": [ { "hex": "#c53637", "name": "red-500", "hue_family": "red" }, … ],
+  "taken_pairs": [ { "fill": "#c53637", "border": "#026fd7" } ]
+}
+```
+
+Rules, all enforced by the database:
+
+* **The (fill, border) PAIR is globally unique** — 128 × 127 = 16 256
+  claims. You may share a fill with another rider, or share a border, but
+  not both. Adjacent territories can therefore never render identically.
+* **Fill and border must differ**, and are set **together** — send both,
+  or send both as `null` to clear and release your claim.
+* **`ruling_alpha` is 0.10–1.00** (default `0.60`) and applies to the
+  **fill only**; the border always renders opaque. To leave the map
+  entirely, set `show_in_leaderboards: false` rather than a low alpha.
+
+`taken_pairs` lets a picker grey out unavailable combinations instead of
+discovering them by `409` on save. It lists pairs only — never which
+account holds one.
+
+| Status | When |
+|---|---|
+| `400` | one-sided colour update, fill equal to border, or a value not on the curated list |
+| `409` | that exact (fill, border) pair is already claimed |
+| `422` | `ruling_alpha` outside 0.10–1.00 |
+
+### Saved map settings & find-ride preference
+
+Two rider-owned stores of **opaque JSON**. The API never reads inside the
+blob, never merges it, and never validates its shape — `PUT` replaces
+wholesale. Max 16 KB per blob; max 50 saved map settings per rider.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /api/v1/profile/map-settings` | `{ "map_settings": [ { "name": "commute", "settings": {…}, "created_at": …, "updated_at": … } ] }`, most recently updated first. |
+| `GET /api/v1/profile/map-settings/{name}` | One setting. `404` if that name isn't yours. |
+| `PUT /api/v1/profile/map-settings/{name}` | `{ "settings": { … } }` — creates or replaces. `409` at the 50-setting cap (you can still overwrite settings you already have), `413` over 16 KB. |
+| `DELETE /api/v1/profile/map-settings/{name}` | `404` if absent. |
+| `GET /api/v1/profile/find-ride-pref` | `{ "find_ride_pref": null }` until you set one. **`null` means never set** — distinct from an empty object you chose. |
+| `PUT /api/v1/profile/find-ride-pref` | `{ "settings": { … } }` — at most one per rider; a second PUT replaces the first. |
+| `DELETE /api/v1/profile/find-ride-pref` | Idempotent — deleting an absent preference returns `200`, since there is only one and "gone" is the state you asked for. |
+
+Names are 1–64 characters and scoped to you: two riders can both have a
+setting called `commute`.
 
 ---
 
