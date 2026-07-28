@@ -10,9 +10,12 @@
     DELETE /api/v1/tracked-rides/{ride_id}             hard-delete one ride
     DELETE /api/v1/tracked-rides                       hard-delete every ride the account owns
 
-Deliberately separate from the legacy `rides` table/src/api_rides.py — see
-sql/027_tracked_rides.sql's header. Every endpoint here is `require_session`
-(open to all riders, no supporter gate — project-wide decision).
+Deliberately separate from the `rides` table, which tracks OFF-FEED rides
+on vehicles with no vehicle_identifier (src/api_rides.py,
+sql/035_off_feed_rides.sql). Use this module when there IS a GBFS vehicle
+to anchor to, that one when there isn't. Every endpoint here is
+`require_session`
+(open to all riders — signed-in is the only gate this product has).
 
 ANTI-FRAUD: the points system pays a bonus when the GBFS-observed
 reappearance is within 20m of the rider's own reported end location. If a
@@ -34,6 +37,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .accounts import SessionUser, require_session
+from .geo import distance_meters, path_length_meters
 from .identity import plate_display_code
 from .pg import connection
 from .points import credit_gbfs_validation_points, credit_waypoint_points
@@ -52,7 +56,8 @@ _RIDE_COLS = (
     "gbfs_left_feed_at, gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon, "
     "gbfs_end_battery_percent, user_reported_ended_at, end_lat, end_lon, "
     "reported_battery_percent, total_cost_cents, metadata, path_polyline, "
-    "vehicle_identifier, created_at, updated_at"
+    "vehicle_identifier, created_at, updated_at, distance_meters, "
+    "distance_source"
 )
 
 
@@ -83,7 +88,8 @@ def _row_to_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
      gbfs_left_feed_at, gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon,
      gbfs_end_battery_percent, user_reported_ended_at, end_lat, end_lon,
      reported_battery_percent, total_cost_cents, metadata, path_polyline,
-     vehicle_identifier, created_at, updated_at) = r
+     vehicle_identifier, created_at, updated_at, ride_distance_meters,
+     distance_source) = r
 
     # ANTI-FRAUD: see module docstring. Redacted as None in the API
     # response only — the underlying columns are untouched.
@@ -109,6 +115,14 @@ def _row_to_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
         "vehicle_identifier": vehicle_identifier,
         "created_at": created_at.isoformat(),
         "updated_at": updated_at.isoformat(),
+        # Not redacted with the gbfs_* fields above: this is derived from
+        # the rider's OWN waypoints or their own reported end, so showing
+        # it back to them reveals nothing they didn't tell us.
+        "distance_meters": (
+            round(float(ride_distance_meters), 1)
+            if ride_distance_meters is not None else None
+        ),
+        "distance_source": distance_source,
     }
     if path_geojson:
         out["path_polyline"] = path_polyline
@@ -258,8 +272,8 @@ def list_tracked_rides(
 def active_tracked_ride(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
     """Registered before /{ride_id} on purpose — Starlette matches
     path-shaped routes in registration order, so 'active' would otherwise
-    be swallowed as a {ride_id} value (see api_rides.py's own
-    /export-before-/{ride_id} ordering for the same hazard)."""
+    be swallowed as a {ride_id} value. The same hazard applies to
+    /{ride_id}/waypoints and /{ride_id}/screenshots below."""
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -314,16 +328,31 @@ def end_tracked_ride(
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT user_reported_ended_at, vehicle_identifier, "
-                "gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon "
+                "gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon, "
+                "start_lat, start_lon, distance_meters, distance_source "
                 "FROM tracked_rides WHERE id = %s AND account_id = %s FOR UPDATE",
                 (str(rid), user.account_id),
             )
             row = cur.fetchone()
             if row is None:
                 raise HTTPException(404, "no such ride")
-            already_ended, vehicle_identifier, _gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon = row
+            (already_ended, vehicle_identifier, _gbfs_reappeared_at,
+             gbfs_end_lat, gbfs_end_lon, start_lat, start_lon,
+             existing_distance, existing_source) = row
             if already_ended is not None:
                 raise HTTPException(409, "this ride's end has already been reported")
+
+            # Waypoint-derived distance is strictly better than the crow-flies
+            # fallback, so a ride that uploaded waypoints keeps what it has.
+            # Only a ride with no waypoints at all falls back to start->end,
+            # which undercounts any route that isn't a straight line — hence
+            # the recorded distance_source (sql/034).
+            if existing_source == "waypoints":
+                new_distance, new_source = existing_distance, "waypoints"
+            else:
+                new_distance = distance_meters(
+                    start_lat, start_lon, payload.end_lat, payload.end_lon)
+                new_source = "straight_line"
 
             cur.execute(
                 """
@@ -335,12 +364,15 @@ def end_tracked_ride(
                     reported_battery_percent = %s,
                     total_cost_cents = %s,
                     metadata = %s::jsonb,
+                    distance_meters = %s,
+                    distance_source = %s,
                     updated_at = NOW()
                 WHERE id = %s
                 """,
                 (payload.ended_at, payload.end_lat, payload.end_lon,
                  payload.reported_battery_percent, payload.total_cost_cents,
-                 json.dumps(payload.metadata or {}), str(rid)),
+                 json.dumps(payload.metadata or {}), new_distance, new_source,
+                 str(rid)),
             )
 
             # Points (requirement #10), credited now that the ride is
@@ -412,15 +444,32 @@ def add_waypoint(
             # Rebuild path_polyline from the full ordered set — waypoints
             # can arrive out of order (client retry/offline buffering), so
             # an incremental append would silently corrupt the path.
+            # The ride's start point leads the path: the rider was already
+            # moving between where they started and wherever their first GPS
+            # fix landed, so dropping that leg undercounts every ride by the
+            # first sampling gap. Off-feed rides do the same
+            # (api_rides.py:_rebuild_track) — badges sum distance across
+            # both tables, so the two must measure the same way.
+            cur.execute(
+                "SELECT start_lat, start_lon FROM tracked_rides WHERE id = %s",
+                (str(rid),),
+            )
+            srow = cur.fetchone()
+            head = [(srow[0], srow[1])] if srow and srow[0] is not None else []
             cur.execute(
                 "SELECT lat, lon FROM ride_waypoints WHERE tracked_ride_id = %s "
                 "ORDER BY waypoint_at ASC, id ASC",
                 (str(rid),),
             )
-            points = cur.fetchall()
+            points = head + cur.fetchall()
+            # Distance is recomputed from the same full ordered set, for the
+            # same reason: an incremental += would be wrong the moment a
+            # waypoint arrives out of order. 'waypoints' always wins over the
+            # straight-line fallback PATCH .../end would otherwise apply.
             cur.execute(
-                "UPDATE tracked_rides SET path_polyline = %s, updated_at = NOW() WHERE id = %s",
-                (encode_polyline(points), str(rid)),
+                "UPDATE tracked_rides SET path_polyline = %s, distance_meters = %s, "
+                "distance_source = 'waypoints', updated_at = NOW() WHERE id = %s",
+                (encode_polyline(points), path_length_meters(points), str(rid)),
             )
         conn.commit()
     return {
@@ -483,7 +532,7 @@ def delete_tracked_ride(
 ) -> dict[str, Any]:
     """Hard delete, cascades to user_device_watch_list + ride_waypoints.
     404 for both 'not yours' and 'doesn't exist' — no existence oracle
-    across accounts (mirrors api_rides.py:delete_ride)."""
+    across accounts."""
     rid = _parse_ride_id(ride_id)
     with connection() as conn:
         with conn.cursor() as cur:

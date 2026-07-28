@@ -1,6 +1,7 @@
 """Ride transaction screenshot endpoints (requirement #16). Namespaced
 under /api/v1/tracked-rides (not /api/v1/rides, which belongs to the
-unrelated legacy supporter-rides table — see sql/027_tracked_rides.sql)."""
+separate off-feed ride tracker — see sql/027_tracked_rides.sql and
+sql/035_off_feed_rides.sql)."""
 
 from __future__ import annotations
 

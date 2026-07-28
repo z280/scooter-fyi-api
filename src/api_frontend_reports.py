@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ from .receipts import (
     ReceiptError,
     delete_receipt,
     receipts_bucket,
+    store_model_photo,
     store_receipt,
 )
 
@@ -48,7 +50,7 @@ router = APIRouter()
 # api_public.py / api_h3.py. A parking complaint says nothing about whether
 # the scooter rides. 'not_found' (sql/029) is NOT excluded — see that
 # migration's header for why a missing vehicle IS a reliability signal.
-_REPORT_TYPES = ("failed_unlock", "dead_battery", "damaged", "improperly_parked", "not_found")
+_REPORT_TYPES = ("not_rideable", "dead_battery", "damaged", "improperly_parked", "not_found")
 
 # Report types that must NOT drive has_negative_report / reliability_tier.
 # Single source of truth for the exclusion applied in the /devices/current
@@ -76,6 +78,10 @@ _LIMIT_DEVICE_ANON_PER_IP = (3, 3600)        # 3/hour per IP (anonymous)
 _LIMIT_DEVICE_AUTH_PER_ACCOUNT = (10, 3600)  # 10/hour per authenticated account
 _LIMIT_DISCOUNT_PER_ACCOUNT = (20, 86400)
 _LIMIT_EXPORT_PER_IP = (10, 3600)
+_LIMIT_MODEL_ANON_PER_IP = (5, 3600)
+_LIMIT_MODEL_AUTH_PER_ACCOUNT = (20, 3600)
+_MAX_MODEL_DESCRIPTION = 2000
+_VEHICLE_IDENTIFIER_RE = re.compile(r"^[0-9a-f]{16}$")
 
 # §3.3 est_overcharge_cents: without Veo's rate card we can't compute the
 # exact delta, so the estimate assumes the missed equity discount is half
@@ -336,6 +342,144 @@ async def submit_discount_report(
 # ---------------------------------------------------------------------------
 # GET /api/v1/reports/summary
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# POST /api/v1/reports/model
+# ---------------------------------------------------------------------------
+@router.post("/api/v1/reports/model")
+async def submit_model_report(
+    request: Request,
+    user: SessionUser | None = Depends(optional_session),
+) -> dict[str, Any]:
+    """"We're showing this as an unrecognized model — tell us what it is."
+
+    Feeds a review queue (sql/038), NOT the reliability signals. A model
+    report is a catalog correction; a scooter whose name we got wrong still
+    rides fine, so this must never touch has_negative_report /
+    reliability_tier the way /api/v1/reports/device does.
+
+    Anonymous TEXT is allowed and rate-limited per IP — naming a scooter
+    model isn't evidence about a rider, and requiring sign-in would lose
+    most of the corrections.
+
+    A PHOTO requires a session, always. Accepting binaries from
+    unauthenticated callers means anyone on the internet can push arbitrary
+    files into our R2 bucket; no per-IP limit fixes that, because IPs are
+    free and the liability of hosting whatever they upload is not. This is
+    the only endpoint in the project that takes an upload alongside an
+    optional session, so it is the only one where the rule has to be stated
+    rather than inherited from require_session.
+
+    multipart/form-data: `device_id` and `description` required;
+    `vehicle_identifier`, `lat`, `lng`, and a `photo` part optional.
+    """
+    # Either form encoding is fine — request.form() parses both, and a
+    # text-only report has no reason to be multipart. A JSON body is
+    # refused rather than half-accepted: it can't carry the photo part, so
+    # silently taking it would drop an attachment the caller thought they
+    # sent.
+    ctype = (request.headers.get("content-type") or "").lower()
+    if not (ctype.startswith("multipart/form-data")
+            or ctype.startswith("application/x-www-form-urlencoded")):
+        raise HTTPException(415, "send multipart/form-data or application/x-www-form-urlencoded")
+    form = await request.form()
+
+    def _text(name: str) -> str | None:
+        v = form.get(name)
+        return v.strip() if isinstance(v, str) and v.strip() else None
+
+    device_id = _text("device_id")
+    description = _text("description")
+    if not device_id:
+        raise HTTPException(422, "device_id is required")
+    if not description:
+        raise HTTPException(422, "description is required")
+    if len(description) > _MAX_MODEL_DESCRIPTION:
+        raise HTTPException(422, f"description too long (max {_MAX_MODEL_DESCRIPTION})")
+
+    vehicle_identifier = _text("vehicle_identifier")
+    if vehicle_identifier and not _VEHICLE_IDENTIFIER_RE.match(vehicle_identifier):
+        raise HTTPException(422, "vehicle_identifier must be 16 lowercase hex chars")
+
+    def _coord(name: str, lo: float, hi: float) -> float | None:
+        raw = _text(name)
+        if raw is None:
+            return None
+        try:
+            val = float(raw)
+        except ValueError:
+            raise HTTPException(422, f"{name} must be a number")
+        if not lo <= val <= hi:
+            raise HTTPException(422, f"{name} out of range")
+        return val
+
+    lat = _coord("lat", -90, 90)
+    lng = _coord("lng", -180, 180)
+    # Half a coordinate pair locates nothing; storing it would just be a
+    # column that lies about being usable.
+    if (lat is None) != (lng is None):
+        raise HTTPException(422, "lat and lng must be sent together")
+
+    photo = form.get("photo")
+    photo_bytes: bytes | None = None
+    if photo is not None and not isinstance(photo, str):
+        # Checked BEFORE reading the body: an anonymous caller must not be
+        # able to make us buffer a 10 MB upload just to reject it.
+        if user is None:
+            raise HTTPException(401, "sign in to attach a photo — "
+                                     "text-only model reports are accepted anonymously")
+        photo_bytes = await photo.read() or None
+        if photo_bytes and len(photo_bytes) > MAX_RECEIPT_BYTES:
+            raise HTTPException(413, "photo too large (max 10 MB)")
+
+    ip = real_client_ip(request)
+    photo_key: str | None = None
+    if photo_bytes:
+        if not receipts_bucket():
+            raise HTTPException(503, "photo storage not configured — submit without the image")
+        try:
+            photo_key = store_model_photo(user.account_id if user else None, photo_bytes)
+        except ReceiptError as e:
+            raise HTTPException(400, str(e))
+
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                if user is not None:
+                    enforce(cur, bucket="model_report_account", key=str(user.account_id),
+                            limit=_LIMIT_MODEL_AUTH_PER_ACCOUNT[0],
+                            window_seconds=_LIMIT_MODEL_AUTH_PER_ACCOUNT[1])
+                else:
+                    enforce(cur, bucket="model_report_ip", key=ip or "unknown",
+                            limit=_LIMIT_MODEL_ANON_PER_IP[0],
+                            window_seconds=_LIMIT_MODEL_ANON_PER_IP[1])
+                cur.execute(
+                    """
+                    INSERT INTO model_reports (
+                        account_id, device_id, vehicle_identifier, description,
+                        lat, lng, photo_r2_key, reporter_ip, reporter_user_agent
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (user.account_id if user else None, device_id, vehicle_identifier,
+                     description, lat, lng, photo_key, ip,
+                     request.headers.get("user-agent")),
+                )
+                new_id, created_at = cur.fetchone()
+            conn.commit()
+    except Exception:
+        # Don't leave the uploaded object orphaned in R2 if the row never
+        # landed — mirrors the discount-report path.
+        if photo_key:
+            try:
+                delete_receipt(photo_key)
+            except ReceiptError:
+                log.exception("orphaned model report photo cleanup failed for %s", photo_key)
+        raise
+
+    return {"id": int(new_id), "created_at": created_at.isoformat(),
+            "photo_stored": photo_key is not None}
+
+
 @router.get("/api/v1/reports/summary")
 def reports_summary(
     response: Response,

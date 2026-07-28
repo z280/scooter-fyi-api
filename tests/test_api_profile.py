@@ -17,17 +17,17 @@ from src.accounts import InvalidUsernameChoice, SessionUser, require_session
 
 _USER = SessionUser(
     account_id=1, email="rider@example.com", scopes=("rider",),
-    supporter=False, expires_at=datetime.now(timezone.utc),
+    expires_at=datetime.now(timezone.utc),
     sliding=True, method="google", token_sha256="x",
 )
 
 # _profile_payload's SELECT tuple shape:
 # (email, phone_number, public_username, show_public_username,
-#  show_in_leaderboards, rate_plan, theme, favorites, supporter,
+#  show_in_leaderboards, rate_plan, theme, favorites,
 #  home_lat, home_lng, work_lat, work_lng)
 _PROFILE_ROW = (
     "rider@example.com", None, "brave🦉", True, True,
-    "visitor", None, [], False, None, None, None, None,
+    "visitor", None, [], None, None, None, None,
 )
 
 
@@ -95,7 +95,7 @@ def _put_client(monkeypatch, current_email, current_phone, raise_on=None):
         yield conn
 
     monkeypatch.setattr(api_profile, "connection", _fake_connection)
-    monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid, supporter: [])
+    monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid: [])
     return TestClient(_app()), conn
 
 
@@ -107,7 +107,7 @@ def _get_client(monkeypatch, row):
         yield conn
 
     monkeypatch.setattr(api_profile, "connection", _fake_connection)
-    monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid, supporter: [])
+    monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid: [])
     return TestClient(_app())
 
 
@@ -259,7 +259,7 @@ def test_put_newly_completing_the_profile_awards_points(monkeypatch):
         yield conn
 
     monkeypatch.setattr(api_profile, "connection", _fake_connection)
-    monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid, supporter: [])
+    monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid: [])
     r = TestClient(_app()).put("/api/v1/profile", json={"phone_number": "+13035551234"})
     assert r.status_code == 200, r.text
     points_insert = next(c for c in conn.cur.executed if c[0].startswith("INSERT INTO user_points"))

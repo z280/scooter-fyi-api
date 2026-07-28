@@ -1,7 +1,7 @@
 """Tests for src/api_tracked_rides.py's pure response-shaping logic
 (_row_to_ride's anti-fraud GBFS redaction is the highest-stakes piece —
 tested directly, no DB needed) plus the request-validation guards that
-follow the same fake-cursor idiom as tests/test_api_rides_validation.py."""
+follow the same fake-cursor idiom as the other API validation tests."""
 
 from __future__ import annotations
 
@@ -21,14 +21,17 @@ _RIDE_ID = uuid.uuid4()
 _NOW = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
 _USER = SessionUser(
     account_id=1, email="rider@example.com", scopes=("rider",),
-    supporter=False, expires_at=_NOW, sliding=True, method="google", token_sha256="x",
+    expires_at=_NOW, sliding=True, method="google", token_sha256="x",
 )
 
 
 def _row(
     *, reported: bool = False, gbfs_reappeared: bool = False,
     path_polyline: str = "",
+    distance_meters: float | None = None,
+    distance_source: str | None = None,
 ) -> tuple:
+    """Column order must track _RIDE_COLS in src/api_tracked_rides.py."""
     return (
         _RIDE_ID, "watching", _NOW, 39.74, -104.98, _NOW,
         _NOW if gbfs_reappeared else None,           # gbfs_left_feed_at
@@ -42,6 +45,24 @@ def _row(
         78.2 if reported else None,                   # reported_battery_percent
         350 if reported else None,                    # total_cost_cents
         {}, path_polyline, "aaaa000000000000", _NOW, _NOW,
+        distance_meters, distance_source,
+    )
+
+
+def _end_select(
+    *, already_ended: bool = False, gbfs_end: tuple | None = None,
+    distance_meters: float | None = None, distance_source: str | None = None,
+) -> tuple:
+    """The narrower SELECT ... FOR UPDATE that PATCH .../end issues before
+    it writes. Distinct from _row above — different column list."""
+    gbfs_lat, gbfs_lon = gbfs_end if gbfs_end else (None, None)
+    return (
+        _NOW if already_ended else None,   # user_reported_ended_at
+        "aaaa000000000000",                # vehicle_identifier
+        None,                              # gbfs_reappeared_at
+        gbfs_lat, gbfs_lon,
+        39.74, -104.98,                    # start_lat, start_lon
+        distance_meters, distance_source,
     )
 
 
@@ -185,7 +206,7 @@ def test_end_ride_404_when_not_found(monkeypatch):
 def test_end_ride_409_when_already_reported(monkeypatch):
     # (user_reported_ended_at, vehicle_identifier, gbfs_reappeared_at,
     # gbfs_end_lat, gbfs_end_lon) — already reported.
-    c, _ = _client(monkeypatch, fetches=[(_NOW, "aaaa000000000000", None, None, None)])
+    c, _ = _client(monkeypatch, fetches=[_end_select(already_ended=True)])
     r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
         "ended_at": "2026-07-01T12:00:00Z", "end_lat": 39.75, "end_lon": -104.99,
     })
@@ -196,7 +217,7 @@ def test_end_ride_credits_waypoint_points(monkeypatch):
     # initial SELECT (not ended, no gbfs data), UPDATE (no fetch),
     # waypoint COUNT, credit_points INSERT...RETURNING, final SELECT.
     fetches = [
-        (None, "aaaa000000000000", None, None, None),
+        _end_select(),
         (3,),
         (77, _NOW),
         _row(),
@@ -213,7 +234,7 @@ def test_end_ride_credits_waypoint_points(monkeypatch):
 
 def test_end_ride_no_waypoints_and_no_gbfs_data_credits_nothing(monkeypatch):
     fetches = [
-        (None, "aaaa000000000000", None, None, None),
+        _end_select(),
         (0,),  # zero waypoints -> credit_waypoint_points no-ops without a query
         _row(),
     ]
@@ -223,6 +244,61 @@ def test_end_ride_no_waypoints_and_no_gbfs_data_credits_nothing(monkeypatch):
     })
     assert r.status_code == 200, r.text
     assert not any(c[0].startswith("INSERT INTO user_points") for c in conn.cur.executed)
+
+
+# ---------- distance on end (sql/034) ---------------------------------------
+
+def _end_update(conn) -> tuple:
+    return next(c for c in conn.cur.executed
+                if c[0].lstrip().startswith("UPDATE tracked_rides SET")
+                and "status = 'completed'" in c[0])
+
+
+def test_end_ride_without_waypoints_falls_back_to_straight_line(monkeypatch):
+    """No waypoints -> distance is start->end as the crow flies, tagged so
+    downstream readers know it's the weak measurement."""
+    c, conn = _client(monkeypatch, [_end_select(), (0,), _row()])
+    r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
+        "ended_at": "2026-07-01T12:00:00Z", "end_lat": 39.75, "end_lon": -104.98,
+    })
+    assert r.status_code == 200, r.text
+    params = _end_update(conn)[1]
+    assert "straight_line" in params
+    # 39.74 -> 39.75 at constant longitude is ~1113 m.
+    distance = next(p for p in params if isinstance(p, float) and p > 1000)
+    assert 1100 < distance < 1120
+
+
+def test_end_ride_keeps_waypoint_distance_and_does_not_overwrite_it(monkeypatch):
+    """A ride with waypoints already has the better number — reporting the
+    end must not clobber it with the straight line."""
+    c, conn = _client(
+        monkeypatch,
+        [_end_select(distance_meters=4321.0, distance_source="waypoints"), (0,), _row()],
+    )
+    r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
+        "ended_at": "2026-07-01T12:00:00Z", "end_lat": 39.75, "end_lon": -104.98,
+    })
+    assert r.status_code == 200, r.text
+    params = _end_update(conn)[1]
+    assert 4321.0 in params
+    assert "waypoints" in params
+    assert "straight_line" not in params
+
+
+def test_row_to_ride_exposes_distance_without_redacting_it():
+    """distance is derived from the rider's own data, so unlike the gbfs_*
+    fields it is visible before they report their end."""
+    ride = api_tracked_rides._row_to_ride(
+        _row(reported=False, distance_meters=1234.56, distance_source="waypoints"))
+    assert ride["distance_meters"] == 1234.6
+    assert ride["distance_source"] == "waypoints"
+
+
+def test_row_to_ride_distance_is_none_before_it_is_computed():
+    ride = api_tracked_rides._row_to_ride(_row())
+    assert ride["distance_meters"] is None
+    assert ride["distance_source"] is None
 
 
 def test_waypoint_requires_tz_aware_timestamp():

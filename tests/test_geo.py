@@ -10,7 +10,13 @@ import math
 import pytest
 
 from src import boundaries, geo
-from src.geo import distance_meters, geometry_contains, region_for_point, region_names
+from src.geo import (
+    distance_meters,
+    geometry_contains,
+    path_length_meters,
+    region_for_point,
+    region_names,
+)
 
 # Unit square with a hole in the middle quarter.
 _SQUARE_WITH_HOLE = {
@@ -122,3 +128,33 @@ def test_distance_within_20m_threshold_used_by_gbfs_trip_validation():
     delta_lat = 21.0 / 111_320.0
     d = distance_meters(39.74, -104.99, 39.74 + delta_lat, -104.99)
     assert d > 20.0
+
+
+# ---------- path_length_meters -----------------------------------------------
+
+def test_path_length_empty_and_single_point_are_zero():
+    assert path_length_meters([]) == 0.0
+    assert path_length_meters([(39.74, -104.99)]) == 0.0
+
+
+def test_path_length_sums_consecutive_legs():
+    step = 100.0 / 111_320.0  # ~100 m of latitude
+    pts = [(39.74 + i * step, -104.99) for i in range(4)]  # 3 legs
+    assert math.isclose(path_length_meters(pts), 300.0, rel_tol=1e-6)
+
+
+def test_path_length_counts_backtracking_rather_than_displacement():
+    """A rider who goes out and comes back rode the whole way. Distance is
+    path length, not start->end displacement — the property that makes the
+    waypoint measurement worth more than the straight-line fallback."""
+    step = 100.0 / 111_320.0
+    out_and_back = [(39.74, -104.99), (39.74 + step, -104.99), (39.74, -104.99)]
+    assert math.isclose(path_length_meters(out_and_back), 200.0, rel_tol=1e-6)
+    assert distance_meters(*out_and_back[0], *out_and_back[-1]) == 0.0
+
+
+def test_path_length_never_below_straight_line_between_endpoints():
+    """The triangle inequality, stated as the invariant badges rely on:
+    the straight-line fallback can only ever UNDERcount, never overcount."""
+    pts = [(39.74, -104.99), (39.75, -104.97), (39.73, -104.95), (39.76, -104.94)]
+    assert path_length_meters(pts) >= distance_meters(*pts[0], *pts[-1])

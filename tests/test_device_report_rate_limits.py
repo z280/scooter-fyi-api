@@ -81,7 +81,7 @@ _BODY = {"vehicle_identifier": _VID, "lat": 39.7392, "lng": -104.9876}
 def test_anonymous_report_is_limited_to_3_per_hour_per_ip(monkeypatch):
     calls = _install(monkeypatch, _FRESH)
     r = TestClient(_app()).post(
-        "/api/v1/reports/device", json={**_BODY, "report_type": "failed_unlock"})
+        "/api/v1/reports/device", json={**_BODY, "report_type": "not_rideable"})
     assert r.status_code == 200
     assert len(calls) == 1
     assert calls[0]["bucket"] == "device_report_ip"
@@ -94,7 +94,7 @@ def test_authenticated_report_is_limited_to_10_per_hour_per_account(monkeypatch)
     app = _app()
     app.dependency_overrides[optional_session] = lambda: SessionUser(
         account_id=42, email="rider@example.com", scopes=("rider",),
-        supporter=False, expires_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc),
         sliding=True, method="google", token_sha256="x",
     )
     r = TestClient(app).post(
@@ -115,7 +115,7 @@ def test_deduped_resubmission_does_not_consume_rate_limit_quota(monkeypatch):
     # dedup SELECT -> an existing report (id=7); no INSERT should follow.
     calls = _install(monkeypatch, [(7, _TS)])
     r = TestClient(_app()).post(
-        "/api/v1/reports/device", json={**_BODY, "report_type": "failed_unlock"})
+        "/api/v1/reports/device", json={**_BODY, "report_type": "not_rideable"})
     assert r.status_code == 200
     body = r.json()
     assert body["deduped"] is True

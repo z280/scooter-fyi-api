@@ -1,6 +1,6 @@
 """GET /api/v1/private/trips/daily.
 
-Uses a fake cursor/connection (same pattern as test_api_rides_validation.py
+Uses a fake cursor/connection (same pattern as test_api_tracked_rides_validation.py
 and test_api_private_lookup_batch.py) to exercise real FastAPI request
 handling without a live Postgres.
 """
@@ -65,7 +65,7 @@ def _client(monkeypatch, summary=SUMMARY_ROW, vehicles=VEHICLE_ROWS):
     app.include_router(api_private.router)
     app.dependency_overrides[require_admin] = lambda: SessionUser(
         account_id=1, email="admin@example.com", scopes=("rider", "admin"),
-        supporter=False, expires_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc),
         sliding=False, method="google", token_sha256="x",
     )
     return TestClient(app)

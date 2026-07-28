@@ -95,8 +95,7 @@ def test_admin_emails_reads_table(store):
 def test_is_admin_email_uses_the_table(store):
     accounts.add_admin("z@neill.io", added_by="cli")
     admin = accounts.SessionUser(
-        account_id=1, email="Z@Neill.IO", scopes=("rider",), supporter=False,
-        expires_at=_AT, sliding=True, method="magic_link", token_sha256="x" * 64,
+        account_id=1, email="Z@Neill.IO", scopes=("rider",), expires_at=_AT, sliding=True, method="magic_link", token_sha256="x" * 64,
     )
     assert accounts.is_admin_email(admin) is True
 

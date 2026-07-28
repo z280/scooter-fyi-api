@@ -79,6 +79,30 @@ def store_receipt(account_id: int, data: bytes) -> str:
     return key
 
 
+def store_model_photo(account_id: int | None, data: bytes) -> str:
+    """Same private bucket and same EXIF-destroying re-encode as receipts,
+    for model-report photos (§3.1a, sql/038).
+
+    Every stored photo belongs to an account: the endpoint rejects an
+    upload from an unauthenticated caller before it gets here (anonymous
+    callers may still submit a text-only report). `account_id` is typed
+    optional only so a future caller can't pass None by accident without
+    tripping the guard below.
+    """
+    if account_id is None:
+        raise ReceiptError("photo uploads require an authenticated account")
+    bucket = receipts_bucket()
+    if not bucket:
+        raise ReceiptError("photo storage not configured")
+    clean = strip_and_reencode(data)
+    key = f"model-reports/{account_id}/{uuid.uuid4()}.jpg"
+    _r2_client().put_object(
+        Bucket=bucket, Key=key, Body=clean, ContentType="image/jpeg"
+    )
+    log.info("model report photo stored: %s (%d bytes after re-encode)", key, len(clean))
+    return key
+
+
 def delete_receipt(key: str) -> None:
     bucket = receipts_bucket()
     if not bucket:

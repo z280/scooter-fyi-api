@@ -112,5 +112,5 @@ def test_reliability_clause_excludes_parking_and_keeps_failures():
     assert clause.startswith("dr.report_type NOT IN (")
     # …while the ride-affecting failure types are NOT named in the exclusion,
     # so they still count toward reliability.
-    for keep in ("failed_unlock", "dead_battery", "damaged"):
+    for keep in ("not_rideable", "dead_battery", "damaged"):
         assert keep not in clause

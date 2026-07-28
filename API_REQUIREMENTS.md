@@ -105,11 +105,20 @@ attribution, and supporter features.
 - Fields (server-computed, read-only): `supporter: boolean`,
   `badges: [{ id, label, earned_at }]` (see §5.3).
 
-### 2.5 Retirements
+### 2.5 Retirements — WITHDRAWN (2026-07-28)
 
-- Once Google + magic links are live and the admin allowlist works,
-  retire the GitHub OAuth app and its callback route. The frontend removes
-  its hidden-tab gate in the same release.
+This asked to retire the GitHub OAuth app and its callback route once the
+admin allowlist worked. **The requirement is dropped by operator decision:
+the GitHub gate on `/admin/*` stays.**
+
+Rider auth (bearer sessions + `admin_allowlist`) and the admin panel's
+GitHub OAuth are two separate mechanisms on purpose, and keeping the
+operator portal behind a second, independent door is a feature rather than
+debt. Do not "finish" this retirement.
+
+Note the *map-auth bearer flow* referenced elsewhere in the codebase WAS
+retired — that is a different thing from the `/admin/*` GitHub gate, and
+those comments are accurate.
 
 ---
 

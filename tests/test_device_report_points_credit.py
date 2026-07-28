@@ -19,7 +19,7 @@ _TS = datetime(2026, 7, 5, tzinfo=timezone.utc)
 _BODY = {"vehicle_identifier": _VID, "lat": 39.7392, "lng": -104.9876}
 _USER = SessionUser(
     account_id=42, email="rider@example.com", scopes=("rider",),
-    supporter=False, expires_at=datetime.now(timezone.utc),
+    expires_at=datetime.now(timezone.utc),
     sliding=True, method="google", token_sha256="x",
 )
 
@@ -77,10 +77,10 @@ def test_authenticated_points_eligible_report_awards_points(monkeypatch):
     # user_points INSERT (inside credit_points) -> (points_id, points_ts).
     fetch = [None, (1, _TS), (99, _TS)]
     client, conn = _client(monkeypatch, fetch)
-    r = client.post("/api/v1/reports/device", json={**_BODY, "report_type": "failed_unlock"})
+    r = client.post("/api/v1/reports/device", json={**_BODY, "report_type": "not_rideable"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["points_awarded"] == 10  # POINTS_REPORT_WONT_START
+    assert body["points_awarded"] == 10  # POINTS_REPORT_NOT_RIDEABLE
     assert body["deduped"] is False
 
 
@@ -109,14 +109,14 @@ def test_anonymous_report_never_enters_the_points_path(monkeypatch):
     app = FastAPI()
     app.include_router(api_frontend_reports.router)
     r = TestClient(app).post(
-        "/api/v1/reports/device", json={**_BODY, "report_type": "failed_unlock"})
+        "/api/v1/reports/device", json={**_BODY, "report_type": "not_rideable"})
     assert r.status_code == 200, r.text
     assert r.json()["points_awarded"] == 0
 
 
 def test_deduped_resubmission_reports_zero_points_awarded(monkeypatch):
     client, _ = _client(monkeypatch, [(7, _TS)])
-    r = client.post("/api/v1/reports/device", json={**_BODY, "report_type": "failed_unlock"})
+    r = client.post("/api/v1/reports/device", json={**_BODY, "report_type": "not_rideable"})
     assert r.status_code == 200
     body = r.json()
     assert body["deduped"] is True

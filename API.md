@@ -1,10 +1,16 @@
 # veo-audit Public API
 
-Read-only REST API serving Denver Veo micromobility fleet data. Polls the
-upstream GBFS feed every 10 minutes, geo-tags each device against five
-spatial layers (Disadvantaged Areas v1/v2, Council Districts, Community
-Networks, Neighborhoods), and exposes both citywide summary metrics and
-per-region breakdowns.
+REST API serving Denver Veo micromobility fleet data. Polls the upstream
+GBFS feed every 10 minutes, geo-tags each device against five spatial
+layers (Disadvantaged Areas v1/v2, Council Districts, Community Networks,
+Neighborhoods), and exposes both citywide summary metrics and per-region
+breakdowns.
+
+The public map surface is read-only and unauthenticated. On top of it sits
+a **rider surface** — sign-in, profiles and public usernames, GBFS-detected
+tracked rides, a points ledger, device photos, and QR scans — which
+requires a bearer token and accepts writes. See
+[Accounts & sessions](#accounts--sessions) onward.
 
 This document is the contract for frontend consumers. Backend internals
 are in [README.md](./README.md).
@@ -23,12 +29,26 @@ HTTP status codes.
 ## Authentication
 
 **Not required for the map.** Every read endpoint that powers the public
-map and compliance dashboards is unauthenticated. Accounts exist for the
-cost ticker's rate choice, report attribution, and supporter features —
-see [Accounts & sessions](#accounts--sessions). Authenticated endpoints
-take `Authorization: Bearer <token>`. The `/admin/*` routes (not
-documented here) require GitHub OAuth and are intended for operators
-only.
+map and compliance dashboards is unauthenticated, as are
+[routing](#routing) and anonymous device reports.
+
+Everything else takes `Authorization: Bearer <token>` from one of the
+sign-in doors in [Accounts & sessions](#accounts--sessions): profiles and
+public usernames, [tracked rides](#tracked-rides-gbfs-detected),
+[points](#points), [device photos](#device-photos),
+[QR scans and recommendations](#device-engagement), discount reports, and
+the signed-in device feed.
+
+Two notes that surprise people:
+
+- **`admin` is not a scope gate.** Admin authorization is membership in
+  the `admin_allowlist` table, reachable through *any* sign-in door.
+- **There is no paid tier.** Signed-in and admin are the only two gates
+  in this system. Nothing is purchasable, nothing unlocks features, and
+  there is no billing integration.
+
+The `/admin/*` routes (not documented here) are a separate GitHub OAuth
+HTML portal for operators.
 
 ## CORS
 
@@ -1099,6 +1119,113 @@ Days without any computed row are simply omitted from `rows` — don't expect de
 
 ---
 
+## Routing
+
+Bicycle routing over a Denver-clipped Valhalla graph, with an empirical
+battery-burn estimate attached. Public, no auth.
+
+**The routing graph is smaller than the map.** It covers
+`[-105.06, 39.65, -104.88, 39.79]` (west, south, east, north) — narrower
+than both the app's map bounds and the audit's `denver_core` envelope.
+Coordinates outside it are **rejected, not clamped**: a silently relocated
+origin would produce a confidently wrong distance and battery estimate.
+Expect `out_of_coverage` in normal use near the edges and handle it.
+
+The graph also **excludes High Injury Network streets**, so a location
+whose only nearby road is on the HIN yields `no_route_from_location`
+rather than a route.
+
+### `GET /api/v1/route`
+
+| Param | Required | Description |
+|---|---|---|
+| `from` | yes | Origin as `lat,lon` (e.g. `39.7392,-104.9876`). |
+| `to` | yes | Destination as `lat,lon`. |
+| `profile` | no | `safe` \| `range` \| `shade` \| `express`. Defaults to `safe`. |
+| `vehicle_model` | no | `Astro` \| `Cosmo` \| `Apollo` — selects a model-specific battery curve. |
+| `explain` | no | `true` adds a `diagnostics` block. |
+
+**Response 200** — a GeoJSON `Feature`, so it drops straight into a map
+source:
+
+```json
+{
+  "type": "Feature",
+  "geometry": { "type": "LineString", "coordinates": [[-104.9876, 39.7392] /* … */] },
+  "properties": {
+    "profile": "safe",
+    "label": "Safe & Protected",
+    "distance_meters": 2412.0,
+    "duration_seconds": 611.0,
+    "elevation_gain_meters": 18.4,
+    "shade_score": null,
+    "battery_percent_estimate": 7.2,
+    "battery_model": "regression",
+    "graph_bbox": [-105.06, 39.65, -104.88, 39.79]
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `distance_meters` | number \| null | Route length. `null` if Valhalla omitted it. |
+| `duration_seconds` | number | Valhalla's estimate for the selected costing. |
+| `elevation_gain_meters` | number | Cumulative climb — the dominant term in battery burn. |
+| `shade_score` | number \| null | Tree-canopy coverage of the chosen route. Only computed for `profile=shade` (or any profile when `explain=true`). `null` when canopy data is unavailable. |
+| `battery_percent_estimate` | number \| null | Estimated battery burn for this route, in percentage points. **`null` whenever `battery_model` is `"unavailable"`.** |
+| `battery_model` | `"regression"` \| `"unavailable"` | Whether a fitted model produced the number. Only these two values. |
+| `graph_bbox` | `[w, s, e, n]` | Echoed on every response so clients can pre-filter without a second call. |
+
+> **The battery estimate is currently always `null` in production.** The
+> regression is fitted from accumulated battery-trip observations, and no
+> model has been fitted yet — so `battery_model` reads `"unavailable"`
+> (with `reason: "no_model"` under `explain=true`) on every request,
+> including when `vehicle_model` is supplied. Clients must treat the
+> estimate as optional and render the route without it. It will start
+> returning numbers once enough observations accumulate; nothing on the
+> client needs to change when that happens.
+
+**`profile=shade` is guaranteed never to do worse than the default.** It
+requests alternates, scores each against the canopy data, and includes the
+default profile's route as a candidate — because shade's own costing
+generates a different route family, re-ranking only within it once
+measured *less* canopy than not asking for shade at all.
+
+**Errors.** These carry a structured object as `detail`, not a bare string:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| 400 | `unknown_profile` | Unrecognized `profile`. Response lists valid `profiles`. |
+| 400 | `out_of_coverage` | `from` or `to` outside the graph. Response includes `graph_bbox`. |
+| 422 | `no_route_from_location` | No cycling-permitted road near one endpoint (often an HIN exclusion). |
+| 422 | `no_route` | Both endpoints routable, but no path between them. |
+| 503 | `router_unavailable` | The Valhalla sidecar is down or timed out. |
+
+Malformed `from`/`to` (not two parseable floats) is a plain `400`.
+
+### `GET /api/v1/route/profiles`
+
+Advertises the selectable profiles so clients needn't hardcode them.
+Public, no auth.
+
+```json
+{
+  "default": "safe",
+  "graph_bbox": [-105.06, 39.65, -104.88, 39.79],
+  "profiles": [
+    { "key": "safe",    "label": "Safe & Protected",    "shade_ranked": false },
+    { "key": "range",   "label": "The Range Maximizer", "shade_ranked": false },
+    { "key": "shade",   "label": "The Shaded Canopy",   "shade_ranked": true },
+    { "key": "express", "label": "Commuter Express",    "shade_ranked": false }
+  ]
+}
+```
+
+Profiles are config-driven (`config.json` → `valhalla.profiles`); treat
+this endpoint, not the table above, as the live list.
+
+---
+
 ## Accounts & sessions
 
 Three sign-in doors, one session model. Session-minting endpoints return
@@ -1119,8 +1246,7 @@ magic-link reaches the admin/`/api/v1/private/*` surface too. The
 allowlist is stored in Postgres (`admin_allowlist` table) and managed from
 the GitHub-gated admin portal at `/admin/admins` (or
 `python -m src.cli admin add <email>`) — it replaced the `ADMIN_EMAILS`
-env var. `supporter` appears automatically while the account has a live
-supporter payment (see the Stripe webhook).
+env var.
 
 **Expiry:** rider sessions last 30 days and slide — call
 `POST /api/v1/auth/refresh` any time to rotate the token and get a fresh
@@ -1147,7 +1273,7 @@ Postmark config). Cached `public, max-age=300`.
 | `POST /api/v1/auth/code` | `{ "email": "you@example.com" }` → always `202 { "sent": true }`. Emails a short `AA000AA` code (10-min TTL). Only the newest code per email is live. Limits: 3/hour per email, 10/hour per IP. `502` if the email provider fails, `503` if unconfigured. |
 | `POST /api/v1/auth/code/verify` | `{ "email": "you@example.com", "code": "AB123XY" }` → `{token, expires}`. Case-insensitive; spaces/hyphens ignored. `401` if the code is wrong, expired, already used, or after too many wrong tries (5 — which burns the code). Verify attempts are rate-limited 30/hour per IP. |
 | `POST /api/v1/auth/refresh` | Bearer required. → `{token, expires}` (new token; old one revoked). |
-| `GET /api/v1/auth/session` | Bearer required. → `{ email, scopes, supporter, expires }`. `401` when invalid/expired — treat as signed out. |
+| `GET /api/v1/auth/session` | Bearer required. → `{ email, scopes, expires }`. `401` when invalid/expired — treat as signed out. |
 | `POST /api/v1/auth/signout` | Bearer required. Revokes the token. → `{ "revoked": true }` |
 
 ### `GET /api/v1/profile` / `PUT /api/v1/profile`
@@ -1157,10 +1283,17 @@ Bearer required. GET returns:
 ```json
 {
   "email": "you@example.com",
+  "phone_number": "+13035550123",
+  "public_username": "brave🦉owl",
+  "show_public_username": true,
+  "show_in_leaderboards": false,
   "rate_plan": "resident",
   "theme": null,
   "favorites": [],
-  "supporter": false,
+  "home_lat": 39.7392,
+  "home_lng": -104.9876,
+  "work_lat": null,
+  "work_lng": null,
   "badges": [ { "id": "first_report", "label": "Filed a report", "earned_at": "2026-07-01T18:00:00+00:00" } ]
 }
 ```
@@ -1173,13 +1306,63 @@ untouched, `"theme": null` clears the theme:
 | `rate_plan` | `"resident" \| "visitor" \| "equity"` | Drives the frontend cost ticker. |
 | `theme` | string \| null | Free-form, ≤64 chars. |
 | `favorites` | array | Opaque JSON, ≤100 entries — shape TBD by the frontend. |
+| `email` | string \| null | ≤320 chars. Nullable — an account can be reachable by phone alone. |
+| `phone_number` | string \| null | ≤32 chars, validated and normalized server-side. |
+| `show_public_username` | bool | When false, your `public_username` is withheld from every public attribution (e.g. device photos) at **read** time, so flipping it applies retroactively and immediately. |
+| `show_in_leaderboards` | bool | Opt into leaderboard listings. |
+| `home_lat` / `home_lng` | number \| null | Set together. |
+| `work_lat` / `work_lng` | number \| null | Set together. |
 
-`supporter` and `badges` are server-computed and ignored if sent. Badge
-ids: `first_report`, `reporter_10`, `ghost_hunter` (one of your reports
-corroborated by a different reporter within 7 days), `discount_watchdog`,
-`miles_10`, `miles_100`, `streak_7` (rides on 7 consecutive days),
-`supporter`. Badges are recomputed on every read, so new thresholds apply
-retroactively.
+`public_username` and `badges` are server-computed and
+ignored if sent — see the username endpoints below to change your
+username.
+
+**Profile completion awards 10 points, once.** Checked on every PUT.
+Criteria are email **and** `rate_plan` **and** `phone_number` **and** at
+least one of home/work coordinates. Note that `email` is nullable and
+`rate_plan` defaults to `"visitor"`, so in practice this reduces to
+"set a phone number and one location."
+
+**Badge ids:** `first_report`, `reporter_10`, `ghost_hunter` (one of your
+reports corroborated by a *different* reporter within 7 days),
+`discount_watchdog`, `miles_10`, `miles_100`, `streak_7` (rides on 7
+consecutive days). Badges are recomputed on every read, so
+new thresholds apply retroactively.
+
+The mileage and streak badges (`miles_10`, `miles_100`, `streak_7`) are
+computed from [tracked rides](#tracked-rides-gbfs-detected) — every ride
+where you reported an end. Both distance sources count toward mileage, so
+a rider who uploads no waypoints still earns badges; their miles just
+accrue more slowly, since a `straight_line` distance undercounts. A ride
+with `distance_meters: null` still counts toward `streak_7` (it happened)
+but adds nothing to mileage.
+
+### Public usernames
+
+Every account gets a generated `public_username`: a curated adjective plus
+an emoji-noun (e.g. `brave🦉owl`). Both halves are validated against
+server-side lists — **never free text** — so usernames can be shown
+publicly without moderation. Usernames are unique.
+
+| Endpoint | Notes |
+|---|---|
+| `POST /api/v1/profile/username/regenerate` | Re-roll to a new random pair. → `{ "public_username": "..." }` |
+| `PUT /api/v1/profile/username` | `{ "adjective"?: string, "emoji"?: string }` — partial: omit either half to keep your current one. `400` if you send neither, `400` if a value isn't on the curated list, `409` if the resulting username is taken. → `{ "public_username": "..." }` |
+
+Both share **one** rate-limit bucket of 10/hour per account — they mutate
+the same field, so a combined cap is what actually limits abuse.
+
+### Username lexicon
+
+The curated word lists, for building a username picker. Bearer required
+(like every rider endpoint), though the content is static.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/emoji-nouns` | `{ "emoji_nouns": [ { "emoji": "🦉", "word": "owl" }, … ] }`, sorted by word. |
+| `GET /api/v1/emoji-nouns/search?q=owl` | Same shape, case-insensitive substring match on the word. `q` is 1–64 chars. |
+| `GET /api/v1/adjectives` | `{ "adjectives": ["brave", "bright", …] }`, sorted. |
+| `GET /api/v1/adjectives/search?q=bra` | Same shape, case-insensitive substring match. |
 
 ---
 
@@ -1192,16 +1375,30 @@ sending a bearer token links the report to your account (10/hour) and
 weighs it double in the public aggregates.
 
 ```json
-{ "vehicle_identifier": "8c4a1f0d2e9b7a35", "report_type": "failed_unlock",
+{ "vehicle_identifier": "8c4a1f0d2e9b7a35", "report_type": "not_rideable",
   "observed_at": "2026-07-04T16:20:00Z", "lat": 39.7392, "lng": -104.9876 }
 ```
 
-`report_type`: `failed_unlock` | `dead_battery` | `damaged` |
-`improperly_parked`. `observed_at`,
+`report_type`: `not_rideable` | `dead_battery` | `damaged` |
+`improperly_parked` | `not_found`. `observed_at`,
 `lat`, `lng` optional — without coordinates the report is anchored to the
-scooter's last known cell. → `{ "id": 17, "reported_at": "...", "deduped": false }`.
+scooter's last known cell. →
+`{ "id": 17, "reported_at": "...", "deduped": false, "points_awarded": 10 }`.
 An identical (vehicle, type, reporter) report within 30 minutes returns
 the existing row with `"deduped": true` instead of creating a new one.
+
+`not_found` — the scooter isn't where the map says it is — is the newest
+type. Like `improperly_parked` it is a **non-reliability** signal in the
+points table but, unlike it, `not_found` *does* feed
+`has_negative_report` / `reliability_tier`: a scooter nobody can locate is
+a scooter that failed the rider.
+
+**Reports earn points** (see [Points](#points)): `not_rideable`,
+`damaged`, and `improperly_parked` are 10 each, `not_found` is 4, and
+`dead_battery` earns none. Points require **both** a bearer token and a
+resolvable location — your `lat`/`lng`, or the scooter's last known H3
+cell as a fallback. Anonymous reports are still accepted and still count
+in the aggregates; they just return `"points_awarded": 0`.
 
 Reports feed `has_negative_report` and `reliability_tier` on
 `/api/v1/devices/current` for 24 h or until the scooter moves, whichever
@@ -1227,6 +1424,42 @@ provenance), 20/day per account. Send JSON:
 ingest — EXIF/GPS metadata is destroyed, not just hidden — stored in a
 private bucket, and deleted after 18 months (see `/api/v1/meta/privacy`).
 → `{ "id": 3, "created_at": "...", "receipt_stored": true }`
+
+### `POST /api/v1/reports/model`
+
+"We're showing this as an unrecognized model — tell us what it actually
+is." Feeds an operator review queue so the model catalog can be corrected.
+
+**This is a catalog correction, not a failure report.** It never touches
+`has_negative_report` / `reliability_tier`, and never appears in
+`/reports/summary` or the CSV export. A scooter whose name we got wrong
+still rides fine.
+
+Send `multipart/form-data` (or `application/x-www-form-urlencoded` for a
+text-only report). A JSON body is refused with `415` — it can't carry the
+photo part, so accepting it would silently drop an attachment.
+
+| Field | Required | Notes |
+|---|---|---|
+| `device_id` | yes | The per-cycle GBFS device id shown to the rider. |
+| `description` | yes | ≤2000 chars. |
+| `vehicle_identifier` | no | 16 lowercase hex, when the client has one. |
+| `lat` / `lng` | no | **Both or neither** — half a pair locates nothing (`422`). |
+| `photo` | no | Image ≤10 MB. **Requires a session** — see below. |
+
+→ `{ "id": 12, "created_at": "…", "photo_stored": true }`
+
+**Auth: text is anonymous, photos are not.** A signed-out caller may
+submit a text report (5/hour per IP) — naming a scooter model isn't
+evidence about a rider, and requiring sign-in would lose most of the
+corrections. Attaching a `photo` while signed out returns **`401`**: we do
+not accept binary uploads from unauthenticated callers, because IPs are
+free and hosting whatever gets uploaded is not. Signed-in callers get
+20/hour per account and may attach a photo.
+
+Photos are re-encoded on ingest (EXIF/GPS destroyed, not hidden) and
+stored in the same private bucket as receipts. `503` if photo storage
+isn't configured on the deployment — submit without the image.
 
 ### `GET /api/v1/reports/summary?layer=<layer>`
 
@@ -1261,31 +1494,443 @@ weight.
 
 ---
 
-## Supporter: ride history
+## Private API (admin)
 
-`POST /api/v1/rides` requires the `supporter` scope (pay-what-you-want
-via the Stripe Payment Link; the webhook flips the account flag).
-Reading and deleting your rides needs only a signed-in session — a lapsed
-supporter can always export and wipe their own data.
+Bearer-token JSON endpoints for operators. Gated on `require_admin` —
+the session's email must be in the `admin_allowlist` table, reachable
+through **any** sign-in door, not a scope. **Distinct from the `/admin/*`
+HTML portal**, which is a separate GitHub OAuth surface.
+
+Documented here for completeness; ordinary frontend clients have no
+reason to call these, and they return plate-level data the public API
+deliberately withholds.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/private/devices/lookup?plate=&vehicle_identifier=` | Resolve a plate ↔ identifier either direction, plus the current state row. Supply exactly one param. |
+| `GET /api/v1/private/devices/lookup-batch?plates=a,b,c` | Comma-separated plates → max observed range per plate. |
+| `GET /api/v1/private/devices/{vehicle_identifier}/history?since=&until=&limit=` | Time-ordered position-stop history for one scooter. `since` defaults to 7 days ago, `until` to now, `limit` 1–10000 (default 2000). |
+| `GET /api/v1/private/devices/max-ranges?form_factor=&limit=` | Devices sorted by highest-ever observed range. `limit` 1–20000 (default 5000). |
+| `GET /api/v1/private/trips/daily?date=YYYY-MM-DD&limit=` | Daily trip/popularity rollup for one Denver-local date. `limit` 1–5000 (default 100). |
+| `GET /api/v1/private/reports` | Admin listing of all negative reports. |
+| `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback. |
+
+A non-allowlisted but validly signed-in caller gets `403`; no token at
+all gets `401`.
+
+---
+
+## Off-feed rides
+
+Bearer required, open to any signed-in rider. Rides on vehicles the audit
+**does not track** — a personal scooter, a competitor's rental, a friend's
+e-bike. There is no `vehicle_identifier` by definition, so you describe the
+vehicle instead.
+
+Use [Tracked rides](#tracked-rides-gbfs-detected) when there IS a Veo
+vehicle to anchor to; use this when there isn't.
+
+**No points are awarded anywhere in this section**, deliberately. Points
+reward data about the public fleet, and every fact here is rider-asserted
+about a vehicle we cannot see or corroborate. Paying per waypoint for an
+unverifiable ride would be an unbounded points faucet.
+
+### Two ways in
+
+| | |
+|---|---|
+| **Lifecycle** | `start` → `waypoints` → `end`, for a ride happening now. Distance is measured server-side from your track. |
+| **One-shot** | A single `POST /api/v1/rides` for a ride already over, where your client computed everything. Distance is whatever you send. |
+
+### Endpoints
 
 | Endpoint | Notes |
 |---|---|
-| `POST /api/v1/rides` | `{ started_at, ended_at, duration_s, distance_m, est_cost_cents?, rate_plan, started_in_zone, ended_in_zone, polyline }`. `polyline` is a Google encoded polyline (precision 5), validated at ingest. → the stored ride incl. `id`. |
-| `GET /api/v1/rides?limit=50&before=<ISO>` | Owner-only, newest first. → `{ count, rides: [...] }` |
+| `POST /api/v1/rides/start` | `{start_lat, start_lon, vehicle_kind?, operator?, started_at?}` → the created ride, `status: "active"`. `409` if you already have an active off-feed ride. 20/hour. |
+| `GET /api/v1/rides/active` | → `{ "active": <ride> }` or `{ "active": null }` — always wrapped. |
+| `POST /api/v1/rides/{id}/waypoints` | `{waypoint_at, lat, lon, metadata?}`. Rebuilds the polyline and distance. 600/hour. `409 {"error": "ride_not_active"}` once ended. |
+| `GET /api/v1/rides/{id}/waypoints?limit=&before=` | → `{count, waypoints: [...]}`, oldest first. |
+| `PATCH /api/v1/rides/{id}/end` | `{ended_at, end_lat, end_lon, est_cost_cents?, rate_plan?, started_in_zone?, ended_in_zone?}` → the completed ride. `409` if already ended. |
+| `POST /api/v1/rides` | One-shot log of a finished ride (fields below). 120/day. |
+| `GET /api/v1/rides?limit=&before=&status=` | Owner-only, newest first. → `{count, rides: [...]}` |
 | `GET /api/v1/rides/export?format=geojson\|csv` | Owner-only full export. GeoJSON decodes each polyline to a `LineString`. |
-| `DELETE /api/v1/rides/{id}` | **Immediate hard delete.** → `{ "deleted": true }` |
-| `DELETE /api/v1/rides` | **Immediate hard delete of everything.** → `{ "deleted_count": n }` |
+| `DELETE /api/v1/rides/{id}` | **Immediate hard delete**, cascading to the ride's waypoints. → `{"deleted": true}` |
+| `DELETE /api/v1/rides` | **Immediate hard delete of everything you own.** → `{"deleted_count": n}` |
+
+`started_at`, `ended_at`, and `waypoint_at` must all carry a UTC offset.
+
+### Describing the vehicle
+
+| Field | Type | Notes |
+|---|---|---|
+| `vehicle_kind` | `"scooter" \| "bicycle" \| "other"` \| null | Optional. |
+| `operator` | string ≤64 \| null | Free text — `"Lime"`, `"Bird"`, `"personal"`, `"my Segway"`. Descriptive only, never a join key. |
+
+`rate_plan` is **optional here**, unlike on tracked rides: `resident` /
+`visitor` / `equity` describe Veo's pricing, which is meaningless on a Lime
+scooter or your own bike.
+
+### One-shot `POST /api/v1/rides` body
+
+```json
+{ "started_at": "2026-07-27T16:20:00Z", "ended_at": "2026-07-27T16:45:00Z",
+  "duration_s": 1500, "distance_m": 2412, "est_cost_cents": 415,
+  "rate_plan": "resident", "started_in_zone": true, "ended_in_zone": false,
+  "polyline": "_p~iF~ps|U_ulLnnqC", "vehicle_kind": "scooter", "operator": "Lime" }
+```
+
+`polyline` is a Google encoded polyline (precision 5), validated at ingest
+and required on this path — a one-shot log with no route is just a row of
+numbers.
+
+### Distance, and how much to trust it
+
+Same two-field contract as tracked rides, plus a third source:
+
+| `distance_source` | Meaning |
+|---|---|
+| `"waypoints"` | Summed over your start point followed by the track you uploaded. Good. |
+| `"straight_line"` | Start → your reported end, crow-flies. The fallback when a lifecycle ride ends with no waypoints. Undercounts. |
+| `"client"` | Your app computed it and we stored what you sent. Unverifiable. |
+| `null` | Ride still active with no waypoints yet. |
+
+Ending a ride never overwrites a waypoint-derived distance with the
+straight line — the better measurement wins.
+
+### Status
+
+`active` → `completed`. You may have only one `active` off-feed ride at a
+time, enforced by the database. This is independent of tracked rides — the
+two mechanisms don't know about each other.
+
+Privacy commitment, unchanged from when this table held the old ride log:
+route polylines are the most sensitive data this system holds. There is no
+soft-delete, no tombstone, and no analytics use of ride routes — ever.
+Deleting a ride cascades to its waypoints. See `/api/v1/meta/privacy`.
+
+---
+
+## Tracked rides (GBFS-detected)
+
+Bearer required, open to any signed-in rider. Use this when the vehicle is
+a Veo scooter in the GBFS feed; use [Off-feed rides](#off-feed-rides) when
+it isn't.
+
+How it works: you declare a ride start against a specific vehicle. The
+server adds that device to a watch list and compares it against **every
+GBFS ingest cycle for 3 hours**, detecting when it leaves the feed (a ride
+began) and when it reappears (it ended, and where). You separately report
+your own end. The two accounts of the ride are then comparable.
+
+### The redaction rule — read this before designing a summary screen
+
+**Every `gbfs_*` field reads as `null` until you have reported your own
+end.** That covers `gbfs_left_feed_at`, `gbfs_reappeared_at`,
+`gbfs_end_lat`, `gbfs_end_lon`, and `gbfs_end_battery_percent`.
+
+This is deliberate anti-fraud design: the rider must commit to their own
+numbers before seeing the server's, so the server's observation can't be
+copied. The underlying columns are untouched — only the API response is
+redacted.
+
+Practically, a ride detail has two distinct presentations: before the end
+report (your data only) and after it (both, comparable). A summary screen
+that assumes GBFS fields are populated at ride end will render nulls.
+
+### Statuses
+
+`watching` → `left_feed` → `completed`, or `expired`.
+
+| Status | Meaning |
+|---|---|
+| `watching` | Ride started; the device is still visible in the GBFS feed. |
+| `left_feed` | The device disappeared from the feed — consistent with a ride in progress. |
+| `completed` | You reported your end. Set by `PATCH …/end`, regardless of what GBFS saw. |
+| `expired` | The 3-hour watch window elapsed without an end report. |
+
+A ride counts as **active** while it has no end report, no GBFS
+reappearance, and an unexpired watch window. You may have only one at a
+time.
+
+### `POST /api/v1/tracked-rides`
+
+```json
+{ "vehicle_identifier": "8c4a1f0d2e9b7a35", "start_lat": 39.7392, "start_lon": -104.9876 }
+```
+
+`vehicle_identifier` is exactly 16 lowercase hex chars. → the created
+ride (shape below). Limit 20/hour per account.
+
+- `404` — unknown `vehicle_identifier`.
+- `409` — `"an active ride already exists"`. Resolve by ending or
+  deleting the existing ride; `GET /api/v1/tracked-rides/active` tells
+  you which. (Concurrent starts are serialized server-side, so exactly
+  one of two simultaneous requests wins.)
+
+The start response additionally carries **`plate_display_code`** — a
+short cosmetic code for the vehicle, so the rider can confirm on-screen
+that they're tracking the scooter in front of them. It is a display aid,
+**not** a privacy control and not the plate itself.
+
+### Ride object
+
+```json
+{
+  "id": "3f2a…-uuid",
+  "status": "watching",
+  "started_at": "2026-07-27T16:20:00+00:00",
+  "start_lat": 39.7392,
+  "start_lon": -104.9876,
+  "watch_expires_at": "2026-07-27T19:20:00+00:00",
+  "gbfs_left_feed_at": null,
+  "gbfs_reappeared_at": null,
+  "gbfs_end_lat": null,
+  "gbfs_end_lon": null,
+  "gbfs_end_battery_percent": null,
+  "user_reported_ended_at": null,
+  "end_lat": null,
+  "end_lon": null,
+  "reported_battery_percent": null,
+  "total_cost_cents": null,
+  "metadata": {},
+  "vehicle_identifier": "8c4a1f0d2e9b7a35",
+  "created_at": "2026-07-27T16:20:00+00:00",
+  "updated_at": "2026-07-27T16:20:00+00:00",
+  "distance_meters": null,
+  "distance_source": null,
+  "path_polyline": null,
+  "path_geojson": null
+}
+```
+
+`path_polyline` is a Google encoded polyline (precision 5) rebuilt from
+your waypoints on each append; `path_geojson` is the same path already
+decoded to a `LineString` so clients needn't decode it. Both are `null`
+until the first waypoint lands. List responses omit both.
+
+### Distance, and how much to trust it
+
+`distance_meters` is the ridden distance, and `distance_source` says how
+it was measured. **Always read them together** — the two sources are not
+equally good:
+
+| `distance_source` | Meaning |
+|---|---|
+| `"waypoints"` | Summed over your ride's start point followed by your uploaded GPS fixes. Good. Still a slight undercount: sampling measures each curve as a chord. |
+| `"straight_line"` | Start → your reported end, as the crow flies. This is the fallback when you uploaded **no** waypoints, and it undercounts badly on any route that isn't a straight line. |
+| `null` | Not computed yet — the ride hasn't ended and has no waypoints. |
+
+Distance appears as soon as your first waypoint lands and updates on every
+append, so an in-progress ride shows a live figure. The path is measured from
+the ride's **start point** through every waypoint — the leg between where
+you started and your first GPS fix is real distance, and dropping it would
+undercount every ride by the first sampling gap. Reporting your end
+never overwrites a waypoint-derived distance with the straight line — the
+better measurement always wins.
+
+Unlike the `gbfs_*` fields, distance is **not** redacted before you report
+your end: it is derived entirely from your own waypoints and your own
+reported end, so it reveals nothing you didn't tell us.
+
+If you show the number to riders, a `straight_line` ride is worth marking
+as an estimate — and it's the honest place to explain that uploading
+waypoints makes it accurate.
+
+### Endpoints
+
+| Endpoint | Notes |
+|---|---|
+| `GET /api/v1/tracked-rides?limit=&before=&status=` | Owner-only, newest first. → `{ count, rides: [...] }`. `before` is an ISO timestamp and **must carry a timezone**. |
+| `GET /api/v1/tracked-rides/active` | → `{ "active": <ride> }`, or `{ "active": null }` when there is none — always wrapped. Call on load to restore a ride that survived a reload. |
+| `GET /api/v1/tracked-rides/{id}` | Full detail incl. `path_geojson`. `404` if it isn't yours. |
+| `PATCH /api/v1/tracked-rides/{id}/end` | See below. |
+| `POST /api/v1/tracked-rides/{id}/waypoints` | See below. |
+| `GET /api/v1/tracked-rides/{id}/waypoints?limit=&before=` | → `{ count, waypoints: [ { id, waypoint_at, lat, lon, metadata, created_at } ] }`, oldest first. |
+| `DELETE /api/v1/tracked-rides/{id}` | **Immediate hard delete**, cascades to waypoints and the watch list. → `{ "deleted": true }` |
+| `DELETE /api/v1/tracked-rides` | **Immediate hard delete of every tracked ride you own.** → `{ "deleted_count": n }` |
 
 Privacy commitment, stated here on purpose: route polylines are the most
 sensitive data this system holds. There is no soft-delete, no tombstone,
 and no analytics use of ride routes — ever. See `/api/v1/meta/privacy`.
 
-### `POST /webhooks/stripe`
+### `PATCH /api/v1/tracked-rides/{id}/end`
 
-Operator plumbing (not for frontend use): Stripe webhook with signature
-verification. Handles `checkout.session.completed` (sets `supporter`,
-keyed by `client_reference_id` = account id) and `charge.refunded`
-(clears the flag on full refund only).
+```json
+{ "ended_at": "2026-07-27T16:45:00Z", "end_lat": 39.7501, "end_lon": -104.9990,
+  "reported_battery_percent": 62.5, "total_cost_cents": 415, "metadata": {} }
+```
+
+`ended_at`, `end_lat`, `end_lon` required; `ended_at` **must include a UTC
+offset** (`400` otherwise). Sets `status` to `completed` and un-redacts
+the `gbfs_*` fields. → the full ride object.
+
+**Single-shot** — a second call returns `409 "this ride's end has already
+been reported"`. There is no un-end and no edit. Confirm before sending.
+
+This is also where points are credited: 2 per waypoint you uploaded, plus
+20 if GBFS saw the scooter reappear within 20 m of your reported end
+(`gbfs_trip_validated`). Both are no-ops when their condition isn't met.
+
+### `POST /api/v1/tracked-rides/{id}/waypoints`
+
+```json
+{ "waypoint_at": "2026-07-27T16:31:02Z", "lat": 39.7450, "lon": -104.9910, "metadata": {} }
+```
+
+`waypoint_at` must include a UTC offset. → the created waypoint. Appending
+recomputes the ride's `path_polyline`.
+
+Limit **600/hour per account** — roughly one fix every 6 seconds
+sustained. Buffer and flush on an interval rather than posting every GPS
+fix.
+
+- `404` — no such ride (or not yours).
+- `409` `{"error": "ride_not_active"}` — the ride has ended, been detected
+  as reappeared, or its watch window expired.
+
+### Ride transaction screenshots
+
+Evidence of what Veo actually charged, for the cost audit. Stored in a
+**private** bucket, re-encoded on ingest (EXIF/GPS destroyed, not hidden).
+
+| Endpoint | Notes |
+|---|---|
+| `POST /api/v1/tracked-rides/{id}/screenshots?screenshot_type=overview\|receipt` | `multipart/form-data`. ≤10 MB. Each type is **one slot per ride** — re-uploading replaces it and deletes the old object. → `{ id, ride_id, screenshot_type, created_at, updated_at, replaced_previous }`. 20/hour per account. |
+| `GET /api/v1/tracked-rides/{id}/screenshots` | Owner-only. → `{ ride_id, screenshots: [ { id, screenshot_type, url, created_at, updated_at } ] }`. `url` is a **presigned, expiring** link — fetch it fresh, don't persist it. |
+
+---
+
+## Points
+
+A score-only ledger: points accumulate for contributing data. **Nothing
+spends them** — there is no redemption endpoint.
+
+### `GET /api/v1/points?limit=100&before=<ISO>`
+
+Bearer required. Owner-only, newest first. `limit` 1–1000 (default 100);
+`before` must include a timezone (`400` otherwise).
+
+```json
+{
+  "total_points": 134,
+  "entries": [
+    { "id": 42, "created_at": "2026-07-27T16:45:00+00:00", "action": "qr_scan",
+      "points": 100, "vehicle_identifier": "8c4a1f0d2e9b7a35", "status": "confirmed" }
+  ]
+}
+```
+
+`total_points` sums **confirmed** entries only, and is the total across
+the whole ledger — not just the returned page.
+
+### Award table
+
+| Action | Points | Earned by |
+|---|---|---|
+| `qr_scan` | 100 | First scan of a given device by you |
+| `gbfs_trip_validated` | 20 | GBFS saw your scooter reappear within 20 m of your reported ride end |
+| `report_not_rideable` | 10 | `not_rideable` device report |
+| `report_vehicle_issue` | 10 | `damaged` device report |
+| `report_improper_parking` | 10 | `improperly_parked` device report |
+| `profile_completion` | 10 | One-time, on completing your profile |
+| `report_not_found` | 4 | `not_found` device report |
+| `waypoint` | 2 each | Per waypoint uploaded, credited when the ride ends |
+
+`dead_battery` reports and device recommendations deliberately award
+nothing. Credits are idempotent per source row, so retries don't
+double-credit.
+
+---
+
+## Device engagement
+
+### `POST /api/v1/devices/qr-scan`
+
+Bearer required. Validates a scanned QR against the device you claim it
+belongs to, and awards the largest single bonus in the system.
+
+```json
+{ "vehicle_identifier": "8c4a1f0d2e9b7a35",
+  "qr_raw_value": "https://…scanned…", "lat": 39.7392, "lng": -104.9876 }
+```
+
+→
+
+```json
+{ "vehicle_identifier": "8c4a1f0d2e9b7a35", "scan_count": 3,
+  "first_scanned_at": "2026-07-10T12:00:00+00:00",
+  "points_awarded": 100, "already_scanned_by_you": false }
+```
+
+`points_awarded` is `0` and `already_scanned_by_you` is `true` on a
+repeat scan of the same device by the same account — the 100 points are
+per device, once. `scan_count` counts scans by everyone.
+
+`400` when the QR payload doesn't resolve to the claimed
+`vehicle_identifier`, or when the device is unknown. Limit 20/hour per
+account.
+
+### `POST /api/v1/devices/{vehicle_identifier}/recommend`
+
+Bearer required. `{ "recommend": true }` — a simple thumbs up/down.
+
+**`403` unless you have a `completed` tracked ride on that device started
+within the last 24 hours.** You can only recommend a scooter you actually
+rode, recently. In practice this belongs on the ride summary screen; it
+will 403 from a device popup. Awards no points.
+
+Upsert — one row per (account, device); re-posting flips your existing
+vote. → `{ id, vehicle_identifier, recommend, created_at, updated_at }`.
+Limit 30/hour per account.
+
+---
+
+## Device photos
+
+Rider-contributed photos of a specific scooter — **public content**,
+attributed to the uploader's public username. Stored in a public bucket
+and re-encoded on ingest (EXIF/GPS destroyed).
+
+| Endpoint | Notes |
+|---|---|
+| `POST /api/v1/devices/{vehicle_identifier}/photos` | Bearer required. `multipart/form-data` with a `photo` part. → `{ id, vehicle_identifier, photo_url, created_at }`. 20/hour per account. |
+| `GET /api/v1/devices/{vehicle_identifier}/photos` | Bearer required. → `{ vehicle_identifier, count, photos: [ { id, photo_url, created_at, uploaded_by } ] }`, oldest first. |
+| `POST /api/v1/photos/{photo_id}/reports` | Bearer required. `{ "reason": "wrong_device" \| "inappropriate" \| "other", "comment"?: string }` (≤2000 chars). Repeat reports of the same photo by you return `{ photo_id, deduped: true }`. 10/hour per account. |
+| `GET /api/v1/photos/mine` | Bearer required. Everything you've uploaded — see below. |
+
+**Cap: 3 photos per device**, across all users. The 4th upload returns
+`409`. Other upload failures: `413` over 10 MB, `422` if the `photo` part
+is missing, `503` if photo storage isn't configured.
+
+`uploaded_by` is the uploader's `public_username`, joined at **read**
+time and `null` when that user has `show_public_username` off — so a
+username change or privacy flip is reflected immediately, retroactively,
+everywhere.
+
+Listing requires a session like every rider endpoint. The photos are
+nonetheless "public" in the sense that matters: `photo_url` points at an
+unauthenticated static object, so a URL works anywhere once you have it.
+
+### `GET /api/v1/photos/mine`
+
+Two different content models kept as two keys, both scoped to you:
+
+```json
+{
+  "device_photos": [
+    { "id": 12, "vehicle_identifier": "8c4a…", "photo_url": "https://…",
+      "created_at": "2026-07-20T10:00:00+00:00", "status": "visible" }
+  ],
+  "ride_transaction_screenshots": [
+    { "id": 4, "ride_id": "3f2a…-uuid", "screenshot_type": "receipt",
+      "url": "https://…presigned…", "created_at": "2026-07-21T09:00:00+00:00" }
+  ]
+}
+```
+
+Device photos are public and carry a `status`; screenshot `url`s are
+presigned and expire. "Private" means "not visible to other accounts,"
+which is why your own screenshots appear here.
 
 ---
 
@@ -1300,6 +1945,11 @@ this, so the published policy and the enforced one can't drift:
 { "updated": "2026-07-04", "contact": "zneill@gmail.com",
   "retention": [ { "data": "sessions", "retention": "30 days idle", "detail": "…" } /* … */ ] }
 ```
+
+Current `data` keys: `sessions`, `magic_link_tokens`, `receipts`, `rides`,
+`reports`, `accounts`, `tracked_rides`, `device_photos`,
+`ride_transaction_screenshots`. Render the list as served — don't
+hardcode it, since new data classes get appended here first.
 
 ---
 
@@ -1459,15 +2109,30 @@ const delta = bikeShareV1 - bikeShareDenver;
 | `304` | Not modified | `If-None-Match` matched the current ETag — empty body, keep what you have. See [Caching & compression](#caching--compression). |
 | `400` | Bad query/body | Malformed `time`/`range`/`ranks`/`include` parameter, bad signature, unreadable receipt image. |
 | `401` | Unauthenticated | Missing/invalid/expired bearer token, failed Google credential, dead magic link. Treat as signed out. |
-| `403` | Forbidden | Valid session but missing scope (`admin`, `supporter`). |
-| `404` | No data | Requested layer has no snapshots (cold start), or the resource isn't yours. |
-| `413` | Too large | Receipt image over 10 MB. |
+| `403` | Forbidden | Valid session but not on the admin allowlist, or an action you haven't earned — e.g. recommending a device you have no recent completed ride on. |
+| `404` | No data | Requested layer has no snapshots (cold start), an unknown `vehicle_identifier`, or the resource isn't yours. |
+| `409` | Conflict | State says no: a second active tracked ride, a re-reported ride end, or a 4th photo on a device. Not retryable — resolve the conflict first. |
+| `413` | Too large | Receipt, device photo, or ride screenshot over 10 MB. |
+| `422` | Unprocessable | A required multipart part is missing, or routing found no path (`no_route`, `no_route_from_location`). |
 | `429` | Rate limited | POST buckets are full — honor the `Retry-After` header (seconds). |
 | `502` | Upstream failure | Email provider rejected a magic-link send. Retry in a minute. |
-| `503` | Service unavailable | No snapshots exist yet, or the feature isn't configured on this deployment (Google/magic-link/Stripe/receipts). |
+| `503` | Service unavailable | No snapshots exist yet, or the feature isn't configured on this deployment (Google/magic-link/receipts/photo storage/router). |
 | `5xx` (other) | Server error | Worker or Postgres failure. Logged in Sentry; transient — retry. |
 
 Error responses are JSON: `{ "detail": "human-readable message" }`.
+
+**`detail` is not always a string.** A few endpoints return a structured
+object instead, so a client that assumes `string` will render
+`[object Object]`. Currently: `/api/v1/route` (`unknown_profile`,
+`out_of_coverage`, `no_route`, `no_route_from_location`,
+`router_unavailable`) and the tracked-ride waypoint endpoint
+(`ride_not_active`). Each carries an `error` key with a stable machine
+code. Branch on `typeof detail === "object" ? detail.error : detail`.
+
+**Rate limits are per-account and tight** — most write buckets are 10–30
+per hour. The exception is tracked-ride waypoints at 600/hour. Every POST
+path needs a `429` path with `Retry-After`; treat that as part of wiring
+the endpoint, not as polish.
 
 ---
 

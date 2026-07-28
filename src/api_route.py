@@ -2,8 +2,8 @@
 
 Maps a rider-selected profile onto a Valhalla bicycle costing payload and
 returns a GeoJSON Feature. All four profiles are free and selectable by anyone —
-the product carries one `supporter` status and nothing is paywalled
-(API_REQUIREMENTS.md §4.1), so there is deliberately no entitlement check here.
+nothing in this product is paywalled (sql/036_decommercialize.sql), so there is
+deliberately no entitlement check here.
 
 Shade is the one profile Valhalla cannot express directly. Its bike-network
 discount is a hardcoded 0.95 factor applied to every request, and there is no

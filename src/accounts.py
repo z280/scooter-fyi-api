@@ -12,8 +12,6 @@ once, stored only as sha256 hex in auth_sessions. Scopes:
                  (see is_admin_email / require_admin), so an allowlisted
                  operator can use magic-link too. The scope is still handy
                  for the frontend to know a Google admin door was used.
-    supporter  — never stored; derived from accounts.supporter at read
-                 time so a Stripe webhook flip applies to live sessions.
 
 Expiry policy:
     rider sessions  — 30 days, sliding: POST /api/v1/auth/refresh rotates
@@ -24,8 +22,10 @@ Expiry policy:
 The FastAPI dependencies live here too: require_session (any valid
 session), require_admin (session whose email is on ADMIN_EMAILS — either
 door; this gates the /api/v1/private/* endpoints that the retired GitHub
-map-auth bearer flow used to gate, per API_REQUIREMENTS.md §2.5), and
-require_supporter.
+map-auth bearer flow used to gate, per API_REQUIREMENTS.md §2.5).
+
+Signed-in or admin are the ONLY gates in this system. There is no paid
+tier — see sql/036_decommercialize.sql.
 """
 
 from __future__ import annotations
@@ -173,8 +173,7 @@ def session_expiry(*, scopes: list[str], now: datetime) -> tuple[datetime, bool]
 class SessionUser:
     account_id: int
     email: str
-    scopes: tuple[str, ...]   # stored scopes + derived 'supporter'
-    supporter: bool
+    scopes: tuple[str, ...]
     expires_at: datetime
     sliding: bool
     method: str
@@ -372,7 +371,7 @@ def _load_session(digest: str) -> SessionUser:
             cur.execute(
                 """
                 SELECT s.account_id, a.email, s.scopes, s.expires_at,
-                       s.sliding, s.method, s.revoked_at, a.supporter
+                       s.sliding, s.method, s.revoked_at
                 FROM auth_sessions s
                 JOIN accounts a ON a.id = s.account_id
                 WHERE s.token_sha256 = %s
@@ -382,7 +381,7 @@ def _load_session(digest: str) -> SessionUser:
             row = cur.fetchone()
             if not row:
                 raise HTTPException(401, "invalid token")
-            account_id, email, scopes, expires_at, sliding, method, revoked_at, supporter = row
+            account_id, email, scopes, expires_at, sliding, method, revoked_at = row
             if revoked_at is not None:
                 raise HTTPException(401, "token revoked")
             if expires_at < datetime.now(timezone.utc):
@@ -398,14 +397,10 @@ def _load_session(digest: str) -> SessionUser:
             except Exception:  # noqa: BLE001
                 log.exception("touching auth_sessions.last_used_at failed")
 
-    effective = list(scopes or [])
-    if supporter and "supporter" not in effective:
-        effective.append("supporter")
     return SessionUser(
         account_id=int(account_id),
         email=email,
-        scopes=tuple(effective),
-        supporter=bool(supporter),
+        scopes=tuple(scopes or []),
         expires_at=expires_at,
         sliding=bool(sliding),
         method=method,
@@ -436,9 +431,3 @@ def require_admin(request: Request) -> SessionUser:
         raise HTTPException(403, "admin access required (email not on ADMIN_EMAILS)")
     return user
 
-
-def require_supporter(request: Request) -> SessionUser:
-    user = require_session(request)
-    if not user.supporter:
-        raise HTTPException(403, "supporter required — see denver.scooter.fyi/support")
-    return user

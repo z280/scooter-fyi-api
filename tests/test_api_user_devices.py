@@ -94,7 +94,7 @@ def _user(email: str, method: str = "magic_link") -> SessionUser:
     # allowlisted email must still unlock plates.
     return SessionUser(
         account_id=1, email=email, scopes=("rider",),
-        supporter=False, expires_at=_SNAP, sliding=True,
+        expires_at=_SNAP, sliding=True,
         method=method, token_sha256="x" * 64,
     )
 

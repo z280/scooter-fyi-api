@@ -104,7 +104,7 @@ def _client(pg_conn):
     pg_conn.commit()
     user = SessionUser(
         account_id=account_id, email="pgtest-ride@example.com", scopes=("rider",),
-        supporter=False, expires_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc),
         sliding=True, method="google", token_sha256="x",
     )
     app = FastAPI()

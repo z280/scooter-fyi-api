@@ -83,8 +83,8 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql … 033_ride_transaction_screenshots.sql
-│                              33 migrations, applied idempotently at boot
+├── sql/001_init.sql … 037_not_rideable_report_type.sql
+│                              37 migrations, applied idempotently at boot
 ├── src/
 │   ├── main.py                 FastAPI app, lifespan, migrations, router mounts
 │   ├── cli.py                  subcommands run by the scheduler container
@@ -106,6 +106,7 @@ agent process).
 │   ├── geo.py                   pure-Python point-in-polygon (report-time region lookup;
 │   │                            the per-cycle device join stays in DuckDB — see compute.py)
 │   │                            + distance_meters (shared flat-earth distance helper)
+│   │                            + path_length_meters (tracked-ride distance from waypoints)
 │   ├── equity_groups.py         registry of tracked equity groups (v1, v2, er1..er6) and
 │   │                            split dimensions (bicycle/scooter, sitting/standing) —
 │   │                            single source of truth for compute.py + daily_sla.py
@@ -115,7 +116,7 @@ agent process).
 │   ├── daily_sla.py             9am daily SLA compliance rollup
 │   ├── daily_trips.py           9am daily trip/popularity rollup (trip_events → ranked stats)
 │   ├── accounts.py              account/session core: bearer tokens, require_session/
-│   │                            require_admin/require_supporter, public-username generation/
+│   │                            require_admin, public-username generation/
 │   │                            choice, phone number validation
 │   ├── google_auth.py           local Google ID-token (JWKS) verification, no per-request call
 │   ├── postmark.py              transactional email (magic link, sign-in code)
@@ -129,12 +130,12 @@ agent process).
 │   ├── qr.py                    QR payload plate extraction + vehicle_identifier validation
 │   ├── points.py                points ledger primitives (credit_points + per-action wrappers)
 │   ├── polyline.py              Google polyline encode/decode (ride paths)
-│   ├── badges.py                server-computed profile badges (recomputed on every read)
+│   ├── badges.py                server-computed profile badges (recomputed on every read;
+│   │                            mileage/streak badges read tracked_rides.distance_meters)
 │   ├── client_ip.py             client IP extraction behind the Cloudflare Tunnel
 │   ├── auth.py                  GitHub OAuth + org allowlist (admin panel only — a
 │   │                            separate mechanism from accounts.py's rider auth)
 │   ├── sentry.py                Sentry SDK init (no-op without DSN)
-│   ├── stripe_webhook.py        POST /webhooks/stripe → flips accounts.supporter
 │   ├── api_public.py            11 public read-only REST routes
 │   ├── api_h3.py                public H3 aggregate endpoint
 │   ├── api_meta.py              public privacy-policy metadata endpoint
@@ -142,7 +143,6 @@ agent process).
 │   ├── api_profile.py           rider profile GET/PUT + public-username endpoints
 │   ├── api_lexicon.py           emoji-noun / adjective list + search endpoints
 │   ├── api_auth.py              sign-in doors + session lifecycle
-│   ├── api_rides.py             supporter ride history (log/list/export/delete) — legacy
 │   ├── api_tracked_rides.py     GBFS-detected ride tracking: start/list/active/detail/
 │   │                            end-report/waypoints/delete
 │   ├── api_points.py            GET /api/v1/points — ledger + running total
@@ -163,7 +163,7 @@ agent process).
 ## Data model
 
 Core tables in Postgres, all narrow (no 270-column wide schemas). (This
-list predates the accounts/reports/supporter tables from
+list predates the accounts/reports tables from
 API_REQUIREMENTS.md §2-§4 — see those migrations for the full current
 set; kept here is the original ingest-pipeline core plus trip tracking.)
 
@@ -279,10 +279,9 @@ them before you have a session. The session-management half
 ## Rider API
 
 Requires `Authorization: Bearer <token>` from one of the sign-in doors
-above. Every endpoint below is open to any signed-in rider — nothing in
-this section is supporter-gated except where marked **(supporter)**, a
-holdover from the original ride-log feature (see `/api/v1/meta/privacy`,
-and Webhooks below for how that flag gets set).
+above. Every endpoint below is open to any signed-in rider. There is no
+paid tier and no purchasable status — signed-in and admin are the only
+two gates in this system (`sql/036_decommercialize.sql`).
 
 ### Session & profile
 
@@ -291,7 +290,7 @@ and Webhooks below for how that flag gets set).
 | `POST /api/v1/auth/refresh` | Rotate the presented bearer token |
 | `GET /api/v1/auth/session` | Session introspection for UI state |
 | `POST /api/v1/auth/signout` | Revoke the presented token |
-| `GET /api/v1/profile` | Full rider profile incl. server-computed badges/supporter flag/public username |
+| `GET /api/v1/profile` | Full rider profile incl. server-computed badges/public username |
 | `PUT /api/v1/profile` | Partial update of `rate_plan`/`theme`/`favorites`/`email`/`phone_number`/`show_public_username`/`show_in_leaderboards`/`home_lat`/`home_lng`/`work_lat`/`work_lng` |
 | `POST /api/v1/profile/username/regenerate` | Re-roll your public username to a new random adjective+emoji pair |
 | `PUT /api/v1/profile/username` | Choose a specific adjective and/or emoji (partial update) |
@@ -302,18 +301,30 @@ and Webhooks below for how that flag gets set).
 | `GET /api/v1/user/devices/current` | Signed-in device map feed; adds plate/admin fields for admin-allowlisted sessions |
 | `POST /api/v1/reports/discount` | Missed-discount evidence, optional receipt upload |
 
-### Legacy ride log (supporter perk)
+### Off-feed rides (vehicles we don't track)
 
-Manually client-declared ride history — a different, older mechanism from
-Tracked rides below. See `sql/014_supporter_rides.sql`.
+Rides on a vehicle with no `vehicle_identifier` — a personal scooter, a
+competitor's rental, a friend's e-bike. Repurposed from the old
+supporter-only ride log (`sql/035_off_feed_rides.sql`); no longer gated,
+and now a full lifecycle rather than a single POST. No points are awarded
+here — the data is rider-asserted about a vehicle we can't corroborate.
 
 | Endpoint | Returns |
 |---|---|
-| `POST /api/v1/rides` **(supporter)** | Log a ride |
-| `GET /api/v1/rides` | Owner-only paginated ride list, newest first |
+| `POST /api/v1/rides/start` | Begin a ride (409 if one is already active) |
+| `GET /api/v1/rides/active` | The caller's one active off-feed ride, or null |
+| `POST /api/v1/rides/{ride_id}/waypoints` | Append a GPS fix; rebuilds polyline + distance |
+| `GET /api/v1/rides/{ride_id}/waypoints` | Owner-only paginated waypoint list |
+| `PATCH /api/v1/rides/{ride_id}/end` | Report the end (single-shot) |
+| `POST /api/v1/rides` | One-shot log of an already-finished ride |
+| `GET /api/v1/rides` | Owner-only paginated list, newest first |
 | `GET /api/v1/rides/export?format=geojson\|csv` | Owner-only export |
-| `DELETE /api/v1/rides/{ride_id}` | Hard-delete one ride |
-| `DELETE /api/v1/rides` | Hard-delete every ride the account owns |
+| `DELETE /api/v1/rides/{ride_id}` | Hard-delete one ride (cascades to waypoints) |
+| `DELETE /api/v1/rides` | Hard-delete every off-feed ride the account owns |
+
+`src/badges.py` computes the mileage/streak badges from **both** this
+table and `tracked_rides` — a rider's mileage is the miles they rode,
+whichever mechanism recorded them.
 
 ### Tracked rides (GBFS-detected, all riders)
 
@@ -374,7 +385,10 @@ HTML portal with its own login flow.
 
 ## Admin panel
 
-At `https://data.scooter.fyi/admin`, behind GitHub OAuth. Reached via
+At `https://data.scooter.fyi/admin`, behind GitHub OAuth — deliberately a
+separate door from rider auth, and **staying that way** (the proposal to
+retire it in favour of the bearer/`admin_allowlist` path was withdrawn
+2026-07-28). Reached via
 Cloudflare Tunnel (`cloudflared` sidecar) — the VPS does not expose port
 80 or 443 to the internet. Users must be members of an org in
 `AUTH_ALLOWED_GITHUB_ORGS`. HTML views (GET unless noted):
@@ -394,12 +408,6 @@ Cloudflare Tunnel (`cloudflared` sidecar) — the VPS does not expose port
 - `/admin/admins` — admin allowlist management view
 - `/admin/admins/add` (POST) — add an email to the admin allowlist
 - `/admin/admins/remove` (POST) — remove an email from the admin allowlist
-
-## Webhooks
-
-- `POST /webhooks/stripe` — signature-verified; Stripe checkout/subscription/refund
-  events drive `accounts.supporter`/`supporter_amount_cents`/`supporter_since`.
-  Not for client use.
 
 ## Run locally
 

@@ -57,13 +57,10 @@ agent</td><td>Keeping you signed in; detecting abuse</td></tr>
 <tr><td>Reports</td><td>Device failure reports, missed-discount reports,
 optional receipt images, optional GPS coordinates you provide</td>
 <td>Building the public compliance/reliability dataset</td></tr>
-<tr><td>Ride history (Premium only)</td><td>Ride start/end time,
-duration, distance, estimated cost, route polyline</td>
-<td>The supporter ride-log feature — opt-in, deletable by you at any
+<tr><td>Ride history</td><td>Ride start/end time, duration, distance,
+estimated cost, route polyline, and any GPS waypoints you upload</td>
+<td>Your own ride log — opt-in, and deletable by you at any
 time</td></tr>
-<tr><td>Payment</td><td>Handled entirely by Stripe; we receive a
-transaction/subscription reference and amount, never your card
-number</td><td>Billing the Premium subscription</td></tr>
 <tr><td>Technical</td><td>IP address on requests, standard server
 logs</td><td>Rate limiting, abuse prevention, debugging</td></tr>
 </table>
@@ -80,9 +77,7 @@ discount reports feed <strong>aggregate, anonymized</strong> public
 statistics (the regional reports summary and the monthly CSV export).
 Aggregate publications never include your identity, IP address, or
 email.</li>
-<li>Detect and prevent abuse (rate limiting, fraud in reports or
-payments).</li>
-<li>Bill your Premium subscription, if you have one.</li>
+<li>Detect and prevent abuse (rate limiting, fraudulent reports).</li>
 <li>Respond to support requests.</li>
 </ul>
 <p>We do not sell your personal information, and we do not share it with
@@ -97,9 +92,6 @@ each processing data only as needed to perform their function:</p>
 account email, only if you use "Sign in with Google"</td></tr>
 <tr><td>Postmark</td><td>Sending magic-link sign-in emails</td>
 <td>Your email address, transactional email content</td></tr>
-<tr><td>Stripe</td><td>Payment processing</td><td>Payment/billing
-details for the Premium subscription — we never receive or store your
-card number</td></tr>
 <tr><td>Cloudflare</td><td>Hosting, CDN, tunnel, and private object
 storage (receipt images)</td><td>Network-level request metadata; receipt
 images in a private, non-public bucket</td></tr>
@@ -146,8 +138,6 @@ or <code>DELETE /api/v1/rides</code> at any time — immediate and
 irreversible.</li>
 <li><strong>Delete your account:</strong> email us (below); we don't yet
 have self-serve account deletion.</li>
-<li><strong>Cancel Premium:</strong> cancel your subscription any time;
-billing stops at the end of the current period.</li>
 <li>We do not sell personal information, so there is nothing to opt out
 of in that sense.</li>
 </ul>
