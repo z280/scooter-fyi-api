@@ -1,4 +1,4 @@
-# veo-audit Public API
+# scooter-fyi-api — Public API
 
 REST API serving Denver Veo micromobility fleet data. Polls the upstream
 GBFS feed every 10 minutes, geo-tags each device against five spatial
@@ -2357,7 +2357,7 @@ brotli for clients that prefer it.
 This is an open-source compliance audit tool. Issues, schema requests,
 and PRs are welcome at:
 
-- Source: <https://github.com/z280/veo-audit>
+- Source: <https://github.com/z280/scooter-fyi-api>
 - Operator: <zneill@gmail.com>
 
 If a metric looks wrong, include the `cycle_id` from

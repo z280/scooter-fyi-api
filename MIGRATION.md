@@ -16,7 +16,7 @@ scheduler crontab are hand-carried.
 
 | Piece | Source of truth | Migration mechanism |
 |---|---|---|
-| Container image | GHCR (`ghcr.io/z280/veo-audit:latest`) | pulled on deploy — nothing to move |
+| Container image | GHCR (`ghcr.io/z280/scooter-fyi-api:latest`) | pulled on deploy — nothing to move |
 | `.env` secrets (salt, tunnel token, R2, Postmark, Stripe, …) | **GitHub Actions repo secrets** | repoint `VPS_HOST` secret → new box, re-run workflow |
 | `docker-compose.yml`, `config.json`, `sql/` | this repo | `scp`'d to `/opt/veo-audit/` by deploy.yml |
 | **Postgres data** (`pgdata` volume) | old box only | `scripts/migrate-state.sh` (pg_dump → pg_restore) |
@@ -109,6 +109,67 @@ stack (`docker compose start scheduler pipeline_worker`) and investigate the new
 box out of band. After step 6, roll back by restarting cloudflared on the old
 box and stopping it on the new one; the old Postgres still holds all data up to
 the freeze.
+
+## Post-rename operator checklist
+
+One-time, for the `veo-audit` → `scooter-fyi-api` GitHub repo rename. GitHub
+redirects git remotes, web URLs, issues/PRs, and keeps repo secrets — but GHCR
+packages and anything that writes to the repo via the API do **not** follow.
+Work through this the day of the rename.
+
+**1. The box's `.env` still points at the old image until a deploy succeeds.**
+
+`/opt/veo-audit/.env` contains `WORKER_IMAGE=ghcr.io/z280/veo-audit:latest`,
+and the *only* thing that rewrites it is a successful `deploy.yml` run. GHCR
+serves the old package forever after a rename, so until that deploy lands, a
+manual `docker compose up -d` on the box pulls and runs **pre-rename code**,
+silently and successfully. This — not the `${WORKER_IMAGE:-…}` fallback in
+`docker-compose.yml` — is the real stale-image pointer. Confirm it flipped:
+```bash
+ssh $NEW 'grep WORKER_IMAGE /opt/veo-audit/.env'   # want .../scooter-fyi-api:latest
+ssh $NEW 'docker inspect pipeline_worker --format "{{.Config.Image}}"'
+```
+Don't hand-run `docker compose up -d` between the rename and the first green
+deploy.
+
+**2. Check the new package's visibility and repo linkage — it's a decision.**
+
+The first post-rename build creates a *brand-new* GHCR package,
+`ghcr.io/z280/scooter-fyi-api`. The old one is **private**, but the repo is
+**public**, and a package created via `GITHUB_TOKEN` inherits the linked
+repo's visibility — so the new package may well come out **public**. Decide
+which you want, don't discover it later:
+
+Packages → `scooter-fyi-api` → *Package settings* → confirm **visibility**
+and that **"Repository source"** is linked to `z280/scooter-fyi-api` (the
+linkage is what lets the deploy job's `packages: read` pull it).
+
+The image bakes in `config.json`, `sql/`, `data/`, and `src/` — but **not**
+`.env` (verified). So a public package leaks source and config, not secrets.
+
+**3. Delete or tombstone the old `ghcr.io/z280/veo-audit` package.**
+
+Once the new package is confirmed working and the box has rolled onto it,
+remove the old one (Packages → `veo-audit` → *Danger zone* → delete). While
+it exists, any stale `WORKER_IMAGE` or unset-variable fallback keeps pulling
+old code and *succeeding* — the failure is silent. Deleting it converts that
+into a loud pull error.
+
+**4. Hand-fix `finish-ovh3-cicd.sh` (outside this repo).**
+
+`/home/ubuntu/finish-ovh3-cicd.sh:63` hardcodes `z280/veo-audit` when setting
+repo secrets with `gh`. GitHub's REST API answers **301** for a renamed repo
+and `gh` does not reliably follow redirects on **writes**, so secret-setting
+will fail or silently no-op. Update that path by hand.
+
+**What deliberately keeps the old name** — do not "fix" these:
+
+| Name | Why |
+|---|---|
+| `name: veo-audit` in `docker-compose.yml` | Compose project name; prefixes every live volume (`veo-audit_pgdata`, …). Changing it points the stack at empty volumes and a blank Postgres. |
+| `/opt/veo-audit` on the box | Cosmetic once the project name is pinned; renaming buys nothing and risks the deploy paths. |
+| `veo_audit` database, `veo-audit-archive` R2 bucket, `veo-audit` Cloudflare tunnel | Live resource identifiers. |
+| "Veo Audit" in public dataset/report copy | Deliberate public brand, distinct from the repo name. |
 
 ## Notes
 - The `ADMIN_EMAILS` env is deprecated (admins live in Postgres now) — it rides
