@@ -12,6 +12,13 @@
 
 -- The original inline column CHECK from sql/013 is auto-named
 -- <table>_<column>_check; drop it and install a named, extended one.
+--
+-- REPLAY SAFETY: the ADD below is guarded on the named constraint not
+-- existing, so replaying this file after a LATER migration has widened the
+-- value list (sql/029, sql/037) leaves that wider list alone instead of
+-- reinstating this one — which would reject rows those migrations
+-- legitimately stored. Keep that guard; see the longer note in sql/029,
+-- which had to be repaired for exactly this reason.
 ALTER TABLE device_reports
     DROP CONSTRAINT IF EXISTS device_reports_report_type_check;
 

@@ -480,7 +480,7 @@ def auth_refresh(request: Request, user: SessionUser = Depends(require_session))
     new_expires = now + timedelta(days=30) if user.sliding else user.expires_at
     raw = secrets.token_urlsafe(32)
 
-    stored_scopes = [s for s in user.scopes if s != "supporter"]
+    stored_scopes = list(user.scopes)
     with connection() as conn:
         with conn.cursor() as cur:
             enforce(cur, bucket="auth_refresh_account", key=str(user.account_id),
@@ -520,7 +520,6 @@ def auth_session(user: SessionUser = Depends(require_session)) -> dict[str, Any]
     return {
         "email": user.email,
         "scopes": list(user.scopes),
-        "supporter": user.supporter,
         "expires": user.expires_at.isoformat(),
     }
 

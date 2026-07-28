@@ -24,8 +24,7 @@ def _allowlist(monkeypatch):
 
 def _user(email: str, method: str = "magic_link", scopes=("rider",)) -> SessionUser:
     return SessionUser(
-        account_id=1, email=email, scopes=scopes, supporter=False,
-        expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc), sliding=True,
+        account_id=1, email=email, scopes=scopes, expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc), sliding=True,
         method=method, token_sha256="x" * 64,
     )
 

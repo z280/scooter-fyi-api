@@ -20,7 +20,7 @@ from src.qr import QrValidationError, extract_plate, validate_scan
 
 _USER = SessionUser(
     account_id=1, email="rider@example.com", scopes=("rider",),
-    supporter=False, expires_at=datetime.now(timezone.utc),
+    expires_at=datetime.now(timezone.utc),
     sliding=True, method="google", token_sha256="x",
 )
 _NOW = datetime.now(timezone.utc)

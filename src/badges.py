@@ -2,7 +2,8 @@
 
 Recomputed on every profile read — no stored badge state, so thresholds
 can be tuned without migrations and retroactively apply. Earned badges
-are available to every account; only `supporter` is tied to payment.
+are available to every account. Nothing here is tied to payment —
+the app has no paid tier (sql/036).
 
 DEFINITIONS
 -----------
@@ -16,7 +17,6 @@ DEFINITIONS
     miles_10            ≥ 10 miles of logged rides (16 093 m)
     miles_100           ≥ 100 miles (160 934 m)
     streak_7            rides on 7 consecutive UTC days
-    supporter           accounts.supporter (Stripe §4.1)
 
 earned_at is derived from the data (the row that crossed the threshold),
 so recomputation is stable across reads.
@@ -86,11 +86,44 @@ def _report_badges(cur, account_id: int) -> list[dict[str, Any]]:
 
 
 def _ride_badges(cur, account_id: int) -> list[dict[str, Any]]:
+    """Mileage + streak badges over BOTH ride mechanisms, unioned and
+    re-sorted by end time:
+
+      - tracked_rides (sql/027) — GBFS-detected rides on Veo vehicles,
+        distance from sql/034.
+      - rides (sql/035) — off-feed rides on vehicles we don't track,
+        distance from the rider's track or their own client.
+
+    A rider's mileage is the miles they actually rode; which mechanism
+    recorded a given ride is an implementation detail they never chose.
+    Splitting the badges by table would mean someone who rides a personal
+    scooter half the time needs twice the distance to earn the same badge.
+
+    Distance quality varies by source (see both migrations): a ride with no
+    waypoints carries a start->end straight line, and a one-shot log carries
+    whatever the client claimed. Every source counts here on purpose —
+    excluding the weak ones would mean a rider who doesn't hand us GPS earns
+    nothing, which reads as the badge being broken. Undercounting is the
+    kinder failure, since it only ever delays a badge.
+    """
     out: list[dict[str, Any]] = []
     cur.execute(
-        "SELECT ended_at, distance_m FROM rides WHERE account_id = %s "
-        "ORDER BY ended_at ASC",
-        (account_id,),
+        """
+        SELECT ended_at, distance_meters FROM (
+            SELECT user_reported_ended_at AS ended_at,
+                   distance_meters
+              FROM tracked_rides
+             WHERE account_id = %s AND user_reported_ended_at IS NOT NULL
+            UNION ALL
+            SELECT ended_at AS ended_at,
+                   distance_m::double precision
+              FROM rides
+             WHERE account_id = %s AND ended_at IS NOT NULL
+               AND status = 'completed'
+        ) all_rides
+        ORDER BY ended_at ASC
+        """,
+        (account_id, account_id),
     )
     rows = cur.fetchall()
     if not rows:
@@ -128,15 +161,8 @@ def _streak_earned_at(days: list[date], needed: int) -> date | None:
     return days[0] if needed <= 1 and days else None
 
 
-def compute_badges(cur, account_id: int, *, supporter: bool) -> list[dict[str, Any]]:
+def compute_badges(cur, account_id: int) -> list[dict[str, Any]]:
     badges = _report_badges(cur, account_id)
     badges += _ride_badges(cur, account_id)
-
-    if supporter:
-        cur.execute(
-            "SELECT supporter_since FROM accounts WHERE id = %s", (account_id,)
-        )
-        row = cur.fetchone()
-        badges.append(_badge("supporter", "Supporter", row[0] if row else None))
 
     return badges

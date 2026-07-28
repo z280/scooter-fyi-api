@@ -39,7 +39,6 @@ from .api_user import router as user_router
 from .config import load, session_https_only, session_secret
 from .pg import run_migrations
 from .sentry import init as sentry_init
-from .stripe_webhook import router as stripe_router
 
 log = logging.getLogger("veo")
 logging.basicConfig(
@@ -111,7 +110,6 @@ app.include_router(device_recommendations_router)
 app.include_router(device_photos_router)
 app.include_router(qr_router)
 app.include_router(ride_screenshots_router)
-app.include_router(stripe_router)
 app.include_router(meta_router)
 app.include_router(legal_router)
 app.include_router(lexicon_router)
@@ -146,6 +144,11 @@ def root():
             "/api/v1/adjectives/search?q=…",
             "/api/v1/reports/{device,discount,summary,export/monthly.csv}",
             "/api/v1/rides",
+            "/api/v1/rides/start",
+            "/api/v1/rides/active",
+            "/api/v1/rides/export?format=geojson",
+            "/api/v1/rides/{ride_id}/end",
+            "/api/v1/rides/{ride_id}/waypoints",
             "/api/v1/tracked-rides",
             "/api/v1/tracked-rides/active",
             "/api/v1/tracked-rides/{ride_id}",

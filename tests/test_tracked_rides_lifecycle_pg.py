@@ -104,7 +104,7 @@ def _client(pg_conn):
     pg_conn.commit()
     user = SessionUser(
         account_id=account_id, email="pgtest-ride@example.com", scopes=("rider",),
-        supporter=False, expires_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc),
         sliding=True, method="google", token_sha256="x",
     )
     app = FastAPI()
@@ -187,6 +187,72 @@ def test_full_lifecycle_with_gbfs_watch_and_anti_fraud_redaction(pg_conn):
     assert client.post(f"/api/v1/tracked-rides/{ride_id}/waypoints", json={
         "waypoint_at": datetime.now(timezone.utc).isoformat(), "lat": 1, "lon": 1,
     }).status_code == 409
+
+
+def test_one_early_waypoint_still_measures_the_whole_ride(pg_conn):
+    """Mirror of the off-feed test of the same name, and it has to give the
+    same answer: src/badges.py sums distance across both tables, so a
+    rider's mileage must not depend on which mechanism logged the ride.
+
+    One fix 20 m from the start, then the rider parks 10 km away. Measuring
+    only start -> last fix recorded ~20 m and tagged it 'waypoints'.
+    """
+    client = _client(pg_conn)
+    now = datetime.now(timezone.utc)
+    step = 1.0 / 111_320.0  # metres of latitude
+    ride_id = client.post("/api/v1/tracked-rides", json={
+        "vehicle_identifier": VID, "start_lat": 39.74, "start_lon": -104.98,
+    }).json()["id"]
+    pg_conn.commit()
+    client.post(f"/api/v1/tracked-rides/{ride_id}/waypoints", json={
+        "waypoint_at": (now + timedelta(seconds=15)).isoformat(),
+        "lat": 39.74 + 20 * step, "lon": -104.98,
+    })
+    done = client.patch(f"/api/v1/tracked-rides/{ride_id}/end", json={
+        "ended_at": (now + timedelta(minutes=40)).isoformat(),
+        "end_lat": 39.74 + 10_000 * step, "end_lon": -104.98,
+    }).json()
+    assert done["distance_source"] == "waypoints"
+    assert 9_900 <= done["distance_meters"] <= 10_100, done["distance_meters"]
+    # Path and distance describe the same three points.
+    assert len(done["path_geojson"]["coordinates"]) == 3
+
+
+def test_waypoint_pagination_reaches_every_page(pg_conn):
+    """`before` paired with an ascending sort re-served the OLDEST rows on
+    every call, so nothing past page 1 was reachable. Forward paging is
+    `after`; `before` walks backwards."""
+    client = _client(pg_conn)
+    now = datetime.now(timezone.utc)
+    ride_id = client.post("/api/v1/tracked-rides", json={
+        "vehicle_identifier": VID, "start_lat": 39.74, "start_lon": -104.98,
+    }).json()["id"]
+    pg_conn.commit()
+    for i in range(5):
+        r = client.post(f"/api/v1/tracked-rides/{ride_id}/waypoints", json={
+            "waypoint_at": (now + timedelta(seconds=30 * i)).isoformat(),
+            "lat": 39.74 + i * 0.001, "lon": -104.98,
+        })
+        assert r.status_code == 200, r.text
+
+    seen: list[str] = []
+    cursor: str | None = None
+    for _ in range(5):
+        params = {"limit": 2}
+        if cursor:
+            params["after"] = cursor
+        page = client.get(f"/api/v1/tracked-rides/{ride_id}/waypoints",
+                          params=params).json()
+        if not page["count"]:
+            break
+        seen += [w["waypoint_at"] for w in page["waypoints"]]
+        cursor = page["waypoints"][-1]["waypoint_at"]
+    assert len(seen) == 5, seen
+    assert seen == sorted(seen)
+
+    back = client.get(f"/api/v1/tracked-rides/{ride_id}/waypoints",
+                      params={"limit": 2, "before": seen[4]}).json()
+    assert [w["waypoint_at"] for w in back["waypoints"]] == seen[2:4]
 
 
 def test_expired_watch_is_not_active_and_expire_stale_watches_closes_it(pg_conn):

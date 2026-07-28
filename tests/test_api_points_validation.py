@@ -1,4 +1,4 @@
-"""GET /api/v1/points — mirrors tests/test_api_rides_validation.py's
+"""GET /api/v1/points — mirrors tests/test_api_tracked_rides_validation.py's
 `before` param validation pattern."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from src.accounts import SessionUser, require_session
 
 _USER = SessionUser(
     account_id=1, email="rider@example.com", scopes=("rider",),
-    supporter=False, expires_at=datetime.now(timezone.utc),
+    expires_at=datetime.now(timezone.utc),
     sliding=True, method="google", token_sha256="x",
 )
 

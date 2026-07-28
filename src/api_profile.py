@@ -10,16 +10,16 @@ Client-writable via PUT /api/v1/profile: rate_plan, theme, favorites,
 email, phone_number, show_public_username, show_in_leaderboards,
 home_lat/home_lng, work_lat/work_lng.
 
-Server-computed, read-only: supporter (Stripe webhook), badges
+Server-computed, read-only: badges
 (recomputed on every read — see src/badges.py), public_username (minted
 by accounts.assign_public_username at account creation / CLI backfill).
 public_username itself is never a field on ProfileUpdate — change it via
 the two dedicated endpoints below, not by smuggling it through the
 generic profile PUT (that would defeat the curated-word-list/SFW
 guarantee those endpoints enforce). Choosing your own adjective/emoji is
-open to every rider today; it's a plausible future supporter-only perk,
+open to every rider today; it's a plausible future restricted perk,
 so both endpoints are written to make that a one-line `Depends` swap
-later (see src/api_rides.py's own POST/GET split for the same pattern).
+later.
 
 A profile must carry an email, a phone_number, or both — never neither
 (accounts_email_or_phone_required, sql/025). Enforced here in plain
@@ -87,7 +87,7 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
     cur.execute(
         """
         SELECT email, phone_number, public_username, show_public_username,
-               show_in_leaderboards, rate_plan, theme, favorites, supporter,
+               show_in_leaderboards, rate_plan, theme, favorites,
                home_lat, home_lng, work_lat, work_lng
         FROM accounts WHERE id = %s
         """,
@@ -97,7 +97,7 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
     if not row:
         raise HTTPException(401, "account no longer exists")
     (email, phone_number, public_username, show_public_username,
-     show_in_leaderboards, rate_plan, theme, favorites, supporter,
+     show_in_leaderboards, rate_plan, theme, favorites,
      home_lat, home_lng, work_lat, work_lng) = row
     return {
         "email": email,
@@ -108,12 +108,11 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
         "rate_plan": rate_plan,
         "theme": theme,
         "favorites": favorites if isinstance(favorites, list) else [],
-        "supporter": bool(supporter),
         "home_lat": home_lat,
         "home_lng": home_lng,
         "work_lat": work_lat,
         "work_lng": work_lng,
-        "badges": compute_badges(cur, user.account_id, supporter=bool(supporter)),
+        "badges": compute_badges(cur, user.account_id),
     }
 
 

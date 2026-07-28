@@ -1,8 +1,7 @@
 """Public legal pages — Terms of Service and Privacy Policy.
 
 Served as plain HTML at clean, extensionless paths so links from the
-frontend, Stripe checkout, and app stores don't expose that these are
-template files. Content is static (no per-request data), so it's read
+frontend and app stores don't expose that these are template files. Content is static (no per-request data), so it's read
 once at import time rather than re-read from disk on every request.
 """
 

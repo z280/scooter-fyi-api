@@ -15,6 +15,7 @@ may land on either side — irrelevant at report-coordinate precision.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any
 
@@ -39,6 +40,22 @@ def distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float
     dy = (lat2 - lat1) * _METERS_PER_DEG_LAT
     dx = (lon2 - lon1) * meters_per_deg_lon
     return math.sqrt(dx * dx + dy * dy)
+
+
+def path_length_meters(points: Sequence[tuple[float, float]]) -> float:
+    """Total length of a (lat, lon) path, summing distance_meters over each
+    consecutive pair. 0.0 for a path of fewer than two points.
+
+    This is the ridden distance for a tracked ride whose rider uploaded
+    waypoints (src/api_tracked_rides.py). It is a lower bound on true
+    distance: GPS is sampled, so any curve between two fixes is measured as
+    the chord. It is nonetheless far better than the start->end straight
+    line used when no waypoints exist — see tracked_rides.distance_source.
+    """
+    return math.fsum(
+        distance_meters(a[0], a[1], b[0], b[1])
+        for a, b in zip(points, points[1:])
+    )
 
 
 def _ring_contains(ring: list[list[float]], lon: float, lat: float) -> bool:

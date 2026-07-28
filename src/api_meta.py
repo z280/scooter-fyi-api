@@ -72,8 +72,7 @@ _PRIVACY = {
             "detail": "Server-detected ride tracking (start location, GBFS "
                       "watch results, waypoints, your reported end location/"
                       "cost/battery). A separate mechanism from the `rides` "
-                      "entry above — open to every rider, not just supporters "
-                      "— but the same commitment applies: DELETE "
+                      "entry above — but the same commitment applies: DELETE "
                       "/api/v1/tracked-rides[/:id] is an immediate hard delete, "
                       "cascading to its waypoints and watch record.",
         },

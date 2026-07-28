@@ -1,6 +1,6 @@
 """GET /api/v1/private/devices/lookup-batch.
 
-Uses a fake cursor/connection (same pattern as test_api_rides_validation.py)
+Uses a fake cursor/connection (same pattern as test_api_tracked_rides_validation.py)
 so this exercises real FastAPI request handling — query parsing, dependency
 injection, sorting/found-vs-not_found split — without a live Postgres.
 """
@@ -72,7 +72,7 @@ def client(monkeypatch):
     app.include_router(api_private.router)
     app.dependency_overrides[require_admin] = lambda: SessionUser(
         account_id=1, email="admin@example.com", scopes=("rider", "admin"),
-        supporter=False, expires_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc),
         sliding=False, method="google", token_sha256="x",
     )
     return TestClient(app)

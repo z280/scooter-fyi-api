@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 # Point values — single source of truth. Kept in Python, not the
 # migration, so a value tweak is a code change, not a migration.
 # ---------------------------------------------------------------------------
-POINTS_REPORT_WONT_START = 10
+POINTS_REPORT_NOT_RIDEABLE = 10
 POINTS_REPORT_NOT_FOUND = 4
 POINTS_REPORT_VEHICLE_ISSUE = 10
 POINTS_REPORT_IMPROPER_PARKING = 10
@@ -43,8 +43,9 @@ POINTS_PROFILE_COMPLETION = 10
 # source of truth for the mapping, imported by
 # src/api_frontend_reports.py rather than duplicated.
 #
-#   "vehicle will not start"   -> failed_unlock (existing value — this IS
-#                                 what failed_unlock already means)
+#   "vehicle not rideable"     -> not_rideable (renamed from failed_unlock
+#                                 in sql/037 — broader than "the unlock
+#                                 failed": could you ride it or not?)
 #   "vehicle not found"        -> not_found (NEW value, sql/029)
 #   "vehicle issue"            -> damaged (existing value — closest
 #                                 semantic match)
@@ -54,7 +55,7 @@ POINTS_PROFILE_COMPLETION = 10
 # this mapping faithfully preserves that asymmetry rather than guessing a
 # value for it.
 REPORT_TYPE_POINTS: dict[str, tuple[str, int]] = {
-    "failed_unlock":     ("report_wont_start", POINTS_REPORT_WONT_START),
+    "not_rideable":      ("report_not_rideable", POINTS_REPORT_NOT_RIDEABLE),
     "not_found":         ("report_not_found", POINTS_REPORT_NOT_FOUND),
     "damaged":           ("report_vehicle_issue", POINTS_REPORT_VEHICLE_ISSUE),
     "improperly_parked": ("report_improper_parking", POINTS_REPORT_IMPROPER_PARKING),

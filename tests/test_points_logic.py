@@ -95,7 +95,7 @@ def test_credit_report_points_skips_dead_battery():
 
 def test_credit_report_points_skips_when_no_location():
     cur = _FakeCursor([])
-    result = credit_report_points(cur, account_id=1, report_type="failed_unlock",
+    result = credit_report_points(cur, account_id=1, report_type="not_rideable",
                                    lat=None, lng=None,
                                    vehicle_identifier="aaaa000000000000", report_id=99)
     assert result is None
