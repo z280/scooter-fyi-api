@@ -78,10 +78,20 @@ from pydantic import BaseModel, Field
 from psycopg import errors as pg_errors
 
 from .accounts import SessionUser, require_session
-from .geo import path_length_meters
+from .geo import distance_meters, path_length_meters
 from .pg import connection
 from .polyline import PolylineError, decode as decode_polyline, encode as encode_polyline
 from .ratelimit import enforce
+from .ride_limits import (
+    MAX_LEG_METERS,
+    MAX_RIDE_DISTANCE_M_INT,
+    MAX_RIDE_DISTANCE_METERS,
+    clamp_distance,
+    close_out_path as _close_out,
+    leg_is_plausible,
+    measure_path,
+    partial_source,
+)
 
 log = logging.getLogger(__name__)
 
@@ -147,6 +157,28 @@ _MAX_AVG_SPEED_MPS = 20.0
 _POLYLINE_DISTANCE_FACTOR = 3.0
 _POLYLINE_DISTANCE_SLACK_M = 1000.0
 
+# ---------------------------------------------------------------------------
+# HOW THE TUNED BOUNDS ABOVE RELATE TO THE OPERATOR'S HARD CAPS.
+# ---------------------------------------------------------------------------
+# The two bounds above are ARGUED numbers (see their rationale). The three
+# in src/ride_limits.py are not — they are operator mandates. Where they
+# overlap, the hard cap wins and is applied FIRST, and the tuned bound can
+# only ever narrow things further. Concretely:
+#
+#   * `distance_exceeds_polyline` permits up to `route x 3`, which on a
+#     40 km submitted route would authorize 120 km — above the 80 km ride
+#     cap. Left alone, the two rules disagree about the same request. The
+#     ceiling is therefore min'd against MAX_RIDE_DISTANCE_METERS in
+#     _check_plausible, so the polyline rule can never license a ride the
+#     hard cap forbids.
+#   * `implausible_speed` is NOT made redundant by the 80 km cap and is
+#     kept: 80 km in 60 s satisfies the distance cap and is still nonsense.
+#     The two bind on different axes.
+#   * RideIn.distance_m's pydantic ceiling and MAX_RIDE_DISTANCE_METERS are
+#     the same number, sourced from the same constant, so the 422 the field
+#     validator raises and the clamp the lifecycle path applies can never
+#     drift apart.
+
 
 class RideIn(BaseModel):
     """A finished ride, computed client-side. `polyline` is required here —
@@ -154,7 +186,9 @@ class RideIn(BaseModel):
     started_at: datetime
     ended_at: datetime
     duration_s: int = Field(..., ge=0, le=86_400)
-    distance_m: int = Field(..., ge=0, le=200_000)
+    # OPERATOR-SET CAP (src/ride_limits.py). Was 200 000 — above miles_100
+    # (160 934 m), so one request could earn the top mileage badge.
+    distance_m: int = Field(..., ge=0, le=MAX_RIDE_DISTANCE_M_INT)
     est_cost_cents: int | None = Field(default=None, ge=0, le=100_000)
     rate_plan: str | None = Field(default=None, pattern="^(resident|visitor|equity)$")
     started_in_zone: bool
@@ -195,7 +229,7 @@ _RIDE_COLS = (
     "id, created_at, started_at, ended_at, duration_s, distance_m, "
     "est_cost_cents, rate_plan, started_in_zone, ended_in_zone, polyline, "
     "status, vehicle_kind, operator, start_lat, start_lon, end_lat, end_lon, "
-    "distance_source"
+    "distance_source, distance_clamped_from_m"
 )
 
 
@@ -220,6 +254,13 @@ def _row_to_ride(r) -> dict[str, Any]:
         "end_lat": r[16],
         "end_lon": r[17],
         "distance_source": r[18],
+        # NULL unless the operator's 80 km ride cap bound. When set, it is
+        # what we measured before clamping — distance_m is the cap. Exposed
+        # rather than hidden: a rider whose ride reads 80 km is entitled to
+        # know that is a ceiling and not a measurement.
+        "distance_clamped_from_m": (
+            round(float(r[19]), 1) if r[19] is not None else None
+        ),
     }
 
 
@@ -282,6 +323,11 @@ def _measured_path(
 
     A client whose first/last waypoint IS the start/end contributes a
     zero-length leg, which costs nothing.
+
+    Callers now pass only start + track: closing the path with the reported
+    end is ride_limits.close_out_path's job, because that is where the
+    operator's leg cap decides whether the final leg is believable at all.
+    The end parameters are kept for callers that want the raw path.
     """
     points: list[tuple[float, float]] = []
     if start_lat is not None and start_lon is not None:
@@ -292,6 +338,46 @@ def _measured_path(
     return points
 
 
+def _ordered_track(cur, rid: UUID) -> list[tuple[datetime, float, float]]:
+    """(waypoint_at, lat, lon), oldest first — the same order _track_points
+    reads in, but keeping the timestamp so a new fix can be placed at the
+    position it will actually occupy once inserted."""
+    cur.execute(
+        "SELECT waypoint_at, lat, lon FROM off_feed_ride_waypoints "
+        "WHERE ride_id = %s ORDER BY waypoint_at ASC, id ASC",
+        (str(rid),),
+    )
+    return [(r[0], r[1], r[2]) for r in cur.fetchall()]
+
+
+def _prospective_path(
+    cur, rid: UUID, start_lat: float | None, start_lon: float | None,
+    new_at: datetime, new_lat: float, new_lon: float,
+) -> tuple[list[tuple[float, float]], int]:
+    """The measured path this ride WOULD have if `new` were appended, plus
+    the index the new point occupies in it.
+
+    Computed before the INSERT rather than after, so a rejected fix is never
+    written and then rolled back — the ride's waypoint ids stay dense and
+    the rejection doesn't depend on transaction unwinding to be correct.
+
+    Placement matters: waypoints can arrive OUT OF ORDER (client retry,
+    offline buffer flush), and the track is read back ordered by
+    waypoint_at. A late-arriving fix therefore lands in the MIDDLE of the
+    path and creates two new adjacencies, not one. Checking only "distance
+    from the last fix I stored" would miss the leg on the far side of it
+    entirely. Ties on waypoint_at sort by id, and the new row's id is the
+    largest, so an equal timestamp places the new point AFTER its peers.
+    """
+    existing = _ordered_track(cur, rid)
+    idx = sum(1 for at, _, _ in existing if at <= new_at)
+    track = [(lat, lon) for _, lat, lon in existing]
+    track.insert(idx, (new_lat, new_lon))
+    points = _measured_path(start_lat, start_lon, track)
+    lead = 1 if (start_lat is not None and start_lon is not None) else 0
+    return points, idx + lead
+
+
 def _rebuild_track(cur, rid: UUID) -> None:
     """Recompute polyline + distance from the ride's full ordered waypoint
     set, led by the ride's start point (see _measured_path).
@@ -299,16 +385,66 @@ def _rebuild_track(cur, rid: UUID) -> None:
     This runs while the ride is still ACTIVE, so there is no reported end
     to close the path with yet — PATCH .../end recomputes over the same
     points plus its own end coordinates.
+
+    Measured under the operator's leg cap, and clamped to the ride cap.
+    Neither should ever bind here — add_waypoint refuses a fix that would
+    breach either — but a ride that was already over a cap when this
+    shipped can still be re-measured by an append that the checks let
+    through, and the stored number must satisfy the invariant regardless of
+    how the row got here.
     """
     cur.execute("SELECT start_lat, start_lon FROM rides WHERE id = %s", (str(rid),))
     row = cur.fetchone()
     start_lat, start_lon = (row[0], row[1]) if row else (None, None)
     points = _measured_path(start_lat, start_lon, _track_points(cur, rid))
+    measured, excluded = measure_path(points, cap_legs=True)
+    recorded, clamped_from = clamp_distance(measured)
     cur.execute(
         "UPDATE rides SET polyline = %s, distance_m = %s, "
-        "distance_source = 'waypoints' WHERE id = %s",
-        (encode_polyline(points), round(path_length_meters(points)), str(rid)),
+        "distance_source = %s, distance_clamped_from_m = %s WHERE id = %s",
+        (encode_polyline(points), round(recorded),
+         partial_source("waypoints", partial=excluded > 0),
+         clamped_from, str(rid)),
     )
+
+
+def _check_appendable(points: list[tuple[float, float]], idx: int) -> None:
+    """Enforce the operator's leg cap and ride cap at the door, on append.
+
+    Rejecting here rather than at /end is the whole design: a bad fix costs
+    the rider that ONE fix and the ride carries on, whereas a check that
+    only fires at /end would have to either refuse the end report — which
+    strands the ride, and the partial unique index on `status = 'active'`
+    makes that stick until the 24-hour sweep — or silently rewrite a
+    finished ride. Losing one GPS sample is the mildest failure available.
+
+    Two legs are checked, not one: the new fix may have landed mid-path
+    (see _prospective_path), so both the leg into it and the leg out of it
+    are new adjacencies.
+    """
+    for a, b in ((idx - 1, idx), (idx, idx + 1)):
+        if a < 0 or b >= len(points):
+            continue
+        if not leg_is_plausible(points[a], points[b]):
+            gap = distance_meters(*points[a], *points[b])
+            raise HTTPException(422, {
+                "error": "waypoint_too_far",
+                "detail": f"this fix is {gap:.0f} m from the adjacent point on "
+                          f"the ride's path, above the {MAX_LEG_METERS:.0f} m "
+                          "limit between consecutive points. The fix was not "
+                          "recorded; the ride is still active and the next one "
+                          "will be accepted normally.",
+            })
+
+    measured, _ = measure_path(points, cap_legs=True)
+    if measured > MAX_RIDE_DISTANCE_METERS:
+        raise HTTPException(422, {
+            "error": "ride_distance_cap_reached",
+            "detail": f"this fix would put the ride at {measured:.0f} m, above "
+                      f"the {MAX_RIDE_DISTANCE_METERS:.0f} m limit for a single "
+                      "ride. The fix was not recorded. End this ride and start "
+                      "a new one to keep logging.",
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -391,17 +527,25 @@ def add_waypoint(
                     limit=_LIMIT_WAYPOINT_PER_ACCOUNT[0],
                     window_seconds=_LIMIT_WAYPOINT_PER_ACCOUNT[1])
             cur.execute(
-                "SELECT status FROM rides WHERE id = %s AND account_id = %s",
+                "SELECT status, start_lat, start_lon FROM rides "
+                "WHERE id = %s AND account_id = %s",
                 (str(rid), user.account_id),
             )
             row = cur.fetchone()
             if row is None:
                 raise HTTPException(404, "no such ride")
-            if row[0] != "active":
+            status, start_lat, start_lon = row
+            if status != "active":
                 raise HTTPException(409, {
                     "error": "ride_not_active",
                     "detail": "cannot add waypoints to a ride that isn't active",
                 })
+
+            points, idx = _prospective_path(
+                cur, rid, start_lat, start_lon,
+                payload.waypoint_at, payload.lat, payload.lon,
+            )
+            _check_appendable(points, idx)
 
             cur.execute(
                 """
@@ -541,12 +685,18 @@ def end_ride(
             # distance_source stays honest about how the number was reached:
             # 'waypoints' when the rider actually handed us a track,
             # 'straight_line' when the only two points we have are the ends
-            # — which undercounts any route that isn't straight (sql/035).
+            # — which undercounts any route that isn't straight (sql/035) —
+            # and a '_partial' suffix when a leg was too long to believe and
+            # was left out of the total.
+            #
+            # NOTHING BELOW THIS LINE CAN REFUSE THE END REPORT. An
+            # implausible final leg is dropped, an over-cap distance is
+            # clamped, and the ride completes either way. See
+            # ride_limits.close_out_path.
             track = _track_points(cur, rid)
-            points = _measured_path(start_lat, start_lon, track,
-                                    payload.end_lat, payload.end_lon)
-            distance = round(path_length_meters(points))
-            source = "waypoints" if track else "straight_line"
+            points, distance, source, clamped_from = _close_out(
+                start_lat, start_lon, track, payload.end_lat, payload.end_lon)
+            distance = round(distance)
             # A ride with a track gets its polyline re-encoded over the same
             # points the distance was measured over, so the two can't
             # disagree. A ride without one keeps '' rather than gaining a
@@ -569,13 +719,15 @@ def end_ride(
                     ended_in_zone = COALESCE(%s, ended_in_zone, FALSE),
                     {polyline_sql},
                     distance_m = %s,
-                    distance_source = %s
+                    distance_source = %s,
+                    distance_clamped_from_m = %s
                 WHERE id = %s
                 RETURNING {_RIDE_COLS}
                 """,
                 (payload.ended_at, payload.end_lat, payload.end_lon, payload.ended_at,
                  payload.est_cost_cents, payload.rate_plan, payload.started_in_zone,
-                 payload.ended_in_zone, *polyline_params, distance, source, str(rid)),
+                 payload.ended_in_zone, *polyline_params, distance, source,
+                 clamped_from, str(rid)),
             )
             ride = _row_to_ride(cur.fetchone())
         conn.commit()
@@ -618,9 +770,19 @@ def _check_plausible(distance_m: int, duration_s: int, route: list[tuple[float, 
                       "(metres) and duration_s (seconds).",
         })
 
+    # The tuned polyline tolerance is capped by the operator's hard ride
+    # limit, so the two can never license different answers for the same
+    # request: on a 40 km submitted route `route x 3` would otherwise
+    # authorize 120 km. RideIn.distance_m's field bound rejects >80 km
+    # before this runs, so in practice this min() is belt-and-braces — but
+    # it is what keeps the two rules from disagreeing on paper as well as in
+    # effect, and it survives someone relaxing the field bound.
     route_m = path_length_meters(route)
-    ceiling = max(route_m * _POLYLINE_DISTANCE_FACTOR,
-                  route_m + _POLYLINE_DISTANCE_SLACK_M)
+    ceiling = min(
+        max(route_m * _POLYLINE_DISTANCE_FACTOR,
+            route_m + _POLYLINE_DISTANCE_SLACK_M),
+        MAX_RIDE_DISTANCE_METERS,
+    )
     if distance_m > ceiling:
         raise HTTPException(422, {
             "error": "distance_exceeds_polyline",
@@ -760,7 +922,8 @@ def export_rides(
     if format == "csv":
         buf = io.StringIO()
         cols = ["id", "started_at", "ended_at", "duration_s", "distance_m",
-                "distance_source", "est_cost_cents", "rate_plan",
+                "distance_source", "distance_clamped_from_m",
+                "est_cost_cents", "rate_plan",
                 "started_in_zone", "ended_in_zone", "status", "vehicle_kind",
                 "operator", "polyline"]
         w = csv.writer(buf)

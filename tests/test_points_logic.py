@@ -53,7 +53,9 @@ def test_credit_points_inserts_and_returns_summary():
 
 
 def test_credit_points_returns_none_on_conflict_dedupe():
-    cur = _FakeCursor([None])
+    # (0,) is the per-ride cap's headroom probe, which now precedes the
+    # INSERT for any award attributed to a ride.
+    cur = _FakeCursor([(0,), None])
     result = credit_points(cur, account_id=1, action="waypoint", points=2, lat=39.74, lng=-104.99,
                             source_table="tracked_rides", source_id="abc-123")
     assert result is None
@@ -123,7 +125,7 @@ def test_credit_qr_scan_points_no_op_on_repeat_scan():
 # ---------- credit_waypoint_points -----------------------------------------------
 
 def test_credit_waypoint_points_scales_with_count():
-    cur = _FakeCursor([(1, _NOW)])
+    cur = _FakeCursor([(0,), (1, _NOW)])
     result = credit_waypoint_points(cur, account_id=1, vehicle_identifier="aaaa000000000000",
                                      waypoint_count=5, end_lat=39.74, end_lng=-104.99, ride_id="uuid-1")
     assert result["points"] == 10  # 2 * 5
@@ -140,7 +142,7 @@ def test_credit_waypoint_points_zero_count_is_a_noop():
 # ---------- credit_gbfs_validation_points -----------------------------------------
 
 def test_credit_gbfs_validation_points_within_threshold():
-    cur = _FakeCursor([(1, _NOW)])
+    cur = _FakeCursor([(0,), (1, _NOW)])
     result = credit_gbfs_validation_points(
         cur, account_id=1, vehicle_identifier="aaaa000000000000",
         end_lat=39.74, end_lng=-104.99, reappear_lat=39.740001, reappear_lng=-104.99,

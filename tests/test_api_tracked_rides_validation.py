@@ -30,6 +30,7 @@ def _row(
     path_polyline: str = "",
     distance_meters: float | None = None,
     distance_source: str | None = None,
+    distance_clamped_from_m: float | None = None,
 ) -> tuple:
     """Column order must track _RIDE_COLS in src/api_tracked_rides.py."""
     return (
@@ -45,7 +46,7 @@ def _row(
         78.2 if reported else None,                   # reported_battery_percent
         350 if reported else None,                    # total_cost_cents
         {}, path_polyline, "aaaa000000000000", _NOW, _NOW,
-        distance_meters, distance_source,
+        distance_meters, distance_source, distance_clamped_from_m,
     )
 
 
@@ -218,6 +219,7 @@ def test_end_ride_credits_waypoint_points(monkeypatch):
     fetches = [
         _end_select(),
         (3,),
+        (0,),          # per-ride points cap: headroom probe
         (77, _NOW),
         _row(),
     ]
@@ -268,35 +270,44 @@ def test_end_ride_without_waypoints_falls_back_to_straight_line(monkeypatch):
     assert 1100 < distance < 1120
 
 
-def test_end_ride_measures_the_leg_from_the_last_waypoint_to_the_end(monkeypatch):
-    """Same regression as tests/test_api_rides_validation.py's namesake, and
-    it has to behave identically: src/badges.py sums distance across both
-    tables, so a rider's mileage must not depend on which mechanism logged
-    the ride.
+def test_end_ride_drops_an_implausible_final_leg_and_says_so(monkeypatch):
+    """RECONCILES two rules that disagreed.
 
-    One waypoint 20 m from the start, then the rider parks 10 km away. The
-    old code kept the ~20 m the last waypoint upload had measured and
-    tagged it 'waypoints'.
+    The previous commit made PATCH .../end measure the leg from the last
+    fix to the reported end, because a phone that backgrounds stops
+    reporting long before the rider parks — one fix 20 m along and a park
+    10 km later used to record 20 m.
+
+    The operator's 3 km leg cap says that 10 km jump is not a leg we are
+    willing to measure. The cap wins: the leg is dropped, the ride records
+    only the track it believes, and `distance_source` carries `_partial`
+    so nobody reads the result as a whole-path measurement. The ride still
+    COMPLETES — the end report is never refused.
+
+    Same expectation as the off-feed namesake in
+    tests/test_api_rides_validation.py; badges sum both tables.
     """
     step = 1.0 / 111_320.0  # metres of latitude
     c, conn = _client(
         monkeypatch,
-        # end SELECT, waypoint COUNT, the waypoint points INSERT, final SELECT
-        [_end_select(), (1,), (77, _NOW), _row()],
+        # end SELECT, waypoint COUNT, cap probe, waypoint points INSERT, final SELECT
+        [_end_select(), (1,), (0,), (77, _NOW), _row()],
         waypoints=[(39.74 + 20 * step, -104.98)],
     )
     r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
         "ended_at": "2026-07-01T12:00:00Z",
         "end_lat": 39.74 + 10_000 * step, "end_lon": -104.98,
     })
-    assert r.status_code == 200, r.text
+    assert r.status_code == 200, "an implausible final leg must never strand the ride"
     sql, params = _end_update(conn)
-    assert "waypoints" in params
-    distance = next(p for p in params if isinstance(p, float) and p > 100)
-    assert 9_900 < distance < 10_100, "the final leg was not measured"
-    # path_polyline is re-encoded over the same points as the distance.
+    assert "waypoints_partial" in params
+    # (ended_at, end_lat, end_lon, battery, cost, metadata, polyline,
+    #  distance, source, clamped_from, ride_id)
+    assert 15 < params[7] < 25, "the 10 km jump was measured after all"
+    # The polyline covers the same points the distance was measured over —
+    # the excluded end point is not in either.
     assert "path_polyline = %s" in sql
-    assert len(decode_polyline(params[6])) == 3  # start, fix, reported end
+    assert len(decode_polyline(params[6])) == 2  # start, fix. No reported end.
 
 
 def test_end_ride_without_waypoints_does_not_fabricate_a_path(monkeypatch):
@@ -341,8 +352,9 @@ def test_waypoint_409_when_ride_not_found(monkeypatch):
 
 
 def test_waypoint_409_when_ride_already_ended(monkeypatch):
-    # (user_reported_ended_at, gbfs_reappeared_at, watch_expires_at) — ended.
-    c, _ = _client(monkeypatch, fetches=[(_NOW, None, _NOW)])
+    # (user_reported_ended_at, gbfs_reappeared_at, watch_expires_at,
+    # start_lat, start_lon) — ended.
+    c, _ = _client(monkeypatch, fetches=[(_NOW, None, _NOW, 39.74, -104.98)])
     r = c.post(f"/api/v1/tracked-rides/{_RIDE_ID}/waypoints", json={
         "waypoint_at": "2026-07-01T12:00:00Z", "lat": 39.74, "lon": -104.98,
     })
@@ -352,7 +364,7 @@ def test_waypoint_409_when_ride_already_ended(monkeypatch):
 def test_waypoint_409_when_watch_expired(monkeypatch):
     from datetime import timedelta
     past = datetime.now(timezone.utc) - timedelta(hours=1)
-    c, _ = _client(monkeypatch, fetches=[(None, None, past)])
+    c, _ = _client(monkeypatch, fetches=[(None, None, past, 39.74, -104.98)])
     r = c.post(f"/api/v1/tracked-rides/{_RIDE_ID}/waypoints", json={
         "waypoint_at": "2026-07-01T12:00:00Z", "lat": 39.74, "lon": -104.98,
     })

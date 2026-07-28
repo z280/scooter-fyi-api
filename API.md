@@ -1576,6 +1576,72 @@ all gets `401`.
 
 ---
 
+## Ride limits
+
+Three hard caps apply to **every** ride, on both mechanisms
+([off-feed](#off-feed-rides) and [tracked](#tracked-rides-gbfs-detected)).
+They are set by the operator, not tuned from data, and they are not
+negotiable per client:
+
+| | Cap | Where it bites |
+|---|---|---|
+| **Points per ride** | **100**, total across every award for that ride | `PATCH .../end` credits less than the raw award when it would exceed this |
+| **Distance between consecutive points** | **3 000 m** | `POST .../waypoints` returns `422`; `PATCH .../end` drops the leg instead |
+| **Total ride distance** | **80 000 m** | `POST .../waypoints` returns `422`; `POST /api/v1/rides` returns `422`; `PATCH .../end` clamps |
+
+Both bounds are inclusive: a leg of exactly 3 000 m and a ride of exactly
+80 000 m are fine.
+
+### The rule that matters when you're building a client
+
+**Reporting the end of a ride never fails because of these caps.** There
+is no cap-related error on `PATCH .../end` — not for a 3 000 km final leg,
+not for a ride that somehow arrives at 500 km. Ending is the one operation
+that must always succeed, because you can only have one active ride at a
+time and a refused end would leave you holding that slot until the ride
+expires hours later.
+
+So the caps are enforced **on the way in**, where the cost of a rejection
+is one GPS fix:
+
+- A fix more than 3 km from its neighbour on the path → `422`
+  `waypoint_too_far`. The fix isn't stored. The ride is untouched and still
+  active; send the next one normally.
+- A fix that would push the ride past 80 km → `422`
+  `ride_distance_cap_reached`. Same deal — end this ride and start another
+  if you're still going.
+
+Note "its neighbour", not "the last fix you sent": waypoints may arrive out
+of order, so a late fix is checked against the points on **both** sides of
+where it lands in the path.
+
+### What `/end` does instead of failing
+
+| Situation | What is recorded |
+|---|---|
+| Final leg (last fix → your reported end) over 3 km | The leg is **excluded** from the distance and the end point is left out of the path. `distance_source` gains a `_partial` suffix. Your `end_lat`/`end_lon` are still stored — we keep your report, we just decline to measure a leg we don't believe. |
+| Ride measures over 80 km | `distance` is recorded **at the cap** and `distance_clamped_from_m` carries what was actually measured. |
+| Ride with **no** waypoints at all | The leg cap does **not** apply. `start → end` is the whole ride rather than a sampling gap, so a 40 km trackless ride records 40 km as `straight_line`. Only the 80 km cap bounds it. |
+
+`distance_clamped_from_m` is `null` on the overwhelming majority of rides.
+When it isn't, the distance you're showing is a ceiling, not a
+measurement — worth saying so in the UI.
+
+### Points
+
+The 100-point ceiling is per **ride**, summed across every award
+attributable to it — so a 600-waypoint ride earns 100, not 1 200. See the
+[award table](#award-table).
+
+`qr_scan` is **not** subject to this: it is a device scan rather than a
+ride award, and is worth 100 on its own.
+
+The cap is **forward-only**. Ledger entries written before it shipped are
+not rewritten or clawed back — the points ledger is append-only and
+records what riders were actually granted.
+
+---
+
 ## Off-feed rides
 
 Bearer required, open to any signed-in rider. Rides on vehicles the audit
@@ -1604,10 +1670,10 @@ unverifiable ride would be an unbounded points faucet.
 |---|---|
 | `POST /api/v1/rides/start` | `{start_lat, start_lon, vehicle_kind?, operator?, started_at?}` → the created ride, `status: "active"`. `409` if you already have an active off-feed ride. 20/hour. |
 | `GET /api/v1/rides/active` | → `{ "active": <ride> }` or `{ "active": null }` — always wrapped. |
-| `POST /api/v1/rides/{id}/waypoints` | `{waypoint_at, lat, lon, metadata?}`. Rebuilds the polyline and distance. 600/hour. `409 {"error": "ride_not_active"}` once ended. |
+| `POST /api/v1/rides/{id}/waypoints` | `{waypoint_at, lat, lon, metadata?}`. Rebuilds the polyline and distance. 600/hour. `409 {"error": "ride_not_active"}` once ended. `422 {"error": "waypoint_too_far"}` / `{"error": "ride_distance_cap_reached"}` — see [Ride limits](#ride-limits). |
 | `GET /api/v1/rides/{id}/waypoints?limit=&after=&before=` | → `{count, waypoints: [...]}`, oldest first. Paginate with `after` — see [below](#paginating-waypoints). |
-| `PATCH /api/v1/rides/{id}/end` | `{ended_at, end_lat, end_lon, est_cost_cents?, rate_plan?, started_in_zone?, ended_in_zone?}` → the completed ride. `409` if already ended; `409 {"error": "ride_expired"}` once the [24-hour window](#the-24-hour-window) has passed. |
-| `POST /api/v1/rides` | One-shot log of a finished ride (fields below). 120/day. `422` if the numbers aren't [plausible](#is-this-ride-possible). |
+| `PATCH /api/v1/rides/{id}/end` | `{ended_at, end_lat, end_lon, est_cost_cents?, rate_plan?, started_in_zone?, ended_in_zone?}` → the completed ride. `409` if already ended; `409 {"error": "ride_expired"}` once the [24-hour window](#the-24-hour-window) has passed. **Never fails on a distance cap** — see [Ride limits](#ride-limits). |
+| `POST /api/v1/rides` | One-shot log of a finished ride (fields below). 120/day. `422` if the numbers aren't [plausible](#is-this-ride-possible), or if `distance_m` exceeds the 80 km [ride cap](#ride-limits). |
 | `GET /api/v1/rides?limit=&before=&status=` | Owner-only, newest first. → `{count, rides: [...]}`. `status` is `active` \| `completed` \| `expired`. |
 | `GET /api/v1/rides/export?format=geojson\|csv` | Owner-only full export. GeoJSON decodes each polyline to a `LineString`; see [Export geometry](#export-geometry). |
 | `DELETE /api/v1/rides/{id}` | **Immediate hard delete**, cascading to the ride's waypoints. → `{"deleted": true}` |
@@ -1653,7 +1719,13 @@ rewrites what you sent.
 | Check | Bound | `error` |
 |---|---|---|
 | Ride-average speed | `distance_m / duration_s` ≤ **20 m/s** (72 km/h, 45 mph). A positive `distance_m` with `duration_s: 0` also fails. | `implausible_speed` |
-| Distance vs. route | `distance_m` ≤ `max(route × 3, route + 1000 m)`, where `route` is the decoded length of the `polyline` you sent. | `distance_exceeds_polyline` |
+| Distance vs. route | `distance_m` ≤ `min( max(route × 3, route + 1000 m), 80 000 m )`, where `route` is the decoded length of the `polyline` you sent. | `distance_exceeds_polyline` |
+
+Above those sits the hard **80 km** [ride cap](#ride-limits), which
+`distance_m` is validated against as a field bound — so a claim over
+80 000 m is a `422` before either check runs. The two are not redundant:
+the speed bound still catches 79 km covered in 90 seconds, which the
+distance cap allows and no scooter did.
 
 **Why 20 m/s.** It is not a speed limit — it is "no micromobility trip
 *averages* this". Shared e-scooters are governed at ~24 km/h, a class-3
@@ -1689,9 +1761,13 @@ Same two-field contract as tracked rides, plus a third source:
 | `distance_source` | Meaning |
 |---|---|
 | `"waypoints"` | Measured along your **whole** path: start point → every fix you uploaded → the end you reported. Good. |
+| `"waypoints_partial"` | Same, except at least one leg was over the 3 km [leg cap](#ride-limits) and was left out. A **lower bound over a path with a hole in it** — do not treat it as equivalent to `"waypoints"`. |
 | `"straight_line"` | Start → your reported end, crow-flies. The fallback when a lifecycle ride ends with no waypoints at all. Undercounts. |
 | `"client"` | Your app computed it and we stored what you sent. Unverifiable. |
 | `null` | Ride still active with no waypoints yet. |
+
+`distance_clamped_from_m` sits alongside these: `null` normally, and when
+set, the distance we measured before clamping it to the 80 km cap.
 
 **Ending a ride re-measures it.** The distance you see while a ride is
 still active covers start → last fix, because that is all we know yet;
@@ -1702,6 +1778,12 @@ before you stop riding, and a ride with one early fix is otherwise
 recorded as a few metres. A ride that uploaded any waypoints keeps
 `"waypoints"` and has its `polyline` re-encoded over exactly the points
 the distance was measured over, so the two can never disagree.
+
+**The exception is a final leg over 3 km**, which is not measured — see
+[Ride limits](#ride-limits). Such a ride records only the track it can
+believe and reports `"waypoints_partial"`. If your users' rides are coming
+back partial, the fix is to upload fixes more often: the leg cap is about
+the gap between consecutive points, not about how far anyone rode.
 
 ### Export geometry
 
@@ -1885,8 +1967,14 @@ equally good:
 | `distance_source` | Meaning |
 |---|---|
 | `"waypoints"` | Measured along your **whole** path: the ride's start point → every GPS fix you uploaded → the end you reported. Good. Still a slight undercount: sampling measures each curve as a chord. |
+| `"waypoints_partial"` | Same, except at least one leg was over the 3 km [leg cap](#ride-limits) and was left out. A lower bound over a path with a hole in it — not equivalent to `"waypoints"`. |
 | `"straight_line"` | Start → your reported end, as the crow flies. This is the fallback when you uploaded **no** waypoints at all, and it undercounts badly on any route that isn't a straight line. |
 | `null` | Not computed yet — the ride hasn't ended and has no waypoints. |
+
+`distance_clamped_from_m` accompanies these: `null` normally, and when set,
+what was measured before the 80 km [ride cap](#ride-limits) clamped it.
+Like `distance_meters` it is derived from your own data, so it is **not**
+part of the `gbfs_*` redaction.
 
 Distance appears as soon as your first waypoint lands and updates on every
 append, so an in-progress ride shows a live figure — covering start → your
@@ -1947,7 +2035,13 @@ been reported"`. There is no un-end and no edit. Confirm before sending.
 
 This is also where points are credited: 2 per waypoint you uploaded, plus
 20 if GBFS saw the scooter reappear within 20 m of your reported end
-(`gbfs_trip_validated`). Both are no-ops when their condition isn't met.
+(`gbfs_trip_validated`). Both are no-ops when their condition isn't met,
+and **both are capped so the ride awards at most 100 points in total** —
+see [Ride limits](#ride-limits). A ledger entry always shows what was
+actually granted, never the pre-cap figure.
+
+It also never fails on a distance cap: an implausible final leg is dropped
+and an over-cap distance is clamped, but the ride always completes.
 
 ### `POST /api/v1/tracked-rides/{id}/waypoints`
 
@@ -1965,6 +2059,13 @@ fix.
 - `404` — no such ride (or not yours).
 - `409` `{"error": "ride_not_active"}` — the ride has ended, been detected
   as reappeared, or its watch window expired.
+- `422` `{"error": "waypoint_too_far"}` — this fix is more than 3 km from
+  its neighbour on the path. Not stored; the ride carries on.
+- `422` `{"error": "ride_distance_cap_reached"}` — this fix would push the
+  ride past 80 km. Not stored; end the ride and start another.
+
+Both are described in [Ride limits](#ride-limits) and behave identically on
+off-feed rides.
 
 ### Ride transaction screenshots
 
@@ -2013,6 +2114,20 @@ the whole ledger — not just the returned page.
 | `profile_completion` | 10 | One-time, on completing your profile |
 | `report_not_found` | 4 | `not_found` device report |
 | `waypoint` | 2 each | Per waypoint uploaded, credited when the ride ends |
+
+**Ceiling: 100 points per ride**, summed across every ride award
+(`waypoint` + `gbfs_trip_validated`). A 600-waypoint ride earns 100, not
+1 200. When the ceiling binds, the ledger entry records the **granted**
+amount — `points` in `GET /api/v1/points` is always what you actually
+received, never a pre-cap figure — and an award with no headroom left
+writes no entry at all.
+
+`qr_scan` is exempt: a device scan is not a ride award, and it is worth
+100 on its own. `profile_completion` and report credits are likewise
+per-account and per-report, not per-ride.
+
+The ceiling is forward-only; entries predating it were not adjusted. See
+[Ride limits](#ride-limits).
 
 `dead_battery` reports and device recommendations deliberately award
 nothing. Credits are idempotent per source row, so retries don't
@@ -2291,7 +2406,7 @@ const delta = bikeShareV1 - bikeShareDenver;
 | `404` | No data | Requested layer has no snapshots (cold start), an unknown `vehicle_identifier`, or the resource isn't yours. |
 | `409` | Conflict | State says no: a second active tracked ride, a re-reported ride end, or a 4th photo on a device. Not retryable — resolve the conflict first. |
 | `413` | Too large | Receipt, device photo, or ride screenshot over 10 MB. |
-| `422` | Unprocessable | A required multipart part is missing, or routing found no path (`no_route`, `no_route_from_location`). |
+| `422` | Unprocessable | A required multipart part is missing, routing found no path (`no_route`, `no_route_from_location`), a client-asserted ride isn't [plausible](#is-this-ride-possible) (`implausible_speed`, `distance_exceeds_polyline`), or a waypoint breaks a [ride limit](#ride-limits) (`waypoint_too_far`, `ride_distance_cap_reached`). |
 | `429` | Rate limited | POST buckets are full — honor the `Retry-After` header (seconds). |
 | `502` | Upstream failure | Email provider rejected a magic-link send. Retry in a minute. |
 | `503` | Service unavailable | No snapshots exist yet, or the feature isn't configured on this deployment (Google/magic-link/receipts/photo storage/router). |
@@ -2301,11 +2416,17 @@ Error responses are JSON: `{ "detail": "human-readable message" }`.
 
 **`detail` is not always a string.** A few endpoints return a structured
 object instead, so a client that assumes `string` will render
-`[object Object]`. Currently: `/api/v1/route` (`unknown_profile`,
-`out_of_coverage`, `no_route`, `no_route_from_location`,
-`router_unavailable`) and the tracked-ride waypoint endpoint
-(`ride_not_active`). Each carries an `error` key with a stable machine
-code. Branch on `typeof detail === "object" ? detail.error : detail`.
+`[object Object]`. Each carries an `error` key with a stable machine code.
+Branch on `typeof detail === "object" ? detail.error : detail`.
+
+| `error` | Status | Where |
+|---|---|---|
+| `unknown_profile`, `out_of_coverage`, `no_route`, `no_route_from_location`, `router_unavailable` | `422` / `503` | `/api/v1/route` |
+| `ride_not_active` | `409` | Waypoint append, both ride mechanisms |
+| `ride_expired` | `409` | `PATCH /api/v1/rides/{id}/end` |
+| `waypoint_too_far` | `422` | Waypoint append, both ride mechanisms |
+| `ride_distance_cap_reached` | `422` | Waypoint append, both ride mechanisms |
+| `implausible_speed`, `distance_exceeds_polyline` | `422` | `POST /api/v1/rides` |
 
 **Rate limits are per-account and tight** — most write buckets are 10–30
 per hour. The exception is tracked-ride waypoints at 600/hour. Every POST

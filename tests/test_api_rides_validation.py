@@ -91,6 +91,7 @@ _NOW = datetime(2026, 7, 27, 16, 20, tzinfo=timezone.utc)
 def _ride_row(
     *, status: str = "active", ended: bool = False,
     distance_m: int | None = None, distance_source: str | None = None,
+    distance_clamped_from_m: float | None = None,
 ) -> tuple:
     """Column order must track _RIDE_COLS in src/api_rides.py."""
     return (
@@ -108,6 +109,7 @@ def _ride_row(
         39.75 if ended else None,         # end_lat
         -104.99 if ended else None,       # end_lon
         distance_source,
+        distance_clamped_from_m,
     )
 
 
@@ -226,7 +228,7 @@ def test_active_ride_is_always_wrapped(monkeypatch):
 
 
 def test_waypoint_409_when_ride_not_active(monkeypatch):
-    c, _ = _seq_client(monkeypatch, [("completed",)])
+    c, _ = _seq_client(monkeypatch, [("completed", 39.74, -104.98)])
     r = c.post(f"/api/v1/rides/{_RIDE_ID}/waypoints", json={
         "waypoint_at": "2026-07-27T16:31:00Z", "lat": 39.745, "lon": -104.985,
     })
@@ -265,10 +267,10 @@ def test_end_ride_409_when_already_completed(monkeypatch):
 
 
 def _end_distance(conn) -> tuple[int, str]:
-    """(distance_m, distance_source) as written by PATCH .../end. They are
-    the last two params before the ride id."""
+    """(distance_m, distance_source) as written by PATCH .../end. The
+    trailing params are (..., distance, source, clamped_from, ride_id)."""
     params = _end_update(conn)[1]
-    return params[-3], params[-2]
+    return params[-4], params[-3]
 
 
 def test_end_ride_without_waypoints_falls_back_to_straight_line(monkeypatch):
@@ -289,22 +291,29 @@ def test_end_ride_without_waypoints_falls_back_to_straight_line(monkeypatch):
     assert "polyline = COALESCE(polyline, '')" in _end_update(conn)[0]
 
 
-def test_end_ride_measures_the_leg_from_the_last_waypoint_to_the_end(monkeypatch):
-    """THE regression this file exists for: a rider whose phone stopped
-    reporting early (backgrounded, battery saver, tunnel) sends ONE waypoint
-    20 m from the start and then parks 10 km away.
+def test_end_ride_drops_an_implausible_final_leg_and_says_so(monkeypatch):
+    """RECONCILES two rules that disagreed.
 
-    The old code took whatever the last waypoint upload had measured and
-    called it 'waypoints', recording ~20 m for a 10 km ride and tagging it
-    high-confidence. The reported end has to close the path.
+    The previous commit made PATCH .../end measure the leg from the last
+    fix to the reported end: a phone that backgrounds, saves battery or
+    hits a tunnel stops reporting long before the rider parks, and one fix
+    20 m along followed by a park 10 km later used to record 20 m for a
+    10 km ride, tagged high-confidence.
+
+    The operator's 3 km leg cap says a 10 km jump between consecutive
+    points is not something we are willing to measure. The cap wins, and
+    the honest result is the narrow one: measure the track we believe,
+    drop the leg we don't, and mark the source `_partial` so the number is
+    never mistaken for a whole-path measurement. What must NOT happen is
+    the ride failing to complete.
     """
     step = 1.0 / 111_320.0  # metres of latitude
     c, conn = _seq_client(
         monkeypatch,
         [
             ("active", _NOW, 39.74, -104.98),
-            _ride_row(status="completed", ended=True, distance_m=10_019,
-                      distance_source="waypoints"),
+            _ride_row(status="completed", ended=True, distance_m=20,
+                      distance_source="waypoints_partial"),
         ],
         waypoints=[(39.74 + 20 * step, -104.98)],  # one fix, 20 m along
     )
@@ -312,16 +321,17 @@ def test_end_ride_measures_the_leg_from_the_last_waypoint_to_the_end(monkeypatch
         "ended_at": "2026-07-27T16:45:00Z",
         "end_lat": 39.74 + 10_000 * step, "end_lon": -104.98,
     })
-    assert r.status_code == 200, r.text
+    assert r.status_code == 200, "an implausible final leg must never strand the ride"
     distance, source = _end_distance(conn)
-    assert source == "waypoints"
-    assert 9_900 < distance < 10_100, "the final leg was not measured"
-    # The stored polyline is re-encoded over the same points as the
-    # distance, so the two can't disagree.
+    assert source == "waypoints_partial"
+    assert 15 < distance < 25, "the 10 km jump was measured after all"
+    # The stored polyline covers exactly the points the distance was
+    # measured over, so the two still can't disagree — the dropped end
+    # point is in neither.
     sql, params = _end_update(conn)
     assert "polyline = %s" in sql
     from src.polyline import decode as decode_polyline
-    assert len(decode_polyline(params[-4])) == 3  # start, fix, reported end
+    assert len(decode_polyline(params[-5])) == 2  # start, fix. No reported end.
 
 
 def test_end_ride_with_waypoints_still_reports_a_tracked_length(monkeypatch):
@@ -529,15 +539,31 @@ def test_a_normal_ride_is_still_accepted(monkeypatch):
 
 
 def test_the_badge_farming_request_is_rejected(monkeypatch):
-    """The exact vector: 160 934 m — miles_100 in one request — claimed over
-    a 90-second ride."""
+    """The exact vector: 160 934 m — miles_100 in one request — claimed
+    over a 90-second ride.
+
+    Now refused one step earlier than it used to be. 160 934 m is above the
+    operator's 80 000 m ride cap, so `RideIn.distance_m` rejects it as a
+    field violation before `_check_plausible` ever sees it; the speed bound
+    that used to catch it is still there and still catches everything under
+    the cap (below). Either way it is a 422 and nothing is stored.
+    """
     c, conn = _seq_client(monkeypatch, [])
     r = _one_shot(c, distance_m=160_934, duration_s=90, polyline=_route(160_934))
     assert r.status_code == 422
-    assert r.json()["detail"]["error"] == "implausible_speed"
     # No cursor was ever opened: the ride is refused at the door, so nothing
     # is stored and then argued about.
     assert conn.cur is None
+
+
+def test_implausible_speed_still_binds_under_the_distance_cap(monkeypatch):
+    """The 80 km cap does NOT make the speed bound redundant — they bind on
+    different axes. 79 km inside the cap, covered in 90 seconds, is still
+    nonsense and still `implausible_speed`."""
+    c, _ = _seq_client(monkeypatch, [])
+    r = _one_shot(c, distance_m=79_000, duration_s=90, polyline=_route(79_000))
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "implausible_speed"
 
 
 def test_distance_with_zero_duration_is_rejected(monkeypatch):

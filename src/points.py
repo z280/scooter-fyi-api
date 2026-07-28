@@ -8,6 +8,15 @@ half the contract" shape as src/ratelimit.py:enforce(). `cur` is an open
 psycopg cursor in the caller's transaction; commit is the caller's
 responsibility, so a point award lands atomically with whatever action
 earned it.
+
+It is also the single enforcement point for the operator's per-ride points
+cap (src/ride_limits.py:MAX_POINTS_PER_RIDE): a ride cannot award more than
+100 points across every action attributable to it, and the ledger records
+the capped amount rather than the requested one. The cap is FORWARD-ONLY —
+no ledger row written before it shipped is rewritten or clawed back. The
+ledger is append-only and is the record of what riders were actually
+granted; retroactively deleting points people earned under the old rules
+would be a worse breach of it than the overpayment was.
 """
 
 from __future__ import annotations
@@ -18,8 +27,20 @@ from typing import Any
 import h3
 
 from .geo import distance_meters
+from .ride_limits import MAX_POINTS_PER_RIDE
 
 log = logging.getLogger(__name__)
+
+# Sources whose (source_table, source_id) identifies A RIDE, and are
+# therefore subject to the operator's per-ride points cap. 'rides' is listed
+# even though off-feed rides award nothing today (src/api_rides.py awards no
+# points anywhere, deliberately) — if that ever changes, the cap already
+# covers it rather than being remembered by whoever adds the award.
+#
+# Anything NOT in this set is uncapped by this mechanism: `qr_scan` is a
+# device scan worth 100 on its own, `profile_completion` is per-account, and
+# device reports are per-report. None of them is a ride.
+_RIDE_SOURCE_TABLES = frozenset({"tracked_rides", "rides"})
 
 # ---------------------------------------------------------------------------
 # Point values — single source of truth. Kept in Python, not the
@@ -29,8 +50,14 @@ POINTS_REPORT_NOT_RIDEABLE = 10
 POINTS_REPORT_NOT_FOUND = 4
 POINTS_REPORT_VEHICLE_ISSUE = 10
 POINTS_REPORT_IMPROPER_PARKING = 10
+# Per-waypoint, and therefore UNBOUNDED on its own — waypoint count is
+# whatever the rider's phone posted. src/ride_limits.py:MAX_POINTS_PER_RIDE
+# is what bounds it; see _apply_ride_cap below. Do not re-derive a ceiling
+# from this value.
 POINTS_PER_WAYPOINT = 2
 POINTS_GBFS_TRIP_VALIDATED = 20
+# NOT a ride award and NOT subject to the per-ride cap — a device scan is
+# its own thing, and it is worth the whole cap on its own by design.
 POINTS_QR_SCAN = 100
 
 # TODO(needs-user-input): the source spec gave no point value for
@@ -67,6 +94,60 @@ def h3_8_index_for(lat: float, lng: float) -> int:
     return int(h3.latlng_to_cell(lat, lng, 8), 16)
 
 
+def _apply_ride_cap(
+    cur, *, action: str, points: int,
+    source_table: str | None, source_id: str | None,
+) -> int | None:
+    """Points actually creditable for this award under the per-ride cap.
+
+    Returns the (possibly reduced) award, or None when the ride has already
+    been paid its full MAX_POINTS_PER_RIDE and there is nothing left to
+    grant. Non-ride sources pass through untouched.
+
+    The headroom is computed from the ledger itself — SUM(points) over every
+    row already attributed to this ride — rather than from a counter, for
+    the same reason the account total is never cached: the ledger is the
+    only source of truth, and a second copy of the number is a second thing
+    that can be wrong.
+
+    Concurrency: both ride credits run inside the caller's transaction,
+    after end_tracked_ride has taken `SELECT ... FOR UPDATE` on the ride
+    row, so two concurrent end reports for the same ride serialize behind
+    that lock and cannot each read the same headroom. The dedupe index is
+    the backstop if they somehow do.
+    """
+    if source_table not in _RIDE_SOURCE_TABLES or source_id is None:
+        return points
+
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(points), 0) FROM user_points
+         WHERE source_table = %s AND source_id = %s
+        """,
+        (source_table, source_id),
+    )
+    (already,) = cur.fetchone()
+    headroom = MAX_POINTS_PER_RIDE - int(already)
+
+    if headroom <= 0:
+        log.info(
+            "points: ride cap reached, no-op source=%s/%s action=%s "
+            "requested=%d already=%d cap=%d",
+            source_table, source_id, action, points, int(already),
+            MAX_POINTS_PER_RIDE,
+        )
+        return None
+    if points > headroom:
+        log.info(
+            "points: ride cap binds source=%s/%s action=%s "
+            "requested=%d credited=%d already=%d cap=%d",
+            source_table, source_id, action, points, headroom, int(already),
+            MAX_POINTS_PER_RIDE,
+        )
+        return headroom
+    return points
+
+
 def credit_points(
     cur,
     *,
@@ -84,7 +165,31 @@ def credit_points(
     (idx_user_points_source_dedupe) — an idempotency guard for
     ride-completion credits against retries. source_id is TEXT because
     sources include both device_reports.id (bigint) and tracked_rides.id
-    (uuid) — pass either as a plain str(...)."""
+    (uuid) — pass either as a plain str(...).
+
+    THIS IS WHERE THE PER-RIDE POINTS CAP IS ENFORCED, and it is the only
+    place. Every point-awarding path in the codebase funnels through this
+    function, so capping here means a ride cannot exceed
+    MAX_POINTS_PER_RIDE no matter how many different awards are attributed
+    to it — including an award nobody has written yet. Capping at the call
+    sites instead (in credit_waypoint_points and credit_gbfs_validation_points)
+    would have left exactly that hole: a third award would have to remember
+    to opt in, and the one that forgot would silently break the invariant.
+
+    When the cap binds, the ledger row is written with the CAPPED value,
+    not the requested one. The ledger is the record of what was granted, so
+    a row claiming more than the rider actually received would make
+    SUM(points) — the only definition of a rider's total — disagree with
+    itself. A request that lands with zero headroom left writes no row at
+    all and returns None, the same shape as the dedupe no-op.
+    """
+    points = _apply_ride_cap(
+        cur, action=action, points=points,
+        source_table=source_table, source_id=source_id,
+    )
+    if points is None:
+        return None
+
     h3_8 = h3_8_index_for(lat, lng)
     cur.execute(
         """
@@ -173,7 +278,12 @@ def credit_waypoint_points(
     ride marked complete"). One ledger row per ride, not per waypoint:
     every waypoint is attributed to the ride's FINAL destination location
     (spec: "Attribute points to final destination location"). ride_id is
-    tracked_rides.id (a UUID) — pass str(ride_id)."""
+    tracked_rides.id (a UUID) — pass str(ride_id).
+
+    The award computed here is a REQUEST, not a guarantee: credit_points
+    reduces it to whatever the ride has left under MAX_POINTS_PER_RIDE. A
+    600-waypoint ride asks for 1200 and is granted 100. Deliberately not
+    capped here — see _apply_ride_cap for why the ceiling has one owner."""
     if waypoint_count <= 0:
         return None
     return credit_points(

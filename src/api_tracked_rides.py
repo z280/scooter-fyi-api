@@ -37,12 +37,21 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .accounts import SessionUser, require_session
-from .geo import path_length_meters
+from .geo import distance_meters
 from .identity import plate_display_code
 from .pg import connection
 from .points import credit_gbfs_validation_points, credit_waypoint_points
 from .polyline import PolylineError, decode as decode_polyline, encode as encode_polyline
 from .ratelimit import enforce
+from .ride_limits import (
+    MAX_LEG_METERS,
+    MAX_RIDE_DISTANCE_METERS,
+    clamp_distance,
+    close_out_path as _close_out,
+    leg_is_plausible,
+    measure_path,
+    partial_source,
+)
 
 router = APIRouter()
 
@@ -57,7 +66,7 @@ _RIDE_COLS = (
     "gbfs_end_battery_percent, user_reported_ended_at, end_lat, end_lon, "
     "reported_battery_percent, total_cost_cents, metadata, path_polyline, "
     "vehicle_identifier, created_at, updated_at, distance_meters, "
-    "distance_source"
+    "distance_source, distance_clamped_from_m"
 )
 
 
@@ -89,7 +98,7 @@ def _row_to_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
      gbfs_end_battery_percent, user_reported_ended_at, end_lat, end_lon,
      reported_battery_percent, total_cost_cents, metadata, path_polyline,
      vehicle_identifier, created_at, updated_at, ride_distance_meters,
-     distance_source) = r
+     distance_source, distance_clamped_from_m) = r
 
     # ANTI-FRAUD: see module docstring. Redacted as None in the API
     # response only — the underlying columns are untouched.
@@ -123,6 +132,13 @@ def _row_to_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
             if ride_distance_meters is not None else None
         ),
         "distance_source": distance_source,
+        # NULL unless the operator's 80 km ride cap bound; see api_rides.py.
+        # Derived from the rider's own data like distance itself, so it is
+        # not part of the gbfs_* redaction.
+        "distance_clamped_from_m": (
+            round(float(distance_clamped_from_m), 1)
+            if distance_clamped_from_m is not None else None
+        ),
     }
     if path_geojson:
         out["path_polyline"] = path_polyline
@@ -199,6 +215,11 @@ def _measured_path(
     Byte-for-byte the same rule as src/api_rides.py:_measured_path, and it
     has to stay that way: src/badges.py sums distance across both tables, so
     a rider's mileage must not depend on which mechanism logged the ride.
+
+    Callers now pass only start + track; closing the path with the reported
+    end is ride_limits.close_out_path's job, which both tables share so the
+    "must stay that way" above is enforced by there being one copy rather
+    than by whoever edits next remembering.
     """
     points: list[tuple[float, float]] = []
     if start_lat is not None and start_lon is not None:
@@ -207,6 +228,67 @@ def _measured_path(
     if end_lat is not None and end_lon is not None:
         points.append((end_lat, end_lon))
     return points
+
+
+def _ordered_track(cur, rid: UUID) -> list[tuple[datetime, float, float]]:
+    """(waypoint_at, lat, lon), oldest first — _track_points plus the
+    timestamp, so a new fix can be placed where it will actually land."""
+    cur.execute(
+        "SELECT waypoint_at, lat, lon FROM ride_waypoints "
+        "WHERE tracked_ride_id = %s ORDER BY waypoint_at ASC, id ASC",
+        (str(rid),),
+    )
+    return [(r[0], r[1], r[2]) for r in cur.fetchall()]
+
+
+def _prospective_path(
+    cur, rid: UUID, start_lat: float | None, start_lon: float | None,
+    new_at: datetime, new_lat: float, new_lon: float,
+) -> tuple[list[tuple[float, float]], int]:
+    """The path this ride WOULD have if `new` were appended, and the index
+    the new point takes in it. Same contract and same reasoning as
+    src/api_rides.py:_prospective_path — waypoints arrive out of order, so
+    a new fix can land mid-path and create two new adjacencies."""
+    existing = _ordered_track(cur, rid)
+    idx = sum(1 for at, _, _ in existing if at <= new_at)
+    track = [(lat, lon) for _, lat, lon in existing]
+    track.insert(idx, (new_lat, new_lon))
+    points = _measured_path(start_lat, start_lon, track)
+    lead = 1 if (start_lat is not None and start_lon is not None) else 0
+    return points, idx + lead
+
+
+def _check_appendable(points: list[tuple[float, float]], idx: int) -> None:
+    """Operator leg cap + ride cap, enforced at append.
+
+    Byte-for-byte the same rule as src/api_rides.py:_check_appendable, and
+    it has to stay that way: src/badges.py sums distance across both
+    tables, so what each will record must not depend on which one you are
+    talking to.
+    """
+    for a, b in ((idx - 1, idx), (idx, idx + 1)):
+        if a < 0 or b >= len(points):
+            continue
+        if not leg_is_plausible(points[a], points[b]):
+            gap = distance_meters(*points[a], *points[b])
+            raise HTTPException(422, {
+                "error": "waypoint_too_far",
+                "detail": f"this fix is {gap:.0f} m from the adjacent point on "
+                          f"the ride's path, above the {MAX_LEG_METERS:.0f} m "
+                          "limit between consecutive points. The fix was not "
+                          "recorded; the ride is still active and the next one "
+                          "will be accepted normally.",
+            })
+
+    measured, _ = measure_path(points, cap_legs=True)
+    if measured > MAX_RIDE_DISTANCE_METERS:
+        raise HTTPException(422, {
+            "error": "ride_distance_cap_reached",
+            "detail": f"this fix would put the ride at {measured:.0f} m, above "
+                      f"the {MAX_RIDE_DISTANCE_METERS:.0f} m limit for a single "
+                      "ride. The fix was not recorded. End this ride and start "
+                      "a new one to keep logging.",
+        })
 
 
 @router.post("/api/v1/tracked-rides")
@@ -393,11 +475,14 @@ def end_tracked_ride(
             # 'waypoints' when the rider actually handed us a track,
             # 'straight_line' when the only two points we have are the ends
             # — which undercounts any route that isn't straight (sql/034).
+            # NOTHING BELOW THIS LINE CAN REFUSE THE END REPORT. An
+            # implausible final leg is dropped and an over-cap distance is
+            # clamped; the ride completes either way. Refusing would strand
+            # the rider — the active-ride predicate would keep answering
+            # "you are still on a ride" until the watch window elapsed.
             track = _track_points(cur, rid)
-            points = _measured_path(start_lat, start_lon, track,
-                                    payload.end_lat, payload.end_lon)
-            new_distance = path_length_meters(points)
-            new_source = "waypoints" if track else "straight_line"
+            points, new_distance, new_source, clamped_from = _close_out(
+                start_lat, start_lon, track, payload.end_lat, payload.end_lon)
             # Re-encode the stored path over the same points the distance was
             # measured over, so polyline and distance can't disagree. A ride
             # with no track keeps path_polyline NULL rather than gaining a
@@ -418,13 +503,14 @@ def end_tracked_ride(
                     {path_sql}
                     distance_meters = %s,
                     distance_source = %s,
+                    distance_clamped_from_m = %s,
                     updated_at = NOW()
                 WHERE id = %s
                 """,
                 (payload.ended_at, payload.end_lat, payload.end_lon,
                  payload.reported_battery_percent, payload.total_cost_cents,
                  json.dumps(payload.metadata or {}), *path_params,
-                 new_distance, new_source, str(rid)),
+                 new_distance, new_source, clamped_from, str(rid)),
             )
 
             # Points (requirement #10), credited now that the ride is
@@ -470,17 +556,24 @@ def add_waypoint(
                     window_seconds=_LIMIT_WAYPOINT_PER_ACCOUNT[1])
 
             cur.execute(
-                "SELECT user_reported_ended_at, gbfs_reappeared_at, watch_expires_at "
+                "SELECT user_reported_ended_at, gbfs_reappeared_at, watch_expires_at, "
+                "start_lat, start_lon "
                 "FROM tracked_rides WHERE id = %s AND account_id = %s",
                 (str(rid), user.account_id),
             )
             row = cur.fetchone()
             if row is None:
                 raise HTTPException(404, "no such ride")
-            ended, reappeared, expires_at = row
+            ended, reappeared, expires_at, start_lat, start_lon = row
             if not (ended is None and reappeared is None and expires_at > datetime.now(timezone.utc)):
                 raise HTTPException(409, {"error": "ride_not_active",
                                           "detail": "cannot add waypoints to a ride that isn't active"})
+
+            points, idx = _prospective_path(
+                cur, rid, start_lat, start_lon,
+                payload.waypoint_at, payload.lat, payload.lon,
+            )
+            _check_appendable(points, idx)
 
             cur.execute(
                 """
@@ -502,20 +595,23 @@ def add_waypoint(
             # end coordinates. Off-feed rides do exactly the same
             # (api_rides.py:_rebuild_track) — badges sum distance across
             # both tables, so the two must measure the same way.
-            cur.execute(
-                "SELECT start_lat, start_lon FROM tracked_rides WHERE id = %s",
-                (str(rid),),
-            )
-            srow = cur.fetchone()
-            start_lat, start_lon = (srow[0], srow[1]) if srow else (None, None)
-            points = _measured_path(start_lat, start_lon, _track_points(cur, rid))
+            rebuilt = _measured_path(start_lat, start_lon, _track_points(cur, rid))
             # Distance is recomputed from the same full ordered set, for the
             # same reason: an incremental += would be wrong the moment a
-            # waypoint arrives out of order.
+            # waypoint arrives out of order. Measured under the operator's
+            # leg cap and clamped to the ride cap — neither should bind,
+            # because _check_appendable just refused anything that would
+            # breach them, but a ride that predates those checks must still
+            # come out of here satisfying the invariant.
+            measured, excluded = measure_path(rebuilt, cap_legs=True)
+            recorded, clamped_from = clamp_distance(measured)
             cur.execute(
                 "UPDATE tracked_rides SET path_polyline = %s, distance_meters = %s, "
-                "distance_source = 'waypoints', updated_at = NOW() WHERE id = %s",
-                (encode_polyline(points), path_length_meters(points), str(rid)),
+                "distance_source = %s, distance_clamped_from_m = %s, "
+                "updated_at = NOW() WHERE id = %s",
+                (encode_polyline(rebuilt), recorded,
+                 partial_source("waypoints", partial=excluded > 0),
+                 clamped_from, str(rid)),
             )
         conn.commit()
     return {

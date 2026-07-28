@@ -90,8 +90,8 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql … 040_off_feed_ride_expiry.sql
-│                              40 migrations, applied idempotently at boot
+├── sql/001_init.sql … 041_ride_hard_caps.sql
+│                              41 migrations, applied idempotently at boot
 ├── src/
 │   ├── main.py                 FastAPI app, lifespan, migrations, router mounts
 │   ├── cli.py                  subcommands run by the scheduler container
@@ -135,7 +135,11 @@ agent process).
 │   ├── device_photos.py         device photo upload → PUBLIC R2 bucket
 │   ├── ride_screenshots.py      ride transaction screenshot upload → PRIVATE R2 bucket
 │   ├── qr.py                    QR payload plate extraction + vehicle_identifier validation
-│   ├── points.py                points ledger primitives (credit_points + per-action wrappers)
+│   ├── points.py                points ledger primitives (credit_points + per-action wrappers;
+│   │                            credit_points is where the 100-points-per-ride cap is enforced)
+│   ├── ride_limits.py           the operator's three hard ride invariants — 100 points/ride,
+│   │                            3 km between consecutive path points, 80 km/ride — plus the
+│   │                            shared path measurement both ride modules close out with
 │   ├── polyline.py              Google polyline encode/decode (ride paths)
 │   ├── badges.py                server-computed profile badges (recomputed on every read;
 │   │                            mileage/streak badges union tracked_rides.distance_meters
