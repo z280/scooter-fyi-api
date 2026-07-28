@@ -40,9 +40,23 @@
 # needed like archive_if_due.
 */15 * * * * cd /app && python -m src.cli expire_stale_watches
 
+# Off-feed ride expiry: close out `rides` rows left 'active' for 24 hours
+# with no end report (sql/040). Shares this slot with the watch expiry above
+# because it is the same kind of job, but it is NOT cosmetic like that one:
+# idx_rides_one_active_per_account is a partial UNIQUE index on
+# status = 'active', so an abandoned ride 409s its owner out of
+# POST /api/v1/rides/start until this runs. Same cheap partial-index scan.
+*/15 * * * * cd /app && python -m src.cli expire_stale_off_feed_rides
+
 # Ride transaction screenshot retention: mirrors cleanup_receipts' 18-month
 # window and slot in the same daily 3:30am run.
 30 3 * * * cd /app && python -m src.cli cleanup_ride_screenshots
+
+# Model-report photo retention: same private bucket, same 18-month window
+# and same 3:30am slot as the receipts job above. sql/038 added
+# photo_deleted_at and nothing set it, so these objects were retained
+# forever despite the published policy. Stamps the row; keeps the report.
+30 3 * * * cd /app && python -m src.cli cleanup_model_report_photos
 
 # Routing graph refresh. denver-map-prep rebuilds and re-uploads the .pbf at
 # 02:00 Denver daily; this picks it up afterwards, once map-prep's ~50-minute

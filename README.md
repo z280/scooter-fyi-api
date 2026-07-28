@@ -83,8 +83,8 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql … 039_backfill_tracked_ride_distance.sql
-│                              37 migrations, applied idempotently at boot
+├── sql/001_init.sql … 040_off_feed_ride_expiry.sql
+│                              40 migrations, applied idempotently at boot
 ├── src/
 │   ├── main.py                 FastAPI app, lifespan, migrations, router mounts
 │   ├── cli.py                  subcommands run by the scheduler container
@@ -131,7 +131,8 @@ agent process).
 │   ├── points.py                points ledger primitives (credit_points + per-action wrappers)
 │   ├── polyline.py              Google polyline encode/decode (ride paths)
 │   ├── badges.py                server-computed profile badges (recomputed on every read;
-│   │                            mileage/streak badges read tracked_rides.distance_meters)
+│   │                            mileage/streak badges union tracked_rides.distance_meters
+│   │                            with off-feed rides.distance_m — ended rides only)
 │   ├── client_ip.py             client IP extraction behind the Cloudflare Tunnel
 │   ├── auth.py                  GitHub OAuth + org allowlist (admin panel only — a
 │   │                            separate mechanism from accounts.py's rider auth)
@@ -145,6 +146,11 @@ agent process).
 │   ├── api_auth.py              sign-in doors + session lifecycle
 │   ├── api_tracked_rides.py     GBFS-detected ride tracking: start/list/active/detail/
 │   │                            end-report/waypoints/delete
+│   ├── api_rides.py             OFF-FEED rides — vehicles not in the GBFS feed (a personal
+│   │                            scooter, a competitor's rental). Same lifecycle as tracked
+│   │                            rides (start/waypoints/end) plus a one-shot log of a
+│   │                            finished ride, owner-only list/export, hard delete. No
+│   │                            points; client-asserted distances are plausibility-checked
 │   ├── api_points.py            GET /api/v1/points — ledger + running total
 │   ├── api_device_recommendations.py  POST .../recommend
 │   ├── api_device_photos.py     device photo upload/list/report + GET /api/v1/photos/mine
@@ -322,9 +328,22 @@ here — the data is rider-asserted about a vehicle we can't corroborate.
 | `DELETE /api/v1/rides/{ride_id}` | Hard-delete one ride (cascades to waypoints) |
 | `DELETE /api/v1/rides` | Hard-delete every off-feed ride the account owns |
 
+An active ride expires 24 hours after it was created
+(`sql/040_off_feed_ride_expiry.sql`, swept by `expire_stale_off_feed_rides`
+every 15 minutes). Without it, a rider who never reports an end holds the
+one-active-ride slot forever and can never start another ride — the
+partial unique index has no other way to let go. An expired ride keeps its
+waypoints and its measured distance, never gains an invented end, and
+earns no badge mileage.
+
 `src/badges.py` computes the mileage/streak badges from **both** this
 table and `tracked_rides` — a rider's mileage is the miles they rode,
-whichever mechanism recorded them.
+whichever mechanism recorded them. Only rides someone *ended* count, from
+both tables. Because the one-shot `POST /api/v1/rides` lets the client
+assert its own distance, that number is checked for plausibility
+(ride-average speed ≤ 20 m/s, and consistent with the submitted polyline)
+before it is stored, so counting off-feed mileage doesn't mean believing
+arbitrary mileage.
 
 ### Tracked rides (GBFS-detected, all riders)
 

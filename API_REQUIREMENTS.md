@@ -47,20 +47,25 @@ devices endpoint:
 
 Two sign-in doors, one session model. The map stays fully usable
 anonymously; accounts exist for the cost ticker's rate choice, report
-attribution, and supporter features.
+attribution, ride history and badges. (This originally read "and supporter
+features" — see §4.1, withdrawn.)
 
 ### 2.1 Session model
 
 - Opaque bearer tokens (random ≥128-bit), stored **hashed** at rest, with
-  scopes: `rider` (default), `admin`, `supporter` (derived, see §5).
+  scopes: `rider` (default) and `admin`. (A third `supporter` scope was
+  specified here and never survives to today — see §4.1, withdrawn.)
 - Rider sessions: long-lived — 30-day sliding expiry via
   `POST /api/v1/auth/refresh` (returns a rotated token + new expiry;
   invalidate the old token). Nobody re-logs-in on a street corner.
 - Admin sessions: same mechanics, shorter fixed expiry (24 h, no sliding).
 - Response shape stays compatible with what the frontend's `map-auth`
   plumbing already stores: `{ token, expires }` (ISO timestamp).
-- `GET /api/v1/auth/session` → `{ email, scopes, supporter, expires }` for
-  UI state; 401 when invalid/expired.
+- `GET /api/v1/auth/session` → `{ email, scopes, expires }` for UI state;
+  401 when invalid/expired. **The `supporter` field specified here was
+  removed** with the tier (§4.1) — a frontend reading it now gets
+  `undefined`, and should treat every signed-in session as fully
+  entitled.
 - `POST /api/v1/auth/signout` → revoke the presented token.
 
 ### 2.2 Google sign-in
@@ -102,8 +107,8 @@ attribution, and supporter features.
 - Fields (client-writable): `rate_plan: "resident" | "visitor" | "equity"`,
   `theme: string | null`, `favorites: []` (opaque JSON array for now —
   shape lands with the favorite-device-types spec).
-- Fields (server-computed, read-only): `supporter: boolean`,
-  `badges: [{ id, label, earned_at }]` (see §5.3).
+- Fields (server-computed, read-only): `badges: [{ id, label, earned_at }]`
+  (see §4.3). The `supporter: boolean` specified here is gone with §4.1.
 
 ### 2.5 Retirements — WITHDRAWN (2026-07-28)
 
@@ -127,7 +132,14 @@ those comments are accurate.
 ### 3.1 Device failure reports
 
 - `POST /api/v1/reports/device` with
-  `{ vehicle_identifier, report_type: "failed_unlock" | "dead_battery" | "damaged", observed_at?, lat?, lng? }`.
+  `{ vehicle_identifier, report_type: "not_rideable" | "dead_battery" | "damaged", observed_at?, lat?, lng? }`.
+  Two values have been added since (`improperly_parked`, `sql/023`;
+  `not_found`, `sql/029`), and `failed_unlock` was renamed
+  **`not_rideable`** (`sql/037`) because the rider-facing question is
+  broader than whether the unlock worked. The old spelling is still
+  accepted as a deprecated alias and normalised at the model boundary, so
+  a frontend and backend deploying at different times can't 422 each
+  other's riders; nothing reads it back out.
 - Anonymous allowed (tight limits: 3/hour per IP); authenticated reports
   are linked to the account (10/hour) and weighted higher in aggregates.
 - Idempotency: dedupe identical (vehicle, type, reporter) within 30 min.
@@ -154,34 +166,38 @@ those comments are accurate.
 
 ---
 
-## 4. Supporter tier (unblocks frontend Phase 5)
+## 4. Rides & badges
 
-### 4.1 Stripe webhook
+### 4.1 Supporter tier / Stripe — WITHDRAWN (2026-07-28)
 
-- `POST /webhooks/stripe` — verify the Stripe signature.
-- **Recurring plan (current):** a single fixed-price monthly subscription
-  with a 30-day free trial (Payment Links can't do pay-what-you-want on
-  recurring prices, only one-time). Handle `checkout.session.completed`
-  (mode=subscription: link `client_reference_id` → the Stripe
-  subscription/customer id) plus `customer.subscription.created/updated`
-  (status/trial_end/current_period_end) and `customer.subscription.deleted`
-  (cancellation). `supporter: true` while status is `trialing` or `active`
-  — a trial counts as supporter access, no payment required yet. Event
-  ordering between the checkout and subscription events isn't guaranteed;
-  both sides upsert by `stripe_subscription_id` (see `src/stripe_webhook.py`
-  docstring).
-- **One-time Payment Link (legacy):** still honored for anyone who
-  supported that way before the switch — `checkout.session.completed`
-  (mode=payment) sets `supporter: true` and stores amount + timestamp;
-  `charge.refunded` clears it only on full refund.
-- No other Stripe surface needed — no products API, no customer portal in
-  v1.
+This section asked for a paid supporter tier: a `POST /webhooks/stripe`
+endpoint verifying Stripe signatures, a fixed-price monthly subscription
+with a 30-day trial plus the legacy one-time Payment Link, and a derived
+`supporter: true` flag gating parts of the rider surface.
+
+**Withdrawn by operator decision. There is no paid tier, no supporter
+status, and no Stripe integration.** `sql/036_decommercialize.sql` dropped
+`supporter_payments`, `supporter_subscriptions`, and the five `supporter*`
+/ `stripe_customer_id` columns on `accounts` (verified empty first:
+0 payment rows, 0 supporter accounts — nothing of value was discarded).
+`src/stripe_webhook.py` and its route are gone, `STRIPE_WEBHOOK_SECRET` is
+no longer read, rendered, or deployed, and the `supporter` scope no longer
+exists.
+
+Support for the project, when it exists, comes from merchandise or a
+direct donation with **no in-app incentive attached** — which needs no
+backend at all. Do not re-derive a supporter flag from a donation.
+
+The only gates in this system are "signed in" and "on the admin
+allowlist".
 
 ### 4.2 Ride history
 
-- `POST /api/v1/rides` (scope `rider`, supporter required) with
+- `POST /api/v1/rides` (scope `rider`) with
   `{ started_at, ended_at, duration_s, distance_m, est_cost_cents, rate_plan, started_in_zone: bool, ended_in_zone: bool, polyline }`
-  (polyline = encoded lat/lng string).
+  (polyline = encoded lat/lng string). **No supporter gate** — nothing on
+  the rider surface is gated, and paywalling data collection just means
+  less data.
 - `GET /api/v1/rides` — owner-only list, paginated.
 - `GET /api/v1/rides/export?format=geojson|csv` — owner-only.
 - `DELETE /api/v1/rides/:id` and `DELETE /api/v1/rides` — **hard delete**,
@@ -189,13 +205,26 @@ those comments are accurate.
   hold; no soft-delete, no analytics reuse, and say both in the privacy
   note.
 
+**Delivered wider than specified (2026-07-27, `sql/035_off_feed_rides.sql`):**
+`rides` is now the OFF-FEED ride tracker — rides on vehicles with no
+`vehicle_identifier`, which the GBFS-detected mechanism (§1.1b /
+`sql/027_tracked_rides.sql`) cannot cover. It carries a full lifecycle
+(`start` → `waypoints` → `end`) alongside the one-shot POST above, and an
+active ride expires 24 h after creation (`sql/040`) so an abandoned ride
+can't permanently occupy the one-active-ride slot. A client-asserted
+`distance_m` is plausibility-checked before storage, because §4.3's
+mileage badges count it.
+
 ### 4.3 Badges
 
 - Server-computed on profile read (no separate endpoint): reports filed,
   ghost scooters confirmed (report later corroborated by another user or
-  API inference), discount reports, miles logged, ride streaks. Earned
-  badges are available to every account — only the `supporter` badge is
-  tied to payment.
+  API inference), discount reports, miles logged, ride streaks. **Every
+  badge is available to every account** — the `supporter` badge this
+  originally carved out is withdrawn with §4.1, and nothing here is tied
+  to payment.
+- Mileage/streak badges count both ride mechanisms (`rides` and
+  `tracked_rides`), ended rides only. See `src/badges.py`.
 
 ---
 
@@ -204,11 +233,16 @@ those comments are accurate.
 - **Rate limiting:** per-IP and per-account buckets on all POST endpoints;
   429 with `Retry-After`.
 - **Secrets/env:** `ADMIN_EMAILS`, `GOOGLE_OAUTH_CLIENT_ID`,
-  `POSTMARK_TOKEN`, `STRIPE_WEBHOOK_SECRET`, R2 credentials.
+  `POSTMARK_TOKEN`, R2 credentials. (`STRIPE_WEBHOOK_SECRET` was listed
+  here; withdrawn with §4.1 and removed from `.env.example`,
+  `docker-compose.yml` and the deploy workflow.)
 - **Privacy page data:** the API should serve
   `GET /api/v1/meta/privacy` (or a static doc) enumerating retention:
   sessions (30 d idle), magic-link tokens (15 min), receipts (18 mo),
-  rides (until user deletes), reports (indefinite, aggregated).
+  rides (until user deletes), reports (indefinite, aggregated). Grown
+  since to cover tracked rides, device photos, ride transaction
+  screenshots and model reports — anything the system stores belongs in
+  that payload AND in `src/templates/legal/privacy_policy.html`.
 - **Repo rename:** `veo-audit` → `scooter-fyi-api` (GitHub auto-redirects
   old URLs). Keep "Veo Audit" as the public dataset/report brand.
 
@@ -221,7 +255,7 @@ those comments are accurate.
 | 3 | §2 accounts (Google → sessions → magic link → profile) | Phase 3 cost ticker |
 | 4 | §2.5 GitHub retirement | Phase 3 admin migration |
 | 5 | §3 reports + aggregates | Phase 4 |
-| 6 | §4 Stripe + rides + badges | Phase 5 |
+| 6 | §4 rides + badges (§4.1 Stripe withdrawn) | Phase 5 |
 
 Items 1–2 are read-only and deployable independently of everything else;
 start there.
@@ -312,7 +346,8 @@ By early August there will be a full month. Then:
 | §2.1–§2.4 accounts, sessions, profile | Implemented (PR #9): `src/accounts.py`, `src/api_auth.py`, `src/api_profile.py`, `sql/012`. |
 | §2.5 GitHub OAuth retirement | **Done** — the GitHub "elevated map" OAuth flow (`map_auth.py`, `map_auth_dep.py`, the `scripts/client/` drop-ins, the `/admin` Map-tokens view, and the `api_tokens` table) is removed. The `/api/v1/private/*` endpoints it gated now require the Google `admin` session scope (`require_admin`). NOTE: the *operator* `/admin` panel keeps its own separate GitHub OAuth (`auth.py`) — that was never part of §2. Deploy prereq: `ADMIN_EMAILS` must be set so an admin session can actually be minted, else the private endpoints are unreachable. |
 | §3 reports + aggregates | Implemented (PR #9): `src/api_frontend_reports.py`, `src/receipts.py`, `src/geo.py`, `sql/013`. Device reports feed `has_negative_report`/`reliability_tier`. |
-| §4 Stripe + rides + badges | Implemented (PR #9): `src/stripe_webhook.py`, `src/api_rides.py`, `src/badges.py`, `sql/014`. |
+| §4.1 Stripe / supporter tier | **Withdrawn (2026-07-28).** Removed by `sql/036_decommercialize.sql`; `src/stripe_webhook.py` and `STRIPE_WEBHOOK_SECRET` are gone everywhere including the deploy workflow. See §4.1. |
+| §4.2–§4.3 rides + badges | Implemented (PR #9), un-gated and widened into off-feed rides (`src/api_rides.py`, `src/badges.py`, `sql/014` → `sql/035`, `sql/040`). |
 | §5 rate limits, env, privacy endpoint | Implemented (PR #9): `src/ratelimit.py`, `src/api_meta.py`, `.env.example`. |
 | Repo rename | Pending — GitHub settings change (`veo-audit` → `scooter-fyi-api`), operator action. |
 | Equity boundary migration (new §1.1a) | In progress — see note below. `er1`–`er6` per-rank layers now tracked with full metric parity to v1/v2 (snapshot + daily SLA). `v1` retirement and the compliance-metric cutoff are still pending a DOTI decision. |

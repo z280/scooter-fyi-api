@@ -1342,6 +1342,19 @@ still counts toward `streak_7` (it happened) but adds nothing to mileage.
 Tracked rides that ended before distance was recorded at all have been
 backfilled with their start → end straight line, tagged `straight_line`.
 
+**A ride nobody ended counts for nothing** — an off-feed ride that
+[expired](#the-24-hour-window) after 24 hours, or a tracked ride whose
+watch window elapsed. Both drop out for the same reason from both sides:
+whatever their waypoints got to before the phone went quiet, no one ever
+said the ride finished.
+
+Because a one-shot `POST /api/v1/rides` counts the distance *you* assert,
+that number is [checked for plausibility](#is-this-ride-possible) before
+it is stored. The check is on the ride, not on the badge: it rejects
+impossible rides at the door rather than discounting off-feed mileage
+afterwards, so an honest off-feed rider's miles are worth exactly as much
+as anyone else's.
+
 ### Public usernames
 
 Every account gets a generated `public_username`: a curated adjective plus
@@ -1491,9 +1504,18 @@ The rate limit is applied **before** the photo is processed or stored, so
 a `429` costs you nothing and burns none of our storage — and quota is
 consumed by the attempt, not by the success.
 
-Photos are re-encoded on ingest (EXIF/GPS destroyed, not hidden) and
-stored in the same private bucket as receipts. `503` if photo storage
-isn't configured on the deployment — submit without the image.
+Photos are re-encoded on ingest (EXIF/GPS destroyed, not hidden), stored
+in the same private bucket as receipts, and **deleted after 18 months** by
+the same daily job, on the same clock (see `/api/v1/meta/privacy`). The
+report row outlives the image: the correction is the point, the photo is
+supporting evidence. `503` if photo storage isn't configured on the
+deployment — submit without the image.
+
+What a model report stores, beyond the fields in the table above: the
+free-text `description`, the coordinates if you sent them, and the IP
+address and user-agent the request arrived with — kept for abuse detection
+because this endpoint accepts anonymous submissions. None of it appears in
+`/reports/summary` or the CSV export.
 
 ### `GET /api/v1/reports/summary?layer=<layer>`
 
@@ -1584,9 +1606,9 @@ unverifiable ride would be an unbounded points faucet.
 | `GET /api/v1/rides/active` | → `{ "active": <ride> }` or `{ "active": null }` — always wrapped. |
 | `POST /api/v1/rides/{id}/waypoints` | `{waypoint_at, lat, lon, metadata?}`. Rebuilds the polyline and distance. 600/hour. `409 {"error": "ride_not_active"}` once ended. |
 | `GET /api/v1/rides/{id}/waypoints?limit=&after=&before=` | → `{count, waypoints: [...]}`, oldest first. Paginate with `after` — see [below](#paginating-waypoints). |
-| `PATCH /api/v1/rides/{id}/end` | `{ended_at, end_lat, end_lon, est_cost_cents?, rate_plan?, started_in_zone?, ended_in_zone?}` → the completed ride. `409` if already ended. |
-| `POST /api/v1/rides` | One-shot log of a finished ride (fields below). 120/day. |
-| `GET /api/v1/rides?limit=&before=&status=` | Owner-only, newest first. → `{count, rides: [...]}` |
+| `PATCH /api/v1/rides/{id}/end` | `{ended_at, end_lat, end_lon, est_cost_cents?, rate_plan?, started_in_zone?, ended_in_zone?}` → the completed ride. `409` if already ended; `409 {"error": "ride_expired"}` once the [24-hour window](#the-24-hour-window) has passed. |
+| `POST /api/v1/rides` | One-shot log of a finished ride (fields below). 120/day. `422` if the numbers aren't [plausible](#is-this-ride-possible). |
+| `GET /api/v1/rides?limit=&before=&status=` | Owner-only, newest first. → `{count, rides: [...]}`. `status` is `active` \| `completed` \| `expired`. |
 | `GET /api/v1/rides/export?format=geojson\|csv` | Owner-only full export. GeoJSON decodes each polyline to a `LineString`; see [Export geometry](#export-geometry). |
 | `DELETE /api/v1/rides/{id}` | **Immediate hard delete**, cascading to the ride's waypoints. → `{"deleted": true}` |
 | `DELETE /api/v1/rides` | **Immediate hard delete of everything you own.** → `{"deleted_count": n}` |
@@ -1616,6 +1638,49 @@ scooter or your own bike.
 `polyline` is a Google encoded polyline (precision 5), validated at ingest
 and required on this path — a one-shot log with no route is just a row of
 numbers.
+
+### Is this ride possible?
+
+On this path — and only this path — you compute the distance and we store
+what you send (`distance_source: "client"`). Those metres count toward the
+mileage badges exactly like a ride we measured ourselves,
+because a rider's mileage is the miles they rode and which mechanism
+recorded a ride is an implementation detail they never chose. The cost of
+that is that the number has to survive two sanity checks first. Both
+return **`422`** with a machine-readable `error`; neither ever quietly
+rewrites what you sent.
+
+| Check | Bound | `error` |
+|---|---|---|
+| Ride-average speed | `distance_m / duration_s` ≤ **20 m/s** (72 km/h, 45 mph). A positive `distance_m` with `duration_s: 0` also fails. | `implausible_speed` |
+| Distance vs. route | `distance_m` ≤ `max(route × 3, route + 1000 m)`, where `route` is the decoded length of the `polyline` you sent. | `distance_exceeds_polyline` |
+
+**Why 20 m/s.** It is not a speed limit — it is "no micromobility trip
+*averages* this". Shared e-scooters are governed at ~24 km/h, a class-3
+e-bike tops out at 45 km/h, and the UCI hour record is 15.7 m/s by a
+professional on a track. The ceiling is deliberately ~3× the fastest thing
+this endpoint is for, because it applies to a whole-ride average: a
+downhill sprint, a stretch of GPS drift, or a leg where you put the bike
+in a car must not cost you your log. If you are hitting it, check your
+units — `distance_m` is metres and `duration_s` is seconds.
+
+**Why the polyline comparison is one-sided.** An encoded polyline is a
+*sampled* path, so its decoded length undercounts the real route by
+however coarsely you sampled it — which is why the tolerance is 3×, and
+why claiming **less** than the route supports is never rejected.
+Undercounting isn't something anyone gains from, and a client reporting a
+vehicle's own odometer is being honest, not evasive. The `+ 1000 m` floor
+exists because the multiplicative rule collapses to nothing on a
+degenerate polyline (two coincident points), which would otherwise reject
+every very short ride.
+
+If you rode a loop and your app only knows the two endpoints, the decoded
+route is near zero and a long ride will be refused. Send the track you
+actually rode: a distance is only believable next to the route it was
+measured over.
+
+The lifecycle path is unaffected — there the server measures the distance
+from your uploaded fixes, so there is nothing to assert.
 
 ### Distance, and how much to trust it
 
@@ -1662,9 +1727,49 @@ naive timestamp is a `400`.
 
 ### Status
 
-`active` → `completed`. You may have only one `active` off-feed ride at a
-time, enforced by the database. This is independent of tracked rides — the
-two mechanisms don't know about each other.
+`active` → `completed`, or `active` → `expired`.
+
+| Status | Meaning |
+|---|---|
+| `active` | Started, not yet ended. Accepts waypoints. |
+| `completed` | You reported an end. Counts toward badges. |
+| `expired` | Left active for 24 hours with no end report — see below. |
+
+You may have only one `active` off-feed ride at a time, enforced by the
+database. This is independent of tracked rides — the two mechanisms don't
+know about each other.
+
+### The 24-hour window
+
+An active ride that is never ended is closed out automatically 24 hours
+after it was created, and becomes `expired`.
+
+This exists because "one active ride at a time" is enforced by a unique
+index: without expiry, a rider whose phone died mid-ride is `409`'d out of
+`POST /api/v1/rides/start` **forever**, and the only escape is `DELETE`,
+which destroys the ride and its whole track. Expiry frees the slot instead
+of trading it for data loss. The clock runs from when the server created
+the ride, not from your `started_at` — you may backdate a start, so it
+can't be what a lifetime is measured against.
+
+What an expired ride looks like, which is exactly what an
+[expired tracked ride](#statuses) looks like:
+
+- `ended_at`, `duration_s`, `end_lat`, `end_lon` stay **`null`**. We never
+  saw an end and won't invent one. It is an incomplete record, not a
+  completed ride with a guessed ending.
+- `distance_m` / `distance_source` keep whatever your uploaded waypoints
+  already measured — start → your last fix. That number is real; it is
+  just missing its final leg, exactly as it was while the ride was live.
+- **It earns no mileage and feeds no streak.** The badges count rides
+  someone ended. A ride nobody ended isn't evidence of a distance ridden,
+  however far the waypoints got.
+- The ride and every waypoint are **kept**. It appears in
+  `GET /api/v1/rides` (filter with `?status=expired`), in the export, and
+  is deleted only when you delete it.
+- `GET /api/v1/rides/active` returns `null` and a new `start` succeeds.
+- `PATCH .../end` returns `409 {"error": "ride_expired"}`. An end reported
+  a day late would attach an invented duration to a ride nobody was on.
 
 Privacy commitment, unchanged from when this table held the old ride log:
 route polylines are the most sensitive data this system holds. There is no

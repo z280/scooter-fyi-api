@@ -99,6 +99,12 @@ def _ride_badges(cur, account_id: int) -> list[dict[str, Any]]:
     Splitting the badges by table would mean someone who rides a personal
     scooter half the time needs twice the distance to earn the same badge.
 
+    Both filters below drop rides nobody ever ended — off-feed rides the
+    sql/040 sweep expired after 24h (status <> 'completed'), and tracked
+    rides whose watch window elapsed (user_reported_ended_at IS NULL). Same
+    rule from both sides: an abandoned ride is not evidence of a distance
+    ridden, however far its waypoints got before the phone stopped talking.
+
     Distance quality varies by source (see both migrations): a ride with no
     waypoints carries a start->end straight line, and a one-shot log carries
     whatever the client claimed. Every source counts here on purpose —
