@@ -130,7 +130,7 @@ services:
     networks:
       - default
       # Reach z280-comms as http://comms:8090
-      - comms-net
+      - comms-api
       # PUBLIC INGRESS -- data.scooter.fyi resolves `pipeline_worker:8080` over
       # this network. It MUST be declared here. A deploy recreates the
       # container, and a recreate drops any network attached at runtime rather
@@ -200,7 +200,7 @@ services:
     networks:
       - default
       # Reach z280-comms as http://comms:8090
-      - comms-net
+      - comms-api
 
   valhalla_map_fetch:
     image: ${WORKER_IMAGE:-ghcr.io/z280/scooter-fyi-api:latest}
@@ -262,6 +262,13 @@ services:
 
 
 networks:
+  # This project's own backend network -- denver_spatial_db, valhalla,
+  # scheduler. Renamed from the implicit `veo-audit_default`, which had been
+  # doubling as the host's PUBLIC INGRESS network for 24 hostnames across six
+  # domains. It is now only what its name says.
+  default:
+    name: scooter-internal
+
   # z280-comms, the messaging service. Membership IS the access control:
   # comms publishes only 127.0.0.1:8090 on the host, so nothing is exposed on
   # the bridge gateway, the public interface or the tailnet. A service not on
@@ -269,16 +276,16 @@ networks:
   #
   # Created and owned by z280/comms. If it does not exist, compose fails
   # loudly at `up`, which is the desired guard.
-  comms-net:
+  comms-api:
     external: true
-    name: comms-net
+    name: comms-api
 
   # The ovh3 public ingress network, owned by z280/cloudflare-management
   # (ingress/). Was `veo-audit_default` -- this project's own default network,
   # which meant `docker compose down` here took 24 hostnames offline with it.
   ovh3-ingress:
     external: true
-    name: ovh3-ingress_default
+    name: ovh3-ingress
 
 volumes:
   pgdata:
