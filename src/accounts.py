@@ -137,8 +137,70 @@ def is_valid_phone_number(phone: str) -> bool:
     return bool(PHONE_E164_RE.match(phone))
 
 
+# --- US numbers, for the SMS sign-in door -----------------------------------
+#
+# normalize_phone_number above stays the general E.164 normalizer for the
+# profile column (it deliberately guesses nothing). SMS sign-in needs the
+# opposite: a rider types "(303) 555-1212" into a phone field and expects it
+# to work, so we DO supply the country code — but only because we only send
+# to one country. Widen this, not normalize_phone_number, if that changes.
+
+_DIGITS_RE = re.compile(r"\D")
+# +1, then a 3-digit area code and 3-digit exchange, each starting 2-9, then
+# the 4-digit subscriber number.
+_NANP_RE = re.compile(r"^\+1([2-9]\d{2})([2-9]\d{2})\d{4}$")
+
+
+def normalize_us_phone(raw: str) -> str | None:
+    """Coerce a US number a human typed into E.164, or None if it can't be.
+
+    Accepts the forms a rider actually types — `(303) 555-1212`,
+    `303-555-1212`, `3035551212`, `1 303 555 1212`, `+13035551212` — by
+    reducing to digits and re-adding the +1. Returns None rather than
+    raising: every caller has a 400 to return and nothing useful to add.
+    """
+    if not raw:
+        return None
+    digits = _DIGITS_RE.sub("", raw)
+    if len(digits) == 10:
+        digits = "1" + digits
+    if len(digits) != 11 or not digits.startswith("1"):
+        return None
+    candidate = "+" + digits
+    return candidate if is_valid_us_phone(candidate) else None
+
+
+def is_valid_us_phone(phone: str) -> bool:
+    """Structural NANP validity for an E.164 string.
+
+    Rejects N11 in both the area code and the exchange (211/311/…/911 are
+    service codes, never assigned to a subscriber), which is the cheap check
+    that catches most typos and all of the obviously-fake numbers.
+
+    Note this is deliberately looser than the `[2-9][0-8]\\d` area-code
+    pattern that gets copy-pasted around: that rule predates area codes with
+    a middle digit of 9, and today would reject real numbers in 929 (New
+    York), 934, 959 and 984. Rejecting a rider's actual phone number is a
+    worse failure than accepting an unassigned one — comms answers 422 for
+    a number it genuinely cannot route to, so an unroutable number is
+    already handled downstream, whereas a false rejection here is a dead end
+    with no recourse.
+    """
+    m = _NANP_RE.match(phone)
+    if not m:
+        return False
+    area, exchange = m.group(1), m.group(2)
+    return not (area.endswith("11") or exchange.endswith("11"))
+
+
 def is_admin_email(user: "SessionUser") -> bool:
     """Whether a session's email is on the ADMIN_EMAILS allowlist.
+
+    A phone-only account (SMS sign-in, no email on file — see
+    upsert_account_by_phone) has `email = None` and is never an admin: the
+    allowlist is keyed by email, so there is nothing to match against. It
+    has to be checked rather than assumed, or the None reaches
+    normalize_email and a would-be 403 becomes a 500.
 
     This — NOT the `admin` scope — is the admin authorization check for the
     /api/v1/private/* endpoints and the /api/v1/user plate fields, so an
@@ -146,6 +208,8 @@ def is_admin_email(user: "SessionUser") -> bool:
     Both doors prove ownership of the email. The `admin` scope stays a
     Google-only signal (see session_scopes) but no longer gates access.
     """
+    if not user.email:
+        return False
     return normalize_email(user.email) in admin_emails()
 
 
@@ -153,11 +217,15 @@ def hash_token(raw: str) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
-def session_scopes(*, method: str, email: str) -> list[str]:
+def session_scopes(*, method: str, email: str | None) -> list[str]:
     """Stored scopes for a new session. The `admin` scope is a Google-only
-    signal (it does NOT gate access — require_admin uses is_admin_email)."""
+    signal (it does NOT gate access — require_admin uses is_admin_email).
+
+    `email` is None for an SMS session on a phone-only account; Google is
+    the only method that can earn `admin` anyway, and Google always carries
+    a verified email, so there is nothing to look up in that case."""
     scopes = ["rider"]
-    if method == "google" and normalize_email(email) in admin_emails():
+    if method == "google" and email and normalize_email(email) in admin_emails():
         scopes.append("admin")
     return scopes
 
@@ -172,7 +240,10 @@ def session_expiry(*, scopes: list[str], now: datetime) -> tuple[datetime, bool]
 @dataclass(frozen=True)
 class SessionUser:
     account_id: int
-    email: str
+    # None for an account whose only identity is a verified phone number
+    # (SMS sign-in). Anything that formats or matches on this must handle
+    # the None — see is_admin_email.
+    email: str | None
     scopes: tuple[str, ...]
     expires_at: datetime
     sliding: bool
@@ -316,11 +387,147 @@ def upsert_account(cur, email: str) -> int:
     return account_id
 
 
+class PhoneNumberTaken(Exception):
+    """Another account has already PROVED this number. Proof beats proof
+    only by recency of nothing at all — we simply refuse. The route maps
+    this to a 409."""
+
+
+class PhoneNumberContested(Exception):
+    """The number is held by an account that never proved it AND has no
+    other way to sign in, so releasing it would strand that account and
+    adopting it would be an account takeover. Needs an operator; the route
+    maps this to a 409."""
+
+
+def _lock_phone(cur, phone: str) -> None:
+    """Serialize everyone racing to claim one number. Same advisory-lock
+    idiom as assign_public_username; auto-released at COMMIT/ROLLBACK."""
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"account_phone:{phone}",),
+    )
+
+
+def _release_unverified_holder(cur, phone: str, *, keep_account_id: int | None = None) -> None:
+    """Take `phone` away from an account that never proved it.
+
+    PUT /api/v1/profile writes phone_number with no proof whatsoever, so an
+    existing holder is an ASSERTION, and this whole module's rule is that
+    proof beats assertion. Callers hold the phone lock and have already
+    established that the caller proved the number.
+
+    Raises PhoneNumberTaken if the holder DID prove it (nobody's proof is
+    better than anyone else's — a human has to sort that out), and
+    PhoneNumberContested if releasing would leave the holder with neither
+    an email nor a phone: sql/025 forbids that row, and even if it didn't,
+    it would be an account with no door left to sign in through.
+    """
+    cur.execute(
+        "SELECT id, email, phone_verified_at FROM accounts WHERE phone_number = %s",
+        (phone,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return
+    holder_id, holder_email, verified_at = int(row[0]), row[1], row[2]
+    if keep_account_id is not None and holder_id == keep_account_id:
+        return
+    if verified_at is not None:
+        raise PhoneNumberTaken(f"account {holder_id} has already verified {phone}")
+    if not holder_email:
+        raise PhoneNumberContested(
+            f"account {holder_id} holds {phone} unverified and has no email"
+        )
+    log.warning(
+        "releasing unverified phone number from account %d — it was never "
+        "proved and someone has now proved it",
+        holder_id,
+    )
+    cur.execute("UPDATE accounts SET phone_number = NULL WHERE id = %s", (holder_id,))
+
+
+def claim_verified_phone(cur, account_id: int, phone: str) -> None:
+    """Attach a just-proved number to an EXISTING account.
+
+    This is the bridge that keeps SMS sign-in from quietly forking a
+    rider's identity: without it, a rider who types their number into their
+    profile and then signs in by SMS gets a brand-new empty account,
+    because sign-in refuses to resolve an unverified number
+    (upsert_account_by_phone). Verifying from inside the session they
+    already have attaches the proof to the account they already own.
+    """
+    _lock_phone(cur, phone)
+    _release_unverified_holder(cur, phone, keep_account_id=account_id)
+    cur.execute(
+        "UPDATE accounts SET phone_number = %s, phone_verified_at = NOW() WHERE id = %s",
+        (phone, account_id),
+    )
+
+
+def upsert_account_by_phone(cur, phone: str) -> int:
+    """Create-or-touch an account by VERIFIED phone number; returns id.
+
+    Called only after a code sent to `phone` was typed back correctly, so
+    reaching here IS the proof of ownership — which is why this is the only
+    function in the codebase that sets phone_verified_at.
+
+    The interesting case is a number already sitting in some account's
+    profile. PUT /api/v1/profile writes that column with no proof
+    whatsoever, so "someone else's row already has this number" must NOT
+    mean "sign them into that row" — that is precisely the takeover
+    sql/045 exists to prevent (claim a stranger's number, wait for them to
+    sign in, receive their account). Proof beats assertion: an UNVERIFIED
+    holder loses the number, and a fresh account is created for whoever
+    actually answered the text.
+
+    The one case we refuse outright: an unverified holder with no email.
+    Releasing the number would leave that account with neither identity
+    (accounts_email_or_phone_required, sql/025) and no door left to sign in
+    through; adopting it would be the takeover. Rare enough — it takes a
+    profile edit that removes the email — to be worth a human's attention
+    rather than a guess.
+    """
+    _lock_phone(cur, phone)
+
+    cur.execute(
+        "SELECT id FROM accounts WHERE phone_number = %s AND phone_verified_at IS NOT NULL",
+        (phone,),
+    )
+    row = cur.fetchone()
+    if row:
+        # The proven owner is signing in again.
+        account_id = int(row[0])
+        cur.execute(
+            "UPDATE accounts SET last_login_at = NOW() WHERE id = %s", (account_id,)
+        )
+        return account_id
+
+    # Nobody has proved it. An unverified holder loses it (or we refuse —
+    # see _release_unverified_holder); PhoneNumberTaken is unreachable from
+    # here, since a verified holder was just handled above.
+    _release_unverified_holder(cur, phone)
+
+    # No proven owner: this is a new account, whose only identity is the
+    # number it just proved. sql/025 made email nullable for exactly this.
+    cur.execute(
+        """
+        INSERT INTO accounts (phone_number, phone_verified_at, last_login_at)
+        VALUES (%s, NOW(), NOW())
+        RETURNING id
+        """,
+        (phone,),
+    )
+    account_id = int(cur.fetchone()[0])
+    assign_public_username(cur, account_id)
+    return account_id
+
+
 def mint_session(
     cur,
     *,
     account_id: int,
-    email: str,
+    email: str | None,
     method: str,
     issued_ip: str | None,
     user_agent: str | None,

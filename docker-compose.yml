@@ -84,6 +84,14 @@ services:
       POSTMARK_TOKEN: ${POSTMARK_TOKEN}
       POSTMARK_FROM: ${POSTMARK_FROM}
       MAGIC_LINK_URL_TEMPLATE: ${MAGIC_LINK_URL_TEMPLATE}
+      # z280-comms — SMS sign-in codes. Blank token = the SMS door 503s and
+      # /auth/config reports sms_enabled:false, which is a supported state.
+      # The base URL is TAILNET-ONLY: this container has to be able to
+      # resolve and reach it, which bridge networking + MagicDNS does not
+      # give you for free. If sends fail with a DNS or connect error, set
+      # COMMS_BASE_URL to the tailnet IP instead of the name.
+      COMMS_TOKEN: ${COMMS_TOKEN}
+      COMMS_BASE_URL: ${COMMS_BASE_URL}
       # Required: HMAC key for vehicle_identifier. Lose this and every
       # previously-emitted identifier becomes orphaned. Treat like a DB
       # encryption key — back up out of repo.
@@ -140,6 +148,11 @@ services:
       R2_MAP_ACCESS_KEY_ID: ${R2_MAP_ACCESS_KEY_ID}
       R2_MAP_SECRET_ACCESS_KEY: ${R2_MAP_SECRET_ACCESS_KEY}
       SENTRY_DSN: ${SENTRY_DSN}
+      # The scheduler owns `poll_comms_replies`, which is the ONLY thing
+      # that ever sees a rider's STOP (replies are polled, never pushed).
+      # Without these it silently no-ops — see src/comms_replies.py.
+      COMMS_TOKEN: ${COMMS_TOKEN}
+      COMMS_BASE_URL: ${COMMS_BASE_URL}
       # Required: matches pipeline_worker — the scheduler runs ingest_cycle
       # which calls hash_plate(), so it MUST have the same salt or every
       # cycle aborts with a salt-missing RuntimeError.

@@ -26,11 +26,15 @@ _USER = SessionUser(
 #  show_in_leaderboards, rate_plan, theme, favorites,
 #  home_lat, home_lng, work_lat, work_lng,
 #  royalty_title, ruling_color, ruling_border_color, ruling_alpha,
-#  display_name)
+#  display_name, phone_verified_at, sms_opted_out_at)
 _PROFILE_ROW = (
     "rider@example.com", None, "brave🦉", True, True,
     "visitor", None, [], None, None, None, None,
     None, None, None, 0.60, "brave🦉",
+    # Both NULL: a number nobody has proved they answer, and no STOP on
+    # record. The payload reports these as the booleans phone_verified /
+    # sms_opted_out.
+    None, None,
 )
 
 

@@ -5,6 +5,8 @@
     POST /api/v1/auth/redeem       magic-link token → session
     POST /api/v1/auth/code         email → Postmark AA000AA code (always 202)
     POST /api/v1/auth/code/verify  email + code → session
+    POST /api/v1/auth/sms/code     phone → comms AA000AA code
+    POST /api/v1/auth/sms/code/verify  phone + code → session
     POST /api/v1/auth/refresh      rotate the presented token
     GET  /api/v1/auth/session      session introspection for UI state
     POST /api/v1/auth/signout      revoke the presented token
@@ -29,14 +31,25 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from .accounts import (
+    PhoneNumberContested,
     SessionUser,
     hash_token,
     mint_session,
     normalize_email,
+    normalize_us_phone,
     require_session,
     upsert_account,
+    upsert_account_by_phone,
 )
 from .client_ip import real_client_ip
+from .comms import (
+    CommsError,
+    OptedOut,
+    QuotaExceeded,
+    UnusableRecipient,
+    comms_credentials,
+    send_sms,
+)
 from .config import load, session_secret
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .pg import connection
@@ -76,6 +89,32 @@ _LIMIT_CODE_PER_EMAIL = (3, 3600)     # 3 code requests/hour per email
 _LIMIT_CODE_PER_IP = (10, 3600)       # 10 code requests/hour per IP
 _LIMIT_CODE_VERIFY_PER_IP = (30, 3600)  # 30 verify attempts/hour per IP
 
+# SMS sign-in (z280-comms). Same AA000AA code and the same TTL as the email
+# door — a rider who has used both types the same shape of thing either way,
+# and the entropy is identical, so the code needs no format-driven
+# compensation. What differs is what the LIMITS protect: every email is free,
+# every text costs a real message on one physical handset shared with other
+# applications, so these are tighter and there is a global ceiling.
+SMS_CODE_TTL_MINUTES = 10
+_LIMIT_SMS_CODE_PER_PHONE = (3, 3600)     # 3 texts/hour to one number
+_LIMIT_SMS_CODE_PER_IP = (5, 3600)        # 5 texts/hour from one IP
+_LIMIT_SMS_CODE_GLOBAL = (250, 86400)     # 250 texts/day, everyone
+_LIMIT_SMS_VERIFY_PER_PHONE = (10, 3600)  # 10 guesses/hour against a number
+_LIMIT_SMS_VERIFY_PER_IP = (30, 3600)
+
+# Comms prefixes "scooter.fyi: " server-side — one phone number serves
+# several applications, and that prefix is what tells a recipient which one
+# is texting them. So the body must NOT name the site again: the rider would
+# read "scooter.fyi: Use code AB123XY to login at denver.scooter.fyi".
+# Delivered in full as: "scooter.fyi: Use code AB123XY to login."
+# 26 characters here, 39 delivered — one GSM-7 segment either way, so it
+# can't split into two billed messages.
+SMS_CODE_TEMPLATE = "Use code {code} to login."
+
+# How long comms may spend trying to hand this to the network before
+# dropping it — NOT how long the code is valid (SMS_CODE_TTL_MINUTES).
+SMS_SEND_TTL_SECONDS = 120
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -98,12 +137,121 @@ def _normalize_code(raw: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", raw or "").upper()
 
 
-def _hash_code(email: str, code: str) -> str:
-    """HMAC-SHA256(server secret, "email:CODE"). Keyed so a leaked
-    login_codes table can't be brute-forced offline, and bound to the email
-    so a code is only ever valid for the address it was sent to."""
-    msg = f"{normalize_email(email)}:{code}".encode("utf-8")
+def _hash_code(destination: str, code: str) -> str:
+    """HMAC-SHA256(server secret, "destination:CODE"). Keyed so a leaked
+    login_codes table can't be brute-forced offline, and bound to the
+    destination so a code is only ever valid for the address — or phone
+    number — it was sent to.
+
+    Still strips and lowercases the destination itself, exactly as it did
+    when it took an email. That keeps every previously-issued hash valid
+    across this deploy, and it stays a defence rather than a formality: a
+    future caller that forgets to normalize would otherwise write a code
+    that can never be verified. It is a no-op for the SMS door, whose
+    destinations are already E.164 and have no case to fold.
+    """
+    msg = f"{destination.strip().lower()}:{code}".encode("utf-8")
     return hmac.new(session_secret().encode("utf-8"), msg, sha256).hexdigest()
+
+
+# The two destination columns login_codes supports (sql/045). Interpolated
+# into SQL below, so it is a closed set of our own literals — never a value
+# that came off a request.
+_DESTINATION_COLUMNS = ("email", "phone_number")
+
+
+def _issue_code(cur, *, column: str, destination: str, ttl_minutes: int,
+                ip: str | None) -> tuple[str, int]:
+    """Burn any live code for this destination, insert a fresh one.
+
+    Returns (plaintext code, login_codes row id). The row id is what the
+    SMS path uses as its comms idempotency key: it names THIS issuance,
+    which is the thing being communicated, so a retried send can't text
+    somebody a second copy — while a genuinely new code gets a new key and
+    is allowed through.
+    """
+    assert column in _DESTINATION_COLUMNS, column
+    code = _generate_code()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
+
+    # Only the newest code per destination stays live — issuing a new one
+    # burns any prior unused code so there's a single guess target.
+    cur.execute(
+        f"UPDATE login_codes SET used_at = NOW() "
+        f"WHERE {column} = %s AND used_at IS NULL",
+        (destination,),
+    )
+    # Opportunistic prune of long-dead rows (used or >1 day expired).
+    cur.execute("DELETE FROM login_codes WHERE expires_at < NOW() - INTERVAL '1 day'")
+    cur.execute(
+        f"""
+        INSERT INTO login_codes ({column}, code_hash, expires_at, request_ip)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+        """,
+        (destination, _hash_code(destination, code), expires_at, ip),
+    )
+    return code, int(cur.fetchone()[0])
+
+
+def _verify_code(conn, cur, *, column: str, destination: str, code: str) -> None:
+    """Check a typed code against the live one for this destination and burn
+    it. Returns None on success; raises HTTPException(401) otherwise.
+
+    Commits before every raise so the rate-limit event the caller already
+    recorded survives — a failed guess must still cost the guesser a slot,
+    which a rollback would refund.
+    """
+    assert column in _DESTINATION_COLUMNS, column
+
+    cur.execute(
+        f"""
+        SELECT id, code_hash FROM login_codes
+        WHERE {column} = %s AND used_at IS NULL AND expires_at >= NOW()
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (destination,),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.commit()  # keep the rate-limit event
+        raise HTTPException(401, "code is invalid or expired")
+    code_id, code_hash = row
+
+    # Claim an attempt ATOMICALLY before comparing: the row-locked UPDATE
+    # serializes concurrent verifies, so N simultaneous guesses can't all
+    # pass a stale `attempts` snapshot and blow past the cap (a TOCTOU the
+    # read-then-check version had). No row returned ⇒ the code was
+    # used/burned between the SELECT and here.
+    cur.execute(
+        "UPDATE login_codes SET attempts = attempts + 1 "
+        "WHERE id = %s AND used_at IS NULL RETURNING attempts",
+        (code_id,),
+    )
+    claimed = cur.fetchone()
+    if not claimed:
+        conn.commit()
+        raise HTTPException(401, "code is invalid or expired")
+    if claimed[0] > MAX_CODE_ATTEMPTS:
+        cur.execute("UPDATE login_codes SET used_at = NOW() WHERE id = %s", (code_id,))
+        conn.commit()
+        raise HTTPException(401, "too many attempts — request a new code")
+
+    if not hmac.compare_digest(_hash_code(destination, code), code_hash):
+        conn.commit()  # the attempt was already counted above
+        raise HTTPException(401, "code is invalid or expired")
+
+    # Success — burn single-use atomically (a concurrent verify that already
+    # won leaves used_at NOT NULL, so this returns no row).
+    cur.execute(
+        "UPDATE login_codes SET used_at = NOW() "
+        "WHERE id = %s AND used_at IS NULL RETURNING id",
+        (code_id,),
+    )
+    if not cur.fetchone():
+        conn.commit()
+        raise HTTPException(401, "code is invalid or expired")
 
 
 _DEFAULT_MAGIC_LINK_TEMPLATE = "https://denver.scooter.fyi/auth?ml={token}"
@@ -183,6 +331,9 @@ def auth_config(response: Response) -> dict[str, Any]:
         "magic_link_enabled": postmark_ready,
         # The typed-code door uses the same Postmark transport as magic-link.
         "code_enabled": postmark_ready,
+        # The SMS door needs a z280-comms token; mirrors the 503 on
+        # /api/v1/auth/sms/code.
+        "sms_enabled": comms_credentials() is not None,
     }
 
 
@@ -346,9 +497,6 @@ def auth_code_request(request: Request, payload: CodeRequestIn = Body(...)) -> d
         raise HTTPException(400, "not an email address")
 
     ip = real_client_ip(request)
-    code = _generate_code()
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=CODE_TTL_MINUTES)
 
     with connection() as conn:
         with conn.cursor() as cur:
@@ -356,24 +504,8 @@ def auth_code_request(request: Request, payload: CodeRequestIn = Body(...)) -> d
                     limit=_LIMIT_CODE_PER_IP[0], window_seconds=_LIMIT_CODE_PER_IP[1])
             enforce(cur, bucket="login_code_email", key=email,
                     limit=_LIMIT_CODE_PER_EMAIL[0], window_seconds=_LIMIT_CODE_PER_EMAIL[1])
-            # Only the newest code per email stays live — issuing a new one
-            # burns any prior unused code so there's a single guess target.
-            cur.execute(
-                "UPDATE login_codes SET used_at = NOW() "
-                "WHERE email = %s AND used_at IS NULL",
-                (email,),
-            )
-            # Opportunistic prune of long-dead rows (used or >1 day expired).
-            cur.execute(
-                "DELETE FROM login_codes WHERE expires_at < NOW() - INTERVAL '1 day'"
-            )
-            cur.execute(
-                """
-                INSERT INTO login_codes (email, code_hash, expires_at, request_ip)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (email, _hash_code(email, code), expires_at, ip),
-            )
+            code, _ = _issue_code(cur, column="email", destination=email,
+                                  ttl_minutes=CODE_TTL_MINUTES, ip=ip)
         conn.commit()
 
     # Send AFTER commit so a Postmark failure doesn't roll back the
@@ -408,59 +540,192 @@ def auth_code_verify(request: Request, payload: CodeVerifyIn = Body(...)) -> dic
                     limit=_LIMIT_CODE_VERIFY_PER_IP[0],
                     window_seconds=_LIMIT_CODE_VERIFY_PER_IP[1])
 
-            cur.execute(
-                """
-                SELECT id, code_hash FROM login_codes
-                WHERE email = %s AND used_at IS NULL AND expires_at >= NOW()
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (email,),
-            )
-            row = cur.fetchone()
-            if not row:
-                conn.commit()  # keep the rate-limit event
-                raise HTTPException(401, "code is invalid or expired")
-            code_id, code_hash = row
-
-            # Claim an attempt ATOMICALLY before comparing: the row-locked
-            # UPDATE serializes concurrent verifies, so N simultaneous
-            # guesses can't all pass a stale `attempts` snapshot and blow
-            # past the cap (a TOCTOU the read-then-check version had). No row
-            # returned ⇒ the code was used/burned between the SELECT and here.
-            cur.execute(
-                "UPDATE login_codes SET attempts = attempts + 1 "
-                "WHERE id = %s AND used_at IS NULL RETURNING attempts",
-                (code_id,),
-            )
-            claimed = cur.fetchone()
-            if not claimed:
-                conn.commit()
-                raise HTTPException(401, "code is invalid or expired")
-            if claimed[0] > MAX_CODE_ATTEMPTS:
-                cur.execute("UPDATE login_codes SET used_at = NOW() WHERE id = %s", (code_id,))
-                conn.commit()
-                raise HTTPException(401, "too many attempts — request a new code")
-
-            if not hmac.compare_digest(_hash_code(email, code), code_hash):
-                conn.commit()  # the attempt was already counted above
-                raise HTTPException(401, "code is invalid or expired")
-
-            # Success — burn single-use atomically (a concurrent verify that
-            # already won leaves used_at NOT NULL, so this returns no row).
-            cur.execute(
-                "UPDATE login_codes SET used_at = NOW() "
-                "WHERE id = %s AND used_at IS NULL RETURNING id",
-                (code_id,),
-            )
-            if not cur.fetchone():
-                conn.commit()
-                raise HTTPException(401, "code is invalid or expired")
+            _verify_code(conn, cur, column="email", destination=email, code=code)
 
             account_id = upsert_account(cur, email)
             token, expires = mint_session(
                 cur, account_id=account_id, email=email,
                 method="email_code", issued_ip=ip, user_agent=ua,
+            )
+        conn.commit()
+    return _session_response(token, expires)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/auth/sms/code  +  POST /api/v1/auth/sms/code/verify
+# ---------------------------------------------------------------------------
+class SmsCodeRequestIn(BaseModel):
+    phone_number: str = Field(..., min_length=7, max_length=32)
+
+
+class SmsCodeVerifyIn(BaseModel):
+    phone_number: str = Field(..., min_length=7, max_length=32)
+    code: str = Field(..., min_length=1, max_length=32)
+
+
+def _require_us_phone(raw: str) -> str:
+    phone = normalize_us_phone(raw)
+    if not phone:
+        raise HTTPException(400, "enter a US phone number, like (303) 555-1212")
+    return phone
+
+
+def enforce_sms_send_budget(cur, *, phone: str, ip: str | None) -> None:
+    """The three buckets every outbound sign-in-ish text must clear.
+
+    One function so that every door which can cause a text to be sent draws
+    on the SAME budget: they share one physical handset, on a number shared
+    with other applications, so a second door with its own limits would
+    silently double what the operator's device can be made to send. Callers
+    must not add their own per-phone bucket alongside this.
+    """
+    enforce(cur, bucket="sms_code_ip", key=ip or "?",
+            limit=_LIMIT_SMS_CODE_PER_IP[0], window_seconds=_LIMIT_SMS_CODE_PER_IP[1])
+    enforce(cur, bucket="sms_code_phone", key=phone,
+            limit=_LIMIT_SMS_CODE_PER_PHONE[0], window_seconds=_LIMIT_SMS_CODE_PER_PHONE[1])
+    # A distributed attempt spread thin enough to clear both per-key buckets
+    # still can't drain a day's sending in an afternoon.
+    enforce(cur, bucket="sms_code_global", key="all",
+            limit=_LIMIT_SMS_CODE_GLOBAL[0], window_seconds=_LIMIT_SMS_CODE_GLOBAL[1])
+
+
+def _note_opt_out(phone: str) -> None:
+    """Record locally that this number has blocked texts.
+
+    Comms is authoritative on consent and enforces it for us; this is only
+    so our own UI can be honest before trying again. Best-effort by design —
+    failing to write a note must not change what the rider is told about
+    their sign-in, which is the far more important half of this response.
+    """
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE accounts SET sms_opted_out_at = NOW() "
+                    "WHERE phone_number = %s AND sms_opted_out_at IS NULL",
+                    (phone,),
+                )
+            conn.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("recording the SMS opt-out for a sign-in attempt failed")
+
+
+def send_code_sms(phone: str, body: str, *, idempotency_key: str, purpose: str) -> None:
+    """Hand a code text to comms and translate its answers into ours.
+
+    The idempotency key must name the THING being communicated (a specific
+    issued code), never the attempt — see comms.send_sms.
+    """
+    try:
+        send_sms(
+            phone,
+            body,
+            idempotency_key=idempotency_key,
+            # A code that surfaces after the rider has given up is worse
+            # than one that never arrives: the first is a confused user and
+            # a support ticket, the second is a retry that works. So comms
+            # drops it rather than queueing it when the handset is
+            # unreachable, and `urgent` skips the inter-send delays. The
+            # code itself stays valid for SMS_CODE_TTL_MINUTES — this only
+            # bounds how long we'll wait to hand it to the network.
+            ttl_seconds=SMS_SEND_TTL_SECONDS,
+            urgent=True,
+            metadata={"purpose": purpose},
+        )
+    except OptedOut as e:
+        _note_opt_out(phone)
+        # Verbatim, not paraphrased — it names the exact keyword and number
+        # that unblock, and a reworded version of it doesn't work.
+        raise HTTPException(409, str(e))
+    except UnusableRecipient:
+        raise HTTPException(400, "that number can't receive texts — check it and try again")
+    except QuotaExceeded:
+        raise HTTPException(429, "too many texts sent right now — try again later")
+    except CommsError:
+        log.exception("SMS code send failed (%s)", purpose)
+        raise HTTPException(502, "couldn't send the code — try again in a minute")
+
+
+@router.post("/api/v1/auth/sms/code", status_code=202)
+def auth_sms_code_request(request: Request, payload: SmsCodeRequestIn = Body(...)) -> dict[str, Any]:
+    """Text a short AA000AA sign-in code (typed back at
+    /api/v1/auth/sms/code/verify). Requires z280-comms (503 if not).
+
+    Unlike the email door this does NOT always 202. A `409` (the recipient
+    has blocked texts) has to reach the rider: the alternative is a
+    permanently silent "check your phone" for a message that will never be
+    sent, and the 409 body names the exact keyword and number that undo it.
+    That leaks nothing about accounts — it is a fact about the phone
+    number's relationship to the shared sender, and the rider asking is
+    holding the phone.
+    """
+    if not comms_credentials():
+        raise HTTPException(503, "SMS sign-in not configured")
+    phone = _require_us_phone(payload.phone_number)
+    ip = real_client_ip(request)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            # Each send costs a real message on one physical handset, so
+            # these protect the operator's device and plan — not the code,
+            # whose entropy is identical to the email door's.
+            enforce_sms_send_budget(cur, phone=phone, ip=ip)
+            code, code_id = _issue_code(cur, column="phone_number", destination=phone,
+                                        ttl_minutes=SMS_CODE_TTL_MINUTES, ip=ip)
+        conn.commit()
+
+    # Send AFTER commit so a comms outage can't roll back the rate-limit
+    # events (a broken sender must not become a free retry loop).
+    send_code_sms(
+        phone,
+        SMS_CODE_TEMPLATE.format(code=code),
+        idempotency_key=f"login-code-{code_id}",
+        purpose="sign_in",
+    )
+    return {"sent": True}
+
+
+@router.post("/api/v1/auth/sms/code/verify")
+def auth_sms_code_verify(request: Request, payload: SmsCodeVerifyIn = Body(...)) -> dict[str, Any]:
+    """Verify a texted code, upsert the account by phone, mint a session.
+
+    Typing the code back IS the proof that the rider answers this number,
+    which is why this is the only path that sets phone_verified_at (see
+    accounts.upsert_account_by_phone). Sessions mint as 'sms_code' and never
+    carry the admin scope — session_scopes restricts that to Google.
+    """
+    ip = real_client_ip(request)
+    ua = request.headers.get("user-agent")
+    phone = _require_us_phone(payload.phone_number)
+    code = _normalize_code(payload.code)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            enforce(cur, bucket="sms_code_verify_ip", key=ip or "?",
+                    limit=_LIMIT_SMS_VERIFY_PER_IP[0],
+                    window_seconds=_LIMIT_SMS_VERIFY_PER_IP[1])
+            # Per-phone too, which the email door doesn't do per-address: a
+            # code sent to a phone is guessable by anyone who knows the
+            # number, without needing access to any inbox.
+            enforce(cur, bucket="sms_code_verify_phone", key=phone,
+                    limit=_LIMIT_SMS_VERIFY_PER_PHONE[0],
+                    window_seconds=_LIMIT_SMS_VERIFY_PER_PHONE[1])
+
+            _verify_code(conn, cur, column="phone_number", destination=phone, code=code)
+
+            try:
+                account_id = upsert_account_by_phone(cur, phone)
+            except PhoneNumberContested:
+                conn.commit()
+                log.warning("SMS sign-in blocked: %s is contested", phone)
+                raise HTTPException(
+                    409,
+                    "that number is attached to another account that can't be "
+                    "released automatically — email support to sort it out",
+                )
+            token, expires = mint_session(
+                cur, account_id=account_id, email=None,
+                method="sms_code", issued_ip=ip, user_agent=ua,
             )
         conn.commit()
     return _session_response(token, expires)
