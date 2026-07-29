@@ -55,6 +55,8 @@ geocoding, pricing/points metadata, and Usuals.
       ADD COLUMN IF NOT EXISTS track_key_issued_at            TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS reported_start_battery_percent NUMERIC(4,1),
       ADD COLUMN IF NOT EXISTS feed_start_battery_percent     INTEGER,     -- derived from the feed at start (see POST below)
+      ADD COLUMN IF NOT EXISTS feed_start_lat                 DOUBLE PRECISION,  -- vehicle's last feed position at start —
+      ADD COLUMN IF NOT EXISTS feed_start_lon                 DOUBLE PRECISION,  --   the feed-anchored start for A2's check 5
       ADD COLUMN IF NOT EXISTS ride_options                   JSONB NOT NULL DEFAULT '{}',
       ADD COLUMN IF NOT EXISTS validation_status              TEXT NOT NULL DEFAULT 'pending',
       ADD COLUMN IF NOT EXISTS validation_reasons             JSONB NOT NULL DEFAULT '[]',
@@ -93,8 +95,10 @@ geocoding, pricing/points metadata, and Usuals.
   `quality.compute_battery_percent(current_range_meters)` off the newest `raw_telemetry_points`
   row, the exact idiom `ride_watch.py` uses to stamp `gbfs_end_battery_percent`; `device_state`
   stores no battery/range column (only `max_observed_range_meters`), so it cannot be the source.
-  NULL when the feed has no fresh observation. Handler also generates `track_nonce` (16 random
-  bytes hex) and `track_key` (32 random bytes base64url). Response gains:
+  NULL when the feed has no fresh observation. The same newest-telemetry read also stamps
+  `feed_start_lat`/`feed_start_lon` — a feed-anchored start position the rider cannot supply
+  (A2's check 5 prefers it over the client-supplied `start_lat/lon`). Handler also generates
+  `track_nonce` (16 random bytes hex) and `track_key` (32 random bytes base64url). Response gains:
 
   ```json
   "track_signing": {"alg": "HS256", "key_id": "<ride_id>", "key": "<b64url 32B>",
@@ -155,10 +159,12 @@ geocoding, pricing/points metadata, and Usuals.
   Rate plans themselves stay client-side (unchanged).
 - `GET /api/v1/points/schedule` (new; public): the authoritative action → points map including
   formulas, e.g. `{"battery_contribution": {"base": 8, "per_step": 2, "step_km": 2}, ...}`,
-  generated from `src/points.py` constants so UI copy can never drift. A1 ships current values;
-  each later phase adds the actions it ships (A2: `battery_contribution` + `nav_distance_bonus`;
-  A3: `nav_route_feedback` + `nav_qualitative_feedback` + `ride_survey`) — the schedule endpoint
-  simply reflects whatever constants exist, so it stays correct in either landing order.
+  generated from `src/points.py` constants so UI copy can never drift. **A1 ships the complete
+  schedule**, existing actions plus all five ride-mode constants (`POINTS_BATTERY_CONTRIBUTION_BASE`
+  etc. — §A2's block is the normative list; the values are locked by master Decision 6 and nothing
+  about the numbers waits on award machinery): frontend F2's Screen 2 ℹ copy interpolates these
+  the day it deploys, and master §1.5 marks the endpoint an F2 dependency for exactly that reason.
+  A2/A3 wire the awards; the schedule needs no further edits from them.
 - Usuals (`src/api_preferences.py`, mirroring the map-settings pattern):
   `GET /api/v1/profile/ride-usuals` (list), `GET/PUT/DELETE /api/v1/profile/ride-usuals/{name}`.
   Blob = `ride_options` + `label`; 16 KB cap reused; cap 10 per account (409 at cap).
@@ -322,12 +328,14 @@ de-identification sweep.
   Screen 10's "waiting on validation from the live feed" branch.
 - `PATCH .../end`: stops calling `credit_waypoint_points` / `credit_gbfs_validation_points`
   (functions retained for history/tests; `API.md` documents the supersession).
-- Deprecation: `POST .../waypoints` (600/h single-waypoint) remains for the legacy HUD until
-  frontend F3 ships, then one more release with an `API.md` deprecation note. Waypoints it records
-  stop earning points as of A2 — precisely: this endpoint never wrote ledger rows itself; the
-  per-waypoint award was always granted at `/end` via `credit_waypoint_points`, so the
-  supersession lands in `/end` (above), not here. It is **not** the transport for ride-mode
-  tracks — those never stream.
+- Deprecation: `POST .../waypoints` (600/h single-waypoint) has **no known client callers** —
+  the denver-scooter-fyi frontend never wired it (verified: zero references in its `src/`), so
+  there is no "legacy HUD" dependency and its schedule is decoupled from frontend F3. It is
+  retained one release purely as caution for unknown external callers, with an `API.md`
+  deprecation note landing in A2. Waypoints it records stop earning points as of A2 — precisely:
+  this endpoint never wrote ledger rows itself; the per-waypoint award was always granted at
+  `/end` via `credit_waypoint_points`, so the supersession lands in `/end` (above), not here. It
+  is **not** the transport for ride-mode tracks — those never stream.
 
 **Verification (`src/track_verify.py` — pure module, fake-cursor unit-testable):**
 `verify_track_chain(cur, ride_row, batches) -> VerificationResult` with checks, in order:
@@ -353,8 +361,11 @@ de-identification sweep.
    over the raw, un-adjusted points.
 5. **GBFS correlation** (primary anti-fabrication control — same anchor points as the
    `credit_gbfs_validation_points` geometry, deliberately looser than that award's 20 m: this is
-   an eligibility gate over GPS-noisy fixes, not the award): first waypoint ≤150 m of `start_lat/lon`; when
-   resolved, last waypoint ≤150 m of `gbfs_end_lat/lon` and `t1(last)` within ±10 min of
+   an eligibility gate over GPS-noisy fixes, not the award): first waypoint ≤150 m of the
+   **feed-anchored** start — `feed_start_lat/lon` when A1's start handler stamped them, falling
+   back to the client-supplied `start_lat/lon` only when the feed had no fresh observation
+   (client-vs-client comparison is the weaker check; the fallback keeps old rides verifiable);
+   when resolved, last waypoint ≤150 m of `gbfs_end_lat/lon` and `t1(last)` within ±10 min of
    `gbfs_reappeared_at`; ride start within 10 min of `gbfs_left_feed_at`. Unresolved feed →
    `pending_feed`.
 6. **Volume** — `waypoint_count ≥ 10`, distance ≥ 500 m, duration ≥ 3 min; else
@@ -458,8 +469,8 @@ public leaderboard subject to the visibility toggles — the master plan calls t
 leaderboard record" and the privacy page must actually say so).
 
 **Files:** `sql/050`, `sql/052`, new `src/track_verify.py`, `src/api_tracked_rides.py`,
-`src/points.py`, `src/api_points.py` (the `battery_contribution` + `nav_distance_bonus` entries
-enter `/points/schedule` here), `src/ride_watch.py`, `src/battery_model.py`, `src/cli.py`,
+`src/points.py` (award functions — the constants and `/points/schedule` entries landed in A1),
+`src/ride_watch.py`, `src/battery_model.py`, `src/cli.py`,
 `crontab`, `src/api_meta.py`, `src/templates/legal/privacy_policy.html`, `API.md`, `README.md`,
 `API_REQUIREMENTS.md`.
 
@@ -550,12 +561,9 @@ trap on points: `'ride_survey'`, `'nav_route_feedback'` and `'nav_qualitative_fe
 violate the live CHECK (sql/028, rewritten in sql/037) and 500. `sql/051` therefore widens the
 constraint for these three actions itself, using the sql/040/042 value-checked guard keyed on
 `'ride_survey'` (052's guard keys on `'battery_contribution'`, so the two migrations no-op
-against each other's work in either order), and A3 defines its three `POINTS_*` constants in
-`src/points.py` with the same values A2 lists — and surfaces those three actions in
-`GET /api/v1/points/schedule` (`src/api_points.py`): the schedule is the authoritative UI-copy
-source (Screen 9's headers render from it, per the master's Reconciliation 6), so it must list
-every action the deployment actually awards — A1's "A2 adds the new actions" sentence assumed
-the A2-first order and covers only A2's own two. Three-address rule: `ride_surveys` (free text)
+against each other's work in either order). The `POINTS_*` constants and the full
+`/points/schedule` are **A1's** (single definition, no per-phase copies to drift): A3 only wires
+its three award functions to constants that already exist. Three-address rule: `ride_surveys` (free text)
 and `ride_routes` (geometry) are new stored data, so **this** PR carries their
 `src/api_meta.py:_PRIVACY` entries and `src/templates/legal/privacy_policy.html` copy.
 
@@ -571,6 +579,13 @@ and `ride_routes` (geometry) are new stored data, so **this** PR carries their
   (the S8 New-Destination loop re-runs Screen 4 mid-ride with the ride id known), it must
   resolve to a **caller-owned** ride, else 404 — the FK alone would accept any account's ride
   id, and the 404 (not 403) is the no-existence-oracle idiom every tracked-rides endpoint uses.
+  Multi-row semantics, stated so nobody re-derives them: a New-Destination loop legitimately
+  creates a **second** row for the same ride (each deliberate Screen 4 selection is one row;
+  automatic off-route re-routes never POST — the frontend plan pins that client rule); the
+  survey rates the leg its `ride_route_id` names, and `nav_distance_bonus` is awarded at most
+  once per ride regardless of row count (the `(source_table='tracked_rides', source_id, action)`
+  dedupe — it requires *a* route row, not a specific one). No uniqueness on `tracked_ride_id`
+  is intended; `tests/test_ride_routes.py` covers the multi-route-per-ride case.
   The client calls
   it **only** when `nav_improvement` is on — that consent is what makes storing a route
   acceptable. 400 `unknown_profile` (the `/route` handler's payload) when `profile` isn't a

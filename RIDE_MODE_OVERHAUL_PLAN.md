@@ -27,12 +27,14 @@ unless started from a specific device on the map (a device deep link fast-forwar
 > Numbering note: the owner's numbering has **no Screen 5** — the gap is intentional and preserved.
 > Never renumber. Screen 2.5 is the "Usuals" picker.
 
-### Screen 1 — Auth & GPS (skippable if logged in, or when starting from a device link)
+### Screen 1 — Auth & GPS (skippable if logged in; a device link fast-forwards the wizard but does **not** bypass these gates)
 
 - IF not logged in: **[Ride as Guest]** or login options — **Email Me a Link** | **Email Me a Code** |
   **Login w/ Google**.
 - IF no GPS: an **Enable GPS** prompt.
-- If neither applies the screen never appears; proceed to Screen 2.
+- If neither applies the screen never appears; proceed to Screen 2. A device deep link changes
+  the landing screen, not these gates — a signed-out or GPS-ungranted deep-link entry still sees
+  Screen 1 (Ride as Guest keeps it one tap).
 
 ### Screen 2 — Select your ride + Ride Mode Options
 
@@ -166,6 +168,10 @@ Nearly identical to today's HUD, with key improvements:
 - `Est Cost: Unlock $ + Per Min $ + Tax $ = Total $`
 - `** The Veo app is your bill **`
 - Buttons: **[Rush Quit] [ New Destination ] [ I ended my ride in Veo ]**
+- Clarification (program): "Note the cost and battery %" is an *instruction to the rider* that
+  the **[I ended my ride in Veo]** flow acts on — that flow collects the end battery % and actual
+  cost as inputs before reporting the end (battery modeling's burn math and the cost record both
+  depend on them).
 
 ### Screen 9 — Surveys (on a Veo scooter + tracked ride, regardless of navigation)
 
@@ -200,18 +206,22 @@ Generated text:
 > Your ride {may be | is} {eligible | ineligible} for community contribution points
 > [ **because** {the start location did not align with the veo feed record | the end location did
 > not align with the veo feed record | you did not opt to track your route | your device did not
-> collect the requisite number of waypoints successfully | your trip was too short | there was an
-> internal error} ]
+> collect the requisite number of waypoints successfully | your trip was too short | your saved
+> track failed integrity verification | there was an internal error} ]
 > ‖ [ **but** we're waiting on validation from the live feed[, **and**] you'll need to donate your
 > trip data to earn these points. ]
+
+*(Program addition: the "failed integrity verification" clause covers the `chain_invalid` reason,
+which the validation vocabulary needs but the original six-clause skeleton lacked — wording is
+program-proposed, owner may re-voice it.)*
 
 Buttons: **[Donate This Trip's Data] [See recent trips] [ Return to Main App ]**
 
 ### Trip-data page (profile pane; possible follow-up, outside ride mode)
 
 - General trip metadata (vehicle, user, start, end) is stored securely on the scooter.fyi API server
-  and **de-identified as soon as points are awarded (typically 4–28 h)** — so there is a limited
-  window in which points can be earned on a trip.
+  and **de-identified 4 h after points settle, with a hard floor of 28 h after donation even if
+  points never settle** — so there is a limited window in which points can be earned on a trip.
 - Specific GPS points recorded while travelling ("waypoints") are **stored locally on the rider's
   device**. The server has no access to these unless the rider chooses to share.
 - In the future we may offer a way to self-encrypt trip data and upload or download it.
@@ -283,7 +293,7 @@ ruling colors); the detail shows **rankings per zone under a generous-size secti
 | **Batch** | ≤25 waypoints or ≤60 s of track, sealed as one compact JWS, hash-chained to its predecessor. |
 | **Donation** | Explicit opt-in bulk upload of the signed track for verification and points. Irrevocable **after** de-identification; hard-deletable before. |
 | **Usual** | A saved ride-options preset (`user_preferences` kind `ride_mode_usual`). |
-| **De-id** | The sweep that nulls account linkage on donated artifacts 4–28 h after points settle. Ledger rows keep h3 cell + account (they ARE the leaderboard record); geometry loses the account. |
+| **De-id** | The sweep that nulls account linkage on donated artifacts: 4 h after points settle, with a hard floor of 28 h after donation even if points never settle. Ledger rows keep h3 cell + account (they ARE the leaderboard record); geometry loses the account. |
 | **Disambiguation list** | Screen 2's device list — "which one am I standing next to", not discovery. |
 | **Leaderboard view** | The 🏆 choropleth: h3 r8 cells colored by the leading account's ruling colors, devices hidden while open. Reads `GET /api/v1/leaderboard/map` only. |
 
@@ -303,7 +313,8 @@ Modal wizard (S1 auth → S2 disambiguate device + options → [S3 dest → S4 r
        └─ [Donate] → POST /track (bulk JWS) → server verifies chain
             → validation → points (battery / nav / distance bonuses)
             → battery_trip_observations ingestion
-  → de-id sweep (hourly cron): 4–28 h after points settle,
+  → de-id sweep (hourly cron): 4 h after points settle, hard floor
+       28 h after donation even if points never settle —
        donated track / ride_routes lose account + ride linkage
   → leaderboard recompute (§11, daily) reads user_points h3 cells
   → 🏆 Leaderboard view renders /leaderboard/map choropleth (ruling colors)
@@ -314,11 +325,11 @@ Modal wizard (S1 auth → S2 disambiguate device + options → [S3 dest → S4 r
 | Endpoint | Change | Frontend phase |
 |---|---|---|
 | `POST /api/v1/tracked-rides` | request +`ride_options`, `reported_start_battery_percent`; response +`track_signing`, +`validation` | F2/F3 |
-| `GET /api/v1/tracked-rides/active`, `/{id}` | response +`track_signing` (owner-only), `ride_options`, `validation` | F3/F4 |
+| `GET /api/v1/tracked-rides/active`, `/{id}` | response +`track_signing` (owner-only), `ride_options`, `validation`; +`survey_submitted` (A3) | F3/F4 |
 | `POST /api/v1/tracked-rides/{id}/track` | **new** — bulk donation, the sole track upload path | F4 |
 | `PATCH /api/v1/tracked-rides/{id}/end` | +`reported_minutes`, `reported_plan` (§10) | F4 |
 | `POST /api/v1/tracked-rides/{id}/survey` | **new** | F4 |
-| `POST /api/v1/ride-routes` | **new** — persist chosen route when nav-improvement is on | F2 |
+| `POST /api/v1/ride-routes` | **new** — persist chosen route when nav-improvement is on. Ships in **A3**, later than F2's A1 baseline: F2 calls it non-blocking and tolerates 404 until A3 deploys (nav points forfeited in that window) | F2 |
 | `GET /api/v1/route` | +`maneuvers=true` passthrough; + IP rate limit | F2/F3 |
 | `GET /api/v1/geocode/search` | **new** — fronts the self-hosted Photon sidecar | F2 |
 | `GET /api/v1/meta/pricing` | **new** — tax rate, config-driven | F2 |
@@ -339,8 +350,10 @@ API A4 (§11 leaderboard)               ──> FE Leaderboard view (independent
 
 Deploy order: **A1 → (F1 ‖) → F2/F3 → A2 + A3 → F4 → A4 any time after A2** (earlier is fine — it
 touches only the ledger read side). F1 starts immediately, in parallel with A1. A2 and A3 are
-independently mergeable after A1. The Leaderboard view is deliberately decoupled from all
-ride-session work — the ideal parallel-agent work item.
+independently mergeable after A1. One deliberate cross-edge: F2 calls `POST /ride-routes` (an A3
+endpoint) **non-blocking** — route choice proceeds on a 404 until A3 deploys, forfeiting only nav
+points in that window, so no F2→A3 ordering edge exists. The Leaderboard view is deliberately
+decoupled from all ride-session work — the ideal parallel-agent work item.
 
 Migration numbering: `FEATURE_PLAN_2026-07.md` reserves `sql/045` (SMS — untouched, may never ship);
 this program ships `046` (§10) and `047` (§11) itself and owns **048–052**. Migrations apply in
@@ -352,11 +365,17 @@ safe.
 ## Part 2 — Track chain format (single source of truth)
 
 Golden test vectors implementing this spec are committed **byte-identically to both repos**
-(frontend Vitest and API pytest consume the same JSON fixtures).
+(frontend Vitest and API pytest consume the same JSON fixtures) at the canonical path
+**`tests/fixtures/track-chain-vectors.json`** — one file, the same literal path in each repo.
+
+Byte-encoding rules (normative — the two implementations must hash the same bytes): all sha256
+inputs and intermediate values are **raw bytes**; the nonce is hex-decoded to its 16 raw bytes
+before hashing; `sha256(jws_n)` is over the ASCII bytes of the compact JWS string; `prev` and
+`chain_root_hash` serialize as lowercase hex of the raw digest.
 
 - Waypoint tuple: `[dt_ms, lat, lon, acc_m]` — `dt_ms` relative to batch `t0`; lat/lon at 6
   decimals; accuracy rounded to an integer.
-- Seal a batch at **25 points or 60 s**, whichever comes first, and at ride end (final partial
+- Seal a batch at **25 waypoints or 60 s**, whichever comes first, and at ride end (final partial
   batch).
 - Each batch is a **compact JWS**, `alg: HS256`, key = the per-ride server-issued key. Private/guest
   rides use a client-random key — tamper-evident only, never points-eligible.
@@ -371,6 +390,12 @@ Golden test vectors implementing this spec are committed **byte-identically to b
   defined and computed now, so a future live-checkpoint endpoint would only need to transmit
   `(seq, H_n)` — **no change to the chain or batch format**. Do not redesign the format to add
   checkpoints later; they already fit.
+- **Known, accepted limit**: no field marks the final batch, so a verifier cannot distinguish a
+  complete chain from a truncated prefix — silently dropping *trailing* batches is undetectable
+  by the chain itself. It only shrinks the claimable distance, and the surviving last point must
+  still pass the GBFS end correlation, so truncation buys a forger nothing. If ever hardened, a
+  `fin:true` field on the final batch is a backward-compatible addition (same argument as the
+  checkpoint note).
 
 Server verification (`src/track_verify.py`, detailed in `PLAN_RIDE_MODE_API.md` §A2): signature →
 chain integrity → time monotonicity within the server-stamped ride window → speed plausibility →
@@ -382,10 +407,14 @@ copy): `start_mismatch`, `end_mismatch`, `tracking_not_opted`, `too_few_waypoint
 
 ## Part 3 — Risks & reconciliations
 
-1. **"NO ROUTE EVER LEAVES ITS OWNER" vs donation** — that commitment (`src/api_rides.py`) is
-   scoped to the off-feed `rides` table, which this program does not touch. Donation is a separate,
-   explicit, per-ride opt-in transfer with disclosed de-identification. The privacy policy states
-   both; Screen 10 consent copy says "anonymous and irrevocable after de-identification (≤28 h)".
+1. **"NO ROUTE EVER LEAVES ITS OWNER" vs donation** — the commitment in `src/api_rides.py` is
+   stated generally, over "waypoints, polylines and ride endpoints", not scoped to a table — so
+   this program does not argue it away on scoping. Donation supersedes it by **explicit,
+   per-ride, per-donation consent** with disclosed de-identification: the default remains that no
+   route ever leaves its owner unless the rider affirmatively donates that ride's track. The API
+   phase that ships donation (A2) must update the `api_rides.py` docstring context, `_PRIVACY`,
+   and the privacy-policy template together (three-address rule). Screen 10 consent copy says
+   "anonymous and irrevocable after de-identification (≤28 h)".
 2. **Hard-delete vs de-id** — pre-de-id, deletes cascade (commitment intact); post-de-id, artifacts
    have no owner to delete from. Disclosed at donation; `DELETE /tracked-rides/{id}` before the
    sweep removes everything.
@@ -393,8 +422,9 @@ copy): `start_mismatch`, `end_mismatch`, `tracking_not_opted`, `too_few_waypoint
    forever (they are the §11 leaderboard record); everything with fine geometry loses account
    linkage within ≤28 h. The privacy page must say the ledger keeps a coarse cell.
 4. **600/h per-waypoint POST vs bulk** — donation replaces streaming entirely; the per-waypoint
-   endpoint is deprecated (kept one release for the legacy HUD, no points from A2 onward). No
-   mid-ride track traffic at all.
+   endpoint is deprecated. It has **no known client callers** — the frontend never wired it — so
+   it is kept one release purely as caution for unknown external callers (no points from A2
+   onward), decoupled from any frontend phase. No mid-ride track traffic at all.
 5. **Points supersession** — `waypoint` (2) and `gbfs_trip_validated` (20) stop being awarded; GBFS
    alignment becomes an eligibility **gate**, not an award. The action CHECK retains old values
    (history is forever); `MAX_POINTS_PER_RIDE` unchanged. Riders who maximized the old scheme see
@@ -433,8 +463,10 @@ copy): `start_mismatch`, `end_mismatch`, `tracking_not_opted`, `too_few_waypoint
 13. **Migration numbering** — 045 stays reserved for SMS (harmless if it never ships); this program
     owns 046–052 minus 045.
 14. **Route maneuver indices** — Valhalla shape indices are leg-local, and the existing
-    `trip_shape()` drops the duplicated shared vertex between legs; the maneuver passthrough must
-    re-offset indices when flattening (a named A1 test). Getting this wrong silently misplaces
+    `trip_shape()` drops the duplicated shared vertex between legs **conditionally** (only when
+    the boundary vertex actually repeats; empty-shape legs are skipped entirely); the maneuver
+    passthrough must re-offset indices in the same pass with the same conditional logic — never
+    a fixed one-drop-per-join formula (a named A1 test). Getting this wrong silently misplaces
     every turn cue.
 15. **Leaderboard launch emptiness + color legibility** — production has ~8 ledger rows: at launch
     nearly all ~720 cells render unclaimed. That is correct, not broken — the view should look
@@ -442,3 +474,11 @@ copy): `start_mismatch`, `end_mismatch`, `tracking_not_opted`, `too_few_waypoint
     contrast guarantee against either basemap theme; accepted for the rough cut (the colors are the
     point), with the opaque-border convention doing the legibility work. Runners-up in the public
     payload expose nothing beyond what §11 already stores; read-time privacy filters every entry.
+16. **Screen 9 pane gates** — the vision's header ("on a Veo scooter + tracked ride, regardless of
+    navigation") governs when Screen 9 *as a whole* may appear; the two panes then gate
+    **individually**: the right (Navigation Feedback) pane renders only when a route was selected
+    and stored ("How was the `${selectedRoute}`?" presupposes one, and the API awards route
+    feedback only when a `ride_route_id` resolves), and the left (Scooter Feedback) pane renders
+    only when the Screen 2 "End ride survey" option is on — that toggle exists to control exactly
+    this pane, and the survey award gates on the same option. Both panes gated off → Screen 9 is
+    skipped entirely.
