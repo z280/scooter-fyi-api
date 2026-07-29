@@ -63,6 +63,7 @@ from .api_auth import (
     SMS_CODE_TTL_MINUTES,
     _issue_code,
     _normalize_code,
+    _settle_issued_code,
     _verify_code,
     enforce_sms_send_budget,
     send_code_sms,
@@ -239,13 +240,14 @@ def put_profile(
             # requests read "email set, phone null" and each independently
             # decides its own half of a null-both-out change is safe.
             cur.execute(
-                "SELECT email, phone_number FROM accounts WHERE id = %s FOR UPDATE",
+                "SELECT email, phone_number, phone_verified_at FROM accounts "
+                "WHERE id = %s FOR UPDATE",
                 (user.account_id,),
             )
             row = cur.fetchone()
             if not row:
                 raise HTTPException(401, "account no longer exists")
-            current_email, current_phone_number = row
+            current_email, current_phone_number, current_phone_verified_at = row
 
             if "rate_plan" in provided:
                 if payload.rate_plan not in _RATE_PLANS:
@@ -300,6 +302,38 @@ def put_profile(
                     400,
                     "a profile needs an email address or a phone number "
                     "(or both) — add one before removing the other",
+                )
+
+            # Refuse the one edit that would destroy the rider's last door.
+            #
+            # Writing phone_number nulls phone_verified_at (above). If the
+            # account has no email AND the proof being cleared was its only
+            # way in, the result is an account nobody can sign into: SMS
+            # sign-in refuses unverified numbers, and it can't re-verify by
+            # signing in either, because upsert_account_by_phone treats an
+            # unverified holder with no email as contested. The rider
+            # wouldn't find out until their session lapsed, up to 30 days
+            # later, by which point nothing they could type would help.
+            #
+            # Deliberately narrow — it fires only when a VERIFIED number is
+            # being overwritten on an email-less account, which is exactly
+            # the state this PR makes reachable. Removing an email while
+            # adding an unverified number was already allowed before any of
+            # this existed and is left alone; it is not a door this change
+            # took away.
+            #
+            # The flow they actually wanted sets the number and its proof
+            # together, so point at it.
+            if (
+                new_email is None
+                and "phone_number" in provided
+                and current_phone_verified_at is not None
+            ):
+                raise HTTPException(
+                    400,
+                    "verify the new number instead (POST /api/v1/profile/phone/code) — "
+                    "changing it here would clear the proof that you answer it, and "
+                    "with no email on file you'd have no way to sign back in",
                 )
 
             if "show_public_username" in provided:
@@ -519,24 +553,36 @@ def request_phone_verification_code(
     with connection() as conn:
         with conn.cursor() as cur:
             phone = _resolve_phone_to_verify(cur, user, payload.phone_number)
-            # Deliberately the SAME budget the sign-in door draws on: one
-            # handset, one plan. Keyed on the phone and (here) the account
-            # rather than an IP, since this door always has a session.
-            enforce_sms_send_budget(cur, phone=phone, ip=str(user.account_id))
+            # Deliberately the SAME per-number and global budget the
+            # sign-in door draws on: one handset, one plan. The origin
+            # bucket is per-account here rather than per-IP, since this
+            # door always has a session to attribute the send to.
+            enforce_sms_send_budget(
+                cur, phone=phone,
+                origin_bucket="sms_code_account", origin_key=str(user.account_id),
+            )
+            # burn_previous=False, and settled after the send — same
+            # reasoning as the sign-in door (api_auth._settle_issued_code):
+            # a refused send must not destroy a code already in hand.
             code, code_id = _issue_code(
                 cur, column="phone_number", destination=phone,
-                ttl_minutes=SMS_CODE_TTL_MINUTES, ip=None,
+                ttl_minutes=SMS_CODE_TTL_MINUTES, ip=None, burn_previous=False,
             )
         conn.commit()
 
     # After commit, exactly as the auth doors do: a comms outage must not
     # roll back the rate-limit events into a free retry loop.
-    send_code_sms(
-        phone,
-        SMS_VERIFY_TEMPLATE.format(code=code),
-        idempotency_key=f"login-code-{code_id}",
-        purpose="phone_verification",
-    )
+    try:
+        send_code_sms(
+            phone,
+            SMS_VERIFY_TEMPLATE.format(code=code),
+            idempotency_key=f"login-code-{code_id}",
+            purpose="phone_verification",
+        )
+    except HTTPException:
+        _settle_issued_code("phone_number", phone, code_id, delivered=False)
+        raise
+    _settle_issued_code("phone_number", phone, code_id, delivered=True)
     return {"sent": True, "phone_number": phone}
 
 

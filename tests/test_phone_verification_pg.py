@@ -207,3 +207,87 @@ def test_two_accounts_cannot_hold_the_same_number(pg_conn):
         with pytest.raises(psycopg.errors.UniqueViolation):
             _make_account(cur, email="pgtest-phone-b@example.com", phone=_PHONE)
     pg_conn.rollback()
+
+
+# ---------- the silent lockout this design could otherwise create ----------
+def test_a_phone_only_account_cannot_edit_itself_into_a_lockout(pg_conn, monkeypatch):
+    """PUT /profile nulls phone_verified_at whenever the number is written.
+    For an account whose ONLY identity is that number, that combination —
+    no email, no verified phone — is an account with no door left, and the
+    rider wouldn't discover it until their session lapsed weeks later."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src import api_profile
+    from src.accounts import SessionUser
+
+    with pg_conn.cursor() as cur:
+        account_id = acct.upsert_account_by_phone(cur, _PHONE)
+    pg_conn.commit()
+
+    @contextmanager
+    def _fake_connection():
+        yield pg_conn
+
+    monkeypatch.setattr(api_profile, "connection", _fake_connection)
+    monkeypatch.setattr(api_profile, "enforce", lambda cur, **kw: None)
+
+    app = FastAPI()
+    app.include_router(api_profile.router)
+    user = SessionUser(
+        account_id=account_id, email=None, scopes=("rider",),
+        expires_at=None, sliding=True, method="sms_code", token_sha256="x",
+    )
+    app.dependency_overrides[api_profile.require_session] = lambda: user
+    client = TestClient(app)
+
+    res = client.put("/api/v1/profile", json={"phone_number": _OTHER_PHONE})
+    assert res.status_code == 400
+    assert "verify the new number" in res.json()["detail"]
+
+    # And the account is untouched — still verified, still able to sign in.
+    with pg_conn.cursor() as cur:
+        email, phone, verified_at = _row(cur, account_id)
+    assert email is None and phone == _PHONE and verified_at is not None
+    pg_conn.rollback()
+
+
+def test_an_account_with_an_email_may_still_change_its_number(pg_conn, monkeypatch):
+    """The guard above must not block the ordinary case: an email on file
+    means there is still a door, so dropping the phone's verification costs
+    a re-verification, not the account."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src import api_profile
+    from src.accounts import SessionUser
+
+    with pg_conn.cursor() as cur:
+        account_id = _make_account(cur, email="pgtest-phone-both@example.com",
+                                   phone=_PHONE, verified=True)
+    pg_conn.commit()
+
+    @contextmanager
+    def _fake_connection():
+        yield pg_conn
+
+    monkeypatch.setattr(api_profile, "connection", _fake_connection)
+    monkeypatch.setattr(api_profile, "enforce", lambda cur, **kw: None)
+
+    app = FastAPI()
+    app.include_router(api_profile.router)
+    user = SessionUser(
+        account_id=account_id, email="pgtest-phone-both@example.com",
+        scopes=("rider",), expires_at=None, sliding=True,
+        method="email_code", token_sha256="x",
+    )
+    app.dependency_overrides[api_profile.require_session] = lambda: user
+    client = TestClient(app)
+
+    res = client.put("/api/v1/profile", json={"phone_number": _OTHER_PHONE})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["phone_number"] == _OTHER_PHONE
+    # Proof belongs to a number, so the new one starts unproved.
+    assert body["phone_verified"] is False
+    pg_conn.rollback()

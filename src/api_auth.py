@@ -37,6 +37,7 @@ from .accounts import (
     mint_session,
     normalize_email,
     normalize_us_phone,
+    phone_is_verified,
     require_session,
     upsert_account,
     upsert_account_by_phone,
@@ -161,14 +162,21 @@ _DESTINATION_COLUMNS = ("email", "phone_number")
 
 
 def _issue_code(cur, *, column: str, destination: str, ttl_minutes: int,
-                ip: str | None) -> tuple[str, int]:
-    """Burn any live code for this destination, insert a fresh one.
+                ip: str | None, burn_previous: bool = True) -> tuple[str, int]:
+    """Insert a fresh code for this destination, optionally burning priors.
 
     Returns (plaintext code, login_codes row id). The row id is what the
     SMS path uses as its comms idempotency key: it names THIS issuance,
     which is the thing being communicated, so a retried send can't text
     somebody a second copy — while a genuinely new code gets a new key and
     is allowed through.
+
+    `burn_previous=False` defers the burn to _settle_issued_code, which the
+    SMS doors call after the send resolves. Email burns immediately (the
+    default) because Postmark accepting is the same act as us deciding to
+    supersede; a text can be refused after we have already committed, and
+    burning first would destroy a working code to deliver nothing. See
+    _settle_issued_code for the full reasoning.
     """
     assert column in _DESTINATION_COLUMNS, column
     code = _generate_code()
@@ -176,11 +184,12 @@ def _issue_code(cur, *, column: str, destination: str, ttl_minutes: int,
 
     # Only the newest code per destination stays live — issuing a new one
     # burns any prior unused code so there's a single guess target.
-    cur.execute(
-        f"UPDATE login_codes SET used_at = NOW() "
-        f"WHERE {column} = %s AND used_at IS NULL",
-        (destination,),
-    )
+    if burn_previous:
+        cur.execute(
+            f"UPDATE login_codes SET used_at = NOW() "
+            f"WHERE {column} = %s AND used_at IS NULL",
+            (destination,),
+        )
     # Opportunistic prune of long-dead rows (used or >1 day expired).
     cur.execute("DELETE FROM login_codes WHERE expires_at < NOW() - INTERVAL '1 day'")
     cur.execute(
@@ -570,21 +579,55 @@ def _require_us_phone(raw: str) -> str:
     return phone
 
 
-def enforce_sms_send_budget(cur, *, phone: str, ip: str | None) -> None:
+def enforce_sms_send_budget(
+    cur, *, phone: str, origin_bucket: str, origin_key: str | None,
+    proven_owner: bool = False,
+) -> None:
     """The three buckets every outbound sign-in-ish text must clear.
 
     One function so that every door which can cause a text to be sent draws
-    on the SAME budget: they share one physical handset, on a number shared
-    with other applications, so a second door with its own limits would
-    silently double what the operator's device can be made to send. Callers
-    must not add their own per-phone bucket alongside this.
+    on the SAME per-number and global budget: they share one physical
+    handset, on a number shared with other applications, so a second door
+    with its own limits would silently double what the operator's device can
+    be made to send. Callers must not add their own per-phone bucket
+    alongside this.
+
+    The *origin* bucket is the caller's, because what identifies an origin
+    differs by door: the signed-out door can only key on an IP, while the
+    profile door always has an account and should key on that (an account is
+    the more meaningful unit, and it survives a changing IP). They are kept
+    in separate named buckets rather than sharing one keyed by two different
+    kinds of string, so a bucket's name always says what its keys are.
     """
-    enforce(cur, bucket="sms_code_ip", key=ip or "?",
+    enforce(cur, bucket=origin_bucket, key=origin_key or "?",
             limit=_LIMIT_SMS_CODE_PER_IP[0], window_seconds=_LIMIT_SMS_CODE_PER_IP[1])
     enforce(cur, bucket="sms_code_phone", key=phone,
             limit=_LIMIT_SMS_CODE_PER_PHONE[0], window_seconds=_LIMIT_SMS_CODE_PER_PHONE[1])
-    # A distributed attempt spread thin enough to clear both per-key buckets
-    # still can't drain a day's sending in an afternoon.
+
+    # The global bucket, and an honest account of what it is worth.
+    #
+    # It does NOT make a determined attacker expensive: at 5 sends/hour per
+    # IP, thirteen IPs exhaust 250 in a single hour, and three drain it over
+    # a day. (An earlier version of this comment claimed otherwise. The
+    # arithmetic never supported it.) What it actually buys is a ceiling on
+    # what this application can spend of the operator's plan through one
+    # careless script or one bad afternoon — a blast radius, not a defence.
+    #
+    # Its danger is who it hits. upsert_account_by_phone creates accounts
+    # whose ONLY identity is a verified phone number, and for those riders an
+    # exhausted global bucket is a total lockout until the window rolls;
+    # an account with an email just uses the email door. Cheap to trigger,
+    # and it lands hardest on the people with no alternative.
+    #
+    # So a number somebody has already PROVED they answer skips this bucket.
+    # A returning owner is not the attack, and the exemption stays bounded:
+    # they remain capped at 3/hour by sms_code_phone above, and becoming
+    # exempt requires having completed a verification, which itself had to
+    # pass the global bucket. The cost is that a verified number can spend
+    # beyond the daily ceiling; the alternative is locking rightful owners
+    # out of the only door they have.
+    if proven_owner:
+        return
     enforce(cur, bucket="sms_code_global", key="all",
             limit=_LIMIT_SMS_CODE_GLOBAL[0], window_seconds=_LIMIT_SMS_CODE_GLOBAL[1])
 
@@ -608,6 +651,56 @@ def _note_opt_out(phone: str) -> None:
             conn.commit()
     except Exception:  # noqa: BLE001
         log.exception("recording the SMS opt-out for a sign-in attempt failed")
+
+
+def _settle_issued_code(column: str, destination: str, code_id: int, *,
+                        delivered: bool) -> None:
+    """Decide which code is live, once the send has actually resolved.
+
+    The email door burns prior codes as it issues, so there is only ever one
+    guess target. The SMS door cannot: comms can refuse a send (409/429/502)
+    *after* we have committed, and burning first means a rider who was
+    holding a perfectly good code — and merely tapped "resend" during a
+    transport blip — is left with the old code destroyed, the new one never
+    delivered, and one of three hourly slots spent. Two taps and they have
+    no way in for an hour; if their account is phone-only, no way in at all.
+    That is a self-inflicted denial of service on a legitimate rider at the
+    exact moment the system is already degraded.
+
+    So the burn waits for the answer:
+
+      delivered — the new code supersedes every older one, restoring the
+        single-live-code rule.
+      not delivered — burn the NEW code instead. The rider's previous code
+        becomes the newest live row again, so _verify_code (which reads
+        ORDER BY created_at DESC LIMIT 1) selects it and it keeps working.
+        Burning the new one rather than leaving both live is what preserves
+        that ordering invariant; two live codes would shadow the older one.
+
+    Best-effort: a failure here is logged and swallowed, because both
+    outcomes degrade to the old behaviour (the newest row wins) rather than
+    to anything unsafe, and the rate-limit slot is deliberately NOT refunded
+    either way — a retry loop must still cost the caller something.
+    """
+    assert column in _DESTINATION_COLUMNS, column
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                if delivered:
+                    cur.execute(
+                        f"UPDATE login_codes SET used_at = NOW() "
+                        f"WHERE {column} = %s AND used_at IS NULL AND id <> %s",
+                        (destination, code_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE login_codes SET used_at = NOW() "
+                        "WHERE id = %s AND used_at IS NULL",
+                        (code_id,),
+                    )
+            conn.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("settling login code %s after send failed", code_id)
 
 
 def send_code_sms(phone: str, body: str, *, idempotency_key: str, purpose: str) -> None:
@@ -669,19 +762,36 @@ def auth_sms_code_request(request: Request, payload: SmsCodeRequestIn = Body(...
             # Each send costs a real message on one physical handset, so
             # these protect the operator's device and plan — not the code,
             # whose entropy is identical to the email door's.
-            enforce_sms_send_budget(cur, phone=phone, ip=ip)
+            enforce_sms_send_budget(
+                cur, phone=phone, origin_bucket="sms_code_ip", origin_key=ip,
+                # A number already proved is a returning rider, quite
+                # possibly one whose ONLY door is this one — see the
+                # exemption's rationale in enforce_sms_send_budget.
+                proven_owner=phone_is_verified(cur, phone),
+            )
+            # burn_previous=False: any code the rider is already holding
+            # stays live until we know this one actually went out. See
+            # _settle_issued_code.
             code, code_id = _issue_code(cur, column="phone_number", destination=phone,
-                                        ttl_minutes=SMS_CODE_TTL_MINUTES, ip=ip)
+                                        ttl_minutes=SMS_CODE_TTL_MINUTES, ip=ip,
+                                        burn_previous=False)
         conn.commit()
 
     # Send AFTER commit so a comms outage can't roll back the rate-limit
     # events (a broken sender must not become a free retry loop).
-    send_code_sms(
-        phone,
-        SMS_CODE_TEMPLATE.format(code=code),
-        idempotency_key=f"login-code-{code_id}",
-        purpose="sign_in",
-    )
+    try:
+        send_code_sms(
+            phone,
+            SMS_CODE_TEMPLATE.format(code=code),
+            idempotency_key=f"login-code-{code_id}",
+            purpose="sign_in",
+        )
+    except HTTPException:
+        # Nothing was delivered, so this code never existed as far as the
+        # rider is concerned — burn it and leave whatever they already had.
+        _settle_issued_code("phone_number", phone, code_id, delivered=False)
+        raise
+    _settle_issued_code("phone_number", phone, code_id, delivered=True)
     return {"sent": True}
 
 

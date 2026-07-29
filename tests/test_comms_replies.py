@@ -15,31 +15,63 @@ import pytest
 from src import comms_replies
 
 
-# ---------- classification ----------------------------------------------------
-@pytest.mark.parametrize("body", [
-    "STOP", "stop", " Stop ", "STOP.", "stopall", "unsubscribe", "CANCEL", "quit", "end",
-])
-def test_opt_out_keywords(body):
-    assert comms_replies.classify(body) == "stop"
+# ---------- classification: the anti-drift table -----------------------------
+#
+# This is the tripwire for scooter-fyi-api#32's first review finding. The
+# classifier in src/comms_replies.py is a MIRROR of z280-comms' rule, not a
+# judgement of our own, so what is being asserted here is AGREEMENT — every
+# row states what comms does with that message, and the test fails the
+# moment our copy drifts from it in either direction.
+#
+# Drift is not cosmetic. Wider here than comms means we mark a rider opted
+# out while comms keeps accepting sends, so every other application on the
+# shared number keeps texting someone who used a carrier-standard keyword.
+# Narrower means comms blocks and we go on offering a door that 409s.
+#
+# comms as of this PR: blocks on a STOP *prefix*, clears on exactly UNSTOP.
+_COMMS_BEHAVIOUR = [
+    # (message, what z280-comms does with it)
+    ("STOP", "stop"),
+    ("stop", "stop"),
+    (" Stop ", "stop"),
+    ("STOP.", "stop"),
+    ("STOPALL", "stop"),
+    # Prefix, not whole-message: comms blocks these, and an earlier draft
+    # of our classifier called them "other" — comms would have blocked the
+    # rider while our UI kept offering to text them.
+    ("STOP please", "stop"),
+    ("stop texting me", "stop"),
+    ("UNSTOP", "unstop"),
+    ("unstop", "unstop"),
+    # Carrier-standard opt-out words that comms does NOT honour today.
+    # Claiming them locally is the dangerous direction: we'd stop showing
+    # the door while every other application on that number kept sending.
+    ("UNSUBSCRIBE", "other"),
+    ("CANCEL", "other"),
+    ("END", "other"),
+    ("QUIT", "other"),
+    # ...and their opt-in counterparts.
+    ("START", "other"),
+    ("YES", "other"),
+    ("SUBSCRIBE", "other"),
+    # Ordinary replies.
+    ("what time again?", "other"),
+    ("stop by the shop later", "stop"),   # prefix rule; comms blocks it too
+    ("please don't stop texting me", "other"),
+    ("", "other"),
+]
 
 
-@pytest.mark.parametrize("body", ["START", "unstop", "UNSTOP!", "yes", "subscribe"])
-def test_opt_in_keywords(body):
-    assert comms_replies.classify(body) == "unstop"
+@pytest.mark.parametrize("body,expected", _COMMS_BEHAVIOUR)
+def test_classification_matches_z280_comms(body, expected):
+    assert comms_replies.classify(body) == expected, (
+        f"{body!r}: we say {comms_replies.classify(body)!r}, comms says "
+        f"{expected!r} — the mirror has drifted"
+    )
 
 
-@pytest.mark.parametrize("body", [
-    None,
-    "",
-    "what time again?",
-    # Contains STOP, means the opposite. A substring match here would
-    # unsubscribe someone who asked to keep hearing from us, and they'd
-    # have no way to tell it happened.
-    "please don't stop texting me the good ones",
-    "stop by the shop later",
-])
-def test_everything_else_is_other(body):
-    assert comms_replies.classify(body) == "other"
+def test_none_body_is_other():
+    assert comms_replies.classify(None) == "other"
 
 
 # ---------- fake DB -----------------------------------------------------------

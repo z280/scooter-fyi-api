@@ -290,6 +290,13 @@ Four things about it will surprise you if nobody says them:
   `scooter.fyi: ` prefix server-side, which is how a recipient tells our
   text apart from another application's. Never put the site name in a
   message body — it would be said twice.
+* **Our STOP/UNSTOP reading is a mirror, not a judgement.**
+  `comms_replies.classify` reproduces comms' rule exactly — a STOP prefix
+  blocks, exactly UNSTOP clears — and the table in
+  `tests/test_comms_replies.py` fails if the two drift. Widening it locally
+  is the tempting mistake: we'd mark someone opted out while comms kept
+  accepting sends, and every *other* application on that number would go on
+  texting a rider who used a carrier-standard keyword.
 * **Consent is global and enforced upstream.** Someone who texted STOP to
   *any* application on that number cannot be messaged by us: the send comes
   back `409`. You will see it for people who have never had an account

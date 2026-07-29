@@ -208,13 +208,20 @@ def test_the_code_is_stored_against_the_phone_column(db, sent):
     assert "phone_number" in insert and "(email," not in insert
 
 
-def test_prior_live_codes_for_that_number_are_burned_first(db, sent):
+def test_prior_live_codes_are_superseded_only_once_the_text_is_away(db, sent, monkeypatch):
+    """Only the newest code stays live — but for SMS that rule is applied
+    AFTER the send, not before it. Burning at issue time destroys a working
+    code whenever comms refuses (review #32.3); the settle step restores the
+    single-guess-target invariant once we know the text actually went."""
+    calls = _settle_calls(monkeypatch)
     api_auth.auth_sms_code_request(
         _request(), api_auth.SmsCodeRequestIn(phone_number="3035551212")
     )
-    burns = [(s, p) for s, p in db["sql"]
-             if s.startswith("UPDATE login_codes SET used_at") and "phone_number = %s" in s]
-    assert burns and burns[0][1] == ("+13035551212",)
+    burned_at_issue = [s for s, _ in db["sql"]
+                       if s.startswith("UPDATE login_codes SET used_at")
+                       and "phone_number = %s" in s]
+    assert not burned_at_issue
+    assert calls[0]["delivered"] is True and calls[0]["destination"] == "+13035551212"
 
 
 def test_the_send_happens_after_the_commit(db, sent, monkeypatch):
@@ -233,7 +240,9 @@ def test_the_send_happens_after_the_commit(db, sent, monkeypatch):
     api_auth.auth_sms_code_request(
         _request(), api_auth.SmsCodeRequestIn(phone_number="3035551212")
     )
-    assert order == ["commit", "send"]
+    # The trailing commit is _settle_issued_code deciding which code is
+    # live now that the send has resolved — it necessarily comes last.
+    assert order[:2] == ["commit", "send"]
 
 
 # ---------- send failures a text has and an email doesn't ---------------------
@@ -358,3 +367,103 @@ def test_auth_config_reports_sms_on_with_a_token(monkeypatch):
 
     monkeypatch.setenv("COMMS_TOKEN", "tok")
     assert api_auth.auth_config(Response())["sms_enabled"] is True
+
+
+# ---------- review #32.3: a failed send must not destroy a working code ------
+def _settle_calls(monkeypatch):
+    """Capture _settle_issued_code instead of touching a database."""
+    calls = []
+    monkeypatch.setattr(
+        api_auth, "_settle_issued_code",
+        lambda column, destination, code_id, *, delivered: calls.append(
+            {"column": column, "destination": destination,
+             "code_id": code_id, "delivered": delivered}
+        ),
+    )
+    return calls
+
+
+def test_issuing_does_not_burn_prior_codes_before_the_send(db, sent):
+    """The burn is deferred, so a rider holding a working code keeps it
+    until we know the new one actually went out."""
+    api_auth.auth_sms_code_request(
+        _request(), api_auth.SmsCodeRequestIn(phone_number="3035551212")
+    )
+    burns = [s for s, _ in db["sql"]
+             if s.startswith("UPDATE login_codes SET used_at")
+             and "phone_number = %s" in s and "id <> %s" not in s]
+    assert not burns, "prior codes were burned before the send resolved"
+
+
+def test_a_delivered_code_supersedes_the_older_ones(db, sent, monkeypatch):
+    calls = _settle_calls(monkeypatch)
+    db["new_code_id"] = 99
+    api_auth.auth_sms_code_request(
+        _request(), api_auth.SmsCodeRequestIn(phone_number="3035551212")
+    )
+    assert calls == [{"column": "phone_number", "destination": "+13035551212",
+                      "code_id": 99, "delivered": True}]
+
+
+@pytest.mark.parametrize("exc", [
+    comms.CommsError("transport down"),
+    comms.QuotaExceeded("over quota"),
+])
+def test_an_undelivered_code_is_burned_instead_of_the_old_one(db, monkeypatch, exc):
+    """The rider tapped resend during an outage. Their previous code has to
+    survive: burning it would leave them with nothing, having also spent one
+    of three hourly slots to get there."""
+    calls = _settle_calls(monkeypatch)
+    db["new_code_id"] = 77
+
+    def raiser(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(api_auth, "send_sms", raiser)
+    with pytest.raises(HTTPException):
+        api_auth.auth_sms_code_request(
+            _request(), api_auth.SmsCodeRequestIn(phone_number="3035551212")
+        )
+    assert calls == [{"column": "phone_number", "destination": "+13035551212",
+                      "code_id": 77, "delivered": False}]
+
+
+def test_an_opted_out_send_also_leaves_the_previous_code_alone(db, monkeypatch):
+    calls = _settle_calls(monkeypatch)
+
+    def opted_out(*a, **k):
+        raise comms.OptedOut("text UNSTOP to +17202803332 to unblock.")
+
+    monkeypatch.setattr(api_auth, "send_sms", opted_out)
+    monkeypatch.setattr(api_auth, "_note_opt_out", lambda phone: None)
+    with pytest.raises(HTTPException):
+        api_auth.auth_sms_code_request(
+            _request(), api_auth.SmsCodeRequestIn(phone_number="3035551212")
+        )
+    assert calls and calls[0]["delivered"] is False
+
+
+# ---------- review #32.2: the global cap must not lock out proven owners -----
+def test_an_unproven_number_is_subject_to_the_global_daily_cap(db, sent, monkeypatch):
+    monkeypatch.setattr(api_auth, "phone_is_verified", lambda cur, phone: False)
+    api_auth.auth_sms_code_request(
+        _request(), api_auth.SmsCodeRequestIn(phone_number="3035551212")
+    )
+    keys = [p[0] for s, p in db["sql"]
+            if s.startswith("SELECT pg_advisory_xact_lock") and p]
+    assert any("sms_code_global:all" in k for k in keys)
+
+
+def test_a_proven_owner_skips_the_global_cap_but_not_the_per_number_one(db, sent, monkeypatch):
+    """13 IPs can drain the daily bucket in an hour. A rider whose only door
+    is SMS must not be locked out by that — but stays capped per number, so
+    the exemption is bounded."""
+    monkeypatch.setattr(api_auth, "phone_is_verified", lambda cur, phone: True)
+    api_auth.auth_sms_code_request(
+        _request(), api_auth.SmsCodeRequestIn(phone_number="3035551212")
+    )
+    keys = [p[0] for s, p in db["sql"]
+            if s.startswith("SELECT pg_advisory_xact_lock") and p]
+    assert not any("sms_code_global" in k for k in keys)
+    assert any("sms_code_phone:+13035551212" in k for k in keys)
+    assert any("sms_code_ip:" in k for k in keys)

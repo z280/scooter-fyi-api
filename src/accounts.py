@@ -447,6 +447,20 @@ def _release_unverified_holder(cur, phone: str, *, keep_account_id: int | None =
     cur.execute("UPDATE accounts SET phone_number = NULL WHERE id = %s", (holder_id,))
 
 
+def phone_is_verified(cur, phone: str) -> bool:
+    """Has anyone proved they answer this number?
+
+    Read-only, and used for exactly one thing: deciding whether a send is a
+    returning owner (who may have no other way in) or an unknown number.
+    Never an authorization check on its own.
+    """
+    cur.execute(
+        "SELECT 1 FROM accounts WHERE phone_number = %s AND phone_verified_at IS NOT NULL",
+        (phone,),
+    )
+    return cur.fetchone() is not None
+
+
 def claim_verified_phone(cur, account_id: int, phone: str) -> None:
     """Attach a just-proved number to an EXISTING account.
 

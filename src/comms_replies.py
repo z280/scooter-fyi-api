@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from .comms import ack_reply, comms_credentials, poll_replies
@@ -36,26 +35,49 @@ from .pg import connection
 
 log = logging.getLogger(__name__)
 
-# The carrier-recognised opt-out/opt-in keywords, matched on the whole
-# message after trimming. Deliberately exact rather than substring: "please
-# don't stop texting me the good ones" contains STOP and means the
-# opposite, and misreading it silently unsubscribes a rider with no way to
-# tell they've been unsubscribed.
-_STOP_WORDS = frozenset({"stop", "stopall", "unsubscribe", "cancel", "end", "quit"})
-_START_WORDS = frozenset({"start", "unstop", "yes", "subscribe"})
-
-_PUNCT_RE = re.compile(r"[^a-z]")
-
-
 def classify(body: str | None) -> str:
-    """'stop' | 'unstop' | 'other' for one reply body."""
+    """'stop' | 'unstop' | 'other' for one reply body.
+
+    This is a MIRROR of z280-comms' own rule, not an independent judgement,
+    and that distinction is the whole point. Comms owns consent for every
+    application on the shared sender; this function exists only so our UI
+    can be honest in between polls. If the two disagree, every disagreement
+    is a bug, in one of two directions:
+
+      * **Wider here than comms** — we mark someone opted out, comms keeps
+        accepting sends, and the OTHER applications on that number keep
+        texting a rider who used a carrier-standard keyword. That is the
+        complaint that gets a shared number filtered, and we'd have caused
+        it while believing we'd handled it.
+      * **Narrower here than comms** — comms blocks, we don't know, and our
+        UI goes on offering a sign-in door that answers 409 forever. That
+        is exactly the dishonesty this module's docstring claims to prevent.
+
+    So being wrong in the same direction as the authority is the only safe
+    way to be wrong, and "improving" on comms locally is the one change
+    that must not be made here.
+
+    As of this PR comms blocks on a STOP **prefix** and clears on exactly
+    UNSTOP — narrower than the carrier-standard set in both directions.
+    (An earlier draft of this file matched a wider set on the whole
+    message, which silently produced nine divergences.) The table in
+    tests/test_comms_replies.py is the tripwire; when comms widens its
+    set, that test fails first and this follows.
+
+    Note this classifier is never load-bearing for a send: consent is
+    enforced upstream, and a 409 at send time records the opt-out
+    regardless of what this function thought (api_auth._note_opt_out).
+    """
     if not body:
         return "other"
-    word = _PUNCT_RE.sub("", body.strip().lower())
-    if word in _STOP_WORDS:
-        return "stop"
-    if word in _START_WORDS:
+    text = body.strip().lower()
+    # Checked first, though it cannot collide: "unstop" does not start with
+    # "stop", and stating the precedence keeps it that way if either rule
+    # is ever edited.
+    if text == "unstop":
         return "unstop"
+    if text.startswith("stop"):
+        return "stop"
     return "other"
 
 

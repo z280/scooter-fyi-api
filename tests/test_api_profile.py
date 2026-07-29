@@ -88,13 +88,23 @@ def _app():
     return app
 
 
-def _put_client(monkeypatch, current_email, current_phone, raise_on=None):
-    # Third item: maybe_credit_profile_completion's "already awarded?"
+def _put_client(monkeypatch, current_email, current_phone, raise_on=None,
+                current_phone_verified_at=None):
+    # First item is the FOR UPDATE read of the account's current identity:
+    # (email, phone_number, phone_verified_at). The third column decides
+    # whether this PUT is about to destroy the only proof an email-less
+    # account has — see the guard in api_profile.
+    #
+    # Second item: maybe_credit_profile_completion's "already awarded?"
     # check, consumed only when the UPDATE succeeds (raise_on tests never
     # reach it — the exception propagates before that call). A truthy
     # value here means "already awarded", so it short-circuits with no
     # further queries — exactly one extra fetchone() either way.
-    fetches = [(current_email, current_phone), (1,), _PROFILE_ROW]
+    fetches = [
+        (current_email, current_phone, current_phone_verified_at),
+        (1,),
+        _PROFILE_ROW,
+    ]
     conn = _FakeConn(fetches, raise_on)
 
     @contextmanager
@@ -253,7 +263,8 @@ def test_put_newly_completing_the_profile_awards_points(monkeypatch):
     complete_accounts_row = ("rider@example.com", "resident", "+13035551234",
                               39.74, -104.98, None, None)
     fetches = [
-        ("rider@example.com", None),   # initial email/phone read
+        # (email, phone_number, phone_verified_at) — the FOR UPDATE read.
+        ("rider@example.com", None, None),
         None,                          # not yet awarded
         complete_accounts_row,         # completeness check
         (55, datetime.now(timezone.utc)),  # credit_points INSERT...RETURNING
@@ -360,3 +371,27 @@ def test_set_username_collision_maps_to_409(monkeypatch):
     c = _username_client(monkeypatch, _choose)
     r = c.put("/api/v1/profile/username", json={"adjective": "bold", "emoji": "🦊"})
     assert r.status_code == 409
+
+
+def test_put_refuses_to_strip_the_last_door_from_a_phone_only_account(monkeypatch):
+    """Writing phone_number clears phone_verified_at. On an account with no
+    email, that proof is the only way in — and SMS sign-in won't resolve an
+    unverified number, so the rider couldn't get back even by texting. The
+    lockout would surface weeks later, when their session lapsed."""
+    from datetime import datetime, timezone
+
+    c, _ = _put_client(
+        monkeypatch, None, "+13035550101",
+        current_phone_verified_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    r = c.put("/api/v1/profile", json={"phone_number": "+13035550102"})
+    assert r.status_code == 400
+    assert "verify the new number" in r.json()["detail"]
+
+
+def test_put_still_allows_swapping_an_unverified_number_on_an_email_less_account(monkeypatch):
+    """Narrowness check: with no verification to destroy, this PUT takes no
+    door away and is left alone — it was allowed long before SMS existed."""
+    c, _ = _put_client(monkeypatch, None, "+13035550101", current_phone_verified_at=None)
+    r = c.put("/api/v1/profile", json={"phone_number": "+13035550102"})
+    assert r.status_code == 200
