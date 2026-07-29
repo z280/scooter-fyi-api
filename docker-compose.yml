@@ -131,6 +131,11 @@ services:
       - default
       # Reach z280-comms as http://comms:8090
       - comms-net
+      # PUBLIC INGRESS. data.scooter.fyi resolves `pipeline_worker:8080` over
+      # this network. It MUST be declared here: a deploy recreates the
+      # container, and a recreate drops any network attached at runtime rather
+      # than in the file. Without this line the site goes dark on next deploy.
+      - ovh3-ingress
 
   scheduler:
     image: ${WORKER_IMAGE:-ghcr.io/z280/scooter-fyi-api:latest}
@@ -255,19 +260,6 @@ services:
           memory: 3072M
     mem_limit: 3072m
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: cloudflared
-    restart: unless-stopped
-    depends_on:
-      pipeline_worker:
-        condition: service_started
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-    mem_limit: 128m
 
 networks:
   # z280-comms, the messaging service. Membership IS the access control:
@@ -280,6 +272,14 @@ networks:
   comms-net:
     external: true
     name: comms-net
+
+  # The ovh3 public ingress network, owned by z280/cloudflare-management
+  # (ingress/). Was `veo-audit_default` -- this project's own default network,
+  # which meant `docker compose down` here took 24 hostnames across six
+  # domains offline with it.
+  ovh3-ingress:
+    external: true
+    name: ovh3-ingress_default
 
 volumes:
   pgdata:
