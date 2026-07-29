@@ -86,10 +86,12 @@ services:
       MAGIC_LINK_URL_TEMPLATE: ${MAGIC_LINK_URL_TEMPLATE}
       # z280-comms — SMS sign-in codes. Blank token = the SMS door 503s and
       # /auth/config reports sms_enabled:false, which is a supported state.
-      # The base URL is TAILNET-ONLY: this container has to be able to
-      # resolve and reach it, which bridge networking + MagicDNS does not
-      # give you for free. If sends fail with a DNS or connect error, set
-      # COMMS_BASE_URL to the tailnet IP instead of the name.
+      # Reached by CONTAINER NAME over the comms-net network (below), not
+      # over the tailnet. comms publishes only 127.0.0.1:8090 on the host,
+      # so there is no bridge gateway to reach and the tailnet URL is not
+      # routable from here — both were measured to time out from this
+      # container. Note there is NO /comms path suffix: that prefix is a
+      # `tailscale serve` mount point, not an application route.
       COMMS_TOKEN: ${COMMS_TOKEN}
       COMMS_BASE_URL: ${COMMS_BASE_URL}
       # Required: HMAC key for vehicle_identifier. Lose this and every
@@ -125,6 +127,11 @@ services:
   # pipeline_worker so the src.cli module + boundary data are available.
   # The schedule keeps firing even when uvicorn crashes; the worker can
   # restart freely without resetting cron timing.
+    networks:
+      - default
+      # Reach z280-comms as http://comms:8090
+      - comms-net
+
   scheduler:
     image: ${WORKER_IMAGE:-ghcr.io/z280/scooter-fyi-api:latest}
     build:
@@ -185,6 +192,11 @@ services:
   # private R2 bucket with SigV4. Valhalla's own `tile_urls` fetcher does an
   # unsigned HTTP GET and cannot read a private bucket, and we would rather not
   # make a 26 MB routing graph world-readable just to feed it.
+    networks:
+      - default
+      # Reach z280-comms as http://comms:8090
+      - comms-net
+
   valhalla_map_fetch:
     image: ${WORKER_IMAGE:-ghcr.io/z280/scooter-fyi-api:latest}
     build:
@@ -256,6 +268,18 @@ services:
         limits:
           memory: 128M
     mem_limit: 128m
+
+networks:
+  # z280-comms, the messaging service. Membership IS the access control:
+  # comms publishes only 127.0.0.1:8090 on the host, so nothing is exposed on
+  # the bridge gateway, the public interface or the tailnet. A service not on
+  # this network gets a DNS failure rather than a connection.
+  #
+  # Created and owned by z280/comms. If it does not exist, compose fails
+  # loudly at `up`, which is the desired guard.
+  comms-net:
+    external: true
+    name: comms-net
 
 volumes:
   pgdata:
