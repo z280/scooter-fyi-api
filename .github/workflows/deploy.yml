@@ -103,6 +103,8 @@ jobs:
           POSTMARK_TOKEN: ${{ secrets.POSTMARK_TOKEN }}
           POSTMARK_FROM: ${{ secrets.POSTMARK_FROM }}
           MAGIC_LINK_URL_TEMPLATE: ${{ secrets.MAGIC_LINK_URL_TEMPLATE }}
+          COMMS_TOKEN: ${{ secrets.COMMS_TOKEN }}
+          COMMS_BASE_URL: ${{ secrets.COMMS_BASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
@@ -110,7 +112,12 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,SENTRY_DSN,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,AUTH_ALLOWED_GITHUB_ORGS,SESSION_SECRET,VEHICLE_IDENTIFIER_SALT,CLOUDFLARE_TUNNEL_TOKEN,R2_RECEIPTS_BUCKET,R2_MAP_BUCKET,R2_MAP_ACCESS_KEY_ID,R2_MAP_SECRET_ACCESS_KEY,GOOGLE_OAUTH_CLIENT_ID,ADMIN_EMAILS,POSTMARK_TOKEN,POSTMARK_FROM,MAGIC_LINK_URL_TEMPLATE,GH_TOKEN,GH_ACTOR,REPO
+          # appleboy/ssh-action forwards ONLY the variables named here.
+          # The step's `env:` block above populates them on the RUNNER; this
+          # allowlist is what carries them to the REMOTE script. A secret
+          # added to `env:` but not to this line expands to an empty string
+          # in the heredoc below, silently, and the deploy still goes green.
+          envs: POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,SENTRY_DSN,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,AUTH_ALLOWED_GITHUB_ORGS,SESSION_SECRET,VEHICLE_IDENTIFIER_SALT,CLOUDFLARE_TUNNEL_TOKEN,R2_RECEIPTS_BUCKET,R2_MAP_BUCKET,R2_MAP_ACCESS_KEY_ID,R2_MAP_SECRET_ACCESS_KEY,GOOGLE_OAUTH_CLIENT_ID,ADMIN_EMAILS,POSTMARK_TOKEN,POSTMARK_FROM,MAGIC_LINK_URL_TEMPLATE,COMMS_TOKEN,COMMS_BASE_URL,GH_TOKEN,GH_ACTOR,REPO
           script: |
             set -e
             cd /opt/veo-audit
@@ -147,6 +154,14 @@ jobs:
             POSTMARK_TOKEN=$POSTMARK_TOKEN
             POSTMARK_FROM=$POSTMARK_FROM
             MAGIC_LINK_URL_TEMPLATE=$MAGIC_LINK_URL_TEMPLATE
+            # z280-comms. Both are read by docker-compose.yml; a blank
+            # COMMS_TOKEN leaves the SMS door closed and /auth/config
+            # reporting sms_enabled:false, which is a supported state.
+            # COMMS_BASE_URL is http://comms:8090 — container name on the
+            # comms-net network, and NO /comms path suffix (that prefix is a
+            # tailscale serve mount point, not an app route).
+            COMMS_TOKEN=$COMMS_TOKEN
+            COMMS_BASE_URL=$COMMS_BASE_URL
             WORKER_IMAGE=ghcr.io/$REPO:latest
             EOF
             echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
