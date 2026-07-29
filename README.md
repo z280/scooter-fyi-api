@@ -279,10 +279,18 @@ them before you have a session. The session-management half
 #### SMS, via z280-comms
 
 Texts go through [z280-comms](https://github.com/z280/comms) rather than
-straight to a handset. Set `COMMS_TOKEN` (and optionally `COMMS_BASE_URL`)
-to switch the door on; leave it blank and `/auth/config` reports
+straight to a handset. Set `COMMS_TOKEN` (and `COMMS_BASE_URL`) to switch
+the door on; leave the token blank and `/auth/config` reports
 `sms_enabled: false`, the SMS endpoints `503`, and the reply poller no-ops.
 That is a supported configuration, not a broken one.
+
+comms is reached container-to-container at `http://comms:8090` over the
+shared `comms-net` network, which `docker-compose.yml` joins as an external
+network. The tailnet URL (`https://ovh3.kudu-squeaker.ts.net/comms`) is
+published by `tailscale serve` on the host and is **not** reachable from a
+bridge container — and note it carries a `/comms` prefix that the direct
+route does not, because that prefix is the serve mount point rather than
+part of the app's routes.
 
 Four things about it will surprise you if nobody says them:
 

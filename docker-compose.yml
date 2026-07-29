@@ -54,6 +54,9 @@ services:
     depends_on:
       denver_spatial_db:
         condition: service_healthy
+    networks:
+      - default
+      - comms-net
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -86,10 +89,12 @@ services:
       MAGIC_LINK_URL_TEMPLATE: ${MAGIC_LINK_URL_TEMPLATE}
       # z280-comms — SMS sign-in codes. Blank token = the SMS door 503s and
       # /auth/config reports sms_enabled:false, which is a supported state.
-      # The base URL is TAILNET-ONLY: this container has to be able to
-      # resolve and reach it, which bridge networking + MagicDNS does not
-      # give you for free. If sends fail with a DNS or connect error, set
-      # COMMS_BASE_URL to the tailnet IP instead of the name.
+      # Reached container-to-container over the shared comms-net as
+      # http://comms:8090 — NOT via the tailnet URL, which is served by
+      # `tailscale serve` on the host and is unreachable from a bridge
+      # container. Note there is no /comms path segment on this route: that
+      # prefix is the tailscale-serve mount point, and the app itself
+      # serves /v1/... and /healthz at the root.
       COMMS_TOKEN: ${COMMS_TOKEN}
       COMMS_BASE_URL: ${COMMS_BASE_URL}
       # Required: HMAC key for vehicle_identifier. Lose this and every
@@ -134,6 +139,9 @@ services:
     depends_on:
       denver_spatial_db:
         condition: service_healthy
+    networks:
+      - default
+      - comms-net
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -256,6 +264,18 @@ services:
         limits:
           memory: 128M
     mem_limit: 128m
+
+networks:
+  # Owned by the z280-comms stack, joined here so the API and the reply
+  # poller can reach it as http://comms:8090. External because this stack
+  # must not create or own it: `docker compose down` here would otherwise
+  # tear out the network comms and every other application on it depend on.
+  #
+  # Both services list `default` explicitly alongside it. Compose drops the
+  # implicit default network the moment a service names any network, so
+  # omitting it here silently cuts pipeline_worker off from Postgres.
+  comms-net:
+    external: true
 
 volumes:
   pgdata:
