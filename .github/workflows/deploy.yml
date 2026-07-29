@@ -103,6 +103,8 @@ jobs:
           POSTMARK_TOKEN: ${{ secrets.POSTMARK_TOKEN }}
           POSTMARK_FROM: ${{ secrets.POSTMARK_FROM }}
           MAGIC_LINK_URL_TEMPLATE: ${{ secrets.MAGIC_LINK_URL_TEMPLATE }}
+          COMMS_TOKEN: ${{ secrets.COMMS_TOKEN }}
+          COMMS_BASE_URL: ${{ secrets.COMMS_BASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
@@ -147,6 +149,14 @@ jobs:
             POSTMARK_TOKEN=$POSTMARK_TOKEN
             POSTMARK_FROM=$POSTMARK_FROM
             MAGIC_LINK_URL_TEMPLATE=$MAGIC_LINK_URL_TEMPLATE
+            # z280-comms. Both are read by docker-compose.yml; a blank
+            # COMMS_TOKEN leaves the SMS door closed and /auth/config
+            # reporting sms_enabled:false, which is a supported state.
+            # COMMS_BASE_URL is http://comms:8090 — container name on the
+            # comms-net network, and NO /comms path suffix (that prefix is a
+            # tailscale serve mount point, not an app route).
+            COMMS_TOKEN=$COMMS_TOKEN
+            COMMS_BASE_URL=$COMMS_BASE_URL
             WORKER_IMAGE=ghcr.io/$REPO:latest
             EOF
             echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
