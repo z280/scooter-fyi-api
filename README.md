@@ -271,8 +271,52 @@ them before you have a session. The session-management half
 | `POST /api/v1/auth/google` | Google ID token → session |
 | `POST /api/v1/auth/magic-link` | Email → Postmark magic link (always 202) |
 | `POST /api/v1/auth/redeem` | Magic-link token → session |
-| `POST /api/v1/auth/code` | Email → Postmark 6-char sign-in code (always 202) |
+| `POST /api/v1/auth/code` | Email → Postmark `AA000AA` sign-in code (always 202) |
 | `POST /api/v1/auth/code/verify` | Email + code → session |
+| `POST /api/v1/auth/sms/code` | US phone → z280-comms `AA000AA` sign-in code |
+| `POST /api/v1/auth/sms/code/verify` | Phone + code → session (and marks the number verified) |
+
+#### SMS, via z280-comms
+
+Texts go through [z280-comms](https://github.com/z280/comms) rather than
+straight to a handset. Set `COMMS_TOKEN` (and optionally `COMMS_BASE_URL`)
+to switch the door on; leave it blank and `/auth/config` reports
+`sms_enabled: false`, the SMS endpoints `503`, and the reply poller no-ops.
+That is a supported configuration, not a broken one.
+
+Four things about it will surprise you if nobody says them:
+
+* **One phone number serves several applications.** Comms adds the
+  `scooter.fyi: ` prefix server-side, which is how a recipient tells our
+  text apart from another application's. Never put the site name in a
+  message body — it would be said twice.
+* **Our STOP/UNSTOP reading is a mirror, not a judgement.**
+  `comms_replies.classify` reproduces comms' rule exactly — a STOP prefix
+  blocks, exactly UNSTOP clears — and the table in
+  `tests/test_comms_replies.py` fails if the two drift. Widening it locally
+  is the tempting mistake: we'd mark someone opted out while comms kept
+  accepting sends, and every *other* application on that number would go on
+  texting a rider who used a carrier-standard keyword.
+* **Consent is global and enforced upstream.** Someone who texted STOP to
+  *any* application on that number cannot be messaged by us: the send comes
+  back `409`. You will see it for people who have never had an account
+  here. The `409` body is written to be shown to a human and names the
+  exact keyword and number that unblock — pass it through verbatim.
+* **Replies are polled, and polling claims.** `python -m src.cli
+  poll_comms_replies` (cron, every 5 min) is the only thing that will ever
+  see a rider's STOP; nothing is redelivered. A row in `comms_replies` with
+  `handled_at IS NULL` means we collected a message and failed to finish
+  with it — that's the query a human should watch.
+* **Nothing is guaranteed delivered.** A `202` means accepted, and
+  `fell_back: true` means the message went out on the handset with no
+  delivery confirmation ever to follow. Sign-in codes are safe under this
+  (the rider just asks for another); anything that *must* not fail silently
+  needs a non-SMS path.
+
+Phone numbers written through `PUT /api/v1/profile` are **unverified** —
+contact details, not proof. Only typing back a texted code sets
+`phone_verified`, and only a verified number can sign in. See
+`sql/045_sms_login_codes.sql` for why that distinction is load-bearing.
 
 ### Reports (public submission & aggregates)
 
@@ -311,6 +355,8 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `PUT /api/v1/profile` | Partial update of `rate_plan`/`theme`/`favorites`/`email`/`phone_number`/`show_public_username`/`show_in_leaderboards`/`home_lat`/`home_lng`/`work_lat`/`work_lng`/`royalty_title`/`ruling_color`/`ruling_border_color`/`ruling_alpha` |
 | `POST /api/v1/profile/username/regenerate` | Re-roll your public username to a new random adjective+emoji pair |
 | `PUT /api/v1/profile/username` | Choose a specific adjective and/or emoji (partial update) |
+| `POST /api/v1/profile/phone/code` | Text a code to prove you answer your listed number |
+| `POST /api/v1/profile/phone/verify` | Type it back → `phone_verified` on **this** account |
 | `GET /api/v1/profile/map-settings` | Every saved map setting for the caller |
 | `GET /api/v1/profile/map-settings/{name}` | One saved map setting |
 | `PUT /api/v1/profile/map-settings/{name}` | Create or replace a named map setting (opaque JSON blob) |

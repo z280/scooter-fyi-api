@@ -57,8 +57,10 @@ class _FakeCur:
         s = " ".join(sql.split())
         self.state.setdefault("sql", []).append((s, params))
         if s.startswith("INSERT INTO login_codes"):
-            self.state["inserted"] = params            # (email, code_hash, expires_at, ip)
-            self._fetch = None
+            self.state["inserted"] = params            # (destination, code_hash, expires_at, ip)
+            # ... RETURNING id — the row id names the issuance, and the SMS
+            # door uses it as the comms idempotency key.
+            self._fetch = (self.state.get("new_code_id", 7),)
         elif s.startswith("SELECT id, code_hash FROM login_codes"):
             self._fetch = self.state.get("row")        # (id, code_hash) or None
         elif "attempts = attempts + 1" in s and "RETURNING attempts" in s:

@@ -68,6 +68,7 @@ from .battery_model import (
     extract_trips,
     train as train_battery,
 )
+from .comms_replies import poll_once as poll_comms_replies
 from .config import load
 from .cycle import run_once
 from .r2_map import sync_map_assets
@@ -500,6 +501,7 @@ COMMANDS = {
     "extract_battery_trips": _cli_extract_battery_trips,
     "train_battery_model":   _cli_train_battery_model,
     "backfill_battery_trips": _cli_backfill_battery_trips,
+    "poll_comms_replies":    poll_comms_replies,
     "migrate":               lambda: run_migrations(),
 }
 

@@ -1266,12 +1266,14 @@ Postmark config). Cached `public, max-age=300`.
 
 | Endpoint | Body / notes |
 |---|---|
-| `GET /api/v1/auth/config` | Public. → `{ google_client_id, google_enabled, magic_link_enabled, code_enabled }`. Render sign-in doors + init Google Identity Services from this. `google_enabled` is false when unconfigured **or** force-disabled via `GOOGLE_AUTH_ENABLED` (and `google_client_id` is null in that case). |
+| `GET /api/v1/auth/config` | Public. → `{ google_client_id, google_enabled, magic_link_enabled, code_enabled, sms_enabled }`. Render sign-in doors + init Google Identity Services from this. `google_enabled` is false when unconfigured **or** force-disabled via `GOOGLE_AUTH_ENABLED` (and `google_client_id` is null in that case). |
 | `POST /api/v1/auth/google` | `{ "credential": "<Google ID token>" }` from Google Identity Services / One Tap. Verified locally (signature, audience, expiry, `email_verified`). → `{token, expires}`. `503` when unconfigured or force-disabled via `GOOGLE_AUTH_ENABLED`. |
 | `POST /api/v1/auth/magic-link` | `{ "email": "you@example.com" }` → always `202 { "sent": true }` (no account-existence oracle). Emails a single-use link (15-min TTL). Limits: 3/hour per email, 10/hour per IP. `502` if the email provider fails, `503` if unconfigured. |
 | `POST /api/v1/auth/redeem` | `{ "token": "<from the emailed link>" }` → `{token, expires}`. Single-use; `401` if invalid, expired, or already used. |
 | `POST /api/v1/auth/code` | `{ "email": "you@example.com" }` → always `202 { "sent": true }`. Emails a short `AA000AA` code (10-min TTL). Only the newest code per email is live. Limits: 3/hour per email, 10/hour per IP. `502` if the email provider fails, `503` if unconfigured. |
 | `POST /api/v1/auth/code/verify` | `{ "email": "you@example.com", "code": "AB123XY" }` → `{token, expires}`. Case-insensitive; spaces/hyphens ignored. `401` if the code is wrong, expired, already used, or after too many wrong tries (5 — which burns the code). Verify attempts are rate-limited 30/hour per IP. |
+| `POST /api/v1/auth/sms/code` | `{ "phone_number": "(303) 555-1212" }` → `202 { "sent": true }`. Texts a short `AA000AA` code (10-min TTL) via z280-comms. US numbers only, any format. Limits: 3/hour per number, 5/hour per IP, 250/day globally — the daily ceiling is **skipped for a number already verified**, so a rider whose only door is SMS can't be locked out by other traffic. A failed send does **not** invalidate a code you already hold. `400` unusable number, `409` **the recipient has blocked texts — show `detail` verbatim, it names the keyword and number that unblock**, `429` over quota, `502` send failed, `503` if unconfigured. |
+| `POST /api/v1/auth/sms/code/verify` | `{ "phone_number": "(303) 555-1212", "code": "AB123XY" }` → `{token, expires}`. Case-insensitive; spaces/hyphens ignored. Typing the code back is what marks the number **verified** — an account is created if none has proved that number yet. `401` wrong/expired/too many tries (5), `409` if the number is contested (needs an operator). Limits: 10/hour per number, 30/hour per IP. |
 | `POST /api/v1/auth/refresh` | Bearer required. → `{token, expires}` (new token; old one revoked). |
 | `GET /api/v1/auth/session` | Bearer required. → `{ email, scopes, expires }`. `401` when invalid/expired — treat as signed out. |
 | `POST /api/v1/auth/signout` | Bearer required. Revokes the token. → `{ "revoked": true }` |
@@ -1378,6 +1380,8 @@ publicly without moderation. Usernames are unique.
 |---|---|
 | `POST /api/v1/profile/username/regenerate` | Re-roll to a new random pair. → `{ "public_username": "..." }` |
 | `PUT /api/v1/profile/username` | `{ "adjective"?: string, "emoji"?: string }` — partial: omit either half to keep your current one. `400` if you send neither, `400` if a value isn't on the curated list, `409` if the resulting username is taken. → `{ "public_username": "..." }` |
+| `POST /api/v1/profile/phone/code` | Bearer required. `{ "phone_number"? }` — omit to use the number already on your profile. Texts an `AA000AA` code. Draws on the **same** send budget as the SMS sign-in door (one handset). Same `400`/`409`/`429`/`502`/`503` set as `/auth/sms/code`. |
+| `POST /api/v1/profile/phone/verify` | Bearer required. `{ "phone_number", "code" }` → `{ phone_number, phone_verified: true }`. Attaches the proved number to **this** account — which is what stops SMS sign-in from creating a second account for a rider who listed their number in their profile. `409` if another account has already verified it. |
 
 Both share **one** rate-limit bucket of 10/hour per account — they mutate
 the same field, so a combined cap is what actually limits abuse.

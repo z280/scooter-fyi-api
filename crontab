@@ -79,3 +79,10 @@
 # Refit weekly. Runs after extraction has had its turn, and the coefficients
 # move slowly enough that a daily refit would mostly chase weather noise.
 45 5 * * 1 cd /app && python -m src.cli train_battery_model
+
+# Inbound SMS replies from z280-comms. Replies are polled, never pushed, and
+# the poll CLAIMS what it returns — nothing is redelivered — so this is the
+# only thing that will ever see a rider's STOP. Every 5 minutes: consent is
+# enforced upstream at send time regardless, so the only cost of lag here is
+# how long our own UI keeps saying "we'll text you" to someone who opted out.
+*/5 * * * * cd /app && python -m src.cli poll_comms_replies

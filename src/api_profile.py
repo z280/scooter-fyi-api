@@ -5,6 +5,8 @@ usernames / phone numbers / home-work locations).
     PUT  /api/v1/profile                      partial update of the client-writable fields
     POST /api/v1/profile/username/regenerate  re-roll public_username to a new random pair
     PUT  /api/v1/profile/username             choose a specific adjective and/or emoji
+    POST /api/v1/profile/phone/code           text a code to prove your number
+    POST /api/v1/profile/phone/verify         type it back → phone_verified
 
 Client-writable via PUT /api/v1/profile: rate_plan, theme, favorites,
 email, phone_number, show_public_username, show_in_leaderboards,
@@ -39,15 +41,35 @@ from pydantic import BaseModel, Field
 from .accounts import (
     EMAIL_RE,
     InvalidUsernameChoice,
+    PhoneNumberContested,
+    PhoneNumberTaken,
     SessionUser,
     assign_public_username,
     choose_public_username,
+    claim_verified_phone,
     normalize_email,
     normalize_phone_number,
+    normalize_us_phone,
     is_valid_phone_number,
     require_session,
 )
+# The code machinery (generate / hash / issue / verify, and the SMS send
+# settings) is owned by the auth module, because sign-in is what it exists
+# for. Verifying your own number is the same machinery pointed at a
+# different outcome — a column on your account instead of a session — so it
+# imports rather than reimplements. One-directional: api_auth knows nothing
+# about profiles.
+from .api_auth import (
+    SMS_CODE_TTL_MINUTES,
+    _issue_code,
+    _normalize_code,
+    _settle_issued_code,
+    _verify_code,
+    enforce_sms_send_budget,
+    send_code_sms,
+)
 from .badges import compute_badges
+from .comms import comms_credentials
 from .pg import connection
 from .points import maybe_credit_profile_completion
 from .ratelimit import enforce
@@ -68,6 +90,10 @@ _MAX_RULING_ALPHA = 1.00
 # Shared by both username-mutating endpoints below — they change the same
 # field, so one combined cap (not one each) is what actually limits abuse.
 _LIMIT_USERNAME_REROLL_PER_ACCOUNT = (10, 3600)
+# Guesses against a texted verification code. The code itself is already
+# attempt-capped per code (MAX_CODE_ATTEMPTS); this caps how many fresh
+# codes an account can grind through.
+_LIMIT_PHONE_VERIFY_PER_ACCOUNT = (10, 3600)
 
 
 class ProfileUpdate(BaseModel):
@@ -106,7 +132,7 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
                show_in_leaderboards, rate_plan, theme, favorites,
                home_lat, home_lng, work_lat, work_lng,
                royalty_title, ruling_color, ruling_border_color, ruling_alpha,
-               display_name
+               display_name, phone_verified_at, sms_opted_out_at
         FROM accounts WHERE id = %s
         """,
         (user.account_id,),
@@ -118,10 +144,22 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
      show_in_leaderboards, rate_plan, theme, favorites,
      home_lat, home_lng, work_lat, work_lng,
      royalty_title, ruling_color, ruling_border_color, ruling_alpha,
-     display_name) = row
+     display_name, phone_verified_at, sms_opted_out_at) = row
     return {
         "email": email,
         "phone_number": phone_number,
+        # Whether anyone has PROVED they answer that number, by typing back
+        # a code texted to it (sql/045). A number typed into the PUT below
+        # starts unverified and stays that way: this endpoint writes contact
+        # details, and contact details are not proof. Only a verified number
+        # can be used to sign in, so the UI needs this to know whether to
+        # offer the "verify your number" prompt.
+        "phone_verified": phone_verified_at is not None,
+        # They texted STOP. Consent is enforced upstream by z280-comms and is
+        # global across every application on the shared sender, so this is a
+        # local echo for honest UI — not the authority, and not something
+        # this API can clear (only an UNSTOP text can).
+        "sms_opted_out": sms_opted_out_at is not None,
         "public_username": public_username,
         # Server-computed (sql/044): title + public_username, or just the
         # username when no title is set. Read-only here — it moves by
@@ -202,13 +240,14 @@ def put_profile(
             # requests read "email set, phone null" and each independently
             # decides its own half of a null-both-out change is safe.
             cur.execute(
-                "SELECT email, phone_number FROM accounts WHERE id = %s FOR UPDATE",
+                "SELECT email, phone_number, phone_verified_at FROM accounts "
+                "WHERE id = %s FOR UPDATE",
                 (user.account_id,),
             )
             row = cur.fetchone()
             if not row:
                 raise HTTPException(401, "account no longer exists")
-            current_email, current_phone_number = row
+            current_email, current_phone_number, current_phone_verified_at = row
 
             if "rate_plan" in provided:
                 if payload.rate_plan not in _RATE_PLANS:
@@ -248,12 +287,53 @@ def put_profile(
                         )
                 sets.append("phone_number = %s")
                 params.append(new_phone_number)
+                # Verification belongs to a NUMBER, not to an account, so
+                # writing a different number here must drop it — otherwise
+                # "verified" would transfer from the number somebody proved
+                # to one nobody has, and that unverified number would then
+                # be a working sign-in key for this account. Unconditional
+                # rather than only-when-changed: re-writing the same number
+                # loses nothing but a re-verification, and getting the
+                # comparison subtly wrong loses the whole guarantee.
+                sets.append("phone_verified_at = NULL")
 
             if new_email is None and new_phone_number is None:
                 raise HTTPException(
                     400,
                     "a profile needs an email address or a phone number "
                     "(or both) — add one before removing the other",
+                )
+
+            # Refuse the one edit that would destroy the rider's last door.
+            #
+            # Writing phone_number nulls phone_verified_at (above). If the
+            # account has no email AND the proof being cleared was its only
+            # way in, the result is an account nobody can sign into: SMS
+            # sign-in refuses unverified numbers, and it can't re-verify by
+            # signing in either, because upsert_account_by_phone treats an
+            # unverified holder with no email as contested. The rider
+            # wouldn't find out until their session lapsed, up to 30 days
+            # later, by which point nothing they could type would help.
+            #
+            # Deliberately narrow — it fires only when a VERIFIED number is
+            # being overwritten on an email-less account, which is exactly
+            # the state this PR makes reachable. Removing an email while
+            # adding an unverified number was already allowed before any of
+            # this existed and is left alone; it is not a door this change
+            # took away.
+            #
+            # The flow they actually wanted sets the number and its proof
+            # together, so point at it.
+            if (
+                new_email is None
+                and "phone_number" in provided
+                and current_phone_verified_at is not None
+            ):
+                raise HTTPException(
+                    400,
+                    "verify the new number instead (POST /api/v1/profile/phone/code) — "
+                    "changing it here would clear the proof that you answer it, and "
+                    "with no email on file you'd have no way to sign back in",
                 )
 
             if "show_public_username" in provided:
@@ -415,3 +495,135 @@ def set_public_username(
                 )
         conn.commit()
     return {"public_username": new_username}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/profile/phone/code  +  POST /api/v1/profile/phone/verify
+# ---------------------------------------------------------------------------
+# Proving the number on YOUR OWN account, from inside a session you already
+# have. Without this pair, phone_verified_at could only ever be set by
+# accounts.upsert_account_by_phone — which creates a NEW account — so a rider
+# who typed their number into their profile and then used SMS sign-in would
+# quietly end up with two accounts and wonder where their rides went. Here
+# the proof lands on the account they are already signed into.
+#
+# The message says "verify your number", not "login": a rider who gets a text
+# they did not ask for should be able to tell from the text itself what it
+# would do if they read it out to someone.
+#
+# No site name here either — comms prefixes "scooter.fyi: " server-side.
+# Delivered as: "scooter.fyi: Use code AB123XY to verify your number."
+SMS_VERIFY_TEMPLATE = "Use code {code} to verify your number."
+
+
+class PhoneCodeRequest(BaseModel):
+    # Optional: default to whatever is already on the profile, so the common
+    # case ("verify the number you can see on screen") needs no body at all.
+    phone_number: str | None = Field(default=None, max_length=32)
+
+
+class PhoneCodeVerify(BaseModel):
+    phone_number: str = Field(..., min_length=7, max_length=32)
+    code: str = Field(..., min_length=1, max_length=32)
+
+
+def _resolve_phone_to_verify(cur, user: SessionUser, supplied: str | None) -> str:
+    raw = supplied
+    if raw is None:
+        cur.execute("SELECT phone_number FROM accounts WHERE id = %s", (user.account_id,))
+        row = cur.fetchone()
+        raw = row[0] if row else None
+        if not raw:
+            raise HTTPException(400, "no phone number on file — add one first")
+    phone = normalize_us_phone(raw)
+    if not phone:
+        raise HTTPException(400, "enter a US phone number, like (303) 555-1212")
+    return phone
+
+
+@router.post("/api/v1/profile/phone/code", status_code=202)
+def request_phone_verification_code(
+    user: SessionUser = Depends(require_session),
+    payload: PhoneCodeRequest = Body(default=PhoneCodeRequest()),
+) -> dict[str, Any]:
+    """Text a code to the number you want to prove you answer."""
+    if not comms_credentials():
+        raise HTTPException(503, "SMS is not configured")
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            phone = _resolve_phone_to_verify(cur, user, payload.phone_number)
+            # Deliberately the SAME per-number and global budget the
+            # sign-in door draws on: one handset, one plan. The origin
+            # bucket is per-account here rather than per-IP, since this
+            # door always has a session to attribute the send to.
+            enforce_sms_send_budget(
+                cur, phone=phone,
+                origin_bucket="sms_code_account", origin_key=str(user.account_id),
+            )
+            # burn_previous=False, and settled after the send — same
+            # reasoning as the sign-in door (api_auth._settle_issued_code):
+            # a refused send must not destroy a code already in hand.
+            code, code_id = _issue_code(
+                cur, column="phone_number", destination=phone,
+                ttl_minutes=SMS_CODE_TTL_MINUTES, ip=None, burn_previous=False,
+            )
+        conn.commit()
+
+    # After commit, exactly as the auth doors do: a comms outage must not
+    # roll back the rate-limit events into a free retry loop.
+    try:
+        send_code_sms(
+            phone,
+            SMS_VERIFY_TEMPLATE.format(code=code),
+            idempotency_key=f"login-code-{code_id}",
+            purpose="phone_verification",
+        )
+    except HTTPException:
+        _settle_issued_code("phone_number", phone, code_id, delivered=False)
+        raise
+    _settle_issued_code("phone_number", phone, code_id, delivered=True)
+    return {"sent": True, "phone_number": phone}
+
+
+@router.post("/api/v1/profile/phone/verify")
+def verify_phone_number(
+    user: SessionUser = Depends(require_session),
+    payload: PhoneCodeVerify = Body(...),
+) -> dict[str, Any]:
+    """Type the code back to attach the verified number to this account.
+
+    Same login_codes row, same attempt cap and single-use burn as sign-in —
+    the code is keyed to the NUMBER, and this endpoint differs only in what
+    success buys: a verified column on the session's account instead of a
+    new session.
+    """
+    phone = normalize_us_phone(payload.phone_number)
+    if not phone:
+        raise HTTPException(400, "enter a US phone number, like (303) 555-1212")
+    code = _normalize_code(payload.code)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            enforce(
+                cur, bucket="phone_verify_account", key=str(user.account_id),
+                limit=_LIMIT_PHONE_VERIFY_PER_ACCOUNT[0],
+                window_seconds=_LIMIT_PHONE_VERIFY_PER_ACCOUNT[1],
+            )
+            _verify_code(conn, cur, column="phone_number", destination=phone, code=code)
+            try:
+                claim_verified_phone(cur, user.account_id, phone)
+            except PhoneNumberTaken:
+                conn.commit()
+                raise HTTPException(
+                    409, "that number is already verified on another account"
+                )
+            except PhoneNumberContested:
+                conn.commit()
+                raise HTTPException(
+                    409,
+                    "that number is attached to another account that can't be "
+                    "released automatically — email support to sort it out",
+                )
+        conn.commit()
+    return {"phone_number": phone, "phone_verified": True}
