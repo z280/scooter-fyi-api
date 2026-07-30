@@ -93,6 +93,58 @@ def test_replaying_every_migration_is_safe_with_a_not_rideable_row(pg_conn):
         assert cur.fetchone()[0] == 1, "the replay must not have destroyed data"
 
 
+def test_replaying_every_migration_is_safe_with_a_ride_mode_points_row(pg_conn):
+    """Same failure class as the not_rideable case above, recurring for a
+    different constraint: sql/037 ALSO rewrites user_points_action_allowed
+    unconditionally (a plain DROP/re-ADD, no guard — see that file's
+    'user_points.action' block before its fix). RIDE_MODE_OVERHAUL_PLAN.md
+    phases A2/A3 (sql/053, sql/052) later widen that SAME constraint to
+    admit five new ride-mode actions. Once a single production row carries
+    one of those (e.g. a rider submits one end-of-ride survey), sql/037
+    sits earlier in file order than 052/053, so a full replay reaches it
+    first and its unconditional re-ADD with the old 8-value list dies with
+    a CheckViolation on that row — identical to the sql/029 bug above, just
+    for user_points instead of device_reports. Pinned here the same way."""
+    with pg_conn.cursor() as cur:
+        account_id = upsert_account(cur, f"pgtest-replay-{uuid.uuid4()}@example.com")
+        cur.execute(
+            "INSERT INTO user_points (account_id, action, points, lat, lng, h3_8_index) "
+            "VALUES (%s, 'ride_survey', 4, 39.74, -104.98, 123456789)",
+            (account_id,),
+        )
+    pg_conn.commit()
+
+    _apply_all(pg_conn)   # would raise CheckViolation before sql/037's fix
+    _apply_all(pg_conn)   # and again — replay must be repeatable, not once-more
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM user_points WHERE account_id = %s AND action = 'ride_survey'",
+            (account_id,),
+        )
+        assert cur.fetchone()[0] == 1, "the replay must not have destroyed data"
+
+
+def test_the_replayed_user_points_constraint_still_permits_every_ride_mode_action(pg_conn):
+    """A replay that silently reinstated sql/037's original 8-value list
+    would only surface the next time a rider earned a ride-mode award.
+    Insert one row per action sql/052/sql/053 add, post-replay."""
+    _apply_all(pg_conn)
+    with pg_conn.cursor() as cur:
+        account_id = upsert_account(cur, f"pgtest-replay-{uuid.uuid4()}@example.com")
+        for action, points in (
+            ("battery_contribution", 8), ("nav_route_feedback", 4),
+            ("nav_qualitative_feedback", 6), ("nav_distance_bonus", 2),
+            ("ride_survey", 4),
+        ):
+            cur.execute(
+                "INSERT INTO user_points (account_id, action, points, lat, lng, h3_8_index) "
+                "VALUES (%s, %s, %s, 39.74, -104.98, 123456789)",
+                (account_id, action, points),
+            )
+    pg_conn.commit()
+
+
 def test_the_replayed_constraint_still_permits_every_current_type(pg_conn):
     """A replay that silently reinstated an older value list would only
     surface on the next rider report. Insert one of each."""

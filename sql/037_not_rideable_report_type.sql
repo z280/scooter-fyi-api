@@ -37,18 +37,54 @@ ALTER TABLE device_reports
 -- --------------------------------------------------------------------------
 -- user_points.action
 -- --------------------------------------------------------------------------
-ALTER TABLE user_points
-    DROP CONSTRAINT IF EXISTS user_points_action_allowed;
+-- REPLAY SAFETY (fixed in place, same bug class and same repair shape as
+-- sql/029's fix for device_reports_report_type_allowed above -- see that
+-- file's header, and the sql/040/041 guarded-rewrite shape
+-- PLAN_RIDE_MODE_API.md's house rules point to). This block used to DROP
+-- the constraint unconditionally and re-ADD it with only the 8 action
+-- values known when this file was written.
+--
+-- RIDE_MODE_OVERHAUL_PLAN.md's phases A2/A3 (sql/053, sql/052) later widen
+-- this SAME constraint to admit five more actions ('battery_contribution',
+-- 'nav_route_feedback', 'nav_qualitative_feedback', 'nav_distance_bonus',
+-- 'ride_survey') -- see those files' own guarded DO blocks. Once a single
+-- production row carries any of those values (e.g. one submitted survey),
+-- replaying the full sql/ set -- src/pg.py's own "IF NOT EXISTS makes
+-- every file safe to re-run" contract, and every _pg test fixture that
+-- does the same, per this file's own numeric position ahead of 052/053 --
+-- reaches THIS block first and an unconditional re-ADD with the old
+-- 8-value list dies with a CheckViolation against that row: exactly
+-- sql/029's bug, recurring here for a different constraint.
+--
+-- Guarded the same way sql/029 was repaired: skip the rewrite once
+-- 'report_not_rideable' (the value THIS migration installs) is already
+-- present, so replaying after a later migration has widened the list
+-- further is a no-op instead of a regression that reverts it.
+DO $$
+DECLARE
+    current_def text;
+BEGIN
+    SELECT pg_get_constraintdef(oid) INTO current_def
+      FROM pg_constraint
+     WHERE conname = 'user_points_action_allowed'
+       AND conrelid = 'user_points'::regclass
+       AND contype = 'c';
 
-UPDATE user_points
-   SET action = 'report_not_rideable'
- WHERE action = 'report_wont_start';
+    IF current_def IS NULL OR position('report_not_rideable' in current_def) = 0 THEN
+        ALTER TABLE user_points
+            DROP CONSTRAINT IF EXISTS user_points_action_allowed;
 
-ALTER TABLE user_points
-    ADD CONSTRAINT user_points_action_allowed
-    CHECK (action IN (
-        'profile_completion', 'waypoint', 'gbfs_trip_validated',
-        'report_not_rideable', 'report_not_found',
-        'report_vehicle_issue', 'report_improper_parking',
-        'qr_scan'
-    ));
+        UPDATE user_points
+           SET action = 'report_not_rideable'
+         WHERE action = 'report_wont_start';
+
+        ALTER TABLE user_points
+            ADD CONSTRAINT user_points_action_allowed
+            CHECK (action IN (
+                'profile_completion', 'waypoint', 'gbfs_trip_validated',
+                'report_not_rideable', 'report_not_found',
+                'report_vehicle_issue', 'report_improper_parking',
+                'qr_scan'
+            ));
+    END IF;
+END $$;

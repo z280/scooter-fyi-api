@@ -67,6 +67,11 @@ Available commands:
                       never settle. Also sweeps ride_routes on its own 28h
                       clock once sql/052 (phase A3) exists -- a
                       to_regclass-guarded no-op until then.
+    recompute_area_leaders
+                      Recompute the H3 r8 area leader report (FEATURE_PLAN_
+                      2026-07.md §11 / PLAN_RIDE_MODE_API.md phase A4):
+                      trailing-28-day per-cell leaderboard, full replace
+                      (src/area_leaders.py:recompute).
     migrate           Apply pending SQL migrations.
     admin             Manage the admin allowlist:
                       `admin (list | add <email> | remove <email>)`.
@@ -79,6 +84,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from .archive import run_archive
+from .area_leaders import recompute as recompute_area_leaders
 from .battery_model import (
     backfill_trips_from_archive,
     extract_trips,
@@ -580,6 +586,14 @@ def _cli_backfill_battery_trips() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# H3 r8 area leader report (FEATURE_PLAN_2026-07.md §11 / PLAN_RIDE_MODE_API.md
+# phase A4). Cron: `15 9 * * * python -m src.cli recompute_area_leaders`.
+# ---------------------------------------------------------------------------
+def _cli_recompute_area_leaders() -> dict:
+    return recompute_area_leaders()
+
+
+# ---------------------------------------------------------------------------
 # De-id sweep (PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md
 # glossary "De-id"). Cron: `15 * * * * python -m src.cli deidentify_donations`.
 # ---------------------------------------------------------------------------
@@ -752,6 +766,7 @@ COMMANDS = {
     "backfill_battery_trips": _cli_backfill_battery_trips,
     "poll_comms_replies":    poll_comms_replies,
     "deidentify_donations":  deidentify_donations,
+    "recompute_area_leaders": _cli_recompute_area_leaders,
     "migrate":               lambda: run_migrations(),
 }
 

@@ -192,6 +192,26 @@ _PRIVACY = {
                       "underlying rows.",
         },
         {
+            "data": "h3_r8_area_leaders",
+            "retention": "recomputed nightly; deleted only with the account",
+            "detail": "The public leaderboard's per-cell top-3 report (H3 "
+                      "resolution-8 area, your account id, your summed "
+                      "points in that cell over the trailing 28 days, and "
+                      "when you first earned points there) is derived "
+                      "entirely from the points ledger above and fully "
+                      "replaced every night at 9:15am -- nothing here "
+                      "accumulates beyond that nightly recompute. It is "
+                      "deleted immediately if your account is deleted "
+                      "(cascade), and is never a separate retention clock "
+                      "from the ledger it's derived from. Whether a rank "
+                      "you hold is shown on the public leaderboard map is "
+                      "decided fresh on every request from your account's "
+                      "current visibility toggles (public username, "
+                      "leaderboard participation) -- turning either off "
+                      "removes you from the public view immediately, not "
+                      "at the next nightly recompute.",
+        },
+        {
             "data": "device_photos",
             "retention": "indefinite (public content)",
             "detail": "Rider-uploaded photos of physical devices are public, "

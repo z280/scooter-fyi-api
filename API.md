@@ -942,6 +942,87 @@ GET /api/v1/h3/aggregates?res=9
 
 ---
 
+### `GET /api/v1/leaderboard/map`
+
+FEATURE_PLAN §11's H3 r8 "area leader" report -- the 🏆 Leaderboard
+view's choropleth **and** click-through detail in one fetch. Reads the
+daily recompute (`src/area_leaders.py`, `sql/048_h3_r8_area_leaders.sql`;
+trailing 28 days, `status='confirmed'` ledger rows only, tie-break
+`points DESC, first_point_at ASC, account_id ASC`), but privacy is
+applied **live**, at read time, against `accounts` -- never baked into
+the stored report. An account with `show_in_leaderboards=false`,
+`show_public_username=false`, or a `NULL` `display_name` (an
+unbackfilled username, sql/025) is skipped and the next stored rank
+(1..3) falls through into `leader`; `runners_up` is whatever eligible
+ranks remain. This takes effect on the very next request -- an opted-out
+rider is never shown again, not just from tomorrow's run.
+
+**Request:**
+```http
+GET /api/v1/leaderboard/map
+```
+
+**Response 200:**
+```json
+{
+  "computed_at": "2026-07-29T09:15:00+00:00",
+  "window_start": "2026-07-01T09:15:00+00:00",
+  "window_end": "2026-07-29T09:15:00+00:00",
+  "cells": {
+    "8828308281fffff": {
+      "total_points": 144,
+      "distinct_earners": 4,
+      "leader": {
+        "display_name": "Duke swift🦦",
+        "points": 88,
+        "ruling_color": "#7c54cd",
+        "ruling_border_color": "#382264",
+        "ruling_alpha": 0.6
+      },
+      "runners_up": [
+        { "display_name": "...", "points": 30,
+          "ruling_color": null, "ruling_border_color": null, "ruling_alpha": null }
+      ]
+    },
+    "8828308283fffff": {
+      "total_points": 0, "distinct_earners": 0, "leader": null, "runners_up": []
+    }
+    /* ... ~720 cells ... */
+  }
+}
+```
+
+**Response 503:** no report has ever been computed yet (cold start),
+`{ "detail": "no leaderboard computed yet" }`.
+
+#### Notes
+
+- **Cell keys are canonical h3 strings** (`h3.int_to_str`), never raw
+  64-bit integers -- same JS `MAX_SAFE_INTEGER` reason as
+  [`/api/v1/h3/aggregates`](#get-apiv1h3aggregatesres8910).
+- `total_points`/`distinct_earners` are **not** privacy-filtered -- they
+  are aggregate ledger facts with no identity attached. A cell can show
+  real nonzero totals with `leader: null` when every earner there opted
+  out.
+- `leader` + `runners_up` together are at most 3 entries, and can be
+  fewer (including both empty/null). No `royalty_title` field:
+  `display_name` already composes it (sql/044's generated column).
+- A rider with no claimed ruling-color pair leads with
+  `ruling_color: null` -- the API never invents a default; that's a
+  frontend decision. `ruling_alpha` is nulled alongside an unclaimed
+  pair (it otherwise carries a non-null `0.60` schema default that would
+  leak as a meaningless fill opacity).
+- **ETag is not run-keyed** -- this payload is a live join, not a pure
+  function of the last recompute. The weak ETag is
+  `W/"arealb:<computed_at epoch>:<sha256(cells)[:16]>"` over a canonical
+  (`sort_keys=True`) serialization, so any eligibility/color/name change
+  between runs busts a client's cached copy immediately, and a fresh run
+  with byte-identical cells still gets a new tag (its
+  `computed_at`/`window_*` changed). `Cache-Control: public,
+  max-age=600`, same as `/api/v1/h3/aggregates`.
+
+---
+
 ### `GET /api/v1/equity-estimate?ranks=1,2`
 
 Device share inside a **candidate equity-rank cutoff** — the combined
@@ -1760,6 +1841,7 @@ deliberately withholds.
 | `GET /api/v1/private/devices/{vehicle_identifier}/history?since=&until=&limit=` | Time-ordered position-stop history for one scooter. `since` defaults to 7 days ago, `until` to now, `limit` 1–10000 (default 2000). |
 | `GET /api/v1/private/devices/max-ranges?form_factor=&limit=` | Devices sorted by highest-ever observed range. `limit` 1–20000 (default 5000). |
 | `GET /api/v1/private/trips/daily?date=YYYY-MM-DD&limit=` | Daily trip/popularity rollup for one Denver-local date. `limit` 1–5000 (default 100). |
+| `GET /api/v1/private/area-leaders` | Full, unfiltered §11 area-leader report: every stored rank 1-3 per cell with real account ids, points, and `first_point_at` tie-break provenance -- no privacy filtering (that layer belongs only to the public `/api/v1/leaderboard/map`). |
 | `GET /api/v1/private/reports` | Admin listing of all negative reports. |
 | `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback. |
 
@@ -3023,6 +3105,8 @@ Explicit `Cache-Control` headers, per endpoint:
 | `/api/v1/meta/privacy` | `public, max-age=3600` | — |
 | `/api/v1/meta/pricing` | `public, max-age=3600` | — |
 | `/api/v1/points/schedule` | `public, max-age=3600` | — |
+| `/api/v1/leaderboard/map` | `public, max-age=600` | weak, keyed on `(computed_at epoch, sha256(canonical cells)[:16])` -- deliberately NOT run-only; see the endpoint's notes |
+| `/api/v1/private/area-leaders` | none (admin) | -- |
 
 Endpoints not listed set no cache headers; caching those for ≤30 s is
 safe in practice (a new snapshot lands at most every 10 minutes).

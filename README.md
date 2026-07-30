@@ -312,6 +312,19 @@ because a sidecar round trip is expensive.
 | `GET /api/v1/route/profiles` | The selectable routing profiles + `graph_bbox` (config-driven; treat as the live list). 60/min per IP |
 | `GET /api/v1/geocode/search?q=…&lat=…&lon=…&limit=…` | Up to 8 Denver-scoped hits as `{label, lat, lon, kind, in_coverage}`; `in_coverage` is routing-graph membership so clients can grey out un-routable picks. 20/min per IP; 503 `geocoder_unavailable` when the sidecar is down or disabled |
 
+### Leaderboard
+
+FEATURE_PLAN §11: the trailing-28-day H3 r8 "area leader" report,
+recomputed nightly (`src/area_leaders.py`, `sql/048_h3_r8_area_leaders.sql`)
+and served with privacy applied **live** at read time -- an account's
+`show_in_leaderboards`/`show_public_username` choice (or a never-
+backfilled `display_name`) takes effect on the very next request, not at
+tomorrow's 09:15 run. See `src/api_leaderboard.py`.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/leaderboard/map` | `{computed_at, window_start, window_end, cells: {"<h3 string>": {total_points, distinct_earners, leader, runners_up}}}` -- full eligible top-3 per cell in one fetch, so the choropleth and click-through detail come from one request. A skipped-for-privacy rank falls through (leader = highest surviving stored rank). Weak ETag keyed on `(computed_at, sha256(rendered cells))` -- not run-only, so an eligibility/color/name change between recomputes still busts a client's cache. `public, max-age=600` |
+
 ### Sign-in
 
 The first half of each door in `src/api_auth.py` — public because you use
@@ -540,6 +553,7 @@ HTML portal with its own login flow.
 | `GET /api/v1/private/devices/{vehicle_identifier}/history` | Time-ordered position-stop history for one scooter |
 | `GET /api/v1/private/devices/max-ranges` | Devices sorted by highest-ever observed range |
 | `GET /api/v1/private/trips/daily` | Daily trip/popularity rollup for one Denver-local date |
+| `GET /api/v1/private/area-leaders` | Full, unfiltered §11 leaderboard: every stored rank 1-3 per cell with real account ids/points/tie-break provenance -- no privacy filtering |
 | `GET /api/v1/private/reports` | Admin listing of all negative reports |
 | `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback |
 

@@ -177,6 +177,18 @@ donated tracks above they are never de-identified — only deleting your
 account removes them. Whether they appear on the public leaderboard is
 controlled separately by your account's visibility settings (public
 username, leaderboard participation).</td></tr>
+<tr><td>Leaderboard report</td><td>Recomputed nightly; deleted only with
+your account</td><td>Each night we recompute, from the points ledger
+above, who holds the top 3 point totals in each map area (H3
+resolution-8 cell) over the trailing 28 days -- your account id, your
+summed points there, and when you first earned points in that area. This
+report is fully replaced on every nightly run, never accumulates on its
+own, and is deleted immediately if your account is deleted. Whether a
+rank you hold is actually shown on the public leaderboard map is decided
+fresh on every page load from your account's current visibility settings
+(public username, leaderboard participation) -- turning either off
+removes you from the public view right away, not at the next nightly
+run.</td></tr>
 <tr><td>Model-report photos</td><td>18 months</td><td>A photo attached to
 a vehicle-model correction. Same private bucket, same full re-encode that
 strips EXIF/GPS/camera metadata, and the same 18-month deletion job as

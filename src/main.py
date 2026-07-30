@@ -23,6 +23,7 @@ from .api_device_recommendations import router as device_recommendations_router
 from .api_frontend_reports import router as frontend_reports_router
 from .api_geocode import router as geocode_router
 from .api_h3 import router as h3_router
+from .api_leaderboard import router as leaderboard_router
 from .api_legal import router as legal_router
 from .api_lexicon import router as lexicon_router
 from .api_meta import router as meta_router
@@ -125,6 +126,7 @@ app.include_router(route_router)
 # because it feeds it: /geocode/search's in_coverage flag is membership in the
 # same graph_bbox /route rejects on.
 app.include_router(geocode_router)
+app.include_router(leaderboard_router)
 
 
 @app.get("/", include_in_schema=False)
@@ -187,6 +189,7 @@ def root():
             "/api/v1/photos/mine",
             "/api/v1/meta/privacy",
             "/api/v1/meta/pricing",
+            "/api/v1/leaderboard/map",
             "/legal/terms-of-service",
             "/legal/privacy-policy",
             "/admin",
