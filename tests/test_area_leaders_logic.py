@@ -156,6 +156,44 @@ class TestRankCell:
         assert [e.account_id for e in ranked] == [3, 2, 4, 1]
 
 
+class TestAggregateRegionalPoints:
+    def test_sums_one_accounts_points_across_multiple_cells(self):
+        by_cell = {
+            100: [area_leaders._CellAccountTotal(100, 1, 10, _t(5))],
+            200: [area_leaders._CellAccountTotal(200, 1, 15, _t(0))],   # same account, earlier
+        }
+        regional = area_leaders._aggregate_regional_points(by_cell)
+        (entry,) = regional
+        assert entry.account_id == 1
+        assert entry.points == 25
+        assert entry.first_point_at == _t(0), "earliest first_point_at across cells wins"
+
+    def test_different_accounts_kept_separate_even_in_the_same_cell(self):
+        by_cell = {
+            100: [
+                area_leaders._CellAccountTotal(100, 1, 10, _t(0)),
+                area_leaders._CellAccountTotal(100, 2, 20, _t(0)),
+            ],
+        }
+        regional = area_leaders._aggregate_regional_points(by_cell)
+        by_account = {e.account_id: e.points for e in regional}
+        assert by_account == {1: 10, 2: 20}
+
+    def test_empty_by_cell_yields_empty_list(self):
+        assert area_leaders._aggregate_regional_points({}) == []
+
+    def test_result_is_rankable_with_rank_cell(self):
+        by_cell = {
+            100: [area_leaders._CellAccountTotal(100, 1, 5, _t(0))],
+            200: [area_leaders._CellAccountTotal(200, 1, 5, _t(0)),
+                  area_leaders._CellAccountTotal(200, 2, 50, _t(0))],
+        }
+        regional = area_leaders._aggregate_regional_points(by_cell)
+        ranked = area_leaders._rank_cell(regional)
+        # account 1: 5+5=10 across two cells; account 2: 50 in one cell.
+        assert [e.account_id for e in ranked] == [2, 1]
+
+
 # ---------------------------------------------------------------------------
 # End-to-end through recompute() against a fake cursor/connection.
 # ---------------------------------------------------------------------------
@@ -171,6 +209,7 @@ class _FakeCursor:
         self.deletes: list[str] = []
         self.inserted_report_rows: list[tuple] = []
         self.inserted_leader_rows: list[tuple] = []
+        self.inserted_regional_rows: list[tuple] = []
         self.run_row: tuple | None = None
 
     def __enter__(self):
@@ -199,6 +238,8 @@ class _FakeCursor:
             self._result = self._canned["window_rows"]
         elif s == "DELETE FROM h3_r8_area_report":
             self.deletes.append(s)
+        elif s == "DELETE FROM regional_leaders":
+            self.deletes.append(s)
         elif s.startswith("INSERT INTO h3_r8_area_leader_runs"):
             self.run_row = params
             self._result = [(1,)]
@@ -212,6 +253,8 @@ class _FakeCursor:
             self.inserted_report_rows.extend(rows)
         elif s.startswith("INSERT INTO h3_r8_area_leaders"):
             self.inserted_leader_rows.extend(rows)
+        elif s.startswith("INSERT INTO regional_leaders"):
+            self.inserted_regional_rows.extend(rows)
         else:
             raise AssertionError(f"unexpected executemany SQL: {s!r}")
 
@@ -269,7 +312,7 @@ def test_recompute_universe_union_deduped_across_sources(fake_recompute):
     assert result["cell_count"] == 4
     assert conn.committed is True
     # DELETE ran exactly once, before the fresh INSERTs (full replace).
-    assert cur.deletes == ["DELETE FROM h3_r8_area_report"]
+    assert cur.deletes == ["DELETE FROM h3_r8_area_report", "DELETE FROM regional_leaders"]
 
 
 def test_recompute_only_confirmed_rows_become_leaders_or_totals(fake_recompute):
@@ -321,6 +364,48 @@ def test_recompute_stores_top_3_but_counts_every_earner_in_totals(fake_recompute
     assert distinct_earners == 4, "all 4 earners count even though only 3 are stored as leaders"
 
 
+def test_recompute_regional_leaderboard_sums_across_cells_and_ranks_globally(fake_recompute):
+    # Account 1 earns points in two different cells; account 2 earns more
+    # in a single cell. The regional table must rank by the CROSS-CELL
+    # total, not any single cell's total — unlike h3_r8_area_leaders, which
+    # stores each cell's own top 3 independently.
+    window_rows = [
+        (100, 1, 10, _t(0), "confirmed"),
+        (200, 1, 10, _t(1), "confirmed"),   # account 1: 20 total, across two cells
+        (100, 2, 15, _t(0), "confirmed"),   # account 2: 15 total, in one cell
+    ]
+    canned = {
+        "device_history_cells": [],
+        "device_state_cells": [],
+        "points_cells": [100, 200],
+        "window_rows": window_rows,
+    }
+    result, cur, conn = fake_recompute(canned)
+
+    assert [row[:3] for row in cur.inserted_regional_rows] == [(1, 1, 20), (2, 2, 15)]
+    assert result["regional_leader_count"] == 2
+
+
+def test_recompute_regional_leaderboard_caps_at_max_regional_leaders(fake_recompute):
+    window_rows = [
+        (100, acct, 100 - acct, _t(acct), "confirmed")
+        for acct in range(1, area_leaders.MAX_REGIONAL_LEADERS + 10)
+    ]
+    canned = {
+        "device_history_cells": [],
+        "device_state_cells": [],
+        "points_cells": [100],
+        "window_rows": window_rows,
+    }
+    result, cur, conn = fake_recompute(canned)
+
+    assert len(cur.inserted_regional_rows) == area_leaders.MAX_REGIONAL_LEADERS
+    assert result["regional_leader_count"] == area_leaders.MAX_REGIONAL_LEADERS
+    assert [row[0] for row in cur.inserted_regional_rows] == list(
+        range(1, area_leaders.MAX_REGIONAL_LEADERS + 1)
+    ), "ranks are contiguous 1..MAX_REGIONAL_LEADERS"
+
+
 def test_recompute_tie_break_order_end_to_end(fake_recompute):
     # Two accounts tied on points; the earlier first_point_at wins rank 1.
     window_rows = [
@@ -363,6 +448,7 @@ def test_recompute_run_row_stamps_window_and_counts(fake_recompute):
         "window_end": window_end,
         "cell_count": 2,
         "led_cells": 1,
+        "regional_leader_count": 1,
     }
 
 
@@ -376,6 +462,8 @@ def test_recompute_empty_universe_skips_inserts_without_error(fake_recompute):
     result, cur, conn = fake_recompute(canned)
     assert result["cell_count"] == 0
     assert result["led_cells"] == 0
+    assert result["regional_leader_count"] == 0
     assert cur.inserted_report_rows == []
     assert cur.inserted_leader_rows == []
+    assert cur.inserted_regional_rows == []
     assert conn.committed is True

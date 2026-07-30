@@ -56,6 +56,21 @@ h3_r8_area_leaders via its FK) -> INSERT the fresh universe -> INSERT the
 fresh leaders -> INSERT one new h3_r8_area_leader_runs row. The runs table is
 the one exception to "replace": it is an APPEND-ONLY audit log, one row per
 call, never deleted here.
+
+REGIONAL LEADERBOARD (sql/054, `regional_leaders`) — a second dashboard,
+computed in this SAME transaction and SAME window: the top
+`MAX_REGIONAL_LEADERS` accounts by total confirmed points across the WHOLE
+database, not split by cell. Per @zNeill's 2026-07-30 clarification on the
+review that originally flagged this module for a spatial_status filter:
+the per-cell report already answers the right question (every cell that
+has ever seen points/devices, no narrower scope needed) — what was
+missing was this second, ungrouped view. Built by collapsing the same
+`by_cell` per-(cell, account) totals this module already computes down to
+one total per account (`_aggregate_regional_points`), then ranked with the
+same tie-break as the per-cell leaders (`_rank_cell` — it never looks at
+`h3_8_index`, so it works unchanged here). Full-replace, like
+h3_r8_area_leaders; no separate runs table (read it against
+h3_r8_area_leader_runs' latest row, exactly as the per-cell leaders do).
 """
 
 from __future__ import annotations
@@ -81,6 +96,11 @@ _CONFIRMED_STATUS = "confirmed"
 
 # Top 3 per cell, not just the winner — see the module docstring.
 _MAX_LEADERS_PER_CELL = 3
+
+# The regional (whole-database) dashboard's leaderboard depth — a real
+# leaderboard length, not a 3-entry podium; see the module docstring.
+# Matches sql/054's `regional_leaders.rank` CHECK bound.
+MAX_REGIONAL_LEADERS = 25
 
 
 @dataclass(frozen=True)
@@ -165,8 +185,42 @@ def _rank_cell(entries: list[_CellAccountTotal]) -> list[_CellAccountTotal]:
     """Deterministic, total tie-break order for one cell's earners:
     points DESC, then first_point_at ASC ("whoever got there first holds
     the territory"), then account_id ASC as the final tiebreak.
+
+    Never reads `h3_8_index` — only points/first_point_at/account_id — so
+    this same function also ranks the regional (whole-database) totals
+    `_aggregate_regional_points` produces, where `h3_8_index` is a
+    meaningless placeholder.
     """
     return sorted(entries, key=lambda e: (-e.points, e.first_point_at, e.account_id))
+
+
+def _aggregate_regional_points(
+    by_cell: dict[int, list[_CellAccountTotal]],
+) -> list[_CellAccountTotal]:
+    """Collapse the per-cell per-account totals `_aggregate_window_points`
+    already computed down to ONE total per account across every cell —
+    the entire-database regional dashboard. Same points-summed /
+    earliest-first_point_at-kept semantics as `_aggregate_window_points`,
+    just merged across cells instead of scoped to one; `by_cell` is
+    already confirmed-only and window-scoped by that function, so nothing
+    here re-filters status or time.
+
+    `h3_8_index` on the returned entries is a meaningless placeholder (0)
+    — this collapses the cell dimension away entirely, and `_rank_cell`
+    never reads it.
+    """
+    totals: dict[int, list[Any]] = {}
+    for entries in by_cell.values():
+        for e in entries:
+            if e.account_id not in totals:
+                totals[e.account_id] = [0, e.first_point_at]
+            elif e.first_point_at < totals[e.account_id][1]:
+                totals[e.account_id][1] = e.first_point_at
+            totals[e.account_id][0] += e.points
+    return [
+        _CellAccountTotal(h3_8_index=0, account_id=account_id, points=points, first_point_at=first_point_at)
+        for account_id, (points, first_point_at) in totals.items()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +318,22 @@ def recompute(window_days: int = DEFAULT_WINDOW_DAYS) -> dict[str, Any]:
                     leader_rows,
                 )
 
+            # ---- full replace: regional (whole-database) leaderboard ----
+            regional_ranked = _rank_cell(_aggregate_regional_points(by_cell))
+            regional_rows = [
+                (rank, entry.account_id, entry.points, entry.first_point_at)
+                for rank, entry in enumerate(regional_ranked[:MAX_REGIONAL_LEADERS], start=1)
+            ]
+            cur.execute("DELETE FROM regional_leaders")
+            if regional_rows:
+                cur.executemany(
+                    """
+                    INSERT INTO regional_leaders (rank, account_id, points, first_point_at)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    regional_rows,
+                )
+
             cell_count = len(report_rows)
             cur.execute(
                 """
@@ -278,8 +348,8 @@ def recompute(window_days: int = DEFAULT_WINDOW_DAYS) -> dict[str, Any]:
         conn.commit()
 
     log.info(
-        "area_leaders.recompute: run_id=%s cells=%d led_cells=%d",
-        run_id, cell_count, led_cells,
+        "area_leaders.recompute: run_id=%s cells=%d led_cells=%d regional_leaders=%d",
+        run_id, cell_count, led_cells, len(regional_rows),
     )
     return {
         "run_id": run_id,
@@ -288,4 +358,5 @@ def recompute(window_days: int = DEFAULT_WINDOW_DAYS) -> dict[str, Any]:
         "window_end": window_end,
         "cell_count": cell_count,
         "led_cells": led_cells,
+        "regional_leader_count": len(regional_rows),
     }

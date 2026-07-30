@@ -432,13 +432,13 @@ def test_canonical_serialization_hash_is_independent_of_dict_key_order():
             "distinct_earners": 3, "total_points": 144,
         },
     }
-    assert api_leaderboard._cells_digest(a) == api_leaderboard._cells_digest(b)
+    assert api_leaderboard._digest(a) == api_leaderboard._digest(b)
 
 
 def test_canonical_serialization_hash_differs_for_different_data():
     a = {"cell": {"total_points": 1, "distinct_earners": 1, "leader": None, "runners_up": []}}
     b = {"cell": {"total_points": 2, "distinct_earners": 1, "leader": None, "runners_up": []}}
-    assert api_leaderboard._cells_digest(a) != api_leaderboard._cells_digest(b)
+    assert api_leaderboard._digest(a) != api_leaderboard._digest(b)
 
 
 # ---------------------------------------------------------------------------

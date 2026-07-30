@@ -166,16 +166,43 @@ def _build_cells(report_rows, accounts_by_id: dict[int, tuple]) -> dict[str, dic
     return result
 
 
-def _cells_digest(cells: dict[str, Any]) -> str:
+def _digest(payload: Any) -> str:
     """sha256[:16] of a CANONICAL serialization — sort_keys so nested dict
     insertion order (or a differently-ordered SQL result) can never change
     the digest for identical data."""
-    canonical = json.dumps(cells, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-def _etag_for(computed_at, cells: dict[str, Any]) -> str:
-    return f'W/"arealb:{int(computed_at.timestamp())}:{_cells_digest(cells)}"'
+def _etag_for(computed_at, payload: Any) -> str:
+    return f'W/"arealb:{int(computed_at.timestamp())}:{_digest(payload)}"'
+
+
+def _build_regional_leaders(
+    leader_rows, accounts_by_id: dict[int, tuple],
+) -> list[dict[str, Any]]:
+    """`leader_rows` are (rank, account_id, points, first_point_at) from
+    `regional_leaders`, already ordered by rank. Same eligibility rule as
+    the per-cell endpoint (`_is_eligible`/`_leader_entry`), but flat and
+    re-numbered: an ineligible stored entry is dropped rather than
+    replaced (there is no runner-up pool beyond the stored top
+    `MAX_REGIONAL_LEADERS` to fall through into), so the output list can
+    be shorter than what was stored, and its `rank` reflects display
+    position among eligible entries, not the original stored rank.
+    """
+    out: list[dict[str, Any]] = []
+    for _stored_rank, account_id, points, _first_point_at in leader_rows:
+        acct = accounts_by_id.get(account_id)
+        if acct is None:
+            continue
+        (display_name, show_in_leaderboards, show_public_username,
+         ruling_color, ruling_border_color, ruling_alpha) = acct
+        if not _is_eligible(display_name, show_in_leaderboards, show_public_username):
+            continue
+        entry = _leader_entry(display_name, points, ruling_color, ruling_border_color, ruling_alpha)
+        entry["rank"] = len(out) + 1
+        out.append(entry)
+    return out
 
 
 @router.get("/api/v1/leaderboard/map")
@@ -252,4 +279,75 @@ def leaderboard_map(request: Request, response: Response) -> Any:
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
         "cells": cells,
+    }
+
+
+@router.get("/api/v1/leaderboard/regional")
+def leaderboard_regional(request: Request, response: Response) -> Any:
+    """The whole-database companion to GET /api/v1/leaderboard/map (sql/054
+    `regional_leaders`, src/area_leaders.py:recompute — same run, same
+    trailing-28-day window, just not split by r8 cell). Same read-time
+    privacy filtering as the per-cell endpoint; an ineligible stored entry
+    is dropped rather than backfilled from a runner-up pool, so the
+    returned list can be shorter than the stored top
+    `area_leaders.MAX_REGIONAL_LEADERS`.
+
+        const r = await fetch("/api/v1/leaderboard/regional");
+        const { leaders } = await r.json();
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            # Same snapshot-consistency reasoning as leaderboard_map: keep
+            # the run metadata and the leader rows on one transaction
+            # snapshot so a concurrent recompute can't split them.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute(
+                """
+                SELECT computed_at, window_start, window_end
+                FROM h3_r8_area_leader_runs
+                ORDER BY computed_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            run = cur.fetchone()
+            if not run:
+                raise HTTPException(503, detail="no leaderboard computed yet")
+            computed_at, window_start, window_end = run
+
+            cur.execute(
+                "SELECT rank, account_id, points, first_point_at "
+                "FROM regional_leaders ORDER BY rank"
+            )
+            leader_rows = cur.fetchall()
+
+            account_ids = sorted({row[1] for row in leader_rows})
+            accounts_by_id: dict[int, tuple] = {}
+            if account_ids:
+                cur.execute(
+                    """
+                    SELECT id, display_name, show_in_leaderboards, show_public_username,
+                           ruling_color, ruling_border_color, ruling_alpha
+                    FROM accounts
+                    WHERE id = ANY(%s)
+                    """,
+                    (account_ids,),
+                )
+                accounts_by_id = {a[0]: tuple(a[1:]) for a in cur.fetchall()}
+
+    leaders = _build_regional_leaders(leader_rows, accounts_by_id)
+    etag = _etag_for(computed_at, leaders)
+
+    if _if_none_match_hit(request, etag):
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Cache-Control": _CACHE_HEADER},
+        )
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = _CACHE_HEADER
+
+    return {
+        "computed_at": computed_at.isoformat(),
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "leaders": leaders,
     }

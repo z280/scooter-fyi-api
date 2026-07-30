@@ -90,6 +90,7 @@ def pg_conn(monkeypatch):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM h3_r8_area_leader_runs")
         cur.execute("DELETE FROM h3_r8_area_report")  # cascades h3_r8_area_leaders
+        cur.execute("DELETE FROM regional_leaders")  # not FK-cascaded from h3_r8_area_report
         cur.execute("DELETE FROM user_points")
         cur.execute("DELETE FROM device_history")
         cur.execute("DELETE FROM device_state")
@@ -282,3 +283,66 @@ def test_account_delete_cascade_removes_leader_rows(pg_conn):
     # ever refreshed by the next recompute(), not reactively by a delete.
     report = _report_rows(pg_conn)
     assert 3001 in report
+
+
+# ---------------------------------------------------------------------------
+# Regional (whole-database) leaderboard (sql/054) — real cross-cell sums
+# and full-replace idempotence against real constraints.
+# ---------------------------------------------------------------------------
+def _regional_rows(conn) -> list[tuple]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT rank, account_id, points, first_point_at "
+            "FROM regional_leaders ORDER BY rank"
+        )
+        return cur.fetchall()
+
+
+def test_regional_leaderboard_sums_across_cells_against_real_constraints(pg_conn):
+    a1 = _account(pg_conn)
+    a2 = _account(pg_conn)
+
+    # a1 earns in two different cells; a2 earns more in a single cell.
+    _insert_point(pg_conn, a1, 4001, 12, _RECENT)
+    _insert_point(pg_conn, a1, 4002, 14, _RECENT)   # a1 total: 26, across two cells
+    _insert_point(pg_conn, a2, 4001, 20, _RECENT)   # a2 total: 20, in one cell
+
+    area_leaders.recompute(window_days=28)
+
+    regional = _regional_rows(pg_conn)
+    assert [(rank, account_id, points) for rank, account_id, points, _ in regional] == [
+        (1, a1, 26), (2, a2, 20),
+    ]
+
+    # Each cell's OWN top-3 is still independent of the regional ranking —
+    # a2 alone leads cell 4001 with 20 vs a1's 12 there.
+    cell_4001_leaders = [row for row in _leader_rows(pg_conn) if row[0] == 4001]
+    assert cell_4001_leaders[0][2] == a2
+
+
+def test_regional_leaderboard_full_replace_idempotence(pg_conn):
+    a1 = _account(pg_conn)
+    _insert_point(pg_conn, a1, 5001, 30, _RECENT)
+
+    area_leaders.recompute(window_days=28)
+    first = _regional_rows(pg_conn)
+    area_leaders.recompute(window_days=28)
+    second = _regional_rows(pg_conn)
+
+    assert first == second, "re-running with unchanged data must not accumulate/reorder rows"
+    assert len(first) == 1
+
+
+def test_regional_leaderboard_account_delete_cascade(pg_conn):
+    account_id = _account(pg_conn)
+    _insert_point(pg_conn, account_id, 6001, 50, _RECENT)
+
+    area_leaders.recompute(window_days=28)
+    assert any(row[1] == account_id for row in _regional_rows(pg_conn))
+
+    with pg_conn.cursor() as cur:
+        cur.execute("DELETE FROM accounts WHERE id = %s", (account_id,))
+    pg_conn.commit()
+
+    assert all(row[1] != account_id for row in _regional_rows(pg_conn)), \
+        "ON DELETE CASCADE on regional_leaders.account_id must remove the deleted account's row"

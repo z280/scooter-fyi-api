@@ -486,3 +486,56 @@ def private_area_leaders(
         "led_cells": int(led_cells),
         "cells": cells,
     }
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/private/regional-leaders — admin sibling of GET
+# /api/v1/leaderboard/regional (sql/054 regional_leaders). Unlike the public
+# endpoint, this view applies NO privacy filtering — every stored rank
+# 1..MAX_REGIONAL_LEADERS, its real account_id, and the raw stored
+# points/first_point_at tie-break provenance.
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/private/regional-leaders")
+def private_regional_leaders(
+    user: SessionUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Full, unfiltered whole-database leaderboard: every stored rank with
+    its real account_id, points, and first_point_at tie-break provenance —
+    no show_in_leaderboards/show_public_username/display_name filtering."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute(
+                """
+                SELECT computed_at, window_start, window_end
+                FROM h3_r8_area_leader_runs
+                ORDER BY computed_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            run = cur.fetchone()
+            if not run:
+                raise HTTPException(503, "no leaderboard computed yet")
+            computed_at, window_start, window_end = run
+
+            cur.execute(
+                "SELECT rank, account_id, points, first_point_at "
+                "FROM regional_leaders ORDER BY rank"
+            )
+            rows = cur.fetchall()
+
+    return {
+        "viewed_by": user.email,
+        "computed_at": computed_at.isoformat(),
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "leaders": [
+            {
+                "rank": int(rank),
+                "account_id": account_id,
+                "points": int(points),
+                "first_point_at": first_point_at.isoformat() if first_point_at else None,
+            }
+            for rank, account_id, points, first_point_at in rows
+        ],
+    }

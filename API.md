@@ -1023,6 +1023,53 @@ GET /api/v1/leaderboard/map
 
 ---
 
+### `GET /api/v1/leaderboard/regional`
+
+The whole-database companion to `/api/v1/leaderboard/map` (sql/054
+`regional_leaders`, `src/area_leaders.py`) -- added per an explicit
+product clarification: the per-cell report already answers "for each
+hexagon where points were earned, who leads it" (no additional spatial
+scoping needed there), and this endpoint answers the separate question
+"across the whole database, who is ranked highest." Same recompute run,
+same trailing-28-day window as the per-cell report -- not split by cell,
+top `MAX_REGIONAL_LEADERS` (25) accounts by summed confirmed points.
+Same read-time privacy filtering as the per-cell endpoint
+(`show_in_leaderboards`, `show_public_username`, non-null
+`display_name`), except an ineligible stored entry is simply dropped
+rather than backfilled from a runner-up pool -- there is no larger stored
+pool beyond the top 25 to fall through into -- so the returned list can
+be shorter than 25, and surviving entries are renumbered to a contiguous
+`rank` starting at 1.
+
+**Request:**
+```http
+GET /api/v1/leaderboard/regional
+```
+
+**Response 200:**
+```json
+{
+  "computed_at": "2026-07-29T09:15:00+00:00",
+  "window_start": "2026-07-01T09:15:00+00:00",
+  "window_end": "2026-07-29T09:15:00+00:00",
+  "leaders": [
+    { "rank": 1, "display_name": "Duke swift🦦", "points": 312,
+      "ruling_color": "#7c54cd", "ruling_border_color": "#382264", "ruling_alpha": 0.6 },
+    { "rank": 2, "display_name": "...", "points": 210,
+      "ruling_color": null, "ruling_border_color": null, "ruling_alpha": null }
+  ]
+}
+```
+
+**Response 503:** no report has ever been computed yet (cold start),
+`{ "detail": "no leaderboard computed yet" }`.
+
+`Cache-Control: public, max-age=600`; ETag is the same weak, content-hash
+scheme as `/api/v1/leaderboard/map` (`W/"arealb:<computed_at
+epoch>:<sha256(leaders)[:16]>"`), for the same live-join reason.
+
+---
+
 ### `GET /api/v1/equity-estimate?ranks=1,2`
 
 Device share inside a **candidate equity-rank cutoff** — the combined
@@ -1842,6 +1889,7 @@ deliberately withholds.
 | `GET /api/v1/private/devices/max-ranges?form_factor=&limit=` | Devices sorted by highest-ever observed range. `limit` 1–20000 (default 5000). |
 | `GET /api/v1/private/trips/daily?date=YYYY-MM-DD&limit=` | Daily trip/popularity rollup for one Denver-local date. `limit` 1–5000 (default 100). |
 | `GET /api/v1/private/area-leaders` | Full, unfiltered §11 area-leader report: every stored rank 1-3 per cell with real account ids, points, and `first_point_at` tie-break provenance -- no privacy filtering (that layer belongs only to the public `/api/v1/leaderboard/map`). |
+| `GET /api/v1/private/regional-leaders` | Full, unfiltered whole-database leaderboard (sql/054): every stored rank with real account ids, points, and `first_point_at` tie-break provenance -- admin sibling of the public `/api/v1/leaderboard/regional`. |
 | `GET /api/v1/private/reports` | Admin listing of all negative reports. |
 | `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback. |
 
@@ -3106,7 +3154,9 @@ Explicit `Cache-Control` headers, per endpoint:
 | `/api/v1/meta/pricing` | `public, max-age=3600` | — |
 | `/api/v1/points/schedule` | `public, max-age=3600` | — |
 | `/api/v1/leaderboard/map` | `public, max-age=600` | weak, keyed on `(computed_at epoch, sha256(canonical cells)[:16])` -- deliberately NOT run-only; see the endpoint's notes |
+| `/api/v1/leaderboard/regional` | `public, max-age=600` | weak, same content-hash scheme as `/api/v1/leaderboard/map` |
 | `/api/v1/private/area-leaders` | none (admin) | -- |
+| `/api/v1/private/regional-leaders` | none (admin) | -- |
 
 Endpoints not listed set no cache headers; caching those for ≤30 s is
 safe in practice (a new snapshot lands at most every 10 minutes).
