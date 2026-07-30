@@ -5,7 +5,8 @@
     GET    /api/v1/tracked-rides/active               the caller's one active ride, if any
     GET    /api/v1/tracked-rides/{ride_id}             one ride's full detail
     PATCH  /api/v1/tracked-rides/{ride_id}/end         rider-reported end (single-shot)
-    POST   /api/v1/tracked-rides/{ride_id}/waypoints   append a waypoint
+    POST   /api/v1/tracked-rides/{ride_id}/track       bulk track donation + verification (sql/051)
+    POST   /api/v1/tracked-rides/{ride_id}/waypoints   append a waypoint (DEPRECATED, see below)
     GET    /api/v1/tracked-rides/{ride_id}/waypoints   paginated waypoint list
     DELETE /api/v1/tracked-rides/{ride_id}             hard-delete one ride
     DELETE /api/v1/tracked-rides                       hard-delete every ride the account owns
@@ -26,6 +27,17 @@ returned by the start call and by the two owner-only single-ride reads, and
 never by the list endpoint — see _RIDE_COLS vs _RIDE_COLS_OWNER, where that
 is structural rather than a redaction anyone has to remember.
 
+TRACK DONATION (PLAN_RIDE_MODE_API.md phase A2, RIDE_MODE_OVERHAUL_PLAN.md
+Part 2): ride mode records its GPS track LOCALLY (IndexedDB, hash-chained,
+HMAC-signed batches) and sends nothing mid-ride — the chain is verified
+server-side only at donation, POST .../track (sql/051). This SUPERSEDES the
+old per-waypoint streaming transport: POST .../waypoints below has no known
+client callers (the frontend never wired it) and is retained one release
+purely as caution for unknown external callers. Waypoints it records stop
+earning points as of A2 — the per-waypoint award (`credit_waypoint_points`)
+was always granted at PATCH .../end, not by the waypoints endpoint itself,
+so the supersession lives at /end (see that handler below), not here.
+
 ANTI-FRAUD: the points system pays a bonus when the GBFS-observed
 reappearance is within 20m of the rider's own reported end location. If a
 rider could see the GBFS answer before submitting their report, they could
@@ -43,14 +55,20 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from .accounts import SessionUser, require_session
+from .battery_model import ingest_donated_observation
 from .geo import distance_meters
 from .identity import plate_display_code
 from .pg import connection
-from .points import credit_gbfs_validation_points, credit_waypoint_points
+# credit_waypoint_points / credit_gbfs_validation_points are RETAINED for
+# history and their existing tests (tests/test_points_logic.py,
+# tests/test_ride_hard_caps.py) but are no longer called from this module —
+# PLAN_RIDE_MODE_API.md phase A2 supersedes both awards; see end_tracked_ride
+# below and the module docstring's "TRACK DONATION" note.
+from .points import credit_battery_contribution, credit_nav_distance_bonus
 from .polyline import PolylineError, decode as decode_polyline, encode as encode_polyline
 from .quality import compute_battery_percent
 from .ratelimit import enforce
@@ -63,6 +81,7 @@ from .ride_limits import (
     measure_path,
     partial_source,
 )
+from .track_verify import RideRow, verify_track_chain
 
 router = APIRouter()
 
@@ -70,6 +89,15 @@ WATCH_DURATION_HOURS = 3
 _LIMIT_START_RIDE_PER_ACCOUNT = (20, 3600)
 _LIMIT_WAYPOINT_PER_ACCOUNT = (600, 3600)
 _VEHICLE_IDENTIFIER_RE = r"^[0-9a-f]{16}$"
+
+# Track donation (PLAN_RIDE_MODE_API.md phase A2). Body cap and batch-count
+# cap sized against the longest honest ride, per the spec's own sanity
+# check: the 3h watch window at 1Hz seals at most ~432 25-point batches
+# (~650 KB of compact JWS), so 600 batches / 2 MB clears that with headroom
+# while still bounding what one request can make this handler parse.
+_LIMIT_TRACK_DONATION_PER_ACCOUNT = (6, 3600)
+MAX_TRACK_DONATION_BYTES = 2 * 1024 * 1024
+MAX_TRACK_DONATION_BATCHES = 600
 
 # Ride-session signing material (sql/049). Per-ride, minted at start over
 # the authenticated POST channel: a compromise is bounded to one ride and a
@@ -805,55 +833,352 @@ def end_tracked_ride(
                  str(rid)),
             )
 
-            # Points (requirement #10), credited now that the ride is
-            # confirmed complete — both are no-ops if their condition
-            # isn't met (zero waypoints; no GBFS reappearance within 20m).
-            cur.execute(
-                "SELECT COUNT(*) FROM ride_waypoints WHERE tracked_ride_id = %s",
-                (str(rid),),
-            )
-            (waypoint_count,) = cur.fetchone()
-            # Attribute the award to the last location the MEASUREMENT is
-            # willing to stand behind, which is not always the reported end.
-            # When the final leg was too long to believe, _close_out dropped
-            # the reported end from the measured path — and filing the
-            # ledger row at that same coordinate would record the rider
-            # earning points in a cell the ride itself just declined to
-            # claim they reached. That is not cosmetic: user_points.lat/lng
-            # and the h3_8_index derived from them ARE the per-area points
-            # geography, so one bad GPS fix would otherwise plant a rider's
-            # whole ride payout in a hexagon they were never in.
-            #
-            # The rider's reported end is still stored in end_lat/end_lon
-            # untouched — it is their report and we keep it. This governs
-            # only where the AWARD is filed.
-            award_lat, award_lng = (
-                points[-1] if points else (payload.end_lat, payload.end_lon)
-            )
-            credit_waypoint_points(
-                cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
-                waypoint_count=waypoint_count, end_lat=award_lat, end_lng=award_lng,
-                ride_id=str(rid),
-            )
-            # Deliberately the REPORTED end, not award_lat/award_lng above.
-            # This award exists because an independent observation — the
-            # vehicle reappearing on GBFS within 20 m — corroborates the
-            # reported end, which makes it the best-attested point on the
-            # whole ride even in the case where the track's last fix
-            # disagrees with it. The two awards can therefore land in
-            # different cells, and that is the correct outcome: each is
-            # filed where its own evidence puts it.
-            credit_gbfs_validation_points(
-                cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
-                end_lat=payload.end_lat, end_lng=payload.end_lon,
-                reappear_lat=gbfs_end_lat, reappear_lng=gbfs_end_lon,
-                ride_id=str(rid),
-            )
+            # Points (requirement #10) — SUPERSEDED as of PLAN_RIDE_MODE_API.md
+            # phase A2 (RIDE_MODE_OVERHAUL_PLAN.md Decision 6 / Risk 5): PATCH
+            # .../end no longer awards `waypoint` or `gbfs_trip_validated`.
+            # GBFS alignment is now an ELIGIBILITY GATE (_provisional_validation
+            # above / src/track_verify.py), not an award; the reshaped
+            # ride-mode awards (battery_contribution, nav_route_feedback,
+            # nav_qualitative_feedback, nav_distance_bonus, ride_survey) are
+            # credited from POST .../track and POST .../survey instead
+            # (src/points.py). credit_waypoint_points and
+            # credit_gbfs_validation_points are kept, UNUSED here, for history
+            # and their existing unit tests — do not delete them from
+            # src/points.py.
 
             cur.execute(f"SELECT {_RIDE_COLS} FROM tracked_rides WHERE id = %s", (str(rid),))
             ride = _row_to_ride(cur.fetchone())
         conn.commit()
     return ride
+
+
+def _vehicle_model_for(cur, vehicle_identifier: str) -> str | None:
+    """device_state.current_vehicle_model_name (sql/016) for the ride's
+    vehicle, at donation time — Astro/Cosmo/Apollo, capitalized
+    (src/ingest.py:_KNOWN_VEHICLE_TYPES), or None for an unconfirmed
+    model. Stamped once onto track_donations.vehicle_model so it survives
+    the de-id sweep (the battery model needs it after account linkage is
+    gone), same source A3's surveys read."""
+    cur.execute(
+        "SELECT current_vehicle_model_name FROM device_state WHERE vehicle_identifier = %s",
+        (vehicle_identifier,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+@router.post("/api/v1/tracked-rides/{ride_id}/track")
+async def donate_track(
+    ride_id: str,
+    request: Request,
+    user: SessionUser = Depends(require_session),
+) -> dict[str, Any]:
+    """Bulk track donation + server-side verification (PLAN_RIDE_MODE_API.md
+    phase A2, RIDE_MODE_OVERHAUL_PLAN.md Part 2) — the sole track upload
+    path; ride mode never transmits mid-ride. Composes four independently
+    built pieces in one transaction:
+
+        track_verify.verify_track_chain  — signature/chain/monotonic/speed/
+                                            GBFS/volume verification (pure)
+        sql/051 tables                   — track_donations + donated_track_points
+        points.credit_battery_contribution / credit_nav_distance_bonus
+                                          — the reshaped ride-mode awards
+        battery_model.ingest_donated_observation
+                                          — the battery-model feedback loop
+
+    Body cap and parsing are handled BEFORE the connection is taken (a
+    malformed/oversized body is a client bug, not a reason to hold a pooled
+    connection open) — same rule _serialize_ride_options follows above.
+    """
+    rid = _parse_ride_id(ride_id)
+
+    raw = await request.body()
+    if len(raw) > MAX_TRACK_DONATION_BYTES:
+        raise HTTPException(413, {
+            "error": "donation_too_large",
+            "detail": f"donation body exceeds the "
+                      f"{MAX_TRACK_DONATION_BYTES // (1024 * 1024)} MB limit",
+        })
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(400, "malformed JSON body")
+    batches = body.get("batches") if isinstance(body, dict) else None
+    if not isinstance(batches, list) or not all(isinstance(b, str) for b in batches):
+        raise HTTPException(422, {
+            "error": "bad_batches",
+            "detail": "`batches` must be a list of compact-JWS strings",
+        })
+    if len(batches) > MAX_TRACK_DONATION_BATCHES:
+        raise HTTPException(413, {
+            "error": "too_many_batches",
+            "detail": f"at most {MAX_TRACK_DONATION_BATCHES} batches per donation",
+        })
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            # The transaction OPENS with this lock — PLAN_RIDE_MODE_API.md is
+            # explicit: finalize_validation (src/ride_watch.py) takes the
+            # SAME `ride_validation:<ride_id>` lock before touching the ride
+            # row, so a ride_watch resolve landing mid-donation serializes
+            # against this transaction instead of racing it (the finisher
+            # would otherwise look for a donation row that hasn't committed
+            # yet, or the two would deadlock if locking order ever
+            # disagreed — see ride_watch.py's own ADVISORY-LOCK ORDERING
+            # note).
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"ride_validation:{rid}",),
+            )
+            enforce(cur, bucket="track_donation_account", key=str(user.account_id),
+                    limit=_LIMIT_TRACK_DONATION_PER_ACCOUNT[0],
+                    window_seconds=_LIMIT_TRACK_DONATION_PER_ACCOUNT[1])
+
+            cur.execute(
+                """
+                SELECT user_reported_ended_at, track_donated_at, ride_options,
+                       track_key, track_nonce, track_key_issued_at,
+                       start_lat, start_lon, feed_start_lat, feed_start_lon,
+                       gbfs_left_feed_at, gbfs_reappeared_at,
+                       gbfs_end_lat, gbfs_end_lon, vehicle_identifier,
+                       feed_start_battery_percent, reported_start_battery_percent,
+                       reported_battery_percent
+                FROM tracked_rides WHERE id = %s AND account_id = %s FOR UPDATE
+                """,
+                (str(rid), user.account_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(404, "no such ride")
+            (user_reported_ended_at, track_donated_at, ride_options,
+             track_key, track_nonce, track_key_issued_at,
+             start_lat, start_lon, feed_start_lat, feed_start_lon,
+             gbfs_left_feed_at, gbfs_reappeared_at,
+             gbfs_end_lat, gbfs_end_lon, vehicle_identifier,
+             feed_start_battery_percent, reported_start_battery_percent,
+             reported_battery_percent) = row
+
+            if user_reported_ended_at is None:
+                raise HTTPException(409, {
+                    "error": "ride_not_ended",
+                    "detail": "report this ride's end (PATCH .../end) before donating its track",
+                })
+            if track_donated_at is not None:
+                raise HTTPException(409, {
+                    "error": "already_donated",
+                    "detail": "this ride's track has already been donated",
+                })
+            opted = isinstance(ride_options, dict) and ride_options.get("save_tracks") is True
+            if not opted:
+                raise HTTPException(422, {
+                    "error": "tracking_not_opted",
+                    "detail": "this ride's ride_options.save_tracks was not on",
+                })
+
+            ride_row = RideRow(
+                id=str(rid),
+                track_key=track_key, track_nonce=track_nonce,
+                track_key_issued_at=track_key_issued_at,
+                user_reported_ended_at=user_reported_ended_at,
+                start_lat=start_lat, start_lon=start_lon,
+                feed_start_lat=feed_start_lat, feed_start_lon=feed_start_lon,
+                gbfs_left_feed_at=gbfs_left_feed_at,
+                gbfs_reappeared_at=gbfs_reappeared_at,
+                gbfs_end_lat=gbfs_end_lat, gbfs_end_lon=gbfs_end_lon,
+            )
+            result = verify_track_chain(cur, ride_row, batches)
+
+            # chain_invalid (checks 1/2: signature or chain integrity) is
+            # the one outcome that REJECTS the submission outright rather
+            # than accepting-and-deciding: the chain isn't trustworthy
+            # enough to even attribute to this ride, so nothing is written
+            # and the one-donation-per-ride slot (track_donated_at) is not
+            # consumed — a client that had a genuine upload bug can retry.
+            # Every other outcome (ineligible for a real reason, pending_feed,
+            # even the internal "error" verdict) IS an accepted donation —
+            # see the module docstring and track_verify.py's own note that a
+            # rejected chain has no root/points a caller can rely on.
+            if "chain_invalid" in result.reasons:
+                raise HTTPException(422, {
+                    "error": "chain_invalid",
+                    "failing_check": "chain",
+                    "batch_seq": result.failing_batch_seq,
+                    "detail": "the submitted track chain failed verification "
+                              "(bad signature, wrong ride binding, or a broken hash chain)",
+                })
+
+            # Defensive bounds check on the flattened, chain-verified track
+            # before persisting it: verify_track_chain's own parsing
+            # (checks 1/2) accepts any numeric lat/lon — physical plausibility
+            # (check 4) and GBFS correlation (check 5) catch a wildly wrong
+            # position, but neither guarantees every waypoint stays inside
+            # donated_track_points' lat/lon CHECK bounds. Reject here rather
+            # than let a bad row 500 out of the INSERT below.
+            for _ms, wp_lat, wp_lon, _acc in result.waypoints:
+                if not (-90 <= wp_lat <= 90 and -180 <= wp_lon <= 180):
+                    raise HTTPException(422, {
+                        "error": "chain_invalid",
+                        "detail": "a waypoint in the submitted chain is outside "
+                                  "valid latitude/longitude bounds",
+                    })
+
+            vehicle_model = _vehicle_model_for(cur, vehicle_identifier)
+
+            # `verification` is per_check PLUS points_status: track_verify.py
+            # computes points_status ("ok" | "pending_review") only from the
+            # raw batches, which are discarded right after verification — so
+            # if this donation settles late as pending_feed -> eligible,
+            # finalize_validation (src/ride_watch.py) has to read the flag
+            # back from here rather than recomputing it, since there is
+            # nothing left to recompute it FROM. Purely additive: the HTTP
+            # response's own "verification" object still comes straight off
+            # result.per_check (via result.as_response(), below) and never
+            # carries this extra key.
+            stored_verification = dict(result.per_check)
+            stored_verification["points_status"] = result.points_status
+
+            cur.execute(
+                """
+                INSERT INTO track_donations (
+                    tracked_ride_id, account_id, vehicle_model, chain_root_hash,
+                    batch_count, waypoint_count, distance_meters, verification
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                RETURNING id, donated_at
+                """,
+                (str(rid), user.account_id, vehicle_model, result.chain_root_hash,
+                 len(batches), result.waypoint_count, result.distance_meters,
+                 json.dumps(stored_verification)),
+            )
+            donation_id, donated_at = cur.fetchone()
+
+            if result.waypoints:
+                cur.executemany(
+                    "INSERT INTO donated_track_points "
+                    "(donation_id, seq, recorded_ms, lat, lon, accuracy_m) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    [
+                        (str(donation_id), seq, ms, lat, lon, acc)
+                        for seq, (ms, lat, lon, acc) in enumerate(result.waypoints)
+                    ],
+                )
+
+            # verdict != "pending_feed" -> settled now (eligible, ineligible
+            # for a non-chain reason, or the internal "error" verdict — all
+            # terminal); "pending_feed" -> still waiting on the live feed,
+            # finished later by finalize_validation. Same validated_at rule
+            # PATCH .../end and finalize_validation both already follow.
+            validated_at = (
+                datetime.now(timezone.utc) if result.verdict != "pending_feed" else None
+            )
+            cur.execute(
+                """
+                UPDATE tracked_rides SET
+                    track_donated_at = %s,
+                    validation_status = %s,
+                    validation_reasons = %s::jsonb,
+                    validated_at = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (donated_at, result.verdict, json.dumps(result.reasons),
+                 validated_at, str(rid)),
+            )
+
+            # Points: only on an outright "eligible" verdict, and only when
+            # points_status isn't "pending_review" (track_verify.py: >10%
+            # of segments sustained above the fast-but-not-implausible
+            # threshold — held pending manual review, not auto-credited).
+            # A "pending_feed" donation's distance-dependent points are
+            # HELD here and awarded later by finalize_validation on a late
+            # eligible settle, per this same gating (see ride_watch.py).
+            own_device = isinstance(ride_options, dict) and ride_options.get("own_device") is True
+            battery_modeling_on = (
+                isinstance(ride_options, dict) and ride_options.get("battery_modeling") is True
+            )
+            nav_improvement_on = (
+                isinstance(ride_options, dict) and ride_options.get("nav_improvement") is True
+            )
+            soc_start = (
+                feed_start_battery_percent if feed_start_battery_percent is not None
+                else reported_start_battery_percent
+            )
+            both_batteries_known = soc_start is not None and reported_battery_percent is not None
+
+            points_awarded: list[dict[str, Any]] = []
+            may_award = result.verdict == "eligible" and result.points_status == "ok"
+
+            if may_award and battery_modeling_on and not own_device and both_batteries_known:
+                award = credit_battery_contribution(
+                    cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
+                    distance_m=result.distance_meters, start_lat=start_lat, start_lng=start_lon,
+                    ride_id=str(rid),
+                )
+                if award is not None:
+                    points_awarded.append({"action": award["action"], "points": award["points"]})
+
+            if may_award and nav_improvement_on:
+                # ride_routes doesn't exist until PLAN_RIDE_MODE_API.md phase
+                # A3 (sql/052) — A2 may deploy first. Guard on a safe
+                # existence probe (to_regclass returns NULL rather than
+                # raising against a database that hasn't applied sql/052 yet,
+                # same idiom src/cli.py:deidentify_donations uses) and skip
+                # the nav award gracefully until that table exists; A3's own
+                # nav_route_feedback/nav_qualitative_feedback awards are
+                # credited from POST .../survey, not here.
+                cur.execute("SELECT to_regclass('ride_routes')")
+                (ride_routes_relid,) = cur.fetchone()
+                has_route_row = False
+                if ride_routes_relid is not None:
+                    cur.execute(
+                        "SELECT 1 FROM ride_routes WHERE tracked_ride_id = %s LIMIT 1",
+                        (str(rid),),
+                    )
+                    has_route_row = cur.fetchone() is not None
+                if has_route_row:
+                    award = credit_nav_distance_bonus(
+                        cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
+                        distance_m=result.distance_meters, start_lat=start_lat, start_lng=start_lon,
+                        ride_id=str(rid),
+                    )
+                    if award is not None:
+                        points_awarded.append({"action": award["action"], "points": award["points"]})
+
+            points_awarded_total = sum(p["points"] for p in points_awarded)
+            cur.execute(
+                "UPDATE track_donations SET points_awarded = %s WHERE id = %s",
+                (points_awarded_total, str(donation_id)),
+            )
+
+            # Battery ingestion: only when GBFS had ALREADY resolved at
+            # donation time ("eligible" implies gbfs_end already matched) —
+            # a "pending_feed" donation's battery signal is ingested later
+            # by finalize_validation, the sole ingestion path for that case.
+            # Unconditional on ride_options: the derived observation helps
+            # the model regardless of whether this rider is credited for it.
+            if result.verdict == "eligible":
+                battery_ride_row = {
+                    "vehicle_identifier": vehicle_identifier,
+                    "track_key_issued_at": track_key_issued_at,
+                    "user_reported_ended_at": user_reported_ended_at,
+                    "feed_start_battery_percent": feed_start_battery_percent,
+                    "reported_start_battery_percent": reported_start_battery_percent,
+                    "reported_battery_percent": reported_battery_percent,
+                }
+                battery_donation_row = {
+                    "id": donation_id, "vehicle_model": vehicle_model,
+                    "distance_meters": result.distance_meters,
+                }
+                ingest_donated_observation(
+                    cur, ride_row=battery_ride_row, donation_row=battery_donation_row)
+
+        conn.commit()
+
+    response = result.as_response()
+    response["donation_id"] = str(donation_id)
+    response["distance_meters"] = round(result.distance_meters, 1)
+    response["waypoint_count"] = result.waypoint_count
+    response["points"] = points_awarded
+    return response
 
 
 @router.post("/api/v1/tracked-rides/{ride_id}/waypoints")

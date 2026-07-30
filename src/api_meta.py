@@ -115,7 +115,57 @@ _PRIVACY = {
                       "separate mechanism from the `rides` entry above — but "
                       "the same commitment applies: DELETE "
                       "/api/v1/tracked-rides[/:id] is an immediate hard "
-                      "delete, cascading to its waypoints and watch record.",
+                      "delete, cascading to its waypoints and watch record, "
+                      "and — if you donated this ride's track — to that "
+                      "donation record too, as long as you delete before "
+                      "the donation's own de-identification sweep runs "
+                      "(see 'donated_tracks' below; within 28 hours of "
+                      "donation). Once a donated track has been "
+                      "de-identified it is no longer linked to your "
+                      "account at all, so deleting the ride after that "
+                      "point can no longer reach it — there is no owner "
+                      "left for the delete to cascade from.",
+        },
+        {
+            "data": "donated_tracks",
+            "retention": "account link removed within 28 hours of donation",
+            "detail": "When you opt in to 'Improve battery modeling' or "
+                      "'Navigation Improvement' and donate your saved ride "
+                      "track at the end of a ride, the signed waypoint chain "
+                      "is verified once, then stored as a trip record "
+                      "(start/end points, distance, timing) linked to your "
+                      "account. An hourly sweep removes that account link 4 "
+                      "hours after your points for the trip settle, with a "
+                      "hard floor of 28 hours after donation even if points "
+                      "never settle — so the account link never survives "
+                      "past 28 hours. Recorded waypoint timestamps are "
+                      "coarsened to the minute in the same sweep. What "
+                      "remains afterward, with no account or ride linkage: "
+                      "the trip's derived battery observation (vehicle "
+                      "model, start/end battery percentage, distance, and "
+                      "duration), kept indefinitely to improve our range "
+                      "predictions for that vehicle model — matching the "
+                      "in-app 'Our Usage' explanation for that feature.",
+        },
+        {
+            "data": "user_points",
+            "retention": "indefinite; deleted only with the account",
+            "detail": "The points ledger keeps every earned-points row — "
+                      "account id, the coarse H3 resolution-8 area cell "
+                      "your location falls in, your ride's start "
+                      "coordinates, the action and point value, and (for a "
+                      "device-tied award) the vehicle id — indefinitely. "
+                      "These rows are the leaderboard record: the H3 area "
+                      "leaderboard is computed directly from them, so "
+                      "unlike donated tracks above they are never "
+                      "de-identified. The only way to remove your own "
+                      "ledger rows is to delete your account, which "
+                      "cascades to them. Public exposure through the "
+                      "leaderboard is subject to your account's visibility "
+                      "toggles (public username, leaderboard "
+                      "participation) — turning those off removes you "
+                      "from the public view without deleting the "
+                      "underlying rows.",
         },
         {
             "data": "device_photos",

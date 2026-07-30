@@ -22,6 +22,7 @@ would be a worse breach of it than the overpayment was.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import h3
@@ -228,6 +229,17 @@ def credit_points(
     if points is None:
         return None
 
+    # EVEN-POINTS INVARIANT (RIDE_MODE_OVERHAUL_PLAN.md Decision 6, sql/053).
+    # Safe against cap trimming: MAX_POINTS_PER_RIDE (100) and every
+    # POINTS_* constant this module defines are even, and even minus even is
+    # even, so a trimmed remainder from _apply_ride_cap is always even too.
+    # This is the second of three enforcement points (the others: sql/053's
+    # `CHECK (points % 2 = 0)` on user_points, and a test sweeping every
+    # constant and formula output) — an AssertionError here means a caller
+    # requested an odd award, which is a bug in the caller, not in a rider's
+    # input.
+    assert points % 2 == 0, f"odd points award: action={action} points={points}"
+
     h3_8 = h3_8_index_for(lat, lng)
     cur.execute(
         """
@@ -349,6 +361,73 @@ def credit_gbfs_validation_points(
         cur, account_id=account_id, action="gbfs_trip_validated",
         points=POINTS_GBFS_TRIP_VALIDATED,
         lat=end_lat, lng=end_lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
+    )
+
+
+def credit_battery_contribution(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    distance_m: float, start_lat: float, start_lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md Decision 6:
+    `POINTS_BATTERY_CONTRIBUTION_BASE` plus
+    `POINTS_BATTERY_CONTRIBUTION_PER_STEP` for every started
+    `BATTERY_CONTRIBUTION_STEP_METERS` of verified track distance, rounded
+    UP — `8 + 2 * ceil(distance_m / 2000)`. `distance_m` is the verified
+    distance off the `track_donations` row, not a client claim.
+
+    Every PRECONDITION (a verified donation, both start/end batteries
+    known, `ride_options.battery_modeling` on, not an own-device ride) is
+    the CALLER's to check — the donation handler / `finalize_validation`,
+    per the A2 spec — this function is only the formula and the ledger
+    write, same division of labor as credit_waypoint_points /
+    credit_gbfs_validation_points above.
+
+    lat/lng = the ride's START point (start_lat/start_lng), NOT its end —
+    RIDE_MODE_OVERHAUL_PLAN.md's Risk 3 rule for the reshaped awards,
+    deliberately unlike the two superseded ride awards above, which file at
+    the ride's end.
+
+    source_table='tracked_rides', source_id=str(ride_id): this is what
+    makes MAX_POINTS_PER_RIDE (src/ride_limits.py) actually bind via
+    _apply_ride_cap/_RIDE_SOURCE_TABLES, and what makes a retried donation
+    dedupe against itself through credit_points' ON CONFLICT. Any other
+    source_table would silently bypass both."""
+    points = POINTS_BATTERY_CONTRIBUTION_BASE + POINTS_BATTERY_CONTRIBUTION_PER_STEP * math.ceil(
+        distance_m / BATTERY_CONTRIBUTION_STEP_METERS
+    )
+    return credit_points(
+        cur, account_id=account_id, action="battery_contribution", points=points,
+        lat=start_lat, lng=start_lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
+    )
+
+
+def credit_nav_distance_bonus(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    distance_m: float, start_lat: float, start_lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md Decision 6:
+    `POINTS_NAV_DISTANCE_PER_STEP` for every started `NAV_DISTANCE_STEP_METERS`
+    of verified track distance, rounded UP — `2 * ceil(distance_m / 3000)`.
+    `distance_m` is the same verified `track_donations` distance
+    credit_battery_contribution reads; there is no flat base term (a 1 km
+    trip earns exactly 2 points, per the owner's copy).
+
+    Same division of labor as credit_battery_contribution:
+    `ride_options.nav_improvement` on and a `ride_routes` row existing are
+    the CALLER's preconditions (PLAN_RIDE_MODE_API.md phase A3), not
+    checked here.
+
+    lat/lng = the ride's START point, same Risk 3 rule as above.
+    source_table='tracked_rides', source_id=str(ride_id): same
+    per-ride-cap/dedupe reason as credit_battery_contribution — this is the
+    award the spec calls out explicitly as a real bug risk if gotten
+    wrong."""
+    points = POINTS_NAV_DISTANCE_PER_STEP * math.ceil(distance_m / NAV_DISTANCE_STEP_METERS)
+    return credit_points(
+        cur, account_id=account_id, action="nav_distance_bonus", points=points,
+        lat=start_lat, lng=start_lng, vehicle_identifier=vehicle_identifier,
         source_table="tracked_rides", source_id=str(ride_id),
     )
 

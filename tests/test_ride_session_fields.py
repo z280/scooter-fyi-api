@@ -239,10 +239,12 @@ def _patch_end(client, **body):
 
 
 def _end_fetches(*, row=None, **select_kw):
-    """PATCH .../end's fetchone sequence with no waypoints: the FOR UPDATE
-    read, the waypoint COUNT (which makes both award calls no-ops), the final
-    response read."""
-    return [_end_select(**select_kw), (0,), _row() if row is None else row]
+    """PATCH .../end's fetchone sequence: the FOR UPDATE read, then the
+    final response read. PLAN_RIDE_MODE_API.md phase A2 superseded the
+    waypoint-count/points-crediting queries that used to sit between them
+    (see src/api_tracked_rides.py:end_tracked_ride) — /end no longer reads
+    ride_waypoints or writes user_points at all."""
+    return [_end_select(**select_kw), _row() if row is None else row]
 
 
 # ---------- ride_options: 4 KB cap -----------------------------------------
@@ -636,12 +638,14 @@ def test_provisional_validation_never_reaches_eligible():
 def test_end_writes_the_provisional_status_and_settles_only_when_terminal(monkeypatch):
     # gbfs_reappeared: the feed has ALREADY resolved, so the only thing
     # making this ride ineligible is that the rider never opted into saving
-    # tracks — the check that has to win over 'pending'. The extra two
-    # fetches are the GBFS-corroboration award that resolution unlocks
-    # (cap-headroom probe, then the ledger INSERT), which A1 leaves alone.
+    # tracks — the check that has to win over 'pending'. A1's version of
+    # this test also expected the GBFS-corroboration award's fetches here
+    # (cap-headroom probe, ledger INSERT) — PLAN_RIDE_MODE_API.md phase A2
+    # superseded that award at /end (see
+    # test_end_no_longer_credits_waypoint_points above), so only the FOR
+    # UPDATE read and the final response read remain.
     c, conn = _client(monkeypatch, [
         _end_select(ride_options={}, gbfs_reappeared=True),
-        (0,), (0,), (78, _NOW),
         _row(validation_status="ineligible",
              validation_reasons=["tracking_not_opted"]),
     ])
@@ -675,18 +679,20 @@ def test_end_reads_ride_options_off_the_locked_row(monkeypatch):
     assert "ride_options" in sql
 
 
-# ---------- award behavior is A2's to change, not A1's ---------------------
+# ---------- award behavior: superseded by A2 --------------------------------
 
-def test_end_still_credits_waypoint_points(monkeypatch):
-    """Award supersession is phase A2. A ride with waypoints credits them
-    exactly as before, provisional validation notwithstanding."""
-    c, conn = _client(monkeypatch, [
-        _end_select(), (3,), (0,), (77, _NOW), _row()])
+def test_end_no_longer_credits_waypoint_points(monkeypatch):
+    """A1's namesake test documented that award supersession was A2's to
+    make ("provisional validation notwithstanding"). PLAN_RIDE_MODE_API.md
+    phase A2 has landed: PATCH .../end no longer reads ride_waypoints or
+    writes user_points at all — see src/api_tracked_rides.py:end_tracked_ride
+    and tests/test_api_tracked_rides_validation.py's own coverage of this
+    same supersession. A ride with waypoints still measures/records its
+    path (distance, polyline); it just earns nothing here anymore."""
+    c, conn = _client(monkeypatch, [_end_select(), _row()], fetchalls=[[(39.741, -104.981)]])
     assert _patch_end(c).status_code == 200
-    insert = next(e for e in conn.cur.executed
-                  if e[0].startswith("INSERT INTO user_points"))
-    assert insert[1][1] == "waypoint"
-    assert insert[1][2] == 6
+    assert not any(e[0].startswith("SELECT COUNT(*) FROM ride_waypoints") for e in conn.cur.executed)
+    assert not any(e[0].startswith("INSERT INTO user_points") for e in conn.cur.executed)
 
 
 # ---------- the parameter positions the pre-existing tests pin -------------

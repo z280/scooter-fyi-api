@@ -298,10 +298,20 @@ def test_disabled_vehicles_are_excluded_in_sql():
 
 def test_temperature_lookup_is_bounded():
     """Unbounded, a hole in the cache hands a trip a reading from days away and
-    beta_3 absorbs the error as if it were signal."""
+    beta_3 absorbs the error as if it were signal.
+
+    The bounded query itself lives in _temperature_at_cur — PLAN_RIDE_MODE_API.md
+    phase A2's donated-ride ingestion needed the same lookup over an
+    already-open cursor (it has no `conn` of its own to hand
+    _temperature_at), so the query was split out and _temperature_at
+    became a thin `with conn.cursor()` wrapper over it; both are asserted
+    here so a refactor that re-inlines the query without keeping the split
+    still passes."""
     assert battery_model.MAX_TEMPERATURE_GAP_SECONDS == 2 * 3600
-    src = __import__("inspect").getsource(battery_model._temperature_at)
+    src = __import__("inspect").getsource(battery_model._temperature_at_cur)
     assert "BETWEEN" in src
+    wrapper_src = __import__("inspect").getsource(battery_model._temperature_at)
+    assert "_temperature_at_cur" in wrapper_src
 
 
 # --- per-model offsets -------------------------------------------------------

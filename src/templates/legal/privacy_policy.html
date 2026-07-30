@@ -133,7 +133,34 @@ Deleted automatically after 18 months; the report record itself is kept
 <tr><td>Ride history</td><td>Until you delete it</td><td>Route polylines
 are the most sensitive data we hold. Deleting a ride (or all your rides)
 is an immediate, permanent hard delete — no soft-delete, no backup
-retention, never reused for analytics.</td></tr>
+retention, never reused for analytics. If you donated that ride's track
+(see "Donated ride tracks" below), the delete also cascades to that
+donation record, but only until our hourly de-identification sweep runs
+(within 28 hours of donation) — after that, the donation record has
+already had its account link removed and there is nothing left for a
+ride delete to reach.</td></tr>
+<tr><td>Donated ride tracks</td><td>Account link removed within 28
+hours</td><td>If you opt in to "Improve battery modeling" or
+"Navigation Improvement" during a ride and donate your saved track
+afterward, we verify it once and store a trip record (start/end points,
+distance, timing) linked to your account. An hourly job removes that
+account link 4 hours after your points for the trip settle, with a hard
+floor of 28 hours after donation even if points never settle — so the
+link never survives past 28 hours, and recorded waypoint timestamps are
+coarsened to the minute at the same time. What's left afterward, with no
+account or ride linkage: the trip's derived battery observation (vehicle
+model, start/end battery percentage, distance, duration), which we keep
+indefinitely to improve range predictions for that vehicle model.</td></tr>
+<tr><td>Points ledger</td><td>Indefinite; deleted only with your
+account</td><td>Every points award you earn is recorded permanently —
+your account, the coarse map area (H3 resolution-8 cell) and ride start
+coordinates it was earned at, the action and point value, and, for
+device-tied awards, the vehicle. These rows are the leaderboard record
+itself: the area leaderboard is computed directly from them, so unlike
+donated tracks above they are never de-identified — only deleting your
+account removes them. Whether they appear on the public leaderboard is
+controlled separately by your account's visibility settings (public
+username, leaderboard participation).</td></tr>
 <tr><td>Model-report photos</td><td>18 months</td><td>A photo attached to
 a vehicle-model correction. Same private bucket, same full re-encode that
 strips EXIF/GPS/camera metadata, and the same 18-month deletion job as

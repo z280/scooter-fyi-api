@@ -229,32 +229,31 @@ def test_end_ride_409_when_already_reported(monkeypatch):
     assert r.status_code == 409
 
 
-def test_end_ride_credits_waypoint_points(monkeypatch):
-    # initial SELECT (not ended, no gbfs data), UPDATE (no fetch),
-    # waypoint COUNT, credit_points INSERT...RETURNING, final SELECT.
-    fetches = [
-        _end_select(),
-        (3,),
-        (0,),          # per-ride points cap: headroom probe
-        (77, _NOW),
-        _row(),
-    ]
-    c, conn = _client(monkeypatch, fetches)
+def test_end_ride_no_longer_credits_waypoint_points(monkeypatch):
+    """SUPERSEDED as of PLAN_RIDE_MODE_API.md phase A2 (Decision 6 / Risk 5):
+    PATCH .../end used to award `waypoint` points (2 * waypoint_count) here.
+    It no longer queries ride_waypoints or writes to user_points at all —
+    the reshaped ride-mode awards are credited from POST .../track and
+    POST .../survey instead. Only the initial SELECT ... FOR UPDATE and the
+    final re-SELECT fetch a row now; _track_points still reads the waypoint
+    track (via fetchall, not fetchone) to measure the path, so `waypoints=`
+    still matters for distance/polyline — it just no longer feeds an award.
+    """
+    fetches = [_end_select(), _row()]
+    c, conn = _client(
+        monkeypatch, fetches,
+        waypoints=[(39.74 + 0.001, -104.98), (39.74 + 0.002, -104.98), (39.74 + 0.003, -104.98)],
+    )
     r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
         "ended_at": "2026-07-01T12:00:00Z", "end_lat": 39.75, "end_lon": -104.99,
     })
     assert r.status_code == 200, r.text
-    points_insert = next(c for c in conn.cur.executed if c[0].startswith("INSERT INTO user_points"))
-    assert points_insert[1][1] == "waypoint"
-    assert points_insert[1][2] == 6  # 2 points * 3 waypoints
+    assert not any(c[0].startswith("SELECT COUNT(*) FROM ride_waypoints") for c in conn.cur.executed)
+    assert not any(c[0].startswith("INSERT INTO user_points") for c in conn.cur.executed)
 
 
 def test_end_ride_no_waypoints_and_no_gbfs_data_credits_nothing(monkeypatch):
-    fetches = [
-        _end_select(),
-        (0,),  # zero waypoints -> credit_waypoint_points no-ops without a query
-        _row(),
-    ]
+    fetches = [_end_select(), _row()]
     c, conn = _client(monkeypatch, fetches)
     r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
         "ended_at": "2026-07-01T12:00:00Z", "end_lat": 39.75, "end_lon": -104.99,
@@ -274,7 +273,7 @@ def _end_update(conn) -> tuple:
 def test_end_ride_without_waypoints_falls_back_to_straight_line(monkeypatch):
     """No waypoints -> distance is start->end as the crow flies, tagged so
     downstream readers know it's the weak measurement."""
-    c, conn = _client(monkeypatch, [_end_select(), (0,), _row()])
+    c, conn = _client(monkeypatch, [_end_select(), _row()])
     r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
         "ended_at": "2026-07-01T12:00:00Z", "end_lat": 39.75, "end_lon": -104.98,
     })
@@ -306,8 +305,9 @@ def test_end_ride_drops_an_implausible_final_leg_and_says_so(monkeypatch):
     step = 1.0 / 111_320.0  # metres of latitude
     c, conn = _client(
         monkeypatch,
-        # end SELECT, waypoint COUNT, cap probe, waypoint points INSERT, final SELECT
-        [_end_select(), (1,), (0,), (77, _NOW), _row()],
+        # end SELECT, final SELECT — no waypoint-count/points crediting
+        # since PLAN_RIDE_MODE_API.md phase A2 superseded that at /end.
+        [_end_select(), _row()],
         waypoints=[(39.74 + 20 * step, -104.98)],
     )
     r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
@@ -329,7 +329,7 @@ def test_end_ride_drops_an_implausible_final_leg_and_says_so(monkeypatch):
 def test_end_ride_without_waypoints_does_not_fabricate_a_path(monkeypatch):
     """A straight-line distance is an honest fallback; a two-point
     path_polyline would be a route we never observed."""
-    c, conn = _client(monkeypatch, [_end_select(), (0,), _row()])
+    c, conn = _client(monkeypatch, [_end_select(), _row()])
     r = c.patch(f"/api/v1/tracked-rides/{_RIDE_ID}/end", json={
         "ended_at": "2026-07-01T12:00:00Z", "end_lat": 39.75, "end_lon": -104.98,
     })

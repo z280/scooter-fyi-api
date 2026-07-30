@@ -96,3 +96,15 @@
 # enforced upstream at send time regardless, so the only cost of lag here is
 # how long our own UI keeps saying "we'll text you" to someone who opted out.
 */5 * * * * cd /app && python -m src.cli poll_comms_replies
+
+# De-id sweep: severs account linkage on donated ride tracks
+# (track_donations/donated_track_points -- RIDE_MODE_OVERHAUL_PLAN.md's
+# "De-id" glossary entry / PLAN_RIDE_MODE_API.md phase A2) 4h after a
+# ride's points settle, with a hard floor of 28h after donation even if
+# points never settle -- so a donated track is never account-linked past
+# 28h. Also carries a to_regclass('ride_routes')-guarded arm for phase
+# A3's route geometry (sql/052) that is a safe no-op until that table
+# exists, so this line is correct regardless of A2/A3 landing order.
+# Hourly at :15 -- cheap, idempotent (WHERE deidentified_at IS NULL),
+# safe to run every hour forever.
+15 * * * * cd /app && python -m src.cli deidentify_donations

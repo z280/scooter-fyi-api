@@ -272,12 +272,17 @@ def test_a_ride_somehow_over_the_cap_grants_nothing_further():
 
 def test_the_cap_is_enforced_below_every_award_helper():
     """The point of putting it in credit_points: a future third award for a
-    ride is capped without having to know the cap exists."""
-    cur = _PointsCursor(already=95)
+    ride is capped without having to know the cap exists.
+
+    already=96 (not 95): sql/053's even-points invariant means a real
+    ledger's already-credited sum for a ride is always even (every
+    POINTS_* constant is even, and even + even is even), so 95 headroom
+    is not a state credit_points can actually reach any more — 4 is."""
+    cur = _PointsCursor(already=96)
     result = credit_points(
-        cur, account_id=1, action="some_future_ride_award", points=999,
+        cur, account_id=1, action="some_future_ride_award", points=998,
         lat=_LAT, lng=_LON, source_table="tracked_rides", source_id=str(_RIDE_ID))
-    assert result["points"] == 5
+    assert result["points"] == 4
 
 
 def test_qr_scan_is_not_a_ride_award_and_keeps_its_hundred():

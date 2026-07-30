@@ -169,6 +169,7 @@ def root():
             "/api/v1/tracked-rides/active",
             "/api/v1/tracked-rides/{ride_id}",
             "/api/v1/tracked-rides/{ride_id}/end",
+            "/api/v1/tracked-rides/{ride_id}/track",
             "/api/v1/tracked-rides/{ride_id}/waypoints",
             "/api/v1/tracked-rides/{ride_id}/screenshots",
             "/api/v1/points",
