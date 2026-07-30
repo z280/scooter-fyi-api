@@ -194,6 +194,10 @@ agent process).
 │   ├── api_device_photos.py     device photo upload/list/report + GET /api/v1/photos/mine
 │   ├── api_qr.py                POST /api/v1/devices/qr-scan
 │   ├── api_ride_screenshots.py  ride transaction screenshot upload/list
+│   ├── api_ride_surveys.py      POST /api/v1/tracked-rides/{id}/survey — Screen 9's
+│   │                            end-of-ride survey + its three point awards (sql/052)
+│   ├── api_ride_routes.py       POST /api/v1/ride-routes — Screen 4's chosen route,
+│   │                            persisted only when nav_improvement consent is on (sql/052)
 │   ├── api_reports.py           map-pin negative reports + quality feedback
 │   ├── api_frontend_reports.py  account-aware device/discount report flow
 │   ├── api_private.py           bearer-token admin JSON API (distinct from api_admin.py)
@@ -488,6 +492,18 @@ track donation, verification and validation-finishing live in
 | `DELETE /api/v1/tracked-rides/{ride_id}` / (bare) | Hard-delete one ride / every ride you own |
 | `POST /api/v1/tracked-rides/{ride_id}/screenshots?screenshot_type=overview\|receipt` | Upload a transaction screenshot (overwrites the same slot) |
 | `GET /api/v1/tracked-rides/{ride_id}/screenshots` | List your screenshots for a ride |
+| `POST /api/v1/tracked-rides/{ride_id}/survey` | Screen 9's end-of-ride survey — scooter-feedback + navigation-feedback panes, single-shot. Awards `ride_survey`/`nav_route_feedback`/`nav_qualitative_feedback`. 404 not yours, 409 not ended / already submitted, 422 bad issue / bad model_bonus / bad ride_route_id. See `src/api_ride_surveys.py` |
+
+### Ride routes
+
+Screen 4's chosen route, stored (only when `ride_options.nav_improvement`
+is on) so the end-of-ride survey above can rate it and `nav_distance_bonus`
+can confirm a route exists. See `sql/052_ride_surveys_routes.sql` /
+`src/api_ride_routes.py`.
+
+| Endpoint | Returns |
+|---|---|
+| `POST /api/v1/ride-routes` | Persist a chosen route; `tracked_ride_id` null in the normal flow, or a ride you own (else 404). 400 unknown profile / bad polyline (<2 decoded points) / out of routing-graph coverage; 422 out-of-bound `distance_meters`/`duration_seconds`/`battery_percent_estimate`. No uniqueness on `tracked_ride_id` — multiple routes per ride is intended. 30/hour per account. → `{ ride_route_id }` |
 
 ### Points & device engagement
 

@@ -476,3 +476,80 @@ def maybe_credit_profile_completion(cur, account_id: int) -> dict[str, Any] | No
         cur, account_id=account_id, action="profile_completion",
         points=POINTS_PROFILE_COMPLETION, lat=lat, lng=lng,
     )
+
+
+# --- Ride Mode survey awards (PLAN_RIDE_MODE_API.md phase A3; src/api_ride_surveys.py) -----
+#
+# All three are flat awards (no distance formula) credited from
+# POST /api/v1/tracked-rides/{ride_id}/survey. Same division of labor as
+# credit_battery_contribution / credit_nav_distance_bonus above: every
+# precondition is the CALLER's to check (src/api_ride_surveys.py reads the
+# gates off the ride's ride_options and the survey payload) — these
+# functions are only the ledger write. lat/lng = the ride's START point in
+# every case, the same Risk 3 rule every ride-mode award follows (not the
+# ride's end, unlike the two superseded awards above).
+#
+# source_table='tracked_rides', source_id=str(ride_id) in every case: this
+# is what makes MAX_POINTS_PER_RIDE (src/ride_limits.py) actually bind via
+# _apply_ride_cap/_RIDE_SOURCE_TABLES, and what makes a retried call dedupe
+# against itself through credit_points' ON CONFLICT — a survey is also
+# single-shot at the endpoint level (ride_surveys.tracked_ride_id UNIQUE,
+# sql/052), so that dedupe is only ever a backstop here, same as it is for
+# credit_battery_contribution.
+
+
+def credit_ride_survey(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    lat: float, lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_RIDE_SURVEY` (4) for
+    Screen 9's scooter-feedback pane. The CALLER checks (any scooter-
+    feedback field present) AND `ride_options.end_survey` AND not an
+    own-device ride before calling — own-device is defensive, not a
+    reachable honest path, since an own-device ride never has a
+    `tracked_rides` row to survey in the first place."""
+    return credit_points(
+        cur, account_id=account_id, action="ride_survey", points=POINTS_RIDE_SURVEY,
+        lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
+    )
+
+
+def credit_nav_route_feedback(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    lat: float, lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_NAV_ROUTE_FEEDBACK` (4)
+    for rating the selected route. The CALLER checks `nav_route_rating` is
+    present AND `ride_route_id` resolves to a `ride_routes` row owned by
+    the caller (unlinked, or already linked to this ride — see
+    src/api_ride_surveys.py's linking logic) before calling.
+
+    Not `credit_nav_distance_bonus`'s twin in every respect: unlike that
+    A2 award, this one is not gated here on `ride_options.nav_improvement`
+    — PLAN_RIDE_MODE_API.md's A3 endpoint spec states only the rating +
+    resolved-route precondition for this action, so that is what the
+    caller checks."""
+    return credit_points(
+        cur, account_id=account_id, action="nav_route_feedback",
+        points=POINTS_NAV_ROUTE_FEEDBACK,
+        lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
+    )
+
+
+def credit_nav_qualitative_feedback(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    lat: float, lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_NAV_QUALITATIVE` (6)
+    for free-text navigation feedback. The CALLER checks
+    `len(nav_qualitative.strip()) >= 20` before calling — "meaningful" is
+    not machine-checkable and no content heuristic is attempted here or
+    upstream."""
+    return credit_points(
+        cur, account_id=account_id, action="nav_qualitative_feedback",
+        points=POINTS_NAV_QUALITATIVE,
+        lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
+    )

@@ -9,7 +9,6 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

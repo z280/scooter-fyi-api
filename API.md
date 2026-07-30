@@ -2409,6 +2409,148 @@ Evidence of what Veo actually charged, for the cost audit. Stored in a
 | `POST /api/v1/tracked-rides/{id}/screenshots?screenshot_type=overview\|receipt` | `multipart/form-data`. ≤10 MB. Each type is **one slot per ride** — re-uploading replaces it and deletes the old object. → `{ id, ride_id, screenshot_type, created_at, updated_at, replaced_previous }`. 20/hour per account. |
 | `GET /api/v1/tracked-rides/{id}/screenshots` | Owner-only. → `{ ride_id, screenshots: [ { id, screenshot_type, url, created_at, updated_at } ] }`. `url` is a **presigned, expiring** link — fetch it fresh, don't persist it. |
 
+### End-of-ride survey
+
+Screen 9's post-ride feedback — the scooter-condition pane and the
+navigation-feedback pane, submitted together as one request. Owner-only,
+single-shot: a ride can be surveyed once (`ride_surveys.tracked_ride_id`
+is `UNIQUE`, sql/052). Source of three point awards — see
+[Points](#points).
+
+### `POST /api/v1/tracked-rides/{id}/survey`
+
+```json
+{
+  "would_ride_again": true,
+  "was_perfect": false,
+  "issues": ["battery", "brakes"],
+  "model_bonus": { "apollo_top_speed_mph": 18.5 },
+  "nav_route_rating": 8,
+  "nav_deviated": false,
+  "nav_deviated_needs_improvement": null,
+  "nav_nps": 9,
+  "nav_qualitative": "The route through the park was great, thanks!",
+  "ride_route_id": "…-uuid|null"
+}
+```
+
+→ echoes every field back plus:
+
+```json
+{
+  "id": "…-uuid", "ride_id": "…-uuid", "vehicle_model": "Apollo",
+  "created_at": "...",
+  "points": [ { "action": "ride_survey", "points": 4 },
+              { "action": "nav_route_feedback", "points": 4 },
+              { "action": "nav_qualitative_feedback", "points": 6 } ]
+}
+```
+
+Every field is optional — submit only the panes you have answers for.
+`vehicle_model` is stamped **server-side** from
+`device_state.current_vehicle_model_name` for the ride's vehicle
+(`Astro`/`Cosmo`/`Apollo`, or `null` if unconfirmed) — never the client's
+own claim.
+
+`issues` is validated against a fixed 16-item vocabulary: `app_veo`,
+`acceleration`, `basket`, `battery`, `bell`, `brakes`, `connectivity`,
+`customer_service`, `dirty`, `kickstand`, `pedals`, `phone_holder`,
+`price`, `speedometer`, `scooterfyi_issue`, `vandalized`.
+
+`model_bonus` keys are validated against the ride's stamped
+`vehicle_model`: `cosmo_front_basket` (bool, Cosmo only),
+`apollo_top_speed_mph` (number 0–40, Apollo only),
+`astro_landscape_holder` (bool, Astro only). A key present for the wrong
+model — or when the model is unconfirmed — `422`s, same as an
+unrecognized key.
+
+`ride_route_id`, when set, must name a `POST /api/v1/ride-routes` row you
+own that is either unlinked or already linked to this ride; submitting
+the survey is what stamps the link (Screen 4 runs before Screen 6 start,
+so the row predates the ride it's about). A row linked to a *different*
+ride, or one that doesn't resolve to your account at all (including a
+de-identified route — its account link is already gone by the 28h
+sweep), `422`s the same way: a stale id and a guessed one are
+indistinguishable on purpose, so both fail identically.
+
+Award gates (amounts in [Points](#points)):
+
+- `ride_survey` (4) — any scooter-feedback field present
+  (`would_ride_again`, `was_perfect`, `issues`, or `model_bonus`),
+  `ride_options.end_survey` was on for this ride, and it isn't an
+  own-device ride (defensive — an own-device ride never has a
+  `tracked_rides` row to survey in the first place).
+- `nav_route_feedback` (4) — `nav_route_rating` present and
+  `ride_route_id` resolves.
+- `nav_qualitative_feedback` (6) — `nav_qualitative`, trimmed, is at
+  least 20 characters. "Meaningful" isn't machine-checkable; length is
+  the whole check.
+
+- `404` — no such ride (or not yours).
+- `409` `{"error": "ride_not_ended"}` — report your end first (`PATCH
+  .../end`) before surveying it.
+- `409` `{"error": "survey_already_submitted"}` — one survey per ride,
+  ever.
+- `422` `{"error": "bad_issue", "detail": "..."}` — an `issues` entry
+  outside the 16-item vocabulary.
+- `422` `{"error": "bad_model_bonus", "detail": "..."}` — an unrecognized
+  key, a key for the wrong (or unconfirmed) vehicle model, or a value
+  outside that key's type/bounds.
+- `422` `{"error": "bad_ride_route_id", "detail": "..."}` —
+  `ride_route_id` doesn't resolve to a route you own, or is already
+  linked to a different ride.
+
+## Ride routes
+
+Screen 4's chosen route (one of `safe`/`range`/`shade`/`express`, from
+`GET /api/v1/route/profiles`), stored so the end-of-ride survey above can
+rate the leg it names and `nav_distance_bonus` can confirm a route exists
+for the ride. The client calls this **only** when
+`ride_options.nav_improvement` is on.
+
+### `POST /api/v1/ride-routes`
+
+```json
+{
+  "tracked_ride_id": null,
+  "profile": "safe",
+  "origin": [39.7450, -104.9910],
+  "destination": [39.7020, -104.9550],
+  "route_polyline": "<precision-5 encoded polyline>",
+  "distance_meters": 2450.0,
+  "duration_seconds": 620.0,
+  "battery_percent_estimate": 4.5
+}
+```
+
+→ `{ "ride_route_id": "…-uuid" }`
+
+`tracked_ride_id` is `null` in the normal wizard flow — Screen 4 precedes
+ride start, and the survey links the row to a ride later. When non-null
+(the New-Destination loop re-running Screen 4 mid-ride), it must resolve
+to a ride **you own**, else `404` — same no-existence-oracle rule as
+every other tracked-rides sub-resource. No uniqueness on
+`tracked_ride_id`: a ride can accumulate more than one stored route (one
+per deliberate Screen-4 selection); `nav_distance_bonus` is still awarded
+at most once per ride regardless of row count.
+
+Owner-only. Limit **30/hour per account** (`ride_route_account`).
+
+- `400` `{"error": "unknown_profile", "profiles": [...]}` — `profile` isn't
+  a live `GET /api/v1/route/profiles` key.
+- `400` `{"error": "bad_polyline"}` — `route_polyline` doesn't decode
+  (precision 5) to at least 2 points.
+- `400` `{"error": "out_of_coverage", "graph_bbox": [...]}` — `origin` or
+  `destination` falls outside the routing graph, the same rejection
+  `GET /api/v1/route` uses.
+- `404` — `tracked_ride_id` is set and isn't a ride you own.
+- `422` — `distance_meters` outside 0–80 000, `duration_seconds` outside
+  0–10 800, or `battery_percent_estimate` outside 0–100. These are your
+  own client-side estimates, stored as reported; no award ever reads them
+  directly (`nav_distance_bonus` reads the *verified* donation distance
+  instead).
+- `429` — over 30/hour.
+
 ---
 
 ## Points
@@ -2446,6 +2588,9 @@ the whole ledger — not just the returned page.
 | `report_not_found` | 4 | `not_found` device report |
 | `battery_contribution` | `8 + 2 × ⌈km / 2⌉` | A verified, `eligible` `POST .../track` donation, `ride_options.battery_modeling` on, not an own-device ride, both start/end battery known |
 | `nav_distance_bonus` | `2 × ⌈km / 3⌉` | Same donation, `ride_options.nav_improvement` on, and a stored `POST /api/v1/ride-routes` row linked to the ride |
+| `ride_survey` | 4 | `POST .../survey`, any scooter-feedback field present, `ride_options.end_survey` on, not an own-device ride |
+| `nav_route_feedback` | 4 | Same survey, `nav_route_rating` present and its `ride_route_id` resolves |
+| `nav_qualitative_feedback` | 6 | Same survey, `nav_qualitative` trimmed to ≥20 characters |
 
 **Ceiling: 100 points per ride**, summed across every ride award. When the
 ceiling binds, the ledger entry records the **granted** amount — `points`
@@ -2469,10 +2614,7 @@ double-credit.
 20 m) are no longer newly granted — GBFS reappearance is now an
 *eligibility gate*, not an award, and the reshaped `battery_contribution`
 above pays for verified distance instead. Both actions remain valid on
-historical ledger rows; nothing is rewritten. `nav_route_feedback` (4),
-`nav_qualitative_feedback` (6) and `ride_survey` (4) are published in
-`GET /api/v1/points/schedule` below but not yet wired to an award (phase
-A3, `POST /api/v1/tracked-rides/{id}/survey`).
+historical ledger rows; nothing is rewritten.
 
 ### `GET /api/v1/points/schedule`
 
@@ -2521,10 +2663,9 @@ cannot sum to an odd award.
 The five ride-mode actions (`battery_contribution`, `nav_route_feedback`,
 `nav_qualitative_feedback`, `nav_distance_bonus`, `ride_survey`) were published
 **before** anything awarded them, because the ride wizard's info copy needs the
-numbers the day it ships. Phase A2 has now wired `battery_contribution` and
-`nav_distance_bonus` (`POST /api/v1/tracked-rides/{id}/track`); the other
-three await phase A3 (`POST /api/v1/tracked-rides/{id}/survey`). The Award
-table above is what the ledger pays today.
+numbers the day it ships. Phases A2 (`POST /api/v1/tracked-rides/{id}/track`)
+and A3 (`POST /api/v1/tracked-rides/{id}/survey`) have now wired all five —
+the Award table above is what the ledger pays today.
 
 ---
 

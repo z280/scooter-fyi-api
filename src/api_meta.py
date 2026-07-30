@@ -148,6 +148,30 @@ _PRIVACY = {
                       "in-app 'Our Usage' explanation for that feature.",
         },
         {
+            "data": "ride_routes",
+            "retention": "account link removed within 28 hours",
+            "detail": "When you turn on 'Navigation Improvement' before a ride, each "
+                      "route you pick on Screen 4 (including a mid-ride reselect) is "
+                      "stored -- profile, origin/destination, the route geometry, and "
+                      "your distance/duration/battery estimates -- linked to your "
+                      "account and, once known, the ride. The same hourly sweep that "
+                      "de-identifies donated tracks removes this link 28 hours after "
+                      "the route was stored, whether or not you ever donated or "
+                      "surveyed that ride; the route geometry itself is kept "
+                      "afterward with no link back to you.",
+        },
+        {
+            "data": "ride_surveys",
+            "retention": "until you delete the ride, or your account",
+            "detail": "Your end-of-ride feedback (scooter-condition answers, "
+                      "free-text navigation comments, route ratings). It carries no "
+                      "geometry of its own, so unlike ride routes above it is never "
+                      "de-identified -- it stays linked to your account and ride "
+                      "under the same rule as your ride history: deleting the ride "
+                      "cascades to its survey, and deleting your account removes "
+                      "every survey you wrote.",
+        },
+        {
             "data": "user_points",
             "retention": "indefinite; deleted only with the account",
             "detail": "The points ledger keeps every earned-points row — "

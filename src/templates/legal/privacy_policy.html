@@ -151,6 +151,22 @@ coarsened to the minute at the same time. What's left afterward, with no
 account or ride linkage: the trip's derived battery observation (vehicle
 model, start/end battery percentage, distance, duration), which we keep
 indefinitely to improve range predictions for that vehicle model.</td></tr>
+<tr><td>Ride routes</td><td>Account link removed within 28
+hours</td><td>When you turn on "Navigation Improvement" before a ride, each
+route you pick on Screen 4 (including a mid-ride reselect) is stored --
+profile, origin/destination, the route geometry, and your distance/
+duration/battery estimates -- linked to your account and, once known, the
+ride. The same hourly sweep that de-identifies donated tracks removes this
+link 28 hours after the route was stored, whether or not you ever donated
+or surveyed that ride; the route geometry itself is kept afterward with no
+link back to you.</td></tr>
+<tr><td>Ride surveys</td><td>Until you delete the ride, or your
+account</td><td>Your end-of-ride feedback (scooter-condition answers,
+free-text navigation comments, route ratings). It carries no geometry of
+its own, so unlike ride routes above it is never de-identified -- it stays
+linked to your account and ride under the same rule as your ride history:
+deleting the ride cascades to its survey, and deleting your account
+removes every survey you wrote.</td></tr>
 <tr><td>Points ledger</td><td>Indefinite; deleted only with your
 account</td><td>Every points award you earn is recorded permanently —
 your account, the coarse map area (H3 resolution-8 cell) and ride start

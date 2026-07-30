@@ -467,14 +467,18 @@ def test_the_key_is_issued_server_side_at_start(monkeypatch):
 
 def test_active_response_carries_the_signing_block(monkeypatch):
     """A client that reloaded mid-ride resumes signing from this."""
-    c, _ = _client(monkeypatch, [_owner_row(), None])
+    # The extra (None,) is _survey_submitted_ids' `SELECT
+    # to_regclass('ride_surveys')` existence probe (PLAN_RIDE_MODE_API.md
+    # phase A3, sql/052) — None short-circuits it to "table does not exist
+    # yet", matching this test's pre-A3 world.
+    c, _ = _client(monkeypatch, [_owner_row(), (None,), None])
     r = c.get("/api/v1/tracked-rides/active")
     assert r.status_code == 200, r.text
     assert _signing_of(r.json()["active"])["key"] == _KEY
 
 
 def test_detail_response_carries_the_signing_block(monkeypatch):
-    c, _ = _client(monkeypatch, [_owner_row(), None])
+    c, _ = _client(monkeypatch, [_owner_row(), (None,), None])
     r = c.get(f"/api/v1/tracked-rides/{_RIDE_ID}")
     assert r.status_code == 200, r.text
     assert _signing_of(r.json())["nonce"] == _NONCE
@@ -483,7 +487,9 @@ def test_detail_response_carries_the_signing_block(monkeypatch):
 def test_track_signing_is_absent_from_the_list_response(monkeypatch):
     """THE SECRET-LEAK GUARD. Not a redaction: the list query never selects
     track_key, so there is nothing there to forget to strip."""
-    c, conn = _client(monkeypatch, fetchones=[], fetchalls=[[_row(), _row()]])
+    # (None,) is _survey_submitted_ids' to_regclass('ride_surveys') probe —
+    # see the comment on test_active_response_carries_the_signing_block.
+    c, conn = _client(monkeypatch, fetchones=[(None,)], fetchalls=[[_row(), _row()]])
     r = c.get("/api/v1/tracked-rides")
     assert r.status_code == 200, r.text
     assert r.json()["count"] == 2
@@ -513,7 +519,9 @@ def test_owner_slice_offset_tracks_the_column_lists():
 def test_signing_block_is_none_for_a_ride_that_predates_sql_049(monkeypatch):
     """No key was ever minted, so there is nothing to sign with — say so
     plainly rather than hand back a half-built block."""
-    c, _ = _client(monkeypatch, [_owner_row(signing=(None, None, None)), None])
+    # (None,) is _survey_submitted_ids' to_regclass('ride_surveys') probe —
+    # see the comment on test_active_response_carries_the_signing_block.
+    c, _ = _client(monkeypatch, [_owner_row(signing=(None, None, None)), (None,), None])
     r = c.get(f"/api/v1/tracked-rides/{_RIDE_ID}")
     assert r.status_code == 200, r.text
     assert r.json()["track_signing"] is None

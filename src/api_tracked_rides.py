@@ -332,14 +332,46 @@ def _track_signing(r: tuple, *, ride_id: str) -> dict[str, Any] | None:
     }
 
 
-def _owner_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
+def _survey_submitted_ids(cur, ride_ids: list) -> set[str]:
+    """Which of `ride_ids` (raw tracked_rides.id values, straight off a
+    fetched row) already have a ride_surveys row (PLAN_RIDE_MODE_API.md
+    phase A3, sql/052) — one batched query per response rather than one
+    per ride, so a list response of N rides costs one extra round trip,
+    not N.
+
+    Guarded on `to_regclass('ride_surveys')` the same way A2's
+    donate_track / src/cli.py:deidentify_donations guard on
+    `to_regclass('ride_routes')`: this read touches EVERY ride payload
+    (start/list/active/get), not just the new survey endpoint, so it must
+    not 500 every pre-existing ride response if this lane's PR reaches
+    production ahead of the migration that creates ride_surveys.
+    """
+    if not ride_ids:
+        return set()
+    cur.execute("SELECT to_regclass('ride_surveys')")
+    (relid,) = cur.fetchone()
+    if relid is None:
+        return set()
+    cur.execute(
+        "SELECT tracked_ride_id FROM ride_surveys WHERE tracked_ride_id = ANY(%s)",
+        (list(ride_ids),),
+    )
+    return {str(r[0]) for r in cur.fetchall()}
+
+
+def _owner_ride(
+    r: tuple, *, path_geojson: bool = True, survey_submitted: bool = False,
+) -> dict[str, Any]:
     """An _RIDE_COLS_OWNER row as a response: the ride plus track_signing."""
-    ride = _row_to_ride(r[:_RIDE_COL_COUNT], path_geojson=path_geojson)
+    ride = _row_to_ride(
+        r[:_RIDE_COL_COUNT], path_geojson=path_geojson, survey_submitted=survey_submitted)
     ride["track_signing"] = _track_signing(r[_RIDE_COL_COUNT:], ride_id=ride["id"])
     return ride
 
 
-def _row_to_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
+def _row_to_ride(
+    r: tuple, *, path_geojson: bool = True, survey_submitted: bool = False,
+) -> dict[str, Any]:
     (ride_id, status, started_at, start_lat, start_lon, watch_expires_at,
      gbfs_left_feed_at, gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon,
      gbfs_end_battery_percent, user_reported_ended_at, end_lat, end_lon,
@@ -398,6 +430,13 @@ def _row_to_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
             "status": validation_status,
             "reasons": validation_reasons if isinstance(validation_reasons, list) else [],
         },
+        # PLAN_RIDE_MODE_API.md phase A3 (sql/052, src/api_ride_surveys.py):
+        # an EXISTS against ride_surveys, computed by the caller and passed
+        # in — NOT redacted like track_signing, since whether a survey was
+        # submitted reveals nothing the rider didn't do themselves. Included
+        # in every ride payload this function builds (single ride, active,
+        # and list).
+        "survey_submitted": survey_submitted,
     }
     if path_geojson:
         out["path_polyline"] = path_polyline
@@ -672,10 +711,14 @@ def list_tracked_rides(
                 params,
             )
             rows = cur.fetchall()
+            submitted_ids = _survey_submitted_ids(cur, [r[0] for r in rows])
     # path_geojson omitted here (list view) to keep a multi-ride response
     # bounded — a ride with a long path would otherwise bloat every list
     # call. Full path is available from GET /{ride_id}.
-    rides = [_row_to_ride(r, path_geojson=False) for r in rows]
+    rides = [
+        _row_to_ride(r, path_geojson=False, survey_submitted=str(r[0]) in submitted_ids)
+        for r in rows
+    ]
     return {"count": len(rides), "rides": rides}
 
 
@@ -702,7 +745,8 @@ def active_tracked_ride(user: SessionUser = Depends(require_session)) -> dict[st
             row = cur.fetchone()
             if row is None:
                 return {"active": None}
-            ride = _owner_ride(row)
+            submitted_ids = _survey_submitted_ids(cur, [row[0]])
+            ride = _owner_ride(row, survey_submitted=str(row[0]) in submitted_ids)
             ride["plate_display_code"] = _plate_display_code_for(cur, ride["vehicle_identifier"])
     return {"active": ride}
 
@@ -724,7 +768,8 @@ def get_tracked_ride(
             row = cur.fetchone()
             if row is None:
                 raise HTTPException(404, "no such ride")
-            ride = _owner_ride(row)
+            submitted_ids = _survey_submitted_ids(cur, [row[0]])
+            ride = _owner_ride(row, survey_submitted=str(row[0]) in submitted_ids)
             ride["plate_display_code"] = _plate_display_code_for(cur, ride["vehicle_identifier"])
     return ride
 

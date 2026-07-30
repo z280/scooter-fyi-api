@@ -30,7 +30,9 @@ from .api_points import router as points_router
 from .api_preferences import router as preferences_router
 from .api_qr import router as qr_router
 from .api_rides import router as rides_router
+from .api_ride_routes import router as ride_routes_router
 from .api_ride_screenshots import router as ride_screenshots_router
+from .api_ride_surveys import router as ride_surveys_router
 from .api_private import router as private_router
 from .api_profile import router as profile_router
 from .api_public import router as public_router
@@ -113,6 +115,8 @@ app.include_router(device_recommendations_router)
 app.include_router(device_photos_router)
 app.include_router(qr_router)
 app.include_router(ride_screenshots_router)
+app.include_router(ride_surveys_router)
+app.include_router(ride_routes_router)
 app.include_router(meta_router)
 app.include_router(legal_router)
 app.include_router(lexicon_router)
@@ -172,6 +176,8 @@ def root():
             "/api/v1/tracked-rides/{ride_id}/track",
             "/api/v1/tracked-rides/{ride_id}/waypoints",
             "/api/v1/tracked-rides/{ride_id}/screenshots",
+            "/api/v1/tracked-rides/{ride_id}/survey",
+            "/api/v1/ride-routes",
             "/api/v1/points",
             "/api/v1/points/schedule",
             "/api/v1/devices/{vehicle_identifier}/recommend",
