@@ -74,7 +74,11 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "docker-compose.yml,config.json,sql"
+          # `docker/` is REQUIRED, not optional: the `photon` service is built
+          # on the box (`build: ./docker/photon`) rather than pulled from GHCR,
+          # so without this directory `docker compose up -d` cannot resolve its
+          # build context and aborts the whole roll — not just geocoding.
+          source: "docker-compose.yml,config.json,sql,docker"
           target: "/opt/veo-audit/"
 
       - name: Render .env and roll containers
@@ -167,6 +171,13 @@ jobs:
             echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
             docker compose --env-file .env.new pull
             mv .env.new .env
+            # `photon` is the one service built HERE instead of pulled: the
+            # geocoding sidecar wraps a pinned upstream jar (docker/photon/),
+            # so `pull` above skips it. `up -d` alone would build it only when
+            # the image is missing, which means a PHOTON_VERSION or Dockerfile
+            # change would silently never land. Build it explicitly; it is a
+            # layer-cache no-op on every deploy that didn't touch it.
+            docker compose build photon
             docker compose up -d --remove-orphans
             sleep 8
             # Fire one ingest cycle synchronously so /health has data to report,

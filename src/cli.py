@@ -40,6 +40,15 @@ Available commands:
     refresh_routing_graph
                       Re-sync the routing assets and report whether the .pbf
                       changed, i.e. whether Valhalla needs a tile rebuild.
+    fetch_photon_index
+                      Sync the Photon geocoding index from R2 into the
+                      photon_files volume. Runs as a one-shot sidecar before
+                      the photon service starts.
+    refresh_photon_index
+                      Re-check R2 for a newer geocoding index (ETag-gated, a
+                      no-op on all but the ~4 days a year it is rebuilt) and
+                      log loudly when the photon container needs restarting
+                      to load one.
     extract_battery_trips
                       Mine the last ~26h of telemetry for observation-gap trips
                       matching the anchor filter, route them through Valhalla,
@@ -71,7 +80,7 @@ from .battery_model import (
 from .comms_replies import poll_once as poll_comms_replies
 from .config import load
 from .cycle import run_once
-from .r2_map import sync_map_assets
+from .r2_map import sync_map_assets, sync_photon_index
 from .daily_sla import run_daily
 from .daily_trips import run_daily as run_daily_trips
 from .pg import connection, run_migrations
@@ -467,6 +476,37 @@ def _cli_refresh_routing_graph() -> dict:
     return result
 
 
+def _cli_fetch_photon_index() -> dict:
+    """One-shot sidecar: pull the Photon geocoding index into its volume.
+
+    Always exits 0, for the same reason as _cli_fetch_map_pbf above: `photon`
+    gates on this via service_completed_successfully and the deploy script runs
+    under `set -e`, so a missing credential or an R2 outage must degrade
+    address autocomplete (a clean 503 from /api/v1/geocode/search) rather than
+    abort the deploy of everything else in the push. sync_photon_index catches
+    its own errors, logs loudly, and reports `index_present` so the failure is
+    visible.
+    """
+    return sync_photon_index()
+
+
+def _cli_refresh_photon_index() -> dict:
+    """Re-check R2 for a newer geocoding index on a schedule (cron, 05:00).
+
+    ETag-gated, so this is a no-op on all but the handful of days a year the
+    index is rebuilt by hand (scripts/build_photon_index.md). Photon opens the
+    index at JVM startup and never re-reads it, so a change is logged loudly
+    and the restart is left to an operator — this container deliberately has no
+    Docker socket, exactly like refresh_routing_graph and Valhalla's tile
+    rebuild.
+    """
+    result = sync_photon_index()
+    if result.get("changed"):
+        log.warning("Photon geocoding index changed — restart the photon "
+                    "service to load it: docker compose restart photon")
+    return result
+
+
 def _cli_extract_battery_trips() -> dict:
     return extract_trips()
 
@@ -498,6 +538,8 @@ COMMANDS = {
     "expire_stale_off_feed_rides": expire_stale_off_feed_rides,
     "fetch_map_pbf":         _cli_fetch_map_pbf,
     "refresh_routing_graph": _cli_refresh_routing_graph,
+    "fetch_photon_index":    _cli_fetch_photon_index,
+    "refresh_photon_index":  _cli_refresh_photon_index,
     "extract_battery_trips": _cli_extract_battery_trips,
     "train_battery_model":   _cli_train_battery_model,
     "backfill_battery_trips": _cli_backfill_battery_trips,

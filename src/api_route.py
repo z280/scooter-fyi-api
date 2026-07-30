@@ -10,23 +10,40 @@ discount is a hardcoded 0.95 factor applied to every request, and there is no
 `use_trails` option for bicycles. So the `shade` profile asks for alternates and
 re-ranks them against the tree-canopy coverage denver-map-prep publishes
 alongside the routing graph.
+
+Both handlers are per-IP rate limited. `ratelimit.enforce` needs an open cursor
+and neither handler otherwise touches Postgres, so the limit opens the one short
+connection it needs (`_enforce_ip_limit`) from a route DEPENDENCY rather than the
+handler body: the guard then cannot be forgotten on any HTTP path, runs before
+any Valhalla work, and leaves both handlers callable in-process (they take no
+`Request`, which is how the profile/coverage unit tests drive them).
 """
 
 from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from . import battery_model, valhalla
+from .client_ip import real_client_ip
 from .config import RouteProfile, load
+from .pg import connection
 from .r2_map import load_canopy_coverage
+from .ratelimit import enforce
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Per-IP rate limits (API_REQUIREMENTS.md §5), as (limit, window_seconds).
+# 30/min on /route accommodates Screen 4's four parallel profile fetches plus
+# the <=1/min off-route re-route; /route/profiles is a config-only response and
+# gets the looser cap.
+_LIMIT_ROUTE_PER_IP = (30, 60)
+_LIMIT_ROUTE_PROFILES_PER_IP = (60, 60)
 
 # way_id -> canopy coverage fraction, loaded lazily from the shared volume.
 _CANOPY: dict[int, float] | None = None
@@ -51,6 +68,37 @@ def _canopy() -> dict[int, float]:
     _CANOPY = load_canopy_coverage()
     _CANOPY_LOADED_AT = time.monotonic()
     return _CANOPY
+
+
+def _enforce_ip_limit(request: Request, *, bucket: str, limit: tuple[int, int]) -> None:
+    """Count this request against `bucket` for the caller's IP, or raise 429.
+
+    `enforce` wants an open cursor inside the caller's transaction, and routing
+    is otherwise DB-free, so this opens the only connection either handler
+    needs. Keyed on `real_client_ip(request)`: behind the cloudflared sidecar
+    `request.client.host` is the loopback address of the tunnel, so every
+    caller would share one bucket (`src/client_ip.py`).
+
+    A 429 propagates out with `Retry-After` from `ratelimit.enforce`, and no
+    commit happens — the same allow-and-record semantics every other bucket has.
+    """
+    ip = real_client_ip(request) or "?"
+    with connection() as conn:
+        with conn.cursor() as cur:
+            enforce(cur, bucket=bucket, key=ip,
+                    limit=limit[0], window_seconds=limit[1])
+        conn.commit()
+
+
+def _limit_route_ip(request: Request) -> None:
+    """Route dependency: 30/min per IP on /route."""
+    _enforce_ip_limit(request, bucket="route_ip", limit=_LIMIT_ROUTE_PER_IP)
+
+
+def _limit_route_profiles_ip(request: Request) -> None:
+    """Route dependency: 60/min per IP on /route/profiles."""
+    _enforce_ip_limit(request, bucket="route_profiles_ip",
+                      limit=_LIMIT_ROUTE_PROFILES_PER_IP)
 
 
 def _parse_point(raw: str, field: str) -> tuple[float, float]:
@@ -166,7 +214,7 @@ def _route_with_retry(points, profile: RouteProfile) -> dict[str, Any]:
                               radius=cfg.retry_radius_meters)
 
 
-@router.get("/api/v1/route")
+@router.get("/api/v1/route", dependencies=[Depends(_limit_route_ip)])
 def route(
     from_: str = Query(..., alias="from", description="Origin as 'lat,lon'"),
     to: str = Query(..., description="Destination as 'lat,lon'"),
@@ -175,6 +223,12 @@ def route(
         None, description="Optional vehicle model (Astro/Cosmo/Apollo) for a "
                           "model-specific battery estimate"),
     explain: bool = Query(False, description="Include diagnostics (shade score on every profile)"),
+    # Annotated form deliberately: with `maneuvers: bool = Query(False)` the
+    # default value is the Query MARKER object, which is truthy, so any
+    # in-process caller of this function would get the passthrough enabled
+    # (and pay for decoding every leg) without asking for it.
+    maneuvers: Annotated[bool, Query(
+        description="Include turn-by-turn maneuvers for the nav HUD")] = False,
 ) -> dict[str, Any]:
     cfg = load().valhalla
 
@@ -273,6 +327,11 @@ def route(
         "battery_model": battery.get("source"),
         "graph_bbox": cfg.bbox,
     }
+    if maneuvers:
+        # Opt-in: the nav HUD needs them, the route preview on Screen 4 does not,
+        # and they roughly double the response size. Shape indices address the
+        # `geometry` LineString below, not the per-leg shapes Valhalla numbers.
+        properties["maneuvers"] = valhalla.trip_maneuvers(chosen)
     if explain:
         properties["diagnostics"] = {
             "alternates_considered": considered,
@@ -290,7 +349,8 @@ def route(
     }
 
 
-@router.get("/api/v1/route/profiles")
+@router.get("/api/v1/route/profiles",
+            dependencies=[Depends(_limit_route_profiles_ip)])
 def profiles() -> dict[str, Any]:
     """Advertise the selectable profiles so the client needn't hardcode them."""
     cfg = load().valhalla

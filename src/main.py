@@ -21,6 +21,7 @@ from .api_auth import router as auth_router
 from .api_device_photos import router as device_photos_router
 from .api_device_recommendations import router as device_recommendations_router
 from .api_frontend_reports import router as frontend_reports_router
+from .api_geocode import router as geocode_router
 from .api_h3 import router as h3_router
 from .api_legal import router as legal_router
 from .api_lexicon import router as lexicon_router
@@ -116,6 +117,10 @@ app.include_router(meta_router)
 app.include_router(legal_router)
 app.include_router(lexicon_router)
 app.include_router(route_router)
+# Address search for Ride Mode's ride wizard. Sits beside the routing router
+# because it feeds it: /geocode/search's in_coverage flag is membership in the
+# same graph_bbox /route rejects on.
+app.include_router(geocode_router)
 
 
 @app.get("/", include_in_schema=False)
@@ -131,6 +136,7 @@ def root():
             "/api/v1/devices/current",
             "/api/v1/route?from=lat,lon&to=lat,lon&profile=safe",
             "/api/v1/route/profiles",
+            "/api/v1/geocode/search?q=…",
             "/api/v1/user/devices/current",
             "/api/v1/equity-estimate?ranks=1,2",
             "/api/v1/h3/aggregates?res=9",
@@ -143,6 +149,8 @@ def root():
             "/api/v1/profile/map-settings",
             "/api/v1/profile/map-settings/{name}",
             "/api/v1/profile/find-ride-pref",
+            "/api/v1/profile/ride-usuals",
+            "/api/v1/profile/ride-usuals/{name}",
             "/api/v1/emoji-nouns",
             "/api/v1/emoji-nouns/search?q=…",
             "/api/v1/adjectives",
@@ -164,12 +172,14 @@ def root():
             "/api/v1/tracked-rides/{ride_id}/waypoints",
             "/api/v1/tracked-rides/{ride_id}/screenshots",
             "/api/v1/points",
+            "/api/v1/points/schedule",
             "/api/v1/devices/{vehicle_identifier}/recommend",
             "/api/v1/devices/{vehicle_identifier}/photos",
             "/api/v1/devices/qr-scan",
             "/api/v1/photos/{photo_id}/reports",
             "/api/v1/photos/mine",
             "/api/v1/meta/privacy",
+            "/api/v1/meta/pricing",
             "/legal/terms-of-service",
             "/legal/privacy-policy",
             "/admin",

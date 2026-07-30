@@ -356,8 +356,27 @@ this is the regression test for §9.1), `test_phone_verification_pg.py`
 
 ## §10 — Tracked ride reported fields
 
+> **SHIPPED AS `sql/047_tracked_rides_reported_fields.sql`, AND NOT WITH THE DDL
+> BELOW.** Two corrections, both made when the Ride Mode program picked this
+> section up (`PLAN_RIDE_MODE_API.md` Phase A1):
+>
+> 1. **Number.** `046` was taken by `sql/046_comms_replies.sql` before this
+>    section shipped. `047` is the file that exists; do not create a second one.
+> 2. **Shape.** The DDL below inlines both CHECKs inside
+>    `ADD COLUMN IF NOT EXISTS`, which Postgres skips *in its entirety* —
+>    constraint included — once the column exists, so neither CHECK would ever
+>    be installed on a database where the column arrived first, and re-running
+>    the file could not repair it. `sql/047` therefore adds the columns bare and
+>    installs `tracked_rides_reported_minutes_range` (conname-only guard, the
+>    `sql/041` step-4 shape for a numeric bound) and
+>    `tracked_rides_reported_plan_allowed` (value-checked guard, the
+>    `sql/040`/`042` shape for an enumerated list) as separate named
+>    constraints. The columns, bounds and vocabulary below are otherwise
+>    exactly what shipped.
+
 ```sql
--- sql/046_tracked_rides_reported_fields.sql
+-- Illustrative only — see the note above. The file is
+-- sql/047_tracked_rides_reported_fields.sql and it does NOT inline these CHECKs.
 ALTER TABLE tracked_rides
     ADD COLUMN IF NOT EXISTS reported_minutes INTEGER
         CHECK (reported_minutes IS NULL OR reported_minutes BETWEEN 0 AND 1440),
@@ -422,8 +441,15 @@ points there in the last four weeks, recalculated."
 
 ### 11.2 Schema
 
+> **NUMBER CORRECTION: this migration is `sql/048_h3_r8_area_leaders.sql`.**
+> `046` and `047` were both taken before §11 shipped (`046_comms_replies.sql`,
+> then `047_tracked_rides_reported_fields.sql` for §10 above), and §11 itself is
+> now delivered by `PLAN_RIDE_MODE_API.md` **Phase A4**, which owns `sql/048`.
+> Creating `sql/047_h3_r8_area_leaders.sql` would collide with a file that
+> already exists and holds something else.
+
 ```sql
--- sql/047_h3_r8_area_leaders.sql
+-- sql/048_h3_r8_area_leaders.sql
 CREATE TABLE IF NOT EXISTS h3_r8_area_report (
     h3_8_index        BIGINT PRIMARY KEY,
     has_devices       BOOLEAN NOT NULL,

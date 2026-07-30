@@ -31,6 +31,11 @@ def _row(
     distance_meters: float | None = None,
     distance_source: str | None = None,
     distance_clamped_from_m: float | None = None,
+    reported_minutes: int | None = None,
+    reported_plan: str | None = None,
+    ride_options: dict | None = None,
+    validation_status: str = "pending",
+    validation_reasons: list | None = None,
 ) -> tuple:
     """Column order must track _RIDE_COLS in src/api_tracked_rides.py."""
     return (
@@ -47,10 +52,18 @@ def _row(
         350 if reported else None,                    # total_cost_cents
         {}, path_polyline, "aaaa000000000000", _NOW, _NOW,
         distance_meters, distance_source, distance_clamped_from_m,
+        # sql/047 (FEATURE_PLAN §10) and sql/049 (ride sessions), appended in
+        # _RIDE_COLS order. The signing columns are deliberately NOT here:
+        # they live in _RIDE_COLS_OWNER, which no list response selects.
+        reported_minutes, reported_plan,
+        {} if ride_options is None else ride_options,
+        validation_status,
+        [] if validation_reasons is None else validation_reasons,
     )
 
 
-def _end_select(*, already_ended: bool = False, gbfs_end: tuple | None = None) -> tuple:
+def _end_select(*, already_ended: bool = False, gbfs_end: tuple | None = None,
+                ride_options: dict | None = None) -> tuple:
     """The narrower SELECT ... FOR UPDATE that PATCH .../end issues before
     it writes. Distinct from _row above — different column list."""
     gbfs_lat, gbfs_lon = gbfs_end if gbfs_end else (None, None)
@@ -60,6 +73,9 @@ def _end_select(*, already_ended: bool = False, gbfs_end: tuple | None = None) -
         None,                              # gbfs_reappeared_at
         gbfs_lat, gbfs_lon,
         39.74, -104.98,                    # start_lat, start_lon
+        # sql/049 — read under the same lock so the provisional
+        # validation_status is computed off the row already held FOR UPDATE.
+        {} if ride_options is None else ride_options,
     )
 
 

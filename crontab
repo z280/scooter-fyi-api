@@ -66,6 +66,16 @@
 # socket to do that itself.
 30 4 * * * cd /app && python -m src.cli refresh_routing_graph
 
+# Photon geocoding index refresh. The index itself is rebuilt BY HAND, roughly
+# quarterly (scripts/build_photon_index.md), so this is only an R2 ETag check
+# and a no-op on all but ~4 days a year. 05:00 keeps it clear of the 04:30
+# routing-graph refresh: both unpack multi-GB artifacts into volumes on the
+# same disk. A changed index is logged loudly, because the photon container has
+# to be RESTARTED to load it (Photon maps the index at JVM startup) and this
+# container deliberately has no Docker socket to do that itself — the same
+# limitation as refresh_routing_graph above.
+0 5 * * * cd /app && python -m src.cli refresh_photon_index
+
 # Battery model. Reads the last ~26h of raw_telemetry_points, so it MUST run
 # BEFORE the 02:00 archive, which flushes that table to R2 and truncates it.
 # Running after would see only the handful of cycles since the truncate. 01:30

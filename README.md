@@ -79,7 +79,9 @@ agent process).
 .
 ├── config.json                 non-secret runtime config
 ├── .env.example                env template (secrets ONLY)
-├── docker-compose.yml          four services, hard memory caps
+├── docker-compose.yml          seven services, hard memory caps (Postgres, worker,
+│                               scheduler, the Valhalla routing pair, the Photon
+│                               geocoding pair)
 ├── Dockerfile                  python:3.11-slim + FastAPI + DuckDB + supercronic + tini
 ├── crontab                     supercronic schedule for the scheduler container
 ├── data/                       baked-in boundary files (11)
@@ -90,8 +92,11 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql … 041_ride_hard_caps.sql
-│                              41 migrations, applied idempotently at boot
+├── sql/001_init.sql … 050_ride_mode_usuals.sql
+│                              49 migrations, applied idempotently at boot
+├── docker/photon/Dockerfile    the Photon geocoding sidecar (pinned + sha256-verified
+│                               official jar; the index itself ships from R2)
+├── scripts/build_photon_index.md  manual runbook for building/refreshing that index
 ├── src/
 │   ├── main.py                 FastAPI app, lifespan, migrations, router mounts
 │   ├── cli.py                  subcommands run by the scheduler container
@@ -141,6 +146,10 @@ agent process).
 │   │                            3 km between consecutive path points, 80 km/ride — plus the
 │   │                            shared path measurement both ride modules close out with
 │   ├── polyline.py              Google polyline encode/decode (ride paths)
+│   ├── valhalla.py              Valhalla HTTP client + trip shape/summary/maneuver
+│   │                            extraction (per-leg shape indices re-offset in one pass)
+│   ├── r2_map.py                SigV4 sync of the private R2 sidecar artifacts: the
+│   │                            routing .pbf + canopy sidecar, and the Photon index
 │   ├── badges.py                server-computed profile badges (recomputed on every read;
 │   │                            mileage/streak badges union tracked_rides.distance_meters
 │   │                            with off-feed rides.distance_m — ended rides only)
@@ -150,10 +159,18 @@ agent process).
 │   ├── sentry.py                Sentry SDK init (no-op without DSN)
 │   ├── api_public.py            11 public read-only REST routes
 │   ├── api_h3.py                public H3 aggregate endpoint
-│   ├── api_meta.py              public privacy-policy metadata endpoint
+│   ├── api_meta.py              public metadata endpoints — privacy retention policy
+│   │                            and the Ride Mode sales-tax rate (`/meta/pricing`)
 │   ├── api_user.py              signed-in device map feed
 │   ├── api_profile.py           rider profile GET/PUT + public-username endpoints
 │   ├── api_lexicon.py           emoji-noun / adjective list + search endpoints
+│   ├── api_preferences.py       rider-owned opaque preference blobs: saved map settings,
+│   │                            the find-ride preference, ride-mode "Usuals"
+│   ├── api_route.py             GET /api/v1/route (+ /profiles) — Valhalla proxy, shade
+│   │                            re-ranking, battery estimate, turn-by-turn maneuvers
+│   ├── api_geocode.py           GET /api/v1/geocode/search — proxy over the
+│   │                            self-hosted Photon sidecar (Denver bbox filter,
+│   │                            in_coverage vs the routing graph, 24h LRU cache)
 │   ├── api_auth.py              sign-in doors + session lifecycle
 │   ├── api_tracked_rides.py     GBFS-detected ride tracking: start/list/active/detail/
 │   │                            end-report/waypoints/delete
@@ -162,7 +179,9 @@ agent process).
 │   │                            rides (start/waypoints/end) plus a one-shot log of a
 │   │                            finished ride, owner-only list/export, hard delete. No
 │   │                            points; client-asserted distances are plausibility-checked
-│   ├── api_points.py            GET /api/v1/points — ledger + running total
+│   ├── api_points.py            GET /api/v1/points — ledger + running total; GET
+│   │                            /api/v1/points/schedule — public action → award map,
+│   │                            generated from src/points.py so UI copy cannot drift
 │   ├── api_device_recommendations.py  POST .../recommend
 │   ├── api_device_photos.py     device photo upload/list/report + GET /api/v1/photos/mine
 │   ├── api_qr.py                POST /api/v1/devices/qr-scan
@@ -226,6 +245,13 @@ all the natural ratios — bikes_denver, scooters_v1, all_devices_v2, etc.
 - `transmission.endpoints[]` — `{name, url, method, path, auth_env}`
 - `cors.allowed_origins` — strictly enforced
 - `auth.allowed_github_orgs` (default; env overrides)
+- `valhalla.*` — sidecar URL, `graph_bbox`, and the selectable routing profiles
+- `geocode.upstream` / `geocode.enabled` — the Photon sidecar behind
+  `/api/v1/geocode/search`; `enabled: false` is a real kill switch (the
+  endpoint 503s exactly as it does when the sidecar is down)
+- `pricing.tax_rate` / `currency` / `as_of` — served by `/api/v1/meta/pricing`.
+  `tax_rate` is a **fraction** (0.0915, not 9.15); a value outside `[0, 1)` is
+  refused and the built-in default served instead
 
 **Secrets** come from environment variables only (see `.env.example`):
 `POSTGRES_*`, `R2_*`, `SENTRY_DSN`, `OIDC_CLIENT_ID/SECRET`,
@@ -258,6 +284,21 @@ else (curl, server-to-server) is unaffected by CORS.
 | `GET /api/v1/compliance/daily/latest` | Most recent computed daily SLA compliance window |
 | `GET /api/v1/compliance/daily?date=…` | Daily SLA window for one Denver-local date |
 | `GET /api/v1/compliance/daily/range` | Range of daily SLA rows, ascending |
+
+### Routing & geocoding
+
+Both upstreams are self-hosted sidecars in this repo's compose file — a
+Denver-clipped Valhalla graph (`valhalla`) and a Colorado-scoped Photon
+index (`photon`, built from `docker/photon/`, seeded from R2; see
+`scripts/build_photon_index.md`). No third-party routing or geocoding API,
+no API key, and no rider query leaves the box. Both are rate limited per IP
+because a sidecar round trip is expensive.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/route?from=&to=&profile=&maneuvers=` | GeoJSON `Feature`: route geometry, distance/duration/elevation, battery estimate, and — with `maneuvers=true` — turn-by-turn cues whose shape indices are re-offset onto the returned LineString. 30/min per IP |
+| `GET /api/v1/route/profiles` | The selectable routing profiles + `graph_bbox` (config-driven; treat as the live list). 60/min per IP |
+| `GET /api/v1/geocode/search?q=…&lat=…&lon=…&limit=…` | Up to 8 Denver-scoped hits as `{label, lat, lon, kind, in_coverage}`; `in_coverage` is routing-graph membership so clients can grey out un-routable picks. 20/min per IP; 503 `geocoder_unavailable` when the sidecar is down or disabled |
 
 ### Sign-in
 
@@ -334,6 +375,7 @@ contact details, not proof. Only typing back a texted code sets
 |---|---|
 | `GET /` | JSON banner listing every mounted endpoint (discovery only) |
 | `GET /api/v1/meta/privacy` | Machine-readable data retention policy |
+| `GET /api/v1/meta/pricing` | Sales-tax rate for the Ride Mode cost breakdown (config-driven, `"pricing"` block) |
 | `GET /legal/terms-of-service` | Static Terms of Service page |
 | `GET /legal/privacy-policy` | Static Privacy Policy page |
 
@@ -364,6 +406,10 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `GET /api/v1/profile/find-ride-pref` | The caller's find-ride preference, or `null` if never set |
 | `PUT /api/v1/profile/find-ride-pref` | Create or replace the find-ride preference (at most one per rider) |
 | `DELETE /api/v1/profile/find-ride-pref` | Clear the find-ride preference (idempotent) |
+| `GET /api/v1/profile/ride-usuals` | Every saved ride-mode "Usual" (options preset) for the caller |
+| `GET /api/v1/profile/ride-usuals/{name}` | One saved Usual |
+| `PUT /api/v1/profile/ride-usuals/{name}` | Create or replace a named Usual (opaque JSON blob: `ride_options` + `label`); 10 per account |
+| `DELETE /api/v1/profile/ride-usuals/{name}` | Delete a named Usual |
 | `GET /api/v1/emoji-nouns` | Full emoji → noun-word list, for building a username picker |
 | `GET /api/v1/emoji-nouns/search?q=…` | Partial word match on the emoji-noun list |
 | `GET /api/v1/adjectives` | Full curated adjective list |
@@ -421,11 +467,11 @@ end. See `sql/027_tracked_rides.sql` / `src/ride_watch.py`.
 
 | Endpoint | Returns |
 |---|---|
-| `POST /api/v1/tracked-rides` | Start a ride + watch (404 unknown device, 409 if one's already active) |
+| `POST /api/v1/tracked-rides` | Start a ride + watch; optional `ride_options` (≤4 KB) and `reported_start_battery_percent`. Returns `track_signing` (per-ride HMAC key, owner-only) + `validation` (404 unknown device, 409 if one's already active, 413 options too large, 422 bad options) |
 | `GET /api/v1/tracked-rides?limit=&before=&status=` | Owner-only paginated list |
 | `GET /api/v1/tracked-rides/active` | The caller's one active ride, or `{"active": null}` |
 | `GET /api/v1/tracked-rides/{ride_id}` | Full detail incl. decoded `path_geojson`; GBFS fields hidden until you report your own end |
-| `PATCH /api/v1/tracked-rides/{ride_id}/end` | Report your end location/battery/cost/metadata (single-shot) |
+| `PATCH /api/v1/tracked-rides/{ride_id}/end` | Report your end location/battery/cost/metadata plus `reported_minutes` (0–1440) and `reported_plan` (`resident\|visitor\|equity`); sets a provisional `validation.status` (single-shot) |
 | `POST /api/v1/tracked-rides/{ride_id}/waypoints` | Append a GPS waypoint while the ride is active |
 | `GET /api/v1/tracked-rides/{ride_id}/waypoints?limit=&before=` | Paginated waypoint list |
 | `DELETE /api/v1/tracked-rides/{ride_id}` / (bare) | Hard-delete one ride / every ride you own |
@@ -437,6 +483,7 @@ end. See `sql/027_tracked_rides.sql` / `src/ride_watch.py`.
 | Endpoint | Returns |
 |---|---|
 | `GET /api/v1/points?limit=&before=` | Your points ledger + running total |
+| `GET /api/v1/points/schedule` | **Public** — authoritative action → points map incl. formulas; UI copy is generated from it |
 | `POST /api/v1/devices/{vehicle_identifier}/recommend` | Yes/no — only accepted with a completed ride on that device in the last 24h |
 | `POST /api/v1/devices/qr-scan` | Validate a scanned QR against the claimed device; awards a first-scan bonus |
 
@@ -516,21 +563,54 @@ curl localhost:8080/api/v1/snapshots/latest   # 503 until first cycle lands (~15
 ```bash
 python3.11 -m pip install -r requirements.txt pytest
 python3.11 -m pytest -v
-# 476 tests across ~60 files. Most run with no real Postgres (a fake
+# ~1100 tests across ~90 files. Most run with no real Postgres (a fake
 # cursor/connection is monkeypatched in) — test_compute_sql exercises the
 # real DuckDB spatial join, and files ending _pg.py additionally skip
 # unless VEO_TEST_PG_DSN points at a real, migratable Postgres instance.
 ```
+
+### Running the `_pg.py` tests
+
+The ~130 `_pg.py` tests are the only coverage of the `sql/` files as Postgres
+actually executes them — the guarded `DO $$` constraint blocks, the partial
+unique indexes, and `test_migration_replay_pg.py`'s replay-over-live-data
+check are all invisible to a fake cursor. **Skipped is not passed**: run them
+before shipping a migration.
+
+Any reachable, migratable Postgres works. Without a Docker daemon, `pgserver`
+ships a server as a wheel:
+
+```bash
+python3.11 -m pip install pgserver   # dev-only; deliberately NOT in
+                                     # requirements.txt (it bundles Postgres
+                                     # binaries the app image must not carry)
+python3.11 - <<'PY'
+import pgserver
+db = pgserver.get_server('/tmp/veopg', cleanup_mode=None)  # None = outlive this process
+db.psql('CREATE DATABASE veotest;')
+print(db.get_uri(database='veotest'))
+PY
+
+VEO_TEST_PG_DSN='postgresql://postgres:@/veotest?host=/tmp/veopg' \
+  python3.11 -m pytest -q          # expect 0 skipped
+```
+
+`cleanup_mode=None` is load-bearing: the default reference-counts the server
+and shuts it down when the starting process exits, so the DSN goes dead and
+every `_pg.py` test silently skips again.
 
 ## Deploy
 
 Push to `main`. `.github/workflows/deploy.yml`:
 
 1. Builds the image, pushes to `ghcr.io/z280/scooter-fyi-api:latest`
-2. SCPs `docker-compose.yml`, `config.json`, `sql/` to `/opt/veo-audit/`
+2. SCPs `docker-compose.yml`, `config.json`, `sql/`, `docker/` to
+   `/opt/veo-audit/` — `docker/` because the `photon` sidecar is built on the
+   box from `docker/photon/`, not pulled from GHCR
 3. SSHes in, renders `.env.new` from GitHub Secrets, `docker compose pull`s
-   with it, and only then `mv`s it over `.env` and rolls containers — a
-   failed pull leaves the live `.env` (and the running stack) untouched
+   with it, and only then `mv`s it over `.env`, builds `photon` (a layer-cache
+   no-op unless its Dockerfile moved) and rolls containers — a failed pull
+   leaves the live `.env` (and the running stack) untouched
 4. `curl /health` — fails the workflow if not green
 
 Renaming the repo? See the
@@ -605,8 +685,14 @@ Enforced via Docker Compose `mem_limit`:
 | `pipeline_worker` | 1.0 GiB | bursts during DuckDB compute (~1 s/cycle) |
 | `denver_spatial_db` | 2.5 GiB | `shared_buffers=2GB`, `max_connections=20` |
 | `scheduler` | 1.0 GiB | supercronic + each job's transient Python process; sized for the 02:00 archive's DuckDB → Parquet burst |
+| `valhalla` | 3.0 GiB | serving a Denver-sized graph needs ~1 GiB; the headroom is for the transient tile build |
+| `photon` | 2.0 GiB | JVM heap capped at 1536m (`JAVA_OPTS`); Photon embeds OpenSearch, so the heap **is** the index budget — this is why the index is Colorado-scoped and not US-wide |
+| `valhalla_map_fetch`, `photon_index_fetch` | 256 MiB each | one-shot sidecars; they exit before the services they feed start serving |
 | `cloudflared` | 128 MiB | tiny — outbound HTTPS tunnel daemon |
 | Native Hermes (host) | ~512 MiB | API-based agent process; **not** enforced by this repo |
 
-Total Docker footprint: ~4.6 GiB on the 12 GiB VPS. The remaining ~7 GiB
-covers Hermes, host OS buffers, and future services.
+Total of the long-running ceilings: ~9.6 GiB on the 12 GiB VPS. These are
+**limits, not steady-state usage** — Valhalla's headroom is only touched
+during a tile rebuild and the two fetch sidecars have exited by then — but the
+sum is now close enough to the box that another always-on service needs a hard
+look at these numbers first, not after.

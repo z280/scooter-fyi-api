@@ -66,6 +66,44 @@ POINTS_QR_SCAN = 100
 # ships — search this constant name before launch.
 POINTS_PROFILE_COMPLETION = 10
 
+# --- Ride Mode awards (PLAN_RIDE_MODE_API.md phase A2; values locked by
+# RIDE_MODE_OVERHAUL_PLAN.md Decision 6) ------------------------------------
+#
+# The VALUES land in A1, ahead of the award machinery, on purpose: the whole
+# published schedule (GET /api/v1/points/schedule, src/api_points.py) is
+# generated from the constants below, and frontend F2's Screen 2 ℹ copy and
+# Screen 9 header interpolate it the day they deploy. A2 wires the awards and
+# needs no further edits here. Nothing about the numbers waits on the awards.
+#
+# EVEN-POINTS INVARIANT (owner rule): every point value in this program is
+# even, including every formula output. That is why the qualitative nav award
+# is 6 and not the owner's original 5 — the correction is the rule working,
+# not a typo. Enforced three ways: `CHECK (points % 2 = 0)` on user_points
+# (sql/053), an assert in credit_points (A2), and a sweep over every constant
+# and every published schedule value in the tests. If you add a value here,
+# it is even.
+#
+# Formulas (A2 owns the implementations; both read distance from the
+# track_donations row, and BOTH ROUND UP — the step is "per STARTED km"):
+#     battery_contribution = 8 + 2 * ceil(distance_m / 2000)
+#     nav_distance_bonus   =     2 * ceil(distance_m / 3000)
+POINTS_BATTERY_CONTRIBUTION_BASE = 8
+POINTS_BATTERY_CONTRIBUTION_PER_STEP = 2
+POINTS_NAV_ROUTE_FEEDBACK = 4
+POINTS_NAV_QUALITATIVE = 6      # even-points rule: owner corrected 5 -> 6
+POINTS_NAV_DISTANCE_PER_STEP = 2
+POINTS_RIDE_SURVEY = 4
+
+# Step sizes for the two distance formulas above. Canonical unit is
+# KILOMETRES because that is the unit the rider-facing copy and
+# /points/schedule's `step_km` are written in ("+2 points per 2 km"); the
+# metre forms are DERIVED so a step can never be retuned in one unit and not
+# the other, which is exactly the drift this endpoint exists to prevent.
+BATTERY_CONTRIBUTION_STEP_KM = 2
+NAV_DISTANCE_STEP_KM = 3
+BATTERY_CONTRIBUTION_STEP_METERS = BATTERY_CONTRIBUTION_STEP_KM * 1000
+NAV_DISTANCE_STEP_METERS = NAV_DISTANCE_STEP_KM * 1000
+
 # device_reports.report_type -> (user_points.action, points). Single
 # source of truth for the mapping, imported by
 # src/api_frontend_reports.py rather than duplicated.

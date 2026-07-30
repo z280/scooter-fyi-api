@@ -355,10 +355,10 @@ endpoint) **non-blocking** — route choice proceeds on a 404 until A3 deploys, 
 points in that window, so no F2→A3 ordering edge exists. The Leaderboard view is deliberately
 decoupled from all ride-session work — the ideal parallel-agent work item.
 
-Migration numbering: `FEATURE_PLAN_2026-07.md` reserves `sql/045` (SMS — untouched, may never ship);
-this program ships `046` (§10) and `047` (§11) itself and owns **048–052**. Migrations apply in
-sorted order at boot and are tracked in `schema_migrations`, so numbering order vs. landing order is
-safe.
+Migration numbering: `sql/045` (SMS sign-in codes, FEATURE_PLAN §9) and `sql/046` (comms replies)
+are already on main and untouched here; this program ships `047` (§10) and `048` (§11) itself and
+owns **049–053**. Migrations apply in sorted order at boot and are tracked in `schema_migrations`, so
+numbering order vs. landing order is safe.
 
 ---
 

@@ -230,8 +230,11 @@ mileage badges count it.
 
 ## 5. Cross-cutting
 
-- **Rate limiting:** per-IP and per-account buckets on all POST endpoints;
-  429 with `Retry-After`.
+- **Rate limiting:** per-IP and per-account buckets on all POST endpoints,
+  plus per-IP buckets on the two routing GETs and the geocoding GET
+  (`route_ip` 30/min, `route_profiles_ip` 60/min, `geocode_ip` 20/min — a
+  sidecar round trip is expensive enough to be worth capping); 429 with
+  `Retry-After`.
 - **Secrets/env:** `ADMIN_EMAILS`, `GOOGLE_OAUTH_CLIENT_ID`,
   `POSTMARK_TOKEN`, R2 credentials. (`STRIPE_WEBHOOK_SECRET` was listed
   here; withdrawn with §4.1 and removed from `.env.example`,
@@ -353,6 +356,11 @@ By early August there will be a full month. Then:
 | Equity boundary migration (new §1.1a) | In progress — see note below. `er1`–`er6` per-rank layers now tracked with full metric parity to v1/v2 (snapshot + daily SLA). `v1` retirement and the compliance-metric cutoff are still pending a DOTI decision. |
 | Vehicle classification + trip tracking (new §1.1b) | Implemented — see note below. `vehicle_use_type`/`vehicle_model_name` on devices/current + device_state/history; `sitting`/`standing` compliance parity with `bicycle`/`scooter`; `trip_events` + daily popularity rollup at 9am. |
 | §7 real range + battery percent | §7.1 implemented (2026-07-07): rank-based `battery_percent` via `data/range_soc_lut.json`, quality tiers re-expressed in SoC percent ('great' now reachable for bicycles). §7.2 buildable now; §7.3 revisit gated on ≥30 days of post-016 archive (≥ 2026-08-05). |
+| Ride Mode A1 — ride session foundation (§10 reported fields) | Implemented. `sql/047_tracked_rides_reported_fields.sql` adds §10's `reported_minutes` (0–1440) / `reported_plan` (`resident\|visitor\|equity`) as separately guarded named constraints, **not** §10's published inline-CHECK DDL. `sql/049_ride_sessions.sql` adds the per-ride signing material (`track_nonce`, `track_key`, `track_key_issued_at`), the rider- and feed-derived start battery/position, the client-owned `ride_options` blob (4 KB cap, `413`/`422` in the handler) and the `validation_status`/`validation_reasons`/`validated_at` triple. `POST /api/v1/tracked-rides` issues `track_signing`; it is owner-only and appears in exactly three responses (start, `GET .../active`, `GET .../{id}`) and **never** in the list — enforced structurally by a separate `_RIDE_COLS_OWNER` column list. `PATCH .../end` sets a provisional status only; A2 owns finalisation. |
+| Ride Mode A1 — routing maneuvers + routing rate limits | Implemented. `GET /api/v1/route?maneuvers=true` returns turn-by-turn cues via new `valhalla.trip_maneuvers()`, with per-leg shape indices re-offset onto the concatenated response LineString in the same pass (and with the same conditional duplicate-vertex drop) as `trip_shape()` — cues from a leg that contributed no geometry are dropped rather than mis-pointed. Closes the standing gap that both routing GETs were unlimited: `route_ip` 30/min and `route_profiles_ip` 60/min per IP, enforced from a route dependency so it cannot be forgotten. Both endpoints now touch Postgres and fail **closed** on a DB outage, matching every other `enforce()` call site. |
+| Ride Mode geocoding (`GET /api/v1/geocode/search`) | Implemented (A1). Self-hosted **Photon** sidecar — `docker/photon/Dockerfile` (pinned + sha256-verified official jar), index seeded from `r2://$R2_MAP_BUCKET/photon/photon-index-<YYYYMMDD>.tar.zst` by `src/r2_map.py:sync_photon_index` (ETag-gated; `fetch_photon_index` one-shot + `refresh_photon_index` at 05:00), fronted by `src/api_geocode.py`: public, bucket `geocode_ip` 20/min/IP, `envelope.denver_core` bbox filter (wider than the routing graph on purpose), `in_coverage` computed against `valhalla.graph_bbox`, 3 s timeout → 503 `geocoder_unavailable`, 512-entry/24 h in-process cache. Index rebuild is manual and quarterly: `scripts/build_photon_index.md`. |
+| Ride Mode Usuals (A1) | Implemented — `sql/050_ride_mode_usuals.sql` adds `user_preferences` kind `ride_mode_usual` (name required, one per `(account, name)`); `src/api_preferences.py` serves `GET/PUT/DELETE /api/v1/profile/ride-usuals[/{name}]`, 10 per account (`MAX_RIDE_USUALS`), 16 KB per blob. Blob is opaque (`ride_options` + `label`), validated only when used to start a ride. |
+| Ride Mode A1 — pricing + points schedule | Implemented. `GET /api/v1/meta/pricing` (public; fractional Denver combined tax rate, `config.json` `"pricing"`, out-of-range values refused) and `GET /api/v1/points/schedule` (public; the **complete** action → award map, generated from `src/points.py` with no literals in the handler, including all five ride-mode constants and their formula shapes). The ride-mode values are published ahead of the award machinery on purpose — frontend F2 interpolates them into Screen 2/9 copy on day one. Awards land in A2/A3 and need no further edits to the schedule. |
 
 **§1.1a Equity boundary migration note (2026-07-04, updated):** Denver
 DOTI delivered an authoritative, census-block-group-based Equity Index

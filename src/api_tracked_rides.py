@@ -17,6 +17,15 @@ to anchor to, that one when there isn't. Every endpoint here is
 `require_session`
 (open to all riders — signed-in is the only gate this product has).
 
+RIDE SESSIONS (sql/049): a ride also carries the material ride mode needs
+to record its GPS track locally and prove later that it did — a per-ride
+HMAC key + nonce (`track_signing`), the rider's ride-mode option blob, a
+feed-anchored start position/battery the rider cannot influence, and the
+contribution-eligibility state (`validation`). track_key is a SECRET: it is
+returned by the start call and by the two owner-only single-ride reads, and
+never by the list endpoint — see _RIDE_COLS vs _RIDE_COLS_OWNER, where that
+is structural rather than a redaction anyone has to remember.
+
 ANTI-FRAUD: the points system pays a bonus when the GBFS-observed
 reappearance is within 20m of the rider's own reported end location. If a
 rider could see the GBFS answer before submitting their report, they could
@@ -29,6 +38,7 @@ response-layer redaction only), and the end-report endpoint is single-shot.
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -42,6 +52,7 @@ from .identity import plate_display_code
 from .pg import connection
 from .points import credit_gbfs_validation_points, credit_waypoint_points
 from .polyline import PolylineError, decode as decode_polyline, encode as encode_polyline
+from .quality import compute_battery_percent
 from .ratelimit import enforce
 from .ride_limits import (
     MAX_LEG_METERS,
@@ -60,20 +71,76 @@ _LIMIT_START_RIDE_PER_ACCOUNT = (20, 3600)
 _LIMIT_WAYPOINT_PER_ACCOUNT = (600, 3600)
 _VEHICLE_IDENTIFIER_RE = r"^[0-9a-f]{16}$"
 
+# Ride-session signing material (sql/049). Per-ride, minted at start over
+# the authenticated POST channel: a compromise is bounded to one ride and a
+# key is never reused, so there is no rotation problem.
+TRACK_SIGNING_ALG = "HS256"
+TRACK_KEY_BYTES = 32    # base64url'd -> the JWS HMAC-SHA256 key
+TRACK_NONCE_BYTES = 16  # hex'd -> seeds the rolling chain hash, H_-1 = sha256(nonce)
+
+# ride_options is a client-owned blob: stored and echoed back verbatim, with
+# the server reading only the booleans it gates on. The cap is measured on
+# the SERIALIZED bytes for the same reason api_preferences.MAX_BLOB_BYTES is
+# — the limit exists to bound what one account can make the database and
+# every subsequent response carry, and that is a byte count.
+MAX_RIDE_OPTIONS_BYTES = 4 * 1024
+_RIDE_OPTION_BOOLS = (
+    "cost_hud", "navigation", "save_tracks", "battery_modeling",
+    "nav_improvement", "end_survey", "own_device",
+)
+_RIDE_OPTION_CHOICES = {
+    "speedometer": ("classic", "digital", "none"),
+    "theme": ("light", "dark", "auto"),
+}
+
+# How stale a feed observation may be and still describe "the vehicle the
+# rider is standing next to right now". The ingest cadence is 2 minutes
+# (crontab), so a vehicle actually in the feed is at most that old; 30
+# minutes leaves room for a few missed cycles without ever letting the
+# 48-hour raw_telemetry_points buffer hand back a position from before
+# somebody else's ride. Past it we stamp NULL rather than a stale anchor —
+# A2's start correlation falls back to the client-supplied start_lat/lon,
+# which is the weaker check but an honest one.
+FEED_START_MAX_AGE_MINUTES = 30
+
+# sql/049's tracked_rides_validation_status_allowed, mirrored here so the
+# provisional computation below cannot emit a value the column rejects.
+VALIDATION_STATUSES = ("pending", "pending_feed", "eligible", "ineligible", "error")
+
 _RIDE_COLS = (
     "id, status, started_at, start_lat, start_lon, watch_expires_at, "
     "gbfs_left_feed_at, gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon, "
     "gbfs_end_battery_percent, user_reported_ended_at, end_lat, end_lon, "
     "reported_battery_percent, total_cost_cents, metadata, path_polyline, "
     "vehicle_identifier, created_at, updated_at, distance_meters, "
-    "distance_source, distance_clamped_from_m"
+    "distance_source, distance_clamped_from_m, reported_minutes, "
+    "reported_plan, ride_options, validation_status, validation_reasons"
 )
+# THE SIGNING COLUMNS ARE NOT IN _RIDE_COLS, AND THAT IS THE ENFORCEMENT.
+# track_key is a secret: anyone holding it can mint batches this ride will
+# accept. The list endpoint selects _RIDE_COLS, so it does not even READ the
+# key — track_signing cannot leak into a list response by someone forgetting
+# to redact it, because there is nothing there to redact. The three
+# single-ride owner-only responses (start, /active, /{id}) select
+# _RIDE_COLS_OWNER and are the only places it appears.
+_SIGNING_COLS = "track_key, track_nonce, track_key_issued_at"
+_RIDE_COLS_OWNER = f"{_RIDE_COLS}, {_SIGNING_COLS}"
+# Where the signing columns begin in an owner row. Derived from the string
+# so it cannot drift out of step with an edit to either list.
+_RIDE_COL_COUNT = _RIDE_COLS.count(",") + 1
 
 
 class StartRideIn(BaseModel):
     vehicle_identifier: str = Field(..., min_length=16, max_length=16, pattern=_VEHICLE_IDENTIFIER_RE)
     start_lat: float = Field(..., ge=-90, le=90)
     start_lon: float = Field(..., ge=-180, le=180)
+    # What the rider read off the vehicle's own display. Independent of the
+    # feed-derived estimate the handler stamps alongside it (sql/049).
+    reported_start_battery_percent: float | None = Field(default=None, ge=0, le=100)
+    ride_options: dict[str, Any] | None = Field(
+        default=None,
+        description="Client-owned ride-mode options object, stored and returned verbatim.",
+    )
 
 
 class EndRideIn(BaseModel):
@@ -83,6 +150,17 @@ class EndRideIn(BaseModel):
     reported_battery_percent: float | None = Field(default=None, ge=0, le=100)
     total_cost_cents: int | None = Field(default=None, ge=0)
     metadata: dict[str, Any] | None = Field(default=None)
+    # FEATURE_PLAN §10. Inert stored facts: nothing in the close-out below
+    # reads them, and reported_minutes is deliberately NOT reconciled
+    # against user_reported_ended_at - started_at — a reported field exists
+    # precisely so it can differ from what we observed. 1440 = 24 h, the
+    # same "a number we won't stand behind doesn't enter the table" rule as
+    # the 80 km distance cap.
+    reported_minutes: int | None = Field(default=None, ge=0, le=1440)
+    # The rate-plan tier the rider says they rode UNDER, which may
+    # legitimately differ from the accounts.rate_plan they say they are ON.
+    # Same vocabulary and same pydantic shape as api_rides.py's rate_plan.
+    reported_plan: str | None = Field(default=None, pattern="^(resident|visitor|equity)$")
 
 
 class WaypointIn(BaseModel):
@@ -92,13 +170,155 @@ class WaypointIn(BaseModel):
     metadata: dict[str, Any] | None = Field(default=None)
 
 
+def _serialize_ride_options(options: dict[str, Any] | None) -> str:
+    """JSON text for storage, shape- and size-checked.
+
+    The blob is CLIENT-OWNED (sql/049): the server stores it, hands it back
+    verbatim, and reads only the booleans it gates on. Two consequences that
+    look inconsistent and are not:
+
+    * The KNOWN keys are validated strictly. `save_tracks` gates whether a
+      track may be donated at all and `battery_modeling` / `nav_improvement`
+      / `end_survey` gate their awards, so a truthy string where a boolean
+      belongs would silently decide a rider's eligibility. A gate the server
+      acts on has to be the type it thinks it is.
+    * UNKNOWN keys pass through untouched. The frontend owns this vocabulary
+      and will add options; rejecting what this version has not heard of
+      would put an API deploy in front of every new client-side toggle,
+      which is exactly the cross-repo ordering edge the program plan avoids.
+    """
+    if options is None:
+        return "{}"
+    for key in _RIDE_OPTION_BOOLS:
+        if key in options and not isinstance(options[key], bool):
+            raise HTTPException(422, {
+                "error": "bad_ride_options",
+                "detail": f"ride_options.{key} must be true or false",
+            })
+    for key, allowed in _RIDE_OPTION_CHOICES.items():
+        if key in options and options[key] not in allowed:
+            raise HTTPException(422, {
+                "error": "bad_ride_options",
+                "detail": f"ride_options.{key} must be one of {list(allowed)}",
+            })
+    blob = json.dumps(options)
+    if len(blob.encode("utf-8")) > MAX_RIDE_OPTIONS_BYTES:
+        raise HTTPException(
+            413,
+            f"ride_options is larger than the {MAX_RIDE_OPTIONS_BYTES // 1024} KB limit",
+        )
+    return blob
+
+
+def _provisional_validation(
+    ride_options: Any, *, gbfs_reappeared_at: datetime | None,
+) -> tuple[str, list[str]]:
+    """The contribution eligibility we can already state at PATCH .../end.
+
+    PROVISIONAL, and deliberately narrow: no track has been donated yet, so
+    nothing here can reach 'eligible'. It answers only the questions the end
+    report already settles, so the post-ride screen has something truthful to
+    render instead of the bare 'pending' default. A2's donation handler and
+    validation finisher own the authoritative status and overwrite this.
+
+    Only two things are knowable now:
+
+    * The rider never opted into saving tracks -> there will never be a
+      track to donate, so this is TERMINAL: 'ineligible' /
+      ['tracking_not_opted'], the same reason token A2's donation endpoint
+      422s with.
+    * The feed has not resolved where the vehicle reappeared -> the
+      start/end correlation is undecidable, so 'pending_feed' (the post-ride
+      screen's "waiting on validation from the live feed" branch).
+
+    Otherwise the only thing outstanding is the rider's own donation, which
+    is what 'pending' means.
+    """
+    opted = isinstance(ride_options, dict) and ride_options.get("save_tracks") is True
+    if not opted:
+        return "ineligible", ["tracking_not_opted"]
+    if gbfs_reappeared_at is None:
+        return "pending_feed", []
+    return "pending", []
+
+
+def _feed_start_observation(
+    cur, vehicle_identifier: str,
+) -> tuple[int | None, float | None, float | None]:
+    """(battery_percent, lat, lon) from the vehicle's newest feed observation.
+
+    All three NULL when the feed has no FRESH observation of this vehicle —
+    which is the normal case for a rider who unlocked in the operator's app
+    before hitting Start, since the vehicle leaves GBFS the moment it is
+    rented.
+
+    Source is raw_telemetry_points, not device_state: device_state carries no
+    battery or range column (only max_observed_range_meters), so it cannot
+    answer this. The battery derivation is compute_battery_percent over
+    current_range_meters — the same call src/ride_watch.py makes to stamp
+    gbfs_end_battery_percent, so the two ends of a ride are measured the same
+    way and their difference means something.
+
+    latitude/longitude are NUMERIC(9,6) (sql/001) and arrive as Decimal;
+    they are cast to float here so what lands in the DOUBLE PRECISION
+    feed_start_* columns matches what every other lat/lon in this module is.
+    """
+    cur.execute(
+        """
+        SELECT current_range_meters, latitude, longitude
+        FROM raw_telemetry_points
+        WHERE vehicle_identifier = %s
+          AND snapshot_time >= NOW() - make_interval(mins => %s)
+        ORDER BY snapshot_time DESC
+        LIMIT 1
+        """,
+        (vehicle_identifier, FEED_START_MAX_AGE_MINUTES),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None, None, None
+    current_range_meters, latitude, longitude = row
+    return (
+        compute_battery_percent(current_range_meters),
+        float(latitude) if latitude is not None else None,
+        float(longitude) if longitude is not None else None,
+    )
+
+
+def _track_signing(r: tuple, *, ride_id: str) -> dict[str, Any] | None:
+    """The per-ride signing block, from an _SIGNING_COLS row slice.
+
+    OWNER-ONLY, and never in a list response — see _RIDE_COLS_OWNER. None
+    for a ride that predates sql/049 and therefore has no key: the client
+    treats that as "this ride cannot be signed", not as an error.
+    """
+    track_key, track_nonce, track_key_issued_at = r
+    if not track_key or not track_nonce:
+        return None
+    return {
+        "alg": TRACK_SIGNING_ALG,
+        "key_id": ride_id,
+        "key": track_key,
+        "nonce": track_nonce,
+        "issued_at": track_key_issued_at.isoformat() if track_key_issued_at else None,
+    }
+
+
+def _owner_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
+    """An _RIDE_COLS_OWNER row as a response: the ride plus track_signing."""
+    ride = _row_to_ride(r[:_RIDE_COL_COUNT], path_geojson=path_geojson)
+    ride["track_signing"] = _track_signing(r[_RIDE_COL_COUNT:], ride_id=ride["id"])
+    return ride
+
+
 def _row_to_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
     (ride_id, status, started_at, start_lat, start_lon, watch_expires_at,
      gbfs_left_feed_at, gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon,
      gbfs_end_battery_percent, user_reported_ended_at, end_lat, end_lon,
      reported_battery_percent, total_cost_cents, metadata, path_polyline,
      vehicle_identifier, created_at, updated_at, ride_distance_meters,
-     distance_source, distance_clamped_from_m) = r
+     distance_source, distance_clamped_from_m, reported_minutes,
+     reported_plan, ride_options, validation_status, validation_reasons) = r
 
     # ANTI-FRAUD: see module docstring. Redacted as None in the API
     # response only — the underlying columns are untouched.
@@ -139,6 +359,17 @@ def _row_to_ride(r: tuple, *, path_geojson: bool = True) -> dict[str, Any]:
             round(float(distance_clamped_from_m), 1)
             if distance_clamped_from_m is not None else None
         ),
+        # FEATURE_PLAN §10 — the rider's own report, so not part of the
+        # gbfs_* redaction: showing it back reveals nothing they didn't say.
+        "reported_minutes": reported_minutes,
+        "reported_plan": reported_plan,
+        # sql/049. The options blob is echoed verbatim; validation is the
+        # contribution-eligibility state the post-ride screen renders from.
+        "ride_options": ride_options if isinstance(ride_options, dict) else {},
+        "validation": {
+            "status": validation_status,
+            "reasons": validation_reasons if isinstance(validation_reasons, list) else [],
+        },
     }
     if path_geojson:
         out["path_polyline"] = path_polyline
@@ -296,6 +527,10 @@ def start_ride(
     user: SessionUser = Depends(require_session),
     payload: StartRideIn = Body(...),
 ) -> dict[str, Any]:
+    # Validated before the connection is taken: a malformed options blob is
+    # a client bug, not a reason to hold a pooled connection open.
+    ride_options = _serialize_ride_options(payload.ride_options)
+
     with connection() as conn:
         with conn.cursor() as cur:
             enforce(cur, bucket="tracked_ride_start_account", key=str(user.account_id),
@@ -329,15 +564,34 @@ def start_ride(
             if cur.fetchone() is not None:
                 raise HTTPException(409, "an active ride already exists")
 
+            # The feed-anchored start (sql/049), stamped from the vehicle's
+            # newest fresh observation. The rider cannot supply or influence
+            # any of these three, which is the whole point: they are the
+            # anti-fabrication anchor a donated track is correlated against.
+            (feed_battery, feed_lat, feed_lon) = _feed_start_observation(
+                cur, payload.vehicle_identifier)
+
+            # Per-ride signing material. token_urlsafe(32) is base64url over
+            # 32 random bytes; token_hex(16) is 16 random bytes as hex —
+            # exactly the two shapes the chain format specifies.
+            track_key = secrets.token_urlsafe(TRACK_KEY_BYTES)
+            track_nonce = secrets.token_hex(TRACK_NONCE_BYTES)
+
             cur.execute(
                 """
                 INSERT INTO tracked_rides (
-                    account_id, vehicle_identifier, start_lat, start_lon, watch_expires_at
-                ) VALUES (%s, %s, %s, %s, NOW() + make_interval(hours => %s))
+                    account_id, vehicle_identifier, start_lat, start_lon, watch_expires_at,
+                    reported_start_battery_percent, ride_options,
+                    feed_start_battery_percent, feed_start_lat, feed_start_lon,
+                    track_key, track_nonce, track_key_issued_at
+                ) VALUES (%s, %s, %s, %s, NOW() + make_interval(hours => %s),
+                          %s, %s::jsonb, %s, %s, %s, %s, %s, NOW())
                 RETURNING id, watch_expires_at
                 """,
                 (user.account_id, payload.vehicle_identifier,
-                 payload.start_lat, payload.start_lon, WATCH_DURATION_HOURS),
+                 payload.start_lat, payload.start_lon, WATCH_DURATION_HOURS,
+                 payload.reported_start_battery_percent, ride_options,
+                 feed_battery, feed_lat, feed_lon, track_key, track_nonce),
             )
             ride_id, watch_expires_at = cur.fetchone()
             cur.execute(
@@ -348,8 +602,13 @@ def start_ride(
                 """,
                 (str(ride_id), user.account_id, payload.vehicle_identifier, watch_expires_at),
             )
-            cur.execute(f"SELECT {_RIDE_COLS} FROM tracked_rides WHERE id = %s", (str(ride_id),))
-            ride = _row_to_ride(cur.fetchone())
+            # _RIDE_COLS_OWNER: the start response carries track_signing, and
+            # is one of only three places that does.
+            cur.execute(
+                f"SELECT {_RIDE_COLS_OWNER} FROM tracked_rides WHERE id = %s",
+                (str(ride_id),),
+            )
+            ride = _owner_ride(cur.fetchone())
             ride["plate_display_code"] = _plate_display_code_for(cur, payload.vehicle_identifier)
         conn.commit()
     return ride
@@ -400,9 +659,11 @@ def active_tracked_ride(user: SessionUser = Depends(require_session)) -> dict[st
     /{ride_id}/waypoints and /{ride_id}/screenshots below."""
     with connection() as conn:
         with conn.cursor() as cur:
+            # _RIDE_COLS_OWNER: a client that reloaded mid-ride resumes
+            # signing from the track_signing block this returns.
             cur.execute(
                 f"""
-                SELECT {_RIDE_COLS} FROM tracked_rides
+                SELECT {_RIDE_COLS_OWNER} FROM tracked_rides
                 WHERE account_id = %s AND user_reported_ended_at IS NULL
                   AND gbfs_reappeared_at IS NULL AND watch_expires_at > NOW()
                 ORDER BY started_at DESC
@@ -413,7 +674,7 @@ def active_tracked_ride(user: SessionUser = Depends(require_session)) -> dict[st
             row = cur.fetchone()
             if row is None:
                 return {"active": None}
-            ride = _row_to_ride(row)
+            ride = _owner_ride(row)
             ride["plate_display_code"] = _plate_display_code_for(cur, ride["vehicle_identifier"])
     return {"active": ride}
 
@@ -426,14 +687,16 @@ def get_tracked_ride(
     rid = _parse_ride_id(ride_id)
     with connection() as conn:
         with conn.cursor() as cur:
+            # Already owner-scoped by the account_id predicate, which is what
+            # makes it safe to return _RIDE_COLS_OWNER's track_signing here.
             cur.execute(
-                f"SELECT {_RIDE_COLS} FROM tracked_rides WHERE id = %s AND account_id = %s",
+                f"SELECT {_RIDE_COLS_OWNER} FROM tracked_rides WHERE id = %s AND account_id = %s",
                 (str(rid), user.account_id),
             )
             row = cur.fetchone()
             if row is None:
                 raise HTTPException(404, "no such ride")
-            ride = _row_to_ride(row)
+            ride = _owner_ride(row)
             ride["plate_display_code"] = _plate_display_code_for(cur, ride["vehicle_identifier"])
     return ride
 
@@ -453,17 +716,31 @@ def end_tracked_ride(
             cur.execute(
                 "SELECT user_reported_ended_at, vehicle_identifier, "
                 "gbfs_reappeared_at, gbfs_end_lat, gbfs_end_lon, "
-                "start_lat, start_lon "
+                "start_lat, start_lon, ride_options "
                 "FROM tracked_rides WHERE id = %s AND account_id = %s FOR UPDATE",
                 (str(rid), user.account_id),
             )
             row = cur.fetchone()
             if row is None:
                 raise HTTPException(404, "no such ride")
-            (already_ended, vehicle_identifier, _gbfs_reappeared_at,
-             gbfs_end_lat, gbfs_end_lon, start_lat, start_lon) = row
+            (already_ended, vehicle_identifier, gbfs_reappeared_at,
+             gbfs_end_lat, gbfs_end_lon, start_lat, start_lon, ride_options) = row
             if already_ended is not None:
                 raise HTTPException(409, "this ride's end has already been reported")
+
+            # Provisional contribution eligibility, computed off the row this
+            # transaction has already locked. Written in the same UPDATE as
+            # everything else the end report settles. A2's donation handler
+            # and validation finisher own the authoritative status.
+            validation_status, validation_reasons = _provisional_validation(
+                ride_options, gbfs_reappeared_at=gbfs_reappeared_at)
+            # Stamped only when the status is SETTLED, so a later reader can
+            # tell "decided" from "defaulted". 'ineligible' here means the
+            # rider never opted into saving tracks, which no later event can
+            # undo; 'pending'/'pending_feed' are still waiting on something.
+            validated_at = (
+                datetime.now(timezone.utc) if validation_status == "ineligible" else None
+            )
 
             # Measure the WHOLE path, start -> fixes -> reported end. The end
             # report is the last thing we learn about the ride, so it is the
@@ -504,13 +781,28 @@ def end_tracked_ride(
                     distance_meters = %s,
                     distance_source = %s,
                     distance_clamped_from_m = %s,
+                    -- §10's inert reported facts and sql/049's provisional
+                    -- validation. Deliberately LAST rather than beside
+                    -- reported_battery_percent where they read most
+                    -- naturally: the SET order is semantically irrelevant,
+                    -- but the parameter order is not — this module's tests
+                    -- assert on positional indices into the tuple below, and
+                    -- appending leaves every pre-existing field where it was.
+                    reported_minutes = %s,
+                    reported_plan = %s,
+                    validation_status = %s,
+                    validation_reasons = %s::jsonb,
+                    validated_at = %s,
                     updated_at = NOW()
                 WHERE id = %s
                 """,
                 (payload.ended_at, payload.end_lat, payload.end_lon,
                  payload.reported_battery_percent, payload.total_cost_cents,
                  json.dumps(payload.metadata or {}), *path_params,
-                 new_distance, new_source, clamped_from, str(rid)),
+                 new_distance, new_source, clamped_from,
+                 payload.reported_minutes, payload.reported_plan,
+                 validation_status, json.dumps(validation_reasons), validated_at,
+                 str(rid)),
             )
 
             # Points (requirement #10), credited now that the ride is
