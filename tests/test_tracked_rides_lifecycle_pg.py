@@ -27,7 +27,6 @@ psycopg = pytest.importorskip("psycopg")
 from src import api_tracked_rides, ride_watch  # noqa: E402
 from src.accounts import SessionUser, require_session, upsert_account  # noqa: E402
 from src.ingest import TaggedDevice  # noqa: E402
-from src.points import h3_8_index_for  # noqa: E402
 
 SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 VID = "aaaa000000000000"
@@ -225,31 +224,24 @@ def test_one_early_waypoint_then_an_implausible_final_leg(pg_conn):
     # in neither.
     assert len(done["path_geojson"]["coordinates"]) == 2
 
-    # ...and neither does the POINTS ledger. The award is filed at the last
-    # location the measurement stands behind — the surviving fix — not at
-    # the reported end this same request just declined to measure a leg to.
-    # user_points.lat/lng and the h3_8_index derived from them are the
-    # per-area points geography, so filing at the disbelieved coordinate
-    # would credit the rider in a cell the ride itself refused to claim
-    # they reached, 10 km from anywhere they were observed.
+    # SUPERSEDED as of PLAN_RIDE_MODE_API.md phase A2 (Decision 6 / Risk 5):
+    # PATCH .../end no longer credits `waypoint` points at all (nor any
+    # other action) — see src/api_tracked_rides.py:end_tracked_ride and
+    # tests/test_api_tracked_rides_validation.py's own coverage of the
+    # supersession. This test used to assert the award landed at the last
+    # believed fix rather than the disbelieved reported end; that
+    # ride-cell-attribution CONCERN is now moot for /end (nothing is filed
+    # here at all) — the reshaped ride-mode awards instead file at the
+    # ride's START point via POST .../track (src/points.py's
+    # credit_battery_contribution/credit_nav_distance_bonus docstrings).
     with pg_conn.cursor() as cur:
         cur.execute(
-            "SELECT lat, lng, h3_8_index FROM user_points "
-            "WHERE source_table = 'tracked_rides' AND source_id = %s "
-            "AND action = 'waypoint'",
+            "SELECT COUNT(*) FROM user_points "
+            "WHERE source_table = 'tracked_rides' AND source_id = %s",
             (ride_id,),
         )
-        row = cur.fetchone()
-    assert row is not None, "the completed ride credited no waypoint points"
-    award_lat, award_lng, award_h3 = row
-    assert award_lat == pytest.approx(39.74 + 20 * step), (
-        "points filed away from the last believed fix"
-    )
-    assert award_lng == pytest.approx(-104.98)
-    assert award_h3 == h3_8_index_for(39.74 + 20 * step, -104.98)
-    assert award_h3 != h3_8_index_for(39.74 + 10_000 * step, -104.98), (
-        "the award landed in the disbelieved end's cell"
-    )
+        (count,) = cur.fetchone()
+    assert count == 0, "PATCH .../end must not credit any points post-A2"
 
 
 def test_waypoint_pagination_reaches_every_page(pg_conn):

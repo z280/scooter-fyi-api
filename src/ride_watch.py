@@ -518,6 +518,18 @@ def finalize_validation(cur, ride_id: str) -> dict[str, Any] | None:
                 if award is not None:
                     points_awarded.append({"action": award["action"], "points": award["points"]})
 
+        if points_awarded:
+            # track_donations.points_awarded defaults to 0 at INSERT time
+            # (src/api_tracked_rides.py:donate_track never knew this ride's
+            # eventual award when it wrote the row, since GBFS hadn't
+            # resolved yet) -- stamp the real total now that it's known,
+            # same column the donation endpoint itself updates on an
+            # immediate-eligible settle.
+            cur.execute(
+                "UPDATE track_donations SET points_awarded = %s WHERE id = %s",
+                (sum(p["points"] for p in points_awarded), str(donation_id)),
+            )
+
         ride_row = {
             "vehicle_identifier": vehicle_identifier,
             "track_key_issued_at": track_key_issued_at,

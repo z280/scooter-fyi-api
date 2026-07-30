@@ -2257,9 +2257,10 @@ waypoints makes it accurate.
 | `GET /api/v1/tracked-rides/active` | → `{ "active": <ride> }`, or `{ "active": null }` when there is none — always wrapped. Call on load to restore a ride that survived a reload: this response carries `track_signing`, so signing resumes on the same chain. |
 | `GET /api/v1/tracked-rides/{id}` | Full detail incl. `path_geojson` and `track_signing`. `404` if it isn't yours. |
 | `PATCH /api/v1/tracked-rides/{id}/end` | See below. |
-| `POST /api/v1/tracked-rides/{id}/waypoints` | See below. |
+| `POST /api/v1/tracked-rides/{id}/track` | Bulk track donation + verification. See below. |
+| `POST /api/v1/tracked-rides/{id}/waypoints` | **Deprecated** — see below. |
 | `GET /api/v1/tracked-rides/{id}/waypoints?limit=&after=&before=` | → `{ count, waypoints: [ { id, waypoint_at, lat, lon, metadata, created_at } ] }`, oldest first. Page **forward** with `after` (the `waypoint_at` of the last waypoint you received) and backward with `before` (the last `limit` waypoints older than the cursor). Both cursors need an explicit UTC offset. Identical contract to `GET /api/v1/rides/{id}/waypoints`. |
-| `DELETE /api/v1/tracked-rides/{id}` | **Immediate hard delete**, cascades to waypoints and the watch list. → `{ "deleted": true }` |
+| `DELETE /api/v1/tracked-rides/{id}` | **Immediate hard delete**, cascades to waypoints, the watch list, and (if not yet de-identified) any track donation. → `{ "deleted": true }` |
 | `DELETE /api/v1/tracked-rides` | **Immediate hard delete of every tracked ride you own.** → `{ "deleted_count": n }` |
 
 Privacy commitment, stated here on purpose: route polylines are the most
@@ -2288,17 +2289,93 @@ where a client that still needs the key finds it.
 **Single-shot** — a second call returns `409 "this ride's end has already
 been reported"`. There is no un-end and no edit. Confirm before sending.
 
-This is also where points are credited: 2 per waypoint you uploaded, plus
-20 if GBFS saw the scooter reappear within 20 m of your reported end
-(`gbfs_trip_validated`). Both are no-ops when their condition isn't met,
-and **both are capped so the ride awards at most 100 points in total** —
-see [Ride limits](#ride-limits). A ledger entry always shows what was
-actually granted, never the pre-cap figure.
-
 It also never fails on a distance cap: an implausible final leg is dropped
 and an over-cap distance is clamped, but the ride always completes.
 
+**No longer credits points**, as of the ride-mode overhaul: the old
+`waypoint` (2/waypoint) and `gbfs_trip_validated` (20, GBFS reappearance
+within 20 m) awards are **superseded**. GBFS reappearance is now an
+*eligibility gate* feeding `validation.status`, not an award in itself;
+the reshaped ride-mode awards (`battery_contribution`, `nav_distance_bonus`,
+etc. — see [Award table](#award-table)) are credited from
+`POST .../track` and `POST .../survey` instead. `waypoint` and
+`gbfs_trip_validated` remain valid historical actions on old ledger rows —
+history is never rewritten — they simply stop being newly granted.
+
+### `POST /api/v1/tracked-rides/{id}/track`
+
+Bulk track donation: uploads the locally-recorded, hash-chained,
+HMAC-signed waypoint chain for server verification, in **one shot** — this
+is the *only* way a track ever reaches the server; ride mode sends nothing
+mid-ride. Owner-only. Limit **6/hour per account**. Body cap **2 MB**; at
+most **600 batches** per request.
+
+```json
+{ "batches": ["<compact JWS>", "<compact JWS>", "..."] }
+```
+
+Each string is one HS256-signed batch, sealed client-side at ≤25 waypoints
+or ≤60 s. Signing key/nonce come from `track_signing` (above); see
+`RIDE_MODE_OVERHAUL_PLAN.md` Part 2 for the exact wire shape and hash
+chain. Raw batches are verified once and then **discarded** — only the
+verification summary and the decoded waypoints persist.
+
+→
+
+```json
+{
+  "donation_id": "9c1e…-uuid",
+  "verification": { "chain": "ok", "monotonic": "ok", "speed": "ok",
+                    "gbfs_start": "ok", "gbfs_end": "ok", "volume": "ok" },
+  "validation": { "status": "eligible", "reasons": [] },
+  "distance_meters": 4312.5, "waypoint_count": 512,
+  "points": [ { "action": "battery_contribution", "points": 14 } ]
+}
+```
+
+`verification` shows each of the six server-side checks (signature/chain
+integrity share one `chain` key). `validation.status` is one of `eligible`,
+`ineligible` (with `reasons` — `start_mismatch`, `end_mismatch`,
+`too_few_waypoints`, `trip_too_short`, `chain_invalid`, `internal_error`),
+or `pending_feed` — GBFS hasn't yet told us where the vehicle reappeared,
+so eligibility can't be decided yet. A `pending_feed` donation is still
+**accepted** (it counts as your one donation for this ride) with its
+distance-dependent points **held**; an hourly/per-cycle background job
+settles it to `eligible`/`ineligible` once the feed resolves or the watch
+window elapses, with no action from you. `points` lists only what was
+actually credited — empty on anything but an immediate `eligible` outcome
+(and even then, empty if a fast-segment ratio flagged the donation for
+review).
+
+Preconditions, in order:
+
+- `404` — no such ride (or not yours).
+- `409` `{"error": "ride_not_ended"}` — report your end first (`PATCH
+  .../end`).
+- `409` `{"error": "already_donated"}` — one donation per ride, ever.
+- `422` `{"error": "tracking_not_opted"}` — this ride's `ride_options.save_tracks`
+  was off, so there was never anything to donate.
+- `422` `{"error": "chain_invalid", "failing_check": "chain", "batch_seq": n}`
+  — the chain failed signature or integrity verification (bad signature,
+  wrong ride binding, or a broken hash chain). The submission is rejected
+  outright — nothing is stored and the donation slot is **not** consumed,
+  so a client that hit a genuine upload bug can retry.
+- `413` — over the 2 MB body cap, or over 600 batches.
+- `429` — over 6/hour.
+
+Award gates: `battery_contribution` requires `ride_options.battery_modeling`,
+not an own-device ride, and both a start and end battery percent known.
+`nav_distance_bonus` requires `ride_options.nav_improvement` and a stored
+route (`POST /api/v1/ride-routes`) — see [Points](#points).
+
 ### `POST /api/v1/tracked-rides/{id}/waypoints`
+
+**Deprecated.** Superseded by `POST .../track` above — ride mode never
+streams a track mid-ride. Retained one release purely as caution for any
+unknown external caller; it earns **no points** as of the ride-mode
+overhaul (the per-waypoint award always lived at `PATCH .../end`, which no
+longer grants it — see above). It is not the transport for ride-mode
+tracks and should not be used by new clients.
 
 ```json
 { "waypoint_at": "2026-07-27T16:31:02Z", "lat": 39.7450, "lon": -104.9910, "metadata": {} }
@@ -2362,20 +2439,19 @@ the whole ledger — not just the returned page.
 | Action | Points | Earned by |
 |---|---|---|
 | `qr_scan` | 100 | First scan of a given device by you |
-| `gbfs_trip_validated` | 20 | GBFS saw your scooter reappear within 20 m of your reported ride end |
 | `report_not_rideable` | 10 | `not_rideable` device report |
 | `report_vehicle_issue` | 10 | `damaged` device report |
 | `report_improper_parking` | 10 | `improperly_parked` device report |
 | `profile_completion` | 10 | One-time, on completing your profile |
 | `report_not_found` | 4 | `not_found` device report |
-| `waypoint` | 2 each | Per waypoint uploaded, credited when the ride ends |
+| `battery_contribution` | `8 + 2 × ⌈km / 2⌉` | A verified, `eligible` `POST .../track` donation, `ride_options.battery_modeling` on, not an own-device ride, both start/end battery known |
+| `nav_distance_bonus` | `2 × ⌈km / 3⌉` | Same donation, `ride_options.nav_improvement` on, and a stored `POST /api/v1/ride-routes` row linked to the ride |
 
-**Ceiling: 100 points per ride**, summed across every ride award
-(`waypoint` + `gbfs_trip_validated`). A 600-waypoint ride earns 100, not
-1 200. When the ceiling binds, the ledger entry records the **granted**
-amount — `points` in `GET /api/v1/points` is always what you actually
-received, never a pre-cap figure — and an award with no headroom left
-writes no entry at all.
+**Ceiling: 100 points per ride**, summed across every ride award. When the
+ceiling binds, the ledger entry records the **granted** amount — `points`
+in `GET /api/v1/points` is always what you actually received, never a
+pre-cap figure — and an award with no headroom left writes no entry at
+all.
 
 `qr_scan` is exempt: a device scan is not a ride award, and it is worth
 100 on its own. `profile_completion` and report credits are likewise
@@ -2387,6 +2463,16 @@ The ceiling is forward-only; entries predating it were not adjusted. See
 `dead_battery` reports and device recommendations deliberately award
 nothing. Credits are idempotent per source row, so retries don't
 double-credit.
+
+**Superseded** (ride-mode overhaul): `waypoint` (2/waypoint, credited at
+`PATCH .../end`) and `gbfs_trip_validated` (20, GBFS reappearance within
+20 m) are no longer newly granted — GBFS reappearance is now an
+*eligibility gate*, not an award, and the reshaped `battery_contribution`
+above pays for verified distance instead. Both actions remain valid on
+historical ledger rows; nothing is rewritten. `nav_route_feedback` (4),
+`nav_qualitative_feedback` (6) and `ride_survey` (4) are published in
+`GET /api/v1/points/schedule` below but not yet wired to an award (phase
+A3, `POST /api/v1/tracked-rides/{id}/survey`).
 
 ### `GET /api/v1/points/schedule`
 
@@ -2433,10 +2519,12 @@ holds for formula outputs too: an even base plus an even per-step increment
 cannot sum to an odd award.
 
 The five ride-mode actions (`battery_contribution`, `nav_route_feedback`,
-`nav_qualitative_feedback`, `nav_distance_bonus`, `ride_survey`) are published
-**before** anything awards them, because the ride wizard's info copy needs the
-numbers the day it ships. Awards are wired in phases A2/A3; the Award table
-above is what the ledger pays today.
+`nav_qualitative_feedback`, `nav_distance_bonus`, `ride_survey`) were published
+**before** anything awarded them, because the ride wizard's info copy needs the
+numbers the day it ships. Phase A2 has now wired `battery_contribution` and
+`nav_distance_bonus` (`POST /api/v1/tracked-rides/{id}/track`); the other
+three await phase A3 (`POST /api/v1/tracked-rides/{id}/survey`). The Award
+table above is what the ledger pays today.
 
 ---
 
@@ -2546,9 +2634,17 @@ this, so the published policy and the enforced one can't drift:
 
 Current `data` keys: `sessions`, `magic_link_tokens`, `receipts`, `rides`,
 `reports`, `accounts`, `user_preferences`, `tracked_rides`,
-`device_photos`, `model_reports`, `ride_transaction_screenshots`. Render
-the list as served — don't hardcode it, since new data classes get appended
-here first.
+`donated_tracks`, `user_points`, `device_photos`, `model_reports`,
+`ride_transaction_screenshots`. Render the list as served — don't hardcode
+it, since new data classes get appended here first.
+
+`donated_tracks` (added with track donation, above): a donated ride track
+loses its account link 4 hours after points settle, with a hard floor of
+28 hours after donation even if points never settle — a `POST .../track`
+response is never the last word on that ride's linkage. `user_points`
+(a pre-existing gap this endpoint now closes): ledger rows keep account,
+h3 cell and ride-start coordinates indefinitely — they're the leaderboard
+record — and are removed only by account deletion.
 
 ### `GET /api/v1/meta/pricing`
 
@@ -2732,8 +2828,8 @@ const delta = bikeShareV1 - bikeShareDenver;
 | `403` | Forbidden | Valid session but not on the admin allowlist, or an action you haven't earned — e.g. recommending a device you have no recent completed ride on. |
 | `404` | No data | Requested layer has no snapshots (cold start), an unknown `vehicle_identifier`, or the resource isn't yours. |
 | `409` | Conflict | State says no: a second active tracked ride, a re-reported ride end, or a 4th photo on a device. Not retryable — resolve the conflict first. |
-| `413` | Too large | Receipt, device photo, or ride screenshot over 10 MB; a preference/Usual blob over 16 KB; `ride_options` over 4 KB. |
-| `422` | Unprocessable | A required multipart part is missing, routing found no path (`no_route`, `no_route_from_location`), a client-asserted ride isn't [plausible](#is-this-ride-possible) (`implausible_speed`, `distance_exceeds_polyline`), or a waypoint breaks a [ride limit](#ride-limits) (`waypoint_too_far`, `ride_distance_cap_reached`). |
+| `413` | Too large | Receipt, device photo, or ride screenshot over 10 MB; a preference/Usual blob over 16 KB; `ride_options` over 4 KB; a track donation over 2 MB or 600 batches. |
+| `422` | Unprocessable | A required multipart part is missing, routing found no path (`no_route`, `no_route_from_location`), a client-asserted ride isn't [plausible](#is-this-ride-possible) (`implausible_speed`, `distance_exceeds_polyline`), a waypoint breaks a [ride limit](#ride-limits) (`waypoint_too_far`, `ride_distance_cap_reached`), or a track donation's chain failed verification (`chain_invalid`) or was never opted into (`tracking_not_opted`). |
 | `429` | Rate limited | A bucket is full — honor the `Retry-After` header (seconds). Mostly POST buckets, but three public GETs are limited too: `/api/v1/route` (30/min/IP), `/api/v1/route/profiles` (60/min/IP) and `/api/v1/geocode/search` (20/min/IP). |
 | `502` | Upstream failure | Email provider rejected a magic-link send. Retry in a minute. |
 | `503` | Service unavailable | No snapshots exist yet, or the feature isn't configured on this deployment (Google/magic-link/receipts/photo storage/router). |
@@ -2755,12 +2851,18 @@ Branch on `typeof detail === "object" ? detail.error : detail`.
 | `ride_distance_cap_reached` | `422` | Waypoint append, both ride mechanisms |
 | `implausible_speed`, `distance_exceeds_polyline` | `422` | `POST /api/v1/rides` |
 | `bad_ride_options` | `422` | `POST /api/v1/tracked-rides` |
+| `ride_not_ended` | `409` | `POST /api/v1/tracked-rides/{id}/track` |
+| `already_donated` | `409` | `POST /api/v1/tracked-rides/{id}/track` |
+| `tracking_not_opted` | `422` | `POST /api/v1/tracked-rides/{id}/track` |
+| `chain_invalid` (carries `failing_check`, `batch_seq`) | `422` | `POST /api/v1/tracked-rides/{id}/track` |
+| `bad_batches`, `too_many_batches`, `donation_too_large` | `422` / `413` | `POST /api/v1/tracked-rides/{id}/track` |
 | `bad_bias`, `bad_query`, `geocoder_unavailable` | `400` / `422` / `503` | `/api/v1/geocode/search` |
 
 **Rate limits are per-account and tight** — most write buckets are 10–30
-per hour. The exception is tracked-ride waypoints at 600/hour. Every POST
-path needs a `429` path with `Retry-After`; treat that as part of wiring
-the endpoint, not as polish.
+per hour. The exception is tracked-ride waypoints at 600/hour; track
+donation is the tightest, at 6/hour, since one ride only ever needs one.
+Every POST path needs a `429` path with `Retry-After`; treat that as part
+of wiring the endpoint, not as polish.
 
 ---
 

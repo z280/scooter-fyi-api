@@ -989,15 +989,13 @@ async def donate_track(
             result = verify_track_chain(cur, ride_row, batches)
 
             # chain_invalid (checks 1/2: signature or chain integrity) is
-            # the one outcome that REJECTS the submission outright rather
+            # one of two outcomes that REJECT the submission outright rather
             # than accepting-and-deciding: the chain isn't trustworthy
             # enough to even attribute to this ride, so nothing is written
             # and the one-donation-per-ride slot (track_donated_at) is not
             # consumed — a client that had a genuine upload bug can retry.
-            # Every other outcome (ineligible for a real reason, pending_feed,
-            # even the internal "error" verdict) IS an accepted donation —
-            # see the module docstring and track_verify.py's own note that a
-            # rejected chain has no root/points a caller can rely on.
+            # Every other real-verdict outcome (ineligible for an actual
+            # reason, pending_feed, eligible) IS an accepted donation.
             if "chain_invalid" in result.reasons:
                 raise HTTPException(422, {
                     "error": "chain_invalid",
@@ -1006,6 +1004,27 @@ async def donate_track(
                     "detail": "the submitted track chain failed verification "
                               "(bad signature, wrong ride binding, or a broken hash chain)",
                 })
+
+            # verdict="error" (track_verify.py's own defensive catch-all for
+            # an exception inside the verifier itself -- the module claims
+            # this should never actually happen against real input) is the
+            # SECOND rejection case, for a reason the chain_invalid branch
+            # above doesn't cover: chain_root_hash is None here too, but
+            # track_donations.chain_root_hash is NOT NULL (sql/051) -- there
+            # is nothing honest to persist as an "audit anchor" for a chain
+            # that was never actually verified. Respond with the SAME shape
+            # donate_track otherwise returns (200, not a client-facing error
+            # code) so Screen 10 can still render its "there was an internal
+            # error" branch -- this is OUR bug, not the client's, so (unlike
+            # chain_invalid) the donation slot is deliberately left open for
+            # a retry once it's fixed.
+            if result.verdict == "error":
+                response = result.as_response()
+                response["donation_id"] = None
+                response["distance_meters"] = 0.0
+                response["waypoint_count"] = 0
+                response["points"] = []
+                return response
 
             # Defensive bounds check on the flattened, chain-verified track
             # before persisting it: verify_track_chain's own parsing

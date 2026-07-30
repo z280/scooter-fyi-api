@@ -91,6 +91,9 @@ class _FakeCursor:
         elif joined.startswith("UPDATE track_donations SET points_settled_at"):
             self.points_settled_call = params
             self._pending = None
+        elif joined.startswith("UPDATE track_donations SET points_awarded"):
+            self.points_awarded_call = params
+            self._pending = None
         elif joined.startswith("UPDATE tracked_rides SET"):
             self.ride_update_call = params
             self._pending = None
@@ -320,6 +323,38 @@ def test_points_settled_at_is_stamped_on_an_eligible_settle(monkeypatch):
     assert cur.points_settled_call is not None
     assert cur.points_settled_call[0] is not None  # a real timestamp, not None
     assert cur.points_settled_call[1] == _DONATION_ID
+
+
+def test_track_donations_points_awarded_column_is_updated_with_the_real_total(monkeypatch):
+    """track_donations.points_awarded defaults to 0 at donation time (GBFS
+    hadn't resolved, so donate_track never knew the eventual award) --
+    finalize_validation must stamp the REAL total once it credits one."""
+    monkeypatch.setattr(ride_watch, "ingest_donated_observation", lambda cur, **kw: {"id": 1})
+    monkeypatch.setattr(
+        ride_watch, "credit_battery_contribution",
+        lambda cur, **kw: {"action": "battery_contribution", "points": 12},
+    )
+    last_ms = int(_ENDED_AT.timestamp() * 1000)
+    cur = _pending_donation_cursor(
+        gbfs_reappeared_at=_ENDED_AT, gbfs_end_lat=39.75, gbfs_end_lon=-104.99,
+        last_point=(last_ms, 39.75001, -104.99001),
+        ride_options={"save_tracks": True, "battery_modeling": True},
+    )
+    ride_watch.finalize_validation(cur, _RIDE_ID)
+    assert cur.points_awarded_call == (12, _DONATION_ID)
+
+
+def test_points_awarded_column_is_left_untouched_when_nothing_is_credited(monkeypatch):
+    """The common case (no ride-mode options on, or an ineligible settle)
+    must not issue a spurious UPDATE at all."""
+    monkeypatch.setattr(ride_watch, "ingest_donated_observation", lambda cur, **kw: {"id": 1})
+    last_ms = int(_ENDED_AT.timestamp() * 1000)
+    cur = _pending_donation_cursor(
+        gbfs_reappeared_at=_ENDED_AT, gbfs_end_lat=39.75, gbfs_end_lon=-104.99,
+        last_point=(last_ms, 39.75001, -104.99001),
+    )
+    ride_watch.finalize_validation(cur, _RIDE_ID)
+    assert not hasattr(cur, "points_awarded_call")
 
 
 def test_points_settled_at_is_stamped_on_an_ineligible_settle():

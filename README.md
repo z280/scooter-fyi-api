@@ -92,8 +92,8 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql … 050_ride_mode_usuals.sql
-│                              49 migrations, applied idempotently at boot
+├── sql/001_init.sql … 053_ride_mode_points.sql
+│                              51 migrations, applied idempotently at boot
 ├── docker/photon/Dockerfile    the Photon geocoding sidecar (pinned + sha256-verified
 │                               official jar; the index itself ships from R2)
 ├── scripts/build_photon_index.md  manual runbook for building/refreshing that index
@@ -140,8 +140,16 @@ agent process).
 │   ├── device_photos.py         device photo upload → PUBLIC R2 bucket
 │   ├── ride_screenshots.py      ride transaction screenshot upload → PRIVATE R2 bucket
 │   ├── qr.py                    QR payload plate extraction + vehicle_identifier validation
-│   ├── points.py                points ledger primitives (credit_points + per-action wrappers;
-│   │                            credit_points is where the 100-points-per-ride cap is enforced)
+│   ├── points.py                points ledger primitives (credit_points + per-action wrappers,
+│   │                            incl. the reshaped ride-mode awards battery_contribution/
+│   │                            nav_distance_bonus; credit_points is where the
+│   │                            100-points-per-ride cap and the even-points assert live)
+│   ├── track_verify.py          pure server-side verifier for the donated waypoint chain:
+│   │                            signature → chain integrity → monotonic/bounds → speed →
+│   │                            GBFS start/end correlation → volume minimums
+│   ├── battery_model.py         empirical battery-burn regression: nightly observation-gap
+│   │                            mining + weekly refit, plus ingest_donated_observation
+│   │                            (the donated-track battery feedback loop, sql/051)
 │   ├── ride_limits.py           the operator's three hard ride invariants — 100 points/ride,
 │   │                            3 km between consecutive path points, 80 km/ride — plus the
 │   │                            shared path measurement both ride modules close out with
@@ -173,7 +181,7 @@ agent process).
 │   │                            in_coverage vs the routing graph, 24h LRU cache)
 │   ├── api_auth.py              sign-in doors + session lifecycle
 │   ├── api_tracked_rides.py     GBFS-detected ride tracking: start/list/active/detail/
-│   │                            end-report/waypoints/delete
+│   │                            end-report/track-donation/waypoints(deprecated)/delete
 │   ├── api_rides.py             OFF-FEED rides — vehicles not in the GBFS feed (a personal
 │   │                            scooter, a competitor's rental). Same lifecycle as tracked
 │   │                            rides (start/waypoints/end) plus a one-shot log of a
@@ -463,7 +471,9 @@ arbitrary mileage.
 Server-detected ride tracking: you declare a ride start, a watch list
 compares the device against every GBFS ingest cycle for up to 3 hours to
 detect it leaving/rejoining the feed, and you separately report your own
-end. See `sql/027_tracked_rides.sql` / `src/ride_watch.py`.
+end. See `sql/027_tracked_rides.sql` / `src/ride_watch.py`. Ride-mode
+track donation, verification and validation-finishing live in
+`sql/051_track_donations.sql` / `src/track_verify.py` / `src/battery_model.py`.
 
 | Endpoint | Returns |
 |---|---|
@@ -471,8 +481,9 @@ end. See `sql/027_tracked_rides.sql` / `src/ride_watch.py`.
 | `GET /api/v1/tracked-rides?limit=&before=&status=` | Owner-only paginated list |
 | `GET /api/v1/tracked-rides/active` | The caller's one active ride, or `{"active": null}` |
 | `GET /api/v1/tracked-rides/{ride_id}` | Full detail incl. decoded `path_geojson`; GBFS fields hidden until you report your own end |
-| `PATCH /api/v1/tracked-rides/{ride_id}/end` | Report your end location/battery/cost/metadata plus `reported_minutes` (0–1440) and `reported_plan` (`resident\|visitor\|equity`); sets a provisional `validation.status` (single-shot) |
-| `POST /api/v1/tracked-rides/{ride_id}/waypoints` | Append a GPS waypoint while the ride is active |
+| `PATCH /api/v1/tracked-rides/{ride_id}/end` | Report your end location/battery/cost/metadata plus `reported_minutes` (0–1440) and `reported_plan` (`resident\|visitor\|equity`); sets a provisional `validation.status` (single-shot). No longer credits points (superseded — see `POST .../track` below) |
+| `POST /api/v1/tracked-rides/{ride_id}/track` | Bulk track donation: verifies the signed waypoint chain (`src/track_verify.py`), stores it, awards `battery_contribution`/`nav_distance_bonus`, and feeds the battery model. Owner-only, 6/hour, ≤2 MB / 600 batches. 404 not yours, 409 not ended / already donated, 422 not opted in / chain invalid |
+| `POST /api/v1/tracked-rides/{ride_id}/waypoints` | **Deprecated** — append a GPS waypoint while the ride is active. Superseded by `POST .../track`; earns no points |
 | `GET /api/v1/tracked-rides/{ride_id}/waypoints?limit=&before=` | Paginated waypoint list |
 | `DELETE /api/v1/tracked-rides/{ride_id}` / (bare) | Hard-delete one ride / every ride you own |
 | `POST /api/v1/tracked-rides/{ride_id}/screenshots?screenshot_type=overview\|receipt` | Upload a transaction screenshot (overwrites the same slot) |
@@ -563,7 +574,7 @@ curl localhost:8080/api/v1/snapshots/latest   # 503 until first cycle lands (~15
 ```bash
 python3.11 -m pip install -r requirements.txt pytest
 python3.11 -m pytest -v
-# ~1100 tests across ~90 files. Most run with no real Postgres (a fake
+# ~1300 tests across ~95 files. Most run with no real Postgres (a fake
 # cursor/connection is monkeypatched in) — test_compute_sql exercises the
 # real DuckDB spatial join, and files ending _pg.py additionally skip
 # unless VEO_TEST_PG_DSN points at a real, migratable Postgres instance.
@@ -571,7 +582,7 @@ python3.11 -m pytest -v
 
 ### Running the `_pg.py` tests
 
-The ~130 `_pg.py` tests are the only coverage of the `sql/` files as Postgres
+The ~140 `_pg.py` tests are the only coverage of the `sql/` files as Postgres
 actually executes them — the guarded `DO $$` constraint blocks, the partial
 unique indexes, and `test_migration_replay_pg.py`'s replay-over-live-data
 check are all invisible to a fake cursor. **Skipped is not passed**: run them
