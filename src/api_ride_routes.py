@@ -46,7 +46,7 @@ from .config import load
 from .pg import connection
 from .polyline import PolylineError, decode as decode_polyline
 from .ratelimit import enforce
-from .ride_limits import MAX_RIDE_DISTANCE_METERS
+from .ride_limits import MAX_RIDE_DISTANCE_METERS, measure_path
 
 router = APIRouter()
 
@@ -61,6 +61,16 @@ _LIMIT_RIDE_ROUTE_PER_ACCOUNT = (30, 3600)
 # WATCH_DURATION_HOURS ever moves.
 MAX_ROUTE_DURATION_SECONDS = 3 * 3600  # 10_800
 
+# REVIEW FIX: the payload had no encoded-length or decoded-point cap at
+# all before this — the 30/hour rate limit alone doesn't bound a single
+# request's size. Both figures are deliberately generous for a real route
+# (a Google encoded polyline needs roughly 5-10 bytes/point, so even a
+# maximally dense 80 km route — MAX_RIDE_DISTANCE_METERS, one point every
+# few meters — fits comfortably within both caps) while still being a
+# firm ceiling against an adversarial or buggy client.
+MAX_ROUTE_POLYLINE_CHARS = 200_000
+MAX_ROUTE_POLYLINE_POINTS = 20_000
+
 
 class RideRouteIn(BaseModel):
     tracked_ride_id: str | None = Field(
@@ -72,7 +82,7 @@ class RideRouteIn(BaseModel):
     profile: str = Field(..., description="A load().valhalla profile key (safe|range|shade|express today)")
     origin: tuple[float, float] = Field(..., description="[lat, lon]")
     destination: tuple[float, float] = Field(..., description="[lat, lon]")
-    route_polyline: str = Field(..., min_length=1)
+    route_polyline: str = Field(..., min_length=1, max_length=MAX_ROUTE_POLYLINE_CHARS)
     distance_meters: float = Field(..., ge=0, le=MAX_RIDE_DISTANCE_METERS)
     duration_seconds: float = Field(..., ge=0, le=MAX_ROUTE_DURATION_SECONDS)
     battery_percent_estimate: float | None = Field(default=None, ge=0, le=100)
@@ -114,6 +124,25 @@ def create_ride_route(
         raise HTTPException(400, {
             "error": "bad_polyline",
             "detail": "route_polyline must decode to at least 2 points",
+        })
+    # REVIEW FIX: a compact-but-dense polyline can expand to far more points
+    # than `max_length` on the encoded string alone would suggest.
+    if len(points) > MAX_ROUTE_POLYLINE_POINTS:
+        raise HTTPException(413, {
+            "error": "bad_polyline",
+            "detail": f"route_polyline decodes to more than "
+                      f"{MAX_ROUTE_POLYLINE_POINTS} points",
+        })
+    # REVIEW FIX: bound the DECODED geometry's real length against the same
+    # ride-distance invariant the rest of the codebase enforces, independent
+    # of whatever `distance_meters` the client claims — a short claimed
+    # distance paired with a geometrically enormous polyline must not sneak
+    # an oversized route past the `distance_meters` field's own bound.
+    measured_m, _ = measure_path(points, cap_legs=False)
+    if measured_m > MAX_RIDE_DISTANCE_METERS:
+        raise HTTPException(422, {
+            "error": "bad_polyline",
+            "detail": "decoded route geometry exceeds the maximum ride distance",
         })
 
     origin_lat, origin_lon = payload.origin

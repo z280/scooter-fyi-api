@@ -1027,6 +1027,21 @@ def ingest_donated_observation(
         return None
     soc_start, soc_end = soc
 
+    # REVIEW FIX: the feed-mined path (`_accept_pair`, above) rejects a
+    # battery swap (a large jump UP, `burn <= -SWAP_JUMP_PCT`), a zero
+    # delta, and any burn outside `(0, MAX_BURN_PCT]` before a candidate
+    # ever reaches this table — a donated observation skipped all three of
+    # those filters entirely, so e.g. start=5/end=100 (burn=-95) would
+    # settle and enter model training uncontested. Apply the SAME bounds
+    # here so both sources feed the model equally honest data. Points are
+    # unaffected: `credit_battery_contribution` (src/points.py) is a pure
+    # function of verified track distance, never of the battery delta, so
+    # nothing here changes what a rider is credited — this only gates what
+    # reaches `battery_trip_observations` for training.
+    burn = soc_start - soc_end
+    if burn <= -SWAP_JUMP_PCT or burn <= 0 or burn > MAX_BURN_PCT:
+        return None
+
     distance_m = donation_row.get("distance_meters")
     if distance_m is None:
         return None

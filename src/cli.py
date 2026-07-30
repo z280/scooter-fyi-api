@@ -554,16 +554,22 @@ def _cli_refresh_photon_index() -> dict:
     """Re-check R2 for a newer geocoding index on a schedule (cron, 05:00).
 
     ETag-gated, so this is a no-op on all but the handful of days a year the
-    index is rebuilt by hand (scripts/build_photon_index.md). Photon opens the
-    index at JVM startup and never re-reads it, so a change is logged loudly
-    and the restart is left to an operator — this container deliberately has no
-    Docker socket, exactly like refresh_routing_graph and Valhalla's tile
-    rebuild.
+    index is rebuilt by hand (scripts/build_photon_index.md). REVIEW FIX:
+    sync_photon_index only STAGES a changed index now — it never swaps it
+    into the live, served directory itself (see that function's own doc
+    comment for why and for the exact operator promotion sequence: stop
+    photon, swap the staged directory in, start photon, verify, then delete
+    the old one). This container deliberately has no Docker socket, exactly
+    like refresh_routing_graph and Valhalla's tile rebuild.
     """
     result = sync_photon_index()
     if result.get("changed"):
-        log.warning("Photon geocoding index changed — restart the photon "
-                    "service to load it: docker compose restart photon")
+        log.warning(
+            "Photon geocoding index staged at %s — promote it with the "
+            "operator stop/swap/start/health-check sequence documented on "
+            "sync_photon_index, then delete the old directory once verified.",
+            result.get("staged_dir"),
+        )
     return result
 
 

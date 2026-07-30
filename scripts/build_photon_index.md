@@ -12,8 +12,10 @@ r2://$R2_MAP_BUCKET/photon/photon-index-<YYYYMMDD>.tar.zst
 
 `src/r2_map.py:sync_photon_index()` picks the **newest date in the key name**
 (not the newest `LastModified`), ETag-gates it against
-`/photon/photon-index.etag`, unpacks `photon_data/` into the `photon_files`
-volume, and logs loudly that the `photon` container must be restarted.
+`/photon/photon-index.etag`, and stages `photon_data/` at `photon_data.staged`
+inside the `photon_files` volume — it does not touch the running `photon`
+container's live index at all; promoting a staged index to live is a
+separate operator step (§6 below).
 
 ---
 
@@ -191,21 +193,52 @@ hand — nothing prunes this prefix.
 ## 6. Tear down and deploy
 
 ```sh
-docker rm -f nominatim-throwaway
-docker volume prune -f          # the throwaway Nominatim volumes
+docker rm -f -v nominatim-throwaway   # -v also removes ITS OWN anonymous
+                                       # volumes (the Nominatim data dirs) —
+                                       # a bare `docker volume prune -f` here
+                                       # would instead delete every unused
+                                       # volume on the whole host, unrelated
+                                       # projects included; scope cleanup to
+                                       # this one container instead
 ```
 
 On the production host:
 
 ```sh
 docker compose run --rm photon_index_fetch     # or wait for the 05:00 cron
-docker compose restart photon                  # REQUIRED: index read at startup
-docker compose ps photon                       # wait for (healthy)
-curl -s 'http://127.0.0.1:8080/api/v1/geocode/search?q=1701+Champa&limit=6'
 ```
 
+**REVIEW FIX**: this only STAGES the new index into the `photon_files` volume
+now, at `photon_data.staged` — it never touches the live `photon_data` the
+running `photon` container has open (Photon's own documented update sequence
+is download/unpack, atomically swap, RESTART, verify, and only THEN delete
+the old database — not swap-then-delete with no restart in between:
+<https://github.com/komoot/photon#updating-photon-with-a-new-version-of-the-database-dump>).
+Promoting the staged index is a separate, explicit operator step. `photon_files`
+is a named Compose volume, not a host path — find its full name once with
+`docker volume ls | grep photon_files`, then:
+
+```sh
+VOL=$(docker volume ls -q | grep photon_files)   # e.g. scooter-fyi-api_photon_files
+
+docker compose stop photon
+docker run --rm -v "$VOL":/photon alpine sh -c \
+  'mv /photon/photon_data /photon/photon_data.old && mv /photon/photon_data.staged /photon/photon_data'
+docker compose start photon
+docker compose ps photon                       # wait for (healthy)
+curl -s 'http://127.0.0.1:8080/api/v1/geocode/search?q=1701+Champa&limit=6'
+
+# Once the query above looks right, free the old index's disk space:
+docker run --rm -v "$VOL":/photon alpine rm -rf /photon/photon_data.old
+```
+
+If the health check fails, reverse the two `mv`s (instead of running the
+final `rm -rf`) and `docker compose start photon` again — the old index is
+still intact until that last cleanup step runs.
+
 `fetch_photon_index` is a no-op when the ETag is unchanged, so the 05:00
-`refresh_photon_index` cron picks a new index up on its own — but it cannot
-restart the `photon` container (the scheduler deliberately has no Docker
-socket, exactly like `refresh_routing_graph` and Valhalla's tile rebuild). It
-logs `PHOTON INDEX UPDATED … must be RESTARTED`; the restart is the operator's.
+`refresh_photon_index` cron re-stages a new index on its own — but it cannot
+promote or restart the `photon` container (the scheduler deliberately has no
+Docker socket, exactly like `refresh_routing_graph` and Valhalla's tile
+rebuild). It logs `PHOTON INDEX STAGED … promote it with …`; the promotion
+sequence above is the operator's.

@@ -937,13 +937,36 @@ async def donate_track(
     """
     rid = _parse_ride_id(ride_id)
 
-    raw = await request.body()
-    if len(raw) > MAX_TRACK_DONATION_BYTES:
-        raise HTTPException(413, {
+    def _too_large() -> HTTPException:
+        return HTTPException(413, {
             "error": "donation_too_large",
             "detail": f"donation body exceeds the "
                       f"{MAX_TRACK_DONATION_BYTES // (1024 * 1024)} MB limit",
         })
+
+    # A dishonest/missing Content-Length can't be trusted, but an HONEST
+    # oversized one should reject before reading anything at all. The real
+    # bound is the streamed read below, which aborts as soon as the
+    # ACCUMULATED size crosses the cap — `await request.body()` used to
+    # buffer the entire request into memory before this check ever ran,
+    # which meant the 2 MB limit protected nothing against a very large or
+    # slow request.
+    declared_length = request.headers.get("content-length")
+    if declared_length is not None:
+        try:
+            if int(declared_length) > MAX_TRACK_DONATION_BYTES:
+                raise _too_large()
+        except ValueError:
+            pass  # non-numeric Content-Length: fall through to the bounded read
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_TRACK_DONATION_BYTES:
+            raise _too_large()
+        chunks.append(chunk)
+    raw = b"".join(chunks)
     try:
         body = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
@@ -1208,9 +1231,19 @@ async def donate_track(
                         points_awarded.append({"action": award["action"], "points": award["points"]})
 
             points_awarded_total = sum(p["points"] for p in points_awarded)
+            # `points_settled_at` starts the de-id clock (src/cli.py's
+            # deidentify_donations reads it directly) and must be stamped
+            # whenever this settles NOW -- reusing `validated_at` (already
+            # `now` for every non-"pending_feed" verdict, `None` for
+            # "pending_feed") is the SAME immediate-vs-deferred rule
+            # `finalize_validation` (src/ride_watch.py) applies when IT
+            # later settles a pending_feed donation, so both settlement
+            # paths agree on when the clock starts. Before this, only the
+            # deferred path ever stamped it -- an immediately eligible OR
+            # ineligible donation never started de-identification at all.
             cur.execute(
-                "UPDATE track_donations SET points_awarded = %s WHERE id = %s",
-                (points_awarded_total, str(donation_id)),
+                "UPDATE track_donations SET points_awarded = %s, points_settled_at = %s WHERE id = %s",
+                (points_awarded_total, validated_at, str(donation_id)),
             )
 
             # Battery ingestion: only when GBFS had ALREADY resolved at

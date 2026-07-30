@@ -411,7 +411,7 @@ def test_ride_survey_awards_four_points(client, db):
 # nav_route_feedback award gate: rating present/absent x ride_route_id present/absent
 # ---------------------------------------------------------------------------
 def test_nav_route_feedback_awarded_when_rating_present_and_route_resolves(client, db):
-    ride_id = db.add_ride(uuid.uuid4())
+    ride_id = db.add_ride(uuid.uuid4(), ride_options={"nav_improvement": True})
     route_id = db.add_route(uuid.uuid4())
     r = _post_survey(client, ride_id, nav_route_rating=8, ride_route_id=route_id)
     assert r.status_code == 200, r.text
@@ -439,6 +439,40 @@ def test_nav_route_feedback_not_awarded_without_a_rating(client, db):
 
 
 # ---------------------------------------------------------------------------
+# Review-fix regression: PLAN_RIDE_MODE_API.md's own precondition —
+# "nav_* require ride_options.nav_improvement + a ride_routes row" — was
+# never actually checked. A rider with a rating, a resolved route, and
+# qualitative text all present must still earn NOTHING when nav_improvement
+# isn't the literal boolean True.
+# ---------------------------------------------------------------------------
+def test_nav_awards_not_given_when_nav_improvement_is_off(client, db):
+    ride_id = db.add_ride(uuid.uuid4(), ride_options={"nav_improvement": False})
+    route_id = db.add_route(uuid.uuid4())
+    r = _post_survey(
+        client, ride_id, nav_route_rating=8, ride_route_id=route_id,
+        nav_qualitative="a" * 25,
+    )
+    assert r.status_code == 200, r.text
+    assert "nav_route_feedback" not in _actions(r.json())
+    assert "nav_qualitative_feedback" not in _actions(r.json())
+    # Linking the route is not itself gated on nav_improvement.
+    assert db.ride_routes[route_id]["tracked_ride_id"] == ride_id
+
+
+def test_nav_awards_not_given_when_nav_improvement_is_missing_or_not_literal_true(client, db):
+    for ride_options in ({}, {"nav_improvement": "true"}, {"nav_improvement": 1}):
+        ride_id = db.add_ride(uuid.uuid4(), ride_options=dict(ride_options))
+        route_id = db.add_route(uuid.uuid4())
+        r = _post_survey(
+            client, ride_id, nav_route_rating=8, ride_route_id=route_id,
+            nav_qualitative="a" * 25,
+        )
+        assert r.status_code == 200, r.text
+        assert "nav_route_feedback" not in _actions(r.json()), ride_options
+        assert "nav_qualitative_feedback" not in _actions(r.json()), ride_options
+
+
+# ---------------------------------------------------------------------------
 # nav_qualitative_feedback award gate: >=20 chars post-trim
 # ---------------------------------------------------------------------------
 def test_nineteen_chars_does_not_earn_the_qualitative_award(client, db):
@@ -449,7 +483,7 @@ def test_nineteen_chars_does_not_earn_the_qualitative_award(client, db):
 
 
 def test_twenty_chars_earns_the_qualitative_award(client, db):
-    ride_id = db.add_ride(uuid.uuid4())
+    ride_id = db.add_ride(uuid.uuid4(), ride_options={"nav_improvement": True})
     r = _post_survey(client, ride_id, nav_qualitative="a" * 20)
     assert r.status_code == 200, r.text
     award = next(p for p in r.json()["points"] if p["action"] == "nav_qualitative_feedback")
@@ -464,7 +498,7 @@ def test_whitespace_padding_does_not_count_toward_the_threshold(client, db):
 
 
 def test_whitespace_padded_twenty_chars_still_earns_the_award(client, db):
-    ride_id = db.add_ride(uuid.uuid4())
+    ride_id = db.add_ride(uuid.uuid4(), ride_options={"nav_improvement": True})
     r = _post_survey(client, ride_id, nav_qualitative="  " + "a" * 20 + "  ")
     assert r.status_code == 200, r.text
     assert "nav_qualitative_feedback" in _actions(r.json())
@@ -558,7 +592,9 @@ def test_vehicle_model_is_null_for_an_unconfirmed_model(client, db):
 
 
 def test_response_echoes_the_survey_row_and_a_points_array(client, db):
-    ride_id = db.add_ride(uuid.uuid4(), ride_options={"end_survey": True, "own_device": False})
+    ride_id = db.add_ride(uuid.uuid4(), ride_options={
+        "end_survey": True, "own_device": False, "nav_improvement": True,
+    })
     r = _post_survey(
         client, ride_id,
         would_ride_again=True, was_perfect=False, issues=["battery"],

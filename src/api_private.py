@@ -425,6 +425,11 @@ def private_area_leaders(
     public GET /api/v1/leaderboard/map only)."""
     with connection() as conn:
         with conn.cursor() as cur:
+            # REVIEW FIX: same snapshot-consistency issue (and same fix) as
+            # the public GET /api/v1/leaderboard/map sibling — see that
+            # endpoint's own comment. REPEATABLE READ must be set before the
+            # first statement in the transaction.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute(
                 """
                 SELECT computed_at, window_start, window_end, cell_count, led_cells

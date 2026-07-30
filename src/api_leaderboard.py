@@ -189,6 +189,15 @@ def leaderboard_map(request: Request, response: Response) -> Any:
     """
     with connection() as conn:
         with conn.cursor() as cur:
+            # REVIEW FIX: the metadata read below and the cells read further
+            # down are two separate statements. Under the default READ
+            # COMMITTED isolation, a recompute committing between them could
+            # make the two disagree — an old computed_at/ETag paired with new
+            # cells, or vice versa — so a client's cache validator would stop
+            # meaning anything. REPEATABLE READ (must be set before the first
+            # statement in the transaction) gives every statement in this
+            # read-only transaction ONE consistent snapshot.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute(
                 """
                 SELECT computed_at, window_start, window_end

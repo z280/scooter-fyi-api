@@ -10,6 +10,17 @@ in CI/prod and skip in a bare container.
 What matters here is the no-op path: this runs as a one-shot sidecar on every
 `docker compose up` AND from cron at 05:00, so an unchanged index must cost one
 LIST and nothing else — and a FAILED install must never be remembered as done.
+
+REVIEW FIX (staging, not live swap): `sync_photon_index()` now only STAGES a
+downloaded index at `photon_data.staged` — it never touches the live,
+served `photon_data` directory the running `photon` container may already
+have open. Promoting a staged index to live is a separate, operator-run
+step outside this module entirely (see `sync_photon_index`'s own doc
+comment). These tests were rewritten from asserting a live swap to
+asserting the staged directory instead; `index_present` now tracks the
+LIVE directory's presence, which none of these tests create unless they
+say so explicitly (a real deployment's `photon_data` is populated once,
+by hand, before `photon` first starts — see build_photon_index.md).
 """
 
 from __future__ import annotations
@@ -71,14 +82,14 @@ def _install(monkeypatch, tmp_path, objects, *, download_error=None,
     monkeypatch.setattr(r2_map, "_client", lambda c: client)
 
     if unpack:
-        def fake_unpack(archive, dest_dir):
-            assert Path(archive).exists(), "unpack ran before the download landed"
+        def fake_stage(archive, dest_dir):
+            assert Path(archive).exists(), "stage ran before the download landed"
             if unpack_error is not None:
                 raise unpack_error
-            (Path(dest_dir) / r2_map.PHOTON_DATA_DIRNAME).mkdir(exist_ok=True)
-            (Path(dest_dir) / r2_map.PHOTON_DATA_DIRNAME / "node.lock").touch()
+            (Path(dest_dir) / r2_map.PHOTON_STAGED_DIRNAME).mkdir(exist_ok=True)
+            (Path(dest_dir) / r2_map.PHOTON_STAGED_DIRNAME / "node.lock").touch()
 
-        monkeypatch.setattr(r2_map, "_unpack_photon_index", fake_unpack)
+        monkeypatch.setattr(r2_map, "_stage_photon_index", fake_stage)
     return client
 
 
@@ -88,16 +99,18 @@ def _marker(tmp_path: Path) -> str:
 
 # --- first install -----------------------------------------------------------
 
-def test_first_run_downloads_unpacks_and_records_the_etag(monkeypatch, tmp_path):
+def test_first_run_downloads_and_stages_and_records_the_etag(monkeypatch, tmp_path):
     client = _install(monkeypatch, tmp_path, [(_KEY_NEW, "abc123")])
     result = r2_map.sync_photon_index()
 
     assert result["changed"] is True
     assert result["key"] == _KEY_NEW
-    assert result["index_present"] is True
+    # The LIVE directory is never created by staging — only the staged one.
+    assert result["index_present"] is False
     assert result["errors"] == []
     assert [k for k, _ in client.downloads] == [_KEY_NEW]
-    assert (tmp_path / r2_map.PHOTON_DATA_DIRNAME).is_dir()
+    assert (tmp_path / r2_map.PHOTON_STAGED_DIRNAME).is_dir()
+    assert not (tmp_path / r2_map.PHOTON_DATA_DIRNAME).exists()
     assert _marker(tmp_path) == f"{_KEY_NEW}\nabc123\n"
     assert client.paginator.prefixes == ["photon/"]
 
@@ -107,6 +120,23 @@ def test_the_downloaded_tarball_is_not_left_on_the_volume(monkeypatch, tmp_path)
     _install(monkeypatch, tmp_path, [(_KEY_NEW, "abc123")])
     r2_map.sync_photon_index()
     assert list(tmp_path.glob("*.tar.zst*")) == []
+
+
+def test_never_touches_a_pre_existing_live_index(monkeypatch, tmp_path):
+    """The live `photon_data` a running `photon` container has open must be
+    completely untouched by staging a new one — this is the whole point of
+    the review fix."""
+    live = tmp_path / r2_map.PHOTON_DATA_DIRNAME
+    live.mkdir()
+    (live / "live.marker").write_text("still serving this")
+
+    _install(monkeypatch, tmp_path, [(_KEY_NEW, "abc123")])
+    result = r2_map.sync_photon_index()
+
+    assert result["changed"] is True
+    assert result["index_present"] is True  # the LIVE dir was already there
+    assert (live / "live.marker").read_text() == "still serving this"
+    assert (tmp_path / r2_map.PHOTON_STAGED_DIRNAME).is_dir()
 
 
 # --- the no-op path ----------------------------------------------------------
@@ -119,7 +149,6 @@ def test_unchanged_etag_is_a_no_op(monkeypatch, tmp_path):
     result = r2_map.sync_photon_index()
     assert result["changed"] is False
     assert result["key"] == _KEY_NEW
-    assert result["index_present"] is True
     assert client.downloads == []
 
 
@@ -153,13 +182,13 @@ def test_newest_is_chosen_by_date_in_the_name_not_by_listing_order(monkeypatch, 
     assert [k for k, _ in client.downloads] == [_KEY_NEW]
 
 
-def test_a_wiped_volume_refetches_even_with_a_matching_marker(monkeypatch, tmp_path):
-    """The marker alone is not evidence the index is still there — a recreated
-    volume (or a hand-deleted photon_data) has to be repopulated."""
+def test_a_wiped_staged_dir_refetches_even_with_a_matching_marker(monkeypatch, tmp_path):
+    """The marker alone is not evidence the staged index is still there — a
+    recreated volume (or a hand-deleted staged dir) has to be repopulated."""
     _install(monkeypatch, tmp_path, [(_KEY_NEW, "abc123")])
     r2_map.sync_photon_index()
-    (tmp_path / r2_map.PHOTON_DATA_DIRNAME / "node.lock").unlink()
-    (tmp_path / r2_map.PHOTON_DATA_DIRNAME).rmdir()
+    (tmp_path / r2_map.PHOTON_STAGED_DIRNAME / "node.lock").unlink()
+    (tmp_path / r2_map.PHOTON_STAGED_DIRNAME).rmdir()
 
     client = _install(monkeypatch, tmp_path, [(_KEY_NEW, "abc123")])
     assert r2_map.sync_photon_index()["changed"] is True
@@ -183,6 +212,7 @@ def test_no_index_object_at_all_is_a_clean_no_op(monkeypatch, tmp_path):
     client = _install(monkeypatch, tmp_path, [("photon/README.txt", "e1")])
     result = r2_map.sync_photon_index()
     assert result == {"changed": False, "key": None, "dir": str(tmp_path),
+                      "staged_dir": str(tmp_path / r2_map.PHOTON_STAGED_DIRNAME),
                       "index_present": False, "errors": []}
     assert client.downloads == []
     assert not (tmp_path / r2_map.PHOTON_MARKER_NAME).exists()
@@ -207,8 +237,8 @@ def test_a_failed_download_leaves_no_marker_and_no_partial(monkeypatch, tmp_path
     assert list(tmp_path.glob("*.part")) == []
 
 
-def test_a_failed_unpack_is_retried_next_run(monkeypatch, tmp_path):
-    """The marker is written AFTER the swap for exactly this reason: an ETag
+def test_a_failed_stage_is_retried_next_run(monkeypatch, tmp_path):
+    """The marker is written AFTER staging for exactly this reason: an ETag
     recorded on download would make a corrupt archive permanent."""
     _install(monkeypatch, tmp_path, [(_KEY_NEW, "abc123")],
              unpack_error=RuntimeError("zstd: unexpected end of input"))
@@ -235,7 +265,7 @@ def test_a_listing_failure_is_reported_not_raised(monkeypatch, tmp_path):
     assert result["errors"] == ["403 forbidden"]
 
 
-# --- the real unpack (needs zstandard) ---------------------------------------
+# --- the real stage (needs zstandard) ----------------------------------------
 
 def _write_archive(path: Path, top_level: str) -> None:
     zstandard = pytest.importorskip("zstandard")
@@ -250,28 +280,38 @@ def _write_archive(path: Path, top_level: str) -> None:
     path.write_bytes(cctx.compress(tar_path.read_bytes()))
 
 
-def test_real_unpack_swaps_photon_data_into_place(tmp_path):
+def test_real_stage_swaps_within_the_staging_namespace_only(tmp_path):
+    """Confirms the review fix directly: a pre-existing LIVE `photon_data` is
+    never read, renamed, or deleted — only `photon_data.staged` is touched,
+    even when a PREVIOUS staged directory already exists and needs replacing."""
     pytest.importorskip("zstandard")
     dest = tmp_path / "volume"
     dest.mkdir()
-    stale = dest / r2_map.PHOTON_DATA_DIRNAME
-    stale.mkdir()
-    (stale / "stale.marker").write_text("old index")
+
+    live = dest / r2_map.PHOTON_DATA_DIRNAME
+    live.mkdir()
+    (live / "live.marker").write_text("still serving this")
+
+    old_staged = dest / r2_map.PHOTON_STAGED_DIRNAME
+    old_staged.mkdir()
+    (old_staged / "stale.marker").write_text("previous stage")
 
     archive = tmp_path / "index.tar.zst"
     _write_archive(archive, r2_map.PHOTON_DATA_DIRNAME)
-    r2_map._unpack_photon_index(archive, dest)
+    r2_map._stage_photon_index(archive, dest)
 
-    assert (dest / r2_map.PHOTON_DATA_DIRNAME / "node.lock").exists()
-    # The previous index is gone, not merged with the new one.
-    assert not (dest / r2_map.PHOTON_DATA_DIRNAME / "stale.marker").exists()
-    assert not (dest / ".photon_index_staging").exists()
-    assert not (dest / f"{r2_map.PHOTON_DATA_DIRNAME}.old").exists()
+    # The new index landed in the staging directory...
+    assert (dest / r2_map.PHOTON_STAGED_DIRNAME / "node.lock").exists()
+    assert not (dest / r2_map.PHOTON_STAGED_DIRNAME / "stale.marker").exists()
+    # ...and the LIVE directory was never touched.
+    assert (live / "live.marker").read_text() == "still serving this"
+    assert not (dest / ".photon_index_extract").exists()
+    assert not (dest / f"{r2_map.PHOTON_STAGED_DIRNAME}.replacing").exists()
 
 
-def test_real_unpack_rejects_an_archive_with_the_wrong_top_level_dir(tmp_path):
-    """Silently installing an index photon cannot find would produce a healthy
-    container that answers nothing."""
+def test_real_stage_rejects_an_archive_with_the_wrong_top_level_dir(tmp_path):
+    """Silently staging an index photon cannot find would produce a healthy
+    container that answers nothing, once promoted."""
     pytest.importorskip("zstandard")
     dest = tmp_path / "volume"
     dest.mkdir()
@@ -279,9 +319,9 @@ def test_real_unpack_rejects_an_archive_with_the_wrong_top_level_dir(tmp_path):
     _write_archive(archive, "photon_data_oops")
 
     with pytest.raises(RuntimeError, match="photon_data"):
-        r2_map._unpack_photon_index(archive, dest)
-    assert not (dest / r2_map.PHOTON_DATA_DIRNAME).exists()
-    assert not (dest / ".photon_index_staging").exists()
+        r2_map._stage_photon_index(archive, dest)
+    assert not (dest / r2_map.PHOTON_STAGED_DIRNAME).exists()
+    assert not (dest / ".photon_index_extract").exists()
 
 
 # --- cli wiring (integrator-owned; skips until applied) ----------------------
@@ -304,7 +344,7 @@ def test_cli_exposes_fetch_and_refresh_commands():
 
     def fake_sync():
         calls.append("sync")
-        return {"changed": True, "key": _KEY_NEW}
+        return {"changed": True, "key": _KEY_NEW, "staged_dir": "/photon/photon_data.staged"}
 
     for name in ("fetch_photon_index", "refresh_photon_index"):
         calls.clear()

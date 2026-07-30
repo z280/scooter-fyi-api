@@ -168,14 +168,29 @@ PHOTON_INDEX_PREFIX = "photon/"
 # The object name carries its build date, so the newest key is picked by name
 # rather than by LastModified (a re-upload of an old index must not win).
 PHOTON_INDEX_RE = re.compile(r"^photon-index-(\d{8})\.tar\.zst$")
-# Records the (key, etag) whose unpack SUCCEEDED — written after the swap, never
-# before, so a truncated download or a failed unpack is retried on the next run
-# instead of being remembered as done.
+# REVIEW FIX: this job used to swap a freshly unpacked index straight into the
+# LIVE, served `photon_data` directory (see `_stage_photon_index`'s own doc
+# comment for the full reasoning) while the `photon` container might already
+# have that directory's files open. It now only STAGES the index at
+# `PHOTON_STAGED_DIRNAME` and never touches `PHOTON_DATA_DIRNAME` itself — the
+# actual swap is a host-side operator action (`sync_photon_index`'s doc
+# comment spells out the exact sequence).
+PHOTON_STAGED_DIRNAME = f"{PHOTON_DATA_DIRNAME}.staged"
+# Records the (key, etag) that is currently STAGED (not necessarily live) —
+# written after staging SUCCEEDS, never before, so a truncated download or a
+# failed unpack is retried on the next run instead of being remembered as done.
 PHOTON_MARKER_NAME = "photon-index.etag"
 
 
 def photon_index_dir() -> Path:
     return Path(PHOTON_INDEX_DIR)
+
+
+def photon_staged_path() -> Path:
+    """Where a newly downloaded index is staged — never the live, served
+    directory (`photon_data_path()`). See `sync_photon_index`'s doc comment
+    for why the live swap is deliberately left to an operator."""
+    return photon_index_dir() / PHOTON_STAGED_DIRNAME
 
 
 def photon_data_path() -> Path:
@@ -215,23 +230,36 @@ def _read_photon_marker(dest_dir: Path) -> tuple[str | None, str | None]:
     return (key or None), (etag or None)
 
 
-def _unpack_photon_index(archive: Path, dest_dir: Path) -> None:
-    """Unpack a ``.tar.zst`` index and swap ``photon_data`` into place.
+def _stage_photon_index(archive: Path, dest_dir: Path) -> None:
+    """Unpack a ``.tar.zst`` index into the STAGING directory
+    (``photon_staged_path()``) — never the live, served ``photon_data``
+    directory.
 
     stdlib ``tarfile`` reads gz/bz2/xz only and the worker image ships no
     ``zstd`` binary, hence ``zstandard`` (requirements.txt). Imported lazily so
     this module — and everything that imports it, including ``src.cli`` — stays
     importable on an environment that hasn't installed it yet.
 
-    Extracted into a staging directory and renamed over the live one, so Photon
-    is never pointed at a half-written index: the swap is two renames on one
-    filesystem.
+    REVIEW FIX: this function used to rename the extracted directory straight
+    over the LIVE ``photon_data`` (then delete the previous live directory
+    outright) while the running ``photon`` container might already have that
+    directory's index files open, with no restart or health verification in
+    between. Photon's own documented update sequence is download/unpack,
+    atomically swap, RESTART, verify, and only THEN delete the old database
+    (https://github.com/komoot/photon#updating-photon-with-a-new-version-of-the-database-dump)
+    — not swap-then-delete with no restart. This container has no Docker
+    socket (the same deliberate limitation `sync_photon_index`'s own doc
+    comment and ``refresh_routing_graph`` share), so it cannot safely perform
+    that restart+verify itself — it now stops at "stage a new index, ready to
+    be swapped in", and leaves the swap to a host-side operator command (see
+    `sync_photon_index`'s doc comment for the exact sequence). The live
+    directory is never read, renamed, or deleted by this function.
     """
     import zstandard  # noqa: PLC0415 — see above
 
-    staging = dest_dir / ".photon_index_staging"
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, exist_ok=True)
+    extract_dir = dest_dir / ".photon_index_extract"
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
 
     dctx = zstandard.ZstdDecompressor()
     with open(archive, "rb") as fh, dctx.stream_reader(fh) as reader:
@@ -239,35 +267,55 @@ def _unpack_photon_index(archive: Path, dest_dir: Path) -> None:
         with tarfile.open(fileobj=reader, mode="r|") as tar:
             # filter="data" refuses absolute paths, "..", device nodes and
             # symlinks pointing outside the tree (CVE-2007-4559).
-            tar.extractall(path=staging, filter="data")
+            tar.extractall(path=extract_dir, filter="data")
 
-    unpacked = staging / PHOTON_DATA_DIRNAME
+    unpacked = extract_dir / PHOTON_DATA_DIRNAME
     if not unpacked.is_dir():
-        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(extract_dir, ignore_errors=True)
         raise RuntimeError(
             f"photon index archive has no top-level {PHOTON_DATA_DIRNAME}/ "
             f"directory — build it with `tar -c {PHOTON_DATA_DIRNAME}/` "
             f"(scripts/build_photon_index.md)")
 
-    live = dest_dir / PHOTON_DATA_DIRNAME
-    previous = dest_dir / f"{PHOTON_DATA_DIRNAME}.old"
+    # Swap within the STAGING namespace only — `live`/`PHOTON_DATA_DIRNAME`
+    # is never touched here.
+    staged = dest_dir / PHOTON_STAGED_DIRNAME
+    previous = dest_dir / f"{PHOTON_STAGED_DIRNAME}.replacing"
     shutil.rmtree(previous, ignore_errors=True)
-    if live.exists():
-        live.rename(previous)
-    unpacked.rename(live)
+    if staged.exists():
+        staged.rename(previous)
+    unpacked.rename(staged)
     shutil.rmtree(previous, ignore_errors=True)
-    shutil.rmtree(staging, ignore_errors=True)
+    shutil.rmtree(extract_dir, ignore_errors=True)
 
 
 def sync_photon_index() -> dict:
-    """Sync the newest Photon geocoding index into the ``photon_files`` volume.
+    """STAGE the newest Photon geocoding index for the ``photon_files`` volume.
 
-    Returns ``{"changed": bool, "key": str|None, "dir": str, "index_present":
-    bool, "errors": [...]}``. ``changed`` is what tells an operator the
-    ``photon`` container has to be restarted: Photon opens the index at JVM
-    startup and never re-reads it, and this container has no Docker socket to
-    restart it itself (the same deliberate limitation as
-    ``refresh_routing_graph`` and Valhalla's tile rebuild).
+    Returns ``{"changed": bool, "key": str|None, "dir": str, "staged_dir": str,
+    "index_present": bool, "errors": [...]}``. ``index_present`` reports the
+    LIVE ``photon_data`` directory's presence; ``changed`` reports whether a
+    NEW index was staged this run.
+
+    REVIEW FIX: this used to swap the downloaded index straight into the LIVE,
+    served ``photon_data`` directory while the ``photon`` container might
+    already have it open, with no restart or verification in between — see
+    `_stage_photon_index`'s own doc comment for the full reasoning and the
+    upstream Photon documentation link. It now only STAGES the index at
+    `photon_staged_path()` and never touches the live directory. Promoting a
+    staged index to live is a host-side operator action (this container has
+    no Docker socket — the same deliberate limitation as
+    ``refresh_routing_graph`` and Valhalla's tile rebuild):
+
+        docker compose stop photon
+        mv <dir>/photon_data <dir>/photon_data.old
+        mv <dir>/photon_data.staged <dir>/photon_data
+        docker compose start photon
+        # verify a known /api/v1/geocode/search query responds, THEN:
+        rm -rf <dir>/photon_data.old
+
+    On a failed health check, reverse the two `mv`s instead of running the
+    final `rm -rf` — the old index is still intact until that last step.
 
     Errors are caught, not raised: this runs as the one-shot ``photon_index_fetch``
     sidecar that ``photon`` gates on via ``service_completed_successfully``, and
@@ -277,7 +325,9 @@ def sync_photon_index() -> dict:
     """
     dest_dir = photon_index_dir()
     data_dir = dest_dir / PHOTON_DATA_DIRNAME
+    staged_dir = photon_staged_path()
     result: dict = {"changed": False, "key": None, "dir": str(dest_dir),
+                    "staged_dir": str(staged_dir),
                     "index_present": data_dir.is_dir(), "errors": []}
 
     creds = r2_map_credentials()
@@ -304,8 +354,8 @@ def sync_photon_index() -> dict:
     result["key"] = key
 
     have_key, have_etag = _read_photon_marker(dest_dir)
-    if data_dir.is_dir() and have_key == key and have_etag == etag and etag:
-        log.info("photon index %s unchanged (etag %s) — skipping download",
+    if staged_dir.is_dir() and have_key == key and have_etag == etag and etag:
+        log.info("photon index %s already staged (etag %s) — skipping download",
                  key, etag[:12])
         return result
 
@@ -314,26 +364,28 @@ def sync_photon_index() -> dict:
         dest_dir.mkdir(parents=True, exist_ok=True)
         log.info("Downloading r2://%s/%s -> %s", bucket, key, archive)
         client.download_file(bucket, key, str(archive))
-        log.info("Unpacking %s (%.1f MB) into %s",
-                 key, archive.stat().st_size / 1e6, dest_dir)
-        _unpack_photon_index(archive, dest_dir)
+        log.info("Unpacking %s (%.1f MB) into staging at %s",
+                 key, archive.stat().st_size / 1e6, staged_dir)
+        _stage_photon_index(archive, dest_dir)
     except Exception as exc:  # noqa: BLE001
-        log.error("photon index sync: failed to install %s: %s", key, exc)
+        log.error("photon index sync: failed to stage %s: %s", key, exc)
         result["errors"].append(f"{key}: {exc}")
-        result["index_present"] = data_dir.is_dir()
         return result
     finally:
         # The tarball is a multi-GB transient; the unpacked index is what
-        # Photon serves. Never left behind, so a failed run also can't fill the
-        # volume and wedge the next one.
+        # Photon will serve once promoted. Never left behind, so a failed run
+        # also can't fill the volume and wedge the next one.
         archive.unlink(missing_ok=True)
 
     (dest_dir / PHOTON_MARKER_NAME).write_text(f"{key}\n{etag}\n")
     result["changed"] = True
-    result["index_present"] = data_dir.is_dir()
-    log.warning("PHOTON INDEX UPDATED to %s — the photon container must be "
-                "RESTARTED to load it (it maps the index at JVM startup): "
-                "docker compose restart photon", key)
+    log.warning(
+        "PHOTON INDEX STAGED at %s (%s) — this does NOT touch the running "
+        "photon container. Promote it with an operator-run stop/swap/start/"
+        "health-check sequence (see this function's own doc comment for the "
+        "exact commands), then delete the old directory once verified.",
+        staged_dir, key,
+    )
     return result
 
 

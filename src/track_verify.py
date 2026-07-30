@@ -65,6 +65,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence
@@ -364,14 +365,24 @@ def _verify_chain(batches: Sequence[str], ride_row: RideRow) -> _ChainOutcome:
             return _ChainOutcome(ok=False, failing_batch_seq=seq)
         if payload.get("prev") != prev_hex:
             return _ChainOutcome(ok=False, failing_batch_seq=seq)
+        # `v`/`rec` are part of the signed schema (the golden vectors'
+        # own decoded payloads carry both) but were never enforced here --
+        # a stale/future/malformed producer's batches would otherwise
+        # verify as if current. `type(...) is int`, not `isinstance`: bool
+        # is a subclass of int in Python, so `True != 1` is False and a
+        # boolean `v` would silently satisfy version 1 under `isinstance`.
+        if type(payload.get("v")) is not int or payload["v"] != PAYLOAD_VERSION:
+            return _ChainOutcome(ok=False, failing_batch_seq=seq)
+        if type(payload.get("rec")) is not bool:
+            return _ChainOutcome(ok=False, failing_batch_seq=seq)
 
         pts = payload.get("pts")
         t0 = payload.get("t0")
         t1 = payload.get("t1")
         if (
             not isinstance(pts, list)
-            or isinstance(t0, bool) or not isinstance(t0, (int, float))
-            or isinstance(t1, bool) or not isinstance(t1, (int, float))
+            or isinstance(t0, bool) or not isinstance(t0, (int, float)) or not math.isfinite(t0)
+            or isinstance(t1, bool) or not isinstance(t1, (int, float)) or not math.isfinite(t1)
         ):
             return _ChainOutcome(ok=False, failing_batch_seq=seq)
         try:
@@ -379,10 +390,28 @@ def _verify_chain(batches: Sequence[str], ride_row: RideRow) -> _ChainOutcome:
                 if not (isinstance(pt, list) and len(pt) == 4):
                     raise ValueError("malformed waypoint tuple")
                 dt_ms, lat, lon, acc = pt
-                if isinstance(dt_ms, bool) or not isinstance(dt_ms, (int, float)):
+                if (
+                    isinstance(dt_ms, bool) or not isinstance(dt_ms, (int, float))
+                    or not math.isfinite(dt_ms)
+                ):
                     raise ValueError("malformed dt_ms")
-                if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+                if (
+                    isinstance(lat, bool) or not isinstance(lat, (int, float)) or not math.isfinite(lat)
+                    or isinstance(lon, bool) or not isinstance(lon, (int, float)) or not math.isfinite(lon)
+                ):
                     raise ValueError("malformed lat/lon")
+                # `acc` is optional: missing or a non-numeric value is
+                # tolerated as "unknown" (contributes 0 to check 4's
+                # adjustment -- see `_clamped_accuracy`'s own doc comment).
+                # A NUMERIC-but-invalid value (NaN/Infinity/negative) is
+                # NOT tolerated -- `json.loads` accepts `NaN`/`Infinity`
+                # literals by default, and letting one reach check 4's
+                # arithmetic unrejected can suppress the speed comparison
+                # entirely (comparisons against NaN are always False).
+                if isinstance(acc, bool):
+                    raise ValueError("malformed acc")
+                if isinstance(acc, (int, float)) and (not math.isfinite(acc) or acc < 0):
+                    raise ValueError("malformed acc")
                 points.append((t0 + dt_ms, float(lat), float(lon),
                                 float(acc) if isinstance(acc, (int, float)) else None))
         except (ValueError, TypeError):
@@ -443,8 +472,12 @@ def _clamped_accuracy(acc: float | None) -> float:
     contributes nothing (0.0), same as a perfectly accurate fix would --
     it does NOT get treated as maximally inaccurate, which would make
     omitting accuracy a cheaper way to erase distance than clamping was
-    built to prevent."""
-    if acc is None:
+    built to prevent. Defensive belt-and-suspenders: `_verify_chain`'s own
+    parsing loop already rejects a non-finite/negative `acc` outright
+    before any point reaches here, but a non-finite value is treated the
+    same as "unknown" (0.0) rather than propagated, in case this function
+    is ever called from a path that skips that parse-time rejection."""
+    if acc is None or not math.isfinite(acc) or acc < 0:
         return 0.0
     return min(acc, MAX_ACCURACY_ADJUSTMENT_M)
 

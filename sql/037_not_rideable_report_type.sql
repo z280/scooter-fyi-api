@@ -47,19 +47,36 @@ ALTER TABLE device_reports
 -- RIDE_MODE_OVERHAUL_PLAN.md's phases A2/A3 (sql/053, sql/052) later widen
 -- this SAME constraint to admit five more actions ('battery_contribution',
 -- 'nav_route_feedback', 'nav_qualitative_feedback', 'nav_distance_bonus',
--- 'ride_survey') -- see those files' own guarded DO blocks. Once a single
--- production row carries any of those values (e.g. one submitted survey),
--- replaying the full sql/ set -- src/pg.py's own "IF NOT EXISTS makes
--- every file safe to re-run" contract, and every _pg test fixture that
--- does the same, per this file's own numeric position ahead of 052/053 --
--- reaches THIS block first and an unconditional re-ADD with the old
--- 8-value list dies with a CheckViolation against that row: exactly
--- sql/029's bug, recurring here for a different constraint.
+-- 'ride_survey') -- see those files' own guarded DO blocks.
 --
--- Guarded the same way sql/029 was repaired: skip the rewrite once
+-- CORRECTED (review fix): the prior wording here claimed production itself
+-- replays every migration file on every boot, which is not how
+-- src/pg.py:run_migrations() works -- it records each applied filename in
+-- schema_migrations and skips it on every later boot, so THIS specific
+-- unconditional re-ADD could never re-fire in a normally deployed
+-- production database once sql/037 has been applied there once. The real,
+-- reachable replay path is test/manual idempotence: several `_pg` test
+-- fixtures (e.g. tests/test_daily_trips_rollup_pg.py's `pg_conn`) apply
+-- every file in sql/ directly, in filename order, against a PERSISTENT
+-- `VEO_TEST_PG_DSN` database on every test run -- bypassing
+-- schema_migrations entirely, exactly as that fixture's own comment says
+-- ("applying them directly... is safe to repeat across runs"). On a
+-- SECOND such run against the same database, after a PRIOR run already
+-- executed sql/052/053 and widened this constraint, this file's block
+-- would reach the old unconditional re-ADD first (037 sorts before
+-- 052/053) and a CheckViolation would fire against any row already
+-- carrying one of the five newer actions -- the same failure mode as
+-- sql/029's bug, just reached through repeated test/manual replay rather
+-- than a production reboot. A hand-run `psql -f sql/037_...sql` against
+-- an already-migrated database would hit the identical failure. Guarded
+-- the same way sql/029 was repaired: skip the rewrite once
 -- 'report_not_rideable' (the value THIS migration installs) is already
 -- present, so replaying after a later migration has widened the list
--- further is a no-op instead of a regression that reverts it.
+-- further is a no-op instead of a regression that reverts it. This has
+-- never shipped to a live production database (this file and its guard
+-- both land in the same unreleased PR), so no separate forward migration
+-- is needed to repair one -- correcting this comment's attribution is the
+-- whole fix.
 DO $$
 DECLARE
     current_def text;

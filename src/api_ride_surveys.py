@@ -254,8 +254,19 @@ def submit_ride_survey(
             # was off) — nothing to resolve, nothing to link.
             ride_route_id: UUID | None = payload.ride_route_id
             if ride_route_id is not None:
+                # FOR UPDATE: without it, two concurrent surveys for two
+                # DIFFERENT rides naming the same ride_route_id can both
+                # observe tracked_ride_id IS NULL, both treat the row as
+                # theirs to claim (and both award route-dependent points
+                # below), and then race on the UPDATE — the last writer
+                # wins the link while the loser keeps points for a link
+                # that no longer exists. Locking the row serializes the
+                # second transaction behind the first's commit, so it then
+                # sees the FRESH tracked_ride_id and correctly 422s as
+                # "already linked to a different ride" instead of racing.
                 cur.execute(
-                    "SELECT tracked_ride_id FROM ride_routes WHERE id = %s AND account_id = %s",
+                    "SELECT tracked_ride_id FROM ride_routes WHERE id = %s AND account_id = %s "
+                    "FOR UPDATE",
                     (str(ride_route_id), user.account_id),
                 )
                 route_row = cur.fetchone()
@@ -328,7 +339,23 @@ def submit_ride_survey(
                 if award is not None:
                     points_awarded.append({"action": award["action"], "points": award["points"]})
 
-            if payload.nav_route_rating is not None and ride_route_id is not None:
+            # PLAN_RIDE_MODE_API.md §A3, verbatim: "nav_* require
+            # ride_options.nav_improvement + a ride_routes row." One shared
+            # gate for every nav_* award — previously only the route-row
+            # half of this precondition was checked, so a rider who
+            # explicitly opted OUT of nav_improvement (the same consent
+            # that makes storing their route acceptable in the first
+            # place) could still earn nav_route_feedback/
+            # nav_qualitative_feedback points.
+            nav_improvement_on = (
+                isinstance(ride_options, dict) and ride_options.get("nav_improvement") is True
+            )
+
+            if (
+                payload.nav_route_rating is not None
+                and ride_route_id is not None
+                and nav_improvement_on
+            ):
                 award = credit_nav_route_feedback(
                     cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
                     lat=start_lat, lng=start_lon, ride_id=str(rid),
@@ -339,6 +366,7 @@ def submit_ride_survey(
             if (
                 payload.nav_qualitative is not None
                 and len(payload.nav_qualitative.strip()) >= NAV_QUALITATIVE_MIN_CHARS
+                and nav_improvement_on
             ):
                 award = credit_nav_qualitative_feedback(
                     cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
