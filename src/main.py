@@ -21,7 +21,9 @@ from .api_auth import router as auth_router
 from .api_device_photos import router as device_photos_router
 from .api_device_recommendations import router as device_recommendations_router
 from .api_frontend_reports import router as frontend_reports_router
+from .api_geocode import router as geocode_router
 from .api_h3 import router as h3_router
+from .api_leaderboard import router as leaderboard_router
 from .api_legal import router as legal_router
 from .api_lexicon import router as lexicon_router
 from .api_meta import router as meta_router
@@ -29,7 +31,9 @@ from .api_points import router as points_router
 from .api_preferences import router as preferences_router
 from .api_qr import router as qr_router
 from .api_rides import router as rides_router
+from .api_ride_routes import router as ride_routes_router
 from .api_ride_screenshots import router as ride_screenshots_router
+from .api_ride_surveys import router as ride_surveys_router
 from .api_private import router as private_router
 from .api_profile import router as profile_router
 from .api_public import router as public_router
@@ -112,10 +116,17 @@ app.include_router(device_recommendations_router)
 app.include_router(device_photos_router)
 app.include_router(qr_router)
 app.include_router(ride_screenshots_router)
+app.include_router(ride_surveys_router)
+app.include_router(ride_routes_router)
 app.include_router(meta_router)
 app.include_router(legal_router)
 app.include_router(lexicon_router)
 app.include_router(route_router)
+# Address search for Ride Mode's ride wizard. Sits beside the routing router
+# because it feeds it: /geocode/search's in_coverage flag is membership in the
+# same graph_bbox /route rejects on.
+app.include_router(geocode_router)
+app.include_router(leaderboard_router)
 
 
 @app.get("/", include_in_schema=False)
@@ -131,6 +142,7 @@ def root():
             "/api/v1/devices/current",
             "/api/v1/route?from=lat,lon&to=lat,lon&profile=safe",
             "/api/v1/route/profiles",
+            "/api/v1/geocode/search?q=…",
             "/api/v1/user/devices/current",
             "/api/v1/equity-estimate?ranks=1,2",
             "/api/v1/h3/aggregates?res=9",
@@ -143,6 +155,8 @@ def root():
             "/api/v1/profile/map-settings",
             "/api/v1/profile/map-settings/{name}",
             "/api/v1/profile/find-ride-pref",
+            "/api/v1/profile/ride-usuals",
+            "/api/v1/profile/ride-usuals/{name}",
             "/api/v1/emoji-nouns",
             "/api/v1/emoji-nouns/search?q=…",
             "/api/v1/adjectives",
@@ -161,15 +175,21 @@ def root():
             "/api/v1/tracked-rides/active",
             "/api/v1/tracked-rides/{ride_id}",
             "/api/v1/tracked-rides/{ride_id}/end",
+            "/api/v1/tracked-rides/{ride_id}/track",
             "/api/v1/tracked-rides/{ride_id}/waypoints",
             "/api/v1/tracked-rides/{ride_id}/screenshots",
+            "/api/v1/tracked-rides/{ride_id}/survey",
+            "/api/v1/ride-routes",
             "/api/v1/points",
+            "/api/v1/points/schedule",
             "/api/v1/devices/{vehicle_identifier}/recommend",
             "/api/v1/devices/{vehicle_identifier}/photos",
             "/api/v1/devices/qr-scan",
             "/api/v1/photos/{photo_id}/reports",
             "/api/v1/photos/mine",
             "/api/v1/meta/privacy",
+            "/api/v1/meta/pricing",
+            "/api/v1/leaderboard/map",
             "/legal/terms-of-service",
             "/legal/privacy-policy",
             "/admin",

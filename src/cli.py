@@ -40,6 +40,15 @@ Available commands:
     refresh_routing_graph
                       Re-sync the routing assets and report whether the .pbf
                       changed, i.e. whether Valhalla needs a tile rebuild.
+    fetch_photon_index
+                      Sync the Photon geocoding index from R2 into the
+                      photon_files volume. Runs as a one-shot sidecar before
+                      the photon service starts.
+    refresh_photon_index
+                      Re-check R2 for a newer geocoding index (ETag-gated, a
+                      no-op on all but the ~4 days a year it is rebuilt) and
+                      log loudly when the photon container needs restarting
+                      to load one.
     extract_battery_trips
                       Mine the last ~26h of telemetry for observation-gap trips
                       matching the anchor filter, route them through Valhalla,
@@ -51,6 +60,18 @@ Available commands:
                       waiting for the daily job to accumulate them. Needs ~2 GiB
                       -- raise the container limit before running (see the
                       docstring).
+    deidentify_donations
+                      De-identify donated ride tracks (track_donations +
+                      donated_track_points) 4h after their points settle,
+                      force-floored at 28h after donation even if points
+                      never settle. Also sweeps ride_routes on its own 28h
+                      clock once sql/052 (phase A3) exists -- a
+                      to_regclass-guarded no-op until then.
+    recompute_area_leaders
+                      Recompute the H3 r8 area leader report (FEATURE_PLAN_
+                      2026-07.md §11 / PLAN_RIDE_MODE_API.md phase A4):
+                      trailing-28-day per-cell leaderboard, full replace
+                      (src/area_leaders.py:recompute).
     migrate           Apply pending SQL migrations.
     admin             Manage the admin allowlist:
                       `admin (list | add <email> | remove <email>)`.
@@ -63,6 +84,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from .archive import run_archive
+from .area_leaders import recompute as recompute_area_leaders
 from .battery_model import (
     backfill_trips_from_archive,
     extract_trips,
@@ -71,10 +93,11 @@ from .battery_model import (
 from .comms_replies import poll_once as poll_comms_replies
 from .config import load
 from .cycle import run_once
-from .r2_map import sync_map_assets
+from .r2_map import sync_map_assets, sync_photon_index
 from .daily_sla import run_daily
 from .daily_trips import run_daily as run_daily_trips
 from .pg import connection, run_migrations
+from .ride_watch import finalize_validation
 from .sentry import capture_exception, init as sentry_init, monitor
 
 log = logging.getLogger("veo.cli")
@@ -371,6 +394,18 @@ def expire_stale_watches() -> dict:
     (2) keep idx_watch_list_open_expiry / idx_tracked_rides_open (both
     partial indexes keyed on status/NULL-checks) from accumulating rows
     that can never match a live query again.
+
+    ALSO the finalize_validation hook for a `pending_feed` ride whose watch
+    window elapsed without GBFS ever resolving (PLAN_RIDE_MODE_API.md phase
+    A2, "Validation finisher" — src/ride_watch.py:finalize_validation). The
+    ride-side UPDATE just above SKIPS a donated ride: it already has
+    `user_reported_ended_at` set (PATCH .../end ran) and its `status` is
+    whatever /end left it as (not 'watching'/'left_feed'), so it never
+    matches that UPDATE's WHERE clause. The finalizer therefore selects on
+    the elapsed watch window itself (`watch_expires_at < NOW()`, no
+    `gbfs_reappeared_at`) rather than on ride status — the two selections
+    are deliberately independent and neither should be folded into the
+    other's WHERE clause.
     """
     now = datetime.now(timezone.utc)
     with connection() as conn:
@@ -388,9 +423,43 @@ def expire_stale_watches() -> dict:
                 (now, now),
             )
             rides_expired = cur.rowcount
+
+            cur.execute(
+                """
+                SELECT id FROM tracked_rides
+                WHERE validation_status = 'pending_feed'
+                  AND watch_expires_at < %s
+                  AND gbfs_reappeared_at IS NULL
+                """,
+                (now,),
+            )
+            stale_ride_ids = [r[0] for r in cur.fetchall()]
         conn.commit()
-    log.info("expire_stale_watches: watches=%d rides=%d", watches_expired, rides_expired)
-    return {"watches_expired": watches_expired, "rides_expired": rides_expired}
+
+        # One ride per transaction — same reasoning as
+        # src/ride_watch.py:update_watches_for_cycle's own finalizer loop:
+        # finalize_validation takes its own ride_validation:<ride_id>
+        # advisory lock before touching that ride's row, and one ride's
+        # failure must not roll back the expiry work already committed
+        # above or block the next stale ride in this same run.
+        finalized = 0
+        for ride_id in stale_ride_ids:
+            try:
+                with conn.cursor() as cur:
+                    result = finalize_validation(cur, str(ride_id))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                log.exception(
+                    "expire_stale_watches: finalize_validation failed for ride %s", ride_id)
+                continue
+            if result is not None:
+                finalized += 1
+
+    log.info("expire_stale_watches: watches=%d rides=%d finalized=%d",
+              watches_expired, rides_expired, finalized)
+    return {"watches_expired": watches_expired, "rides_expired": rides_expired,
+            "finalized_validations": finalized}
 
 
 _OFF_FEED_RIDE_MAX_ACTIVE_HOURS = 24
@@ -467,6 +536,43 @@ def _cli_refresh_routing_graph() -> dict:
     return result
 
 
+def _cli_fetch_photon_index() -> dict:
+    """One-shot sidecar: pull the Photon geocoding index into its volume.
+
+    Always exits 0, for the same reason as _cli_fetch_map_pbf above: `photon`
+    gates on this via service_completed_successfully and the deploy script runs
+    under `set -e`, so a missing credential or an R2 outage must degrade
+    address autocomplete (a clean 503 from /api/v1/geocode/search) rather than
+    abort the deploy of everything else in the push. sync_photon_index catches
+    its own errors, logs loudly, and reports `index_present` so the failure is
+    visible.
+    """
+    return sync_photon_index()
+
+
+def _cli_refresh_photon_index() -> dict:
+    """Re-check R2 for a newer geocoding index on a schedule (cron, 05:00).
+
+    ETag-gated, so this is a no-op on all but the handful of days a year the
+    index is rebuilt by hand (scripts/build_photon_index.md). REVIEW FIX:
+    sync_photon_index only STAGES a changed index now — it never swaps it
+    into the live, served directory itself (see that function's own doc
+    comment for why and for the exact operator promotion sequence: stop
+    photon, swap the staged directory in, start photon, verify, then delete
+    the old one). This container deliberately has no Docker socket, exactly
+    like refresh_routing_graph and Valhalla's tile rebuild.
+    """
+    result = sync_photon_index()
+    if result.get("changed"):
+        log.warning(
+            "Photon geocoding index staged at %s — promote it with the "
+            "operator stop/swap/start/health-check sequence documented on "
+            "sync_photon_index, then delete the old directory once verified.",
+            result.get("staged_dir"),
+        )
+    return result
+
+
 def _cli_extract_battery_trips() -> dict:
     return extract_trips()
 
@@ -485,6 +591,167 @@ def _cli_backfill_battery_trips() -> dict:
     return backfill_trips_from_archive()
 
 
+# ---------------------------------------------------------------------------
+# H3 r8 area leader report (FEATURE_PLAN_2026-07.md §11 / PLAN_RIDE_MODE_API.md
+# phase A4). Cron: `15 9 * * * python -m src.cli recompute_area_leaders`.
+# ---------------------------------------------------------------------------
+def _cli_recompute_area_leaders() -> dict:
+    return recompute_area_leaders()
+
+
+# ---------------------------------------------------------------------------
+# De-id sweep (PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md
+# glossary "De-id"). Cron: `15 * * * * python -m src.cli deidentify_donations`.
+# ---------------------------------------------------------------------------
+
+# Two independent triggers name the same wall-clock unit (hours) but read
+# from two different columns — kept as separate constants rather than one
+# "retention hours" so a future change to either window can't silently move
+# the other.
+_DEID_SETTLED_GRACE_HOURS = 4
+_DEID_DONATION_FORCE_FLOOR_HOURS = 28
+_MS_PER_MINUTE = 60_000
+
+
+def deidentify_donations(dry_run: bool = False) -> dict:
+    """De-identify donated ride tracks once points have settled — the sweep
+    named in PLAN_RIDE_MODE_API.md phase A2 and
+    RIDE_MODE_OVERHAUL_PLAN.md's "De-id" glossary entry.
+    `python -m src.cli deidentify_donations`, hourly at :15.
+
+    A `track_donations` row is swept the moment EITHER is true:
+
+      - `points_settled_at` (stamped by the donation handler, or by A2's
+        `finalize_validation` for a `pending_feed` donation that settles
+        late — stamped on settle REGARDLESS of outcome, so a denied
+        donation starts this clock too) is more than
+        `_DEID_SETTLED_GRACE_HOURS` (4h) in the past. The normal path: a
+        rider gets a few hours to see their award before the underlying
+        track is severed from their account.
+      - `donated_at` is more than `_DEID_DONATION_FORCE_FLOOR_HOURS` (28h)
+        in the past, REGARDLESS of whether points ever settled. This is
+        the force floor: a donation whose GBFS correlation never resolves
+        (`validation.status` stuck at `pending_feed` forever, so
+        `points_settled_at` stays NULL forever) must not keep full
+        account + geometry linkage indefinitely just because settlement
+        never happened.
+
+    Sweeping nulls `account_id` and `tracked_ride_id` (severing the FKs
+    that make hard-delete cascade pre-sweep — post-sweep the artifact has
+    no owner left to cascade from) and stamps `deidentified_at`; every one
+    of that donation's `donated_track_points.recorded_ms` is coarsened to
+    minute precision in the same pass. `chain_root_hash`, `vehicle_model`,
+    `distance_meters`, and the rest of the row are left alone — the
+    de-identified geometry + derived battery observation are exactly what
+    the battery-modeling feedback loop still needs.
+
+    `WHERE deidentified_at IS NULL` is both the eligibility filter and the
+    idempotence guard: a row already swept never matches again, so this
+    command is safe to run every hour forever (or twice in the same
+    minute) with no double effect.
+
+    `ride_routes` (PLAN_RIDE_MODE_API.md phase A3, sql/052) sweeps on its
+    OWN 28h clock, independent of any donation — a nav-improvement ride
+    whose track is never donated still stored route geometry, and hanging
+    its de-id off a donation that may not exist would keep it
+    account-linked forever. That table does not exist in this build order
+    (A2 lands before A3), so this arm is guarded on
+    `to_regclass('ride_routes') IS NOT NULL`: `to_regclass` returns NULL
+    for an unknown relation instead of raising, so the guard is a safe
+    existence probe against a database that has not yet applied sql/052,
+    and the arm underneath it is a pure no-op today. The moment sql/052
+    lands, `to_regclass` starts returning a real relation id and this same
+    predicate activates with no further code change.
+
+    `dry_run=True` counts what the sweep WOULD touch without writing
+    anything (a manual sanity check before changing the cron); the cron
+    itself always calls this with the default `dry_run=False`.
+    """
+    now = datetime.now(timezone.utc)
+    settled_cutoff = now - timedelta(hours=_DEID_SETTLED_GRACE_HOURS)
+    donated_cutoff = now - timedelta(hours=_DEID_DONATION_FORCE_FLOOR_HOURS)
+
+    donations_deidentified = 0
+    points_coarsened = 0
+    ride_routes_deidentified = 0
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            if dry_run:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM track_donations
+                    WHERE deidentified_at IS NULL
+                      AND (points_settled_at < %s OR donated_at < %s)
+                    """,
+                    (settled_cutoff, donated_cutoff),
+                )
+                (donations_deidentified,) = cur.fetchone()
+            else:
+                cur.execute(
+                    """
+                    UPDATE track_donations
+                    SET account_id = NULL, tracked_ride_id = NULL, deidentified_at = NOW()
+                    WHERE deidentified_at IS NULL
+                      AND (points_settled_at < %s OR donated_at < %s)
+                    RETURNING id
+                    """,
+                    (settled_cutoff, donated_cutoff),
+                )
+                donation_ids = [row[0] for row in cur.fetchall()]
+                donations_deidentified = len(donation_ids)
+
+                if donation_ids:
+                    cur.execute(
+                        """
+                        UPDATE donated_track_points
+                        SET recorded_ms = (recorded_ms / %s) * %s
+                        WHERE donation_id = ANY(%s)
+                        """,
+                        (_MS_PER_MINUTE, _MS_PER_MINUTE, donation_ids),
+                    )
+                    points_coarsened = cur.rowcount
+
+            # ride_routes (A3, sql/052) — guarded existence probe; see the
+            # docstring. Must run whether or not any donation matched above.
+            cur.execute("SELECT to_regclass('ride_routes')")
+            (ride_routes_relid,) = cur.fetchone()
+            if ride_routes_relid is not None:
+                if dry_run:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) FROM ride_routes
+                        WHERE deidentified_at IS NULL AND created_at < %s
+                        """,
+                        (donated_cutoff,),
+                    )
+                    (ride_routes_deidentified,) = cur.fetchone()
+                else:
+                    cur.execute(
+                        """
+                        UPDATE ride_routes
+                        SET account_id = NULL, tracked_ride_id = NULL, deidentified_at = NOW()
+                        WHERE deidentified_at IS NULL AND created_at < %s
+                        """,
+                        (donated_cutoff,),
+                    )
+                    ride_routes_deidentified = cur.rowcount
+
+        if not dry_run:
+            conn.commit()
+
+    log.info(
+        "deidentify_donations: donations=%d points_coarsened=%d ride_routes=%d dry_run=%s",
+        donations_deidentified, points_coarsened, ride_routes_deidentified, dry_run,
+    )
+    return {
+        "donations_deidentified": donations_deidentified,
+        "points_coarsened": points_coarsened,
+        "ride_routes_deidentified": ride_routes_deidentified,
+        "dry_run": dry_run,
+    }
+
+
 COMMANDS = {
     "ingest_cycle":          _cli_ingest_cycle,
     "archive_if_due":        _cli_archive_if_due,
@@ -498,10 +765,14 @@ COMMANDS = {
     "expire_stale_off_feed_rides": expire_stale_off_feed_rides,
     "fetch_map_pbf":         _cli_fetch_map_pbf,
     "refresh_routing_graph": _cli_refresh_routing_graph,
+    "fetch_photon_index":    _cli_fetch_photon_index,
+    "refresh_photon_index":  _cli_refresh_photon_index,
     "extract_battery_trips": _cli_extract_battery_trips,
     "train_battery_model":   _cli_train_battery_model,
     "backfill_battery_trips": _cli_backfill_battery_trips,
     "poll_comms_replies":    poll_comms_replies,
+    "deidentify_donations":  deidentify_donations,
+    "recompute_area_leaders": _cli_recompute_area_leaders,
     "migrate":               lambda: run_migrations(),
 }
 

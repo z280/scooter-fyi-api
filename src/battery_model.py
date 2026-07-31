@@ -145,6 +145,24 @@ WHERE o.t2 IS NOT NULL
       WHERE b.vehicle_identifier = o.vehicle_identifier
         AND b.departed_at = o.snapshot_time
   )
+  -- Double-count guard, the other direction (sql/051 / PLAN_RIDE_MODE_API.md
+  -- phase A2 "Battery ingestion"): a donated ride's observation window can
+  -- straddle this candidate pair without sharing its exact departed_at (the
+  -- donation's departed_at is the RIDE's started_at; this candidate's is a
+  -- raw_telemetry_points snapshot_time), so the exact-match NOT EXISTS above
+  -- would miss it. ingest_donated_observation() (this module) handles the
+  -- inverse direction -- deleting an already-mined feed row when a donation
+  -- lands for the same trip -- so this is the one remaining direction: a
+  -- donation that lands BEFORE the nightly extraction run must stop
+  -- extraction from mining the same trip a second time as a separate,
+  -- lower-quality observation.
+  AND NOT EXISTS (
+      SELECT 1 FROM battery_trip_observations d
+      WHERE d.vehicle_identifier = o.vehicle_identifier
+        AND d.source = 'donated_ride'
+        AND d.departed_at < o.t2
+        AND d.arrived_at > o.snapshot_time
+  )
 ORDER BY o.snapshot_time DESC
 LIMIT %(limit)s
 """
@@ -156,21 +174,32 @@ LIMIT %(limit)s
 MAX_TEMPERATURE_GAP_SECONDS = 2 * 3600
 
 
+def _temperature_at_cur(cur, when: datetime) -> float | None:
+    """Same lookup as _temperature_at, over an already-open cursor.
+
+    Split out so ingest_donated_observation (below) — which runs inside a
+    caller-managed transaction it does not own a connection object for —
+    can reuse the exact same query rather than a second copy that could
+    drift from it.
+    """
+    cur.execute(
+        """
+        SELECT temperature_c
+        FROM hourly_temperature
+        WHERE observed_hour BETWEEN %(when)s - %(gap)s * INTERVAL '1 second'
+                                AND %(when)s + %(gap)s * INTERVAL '1 second'
+        ORDER BY ABS(EXTRACT(EPOCH FROM (observed_hour - %(when)s)))
+        LIMIT 1
+        """,
+        {"when": when, "gap": MAX_TEMPERATURE_GAP_SECONDS},
+    )
+    row = cur.fetchone()
+    return float(row[0]) if row else None
+
+
 def _temperature_at(conn, when: datetime) -> float | None:
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT temperature_c
-            FROM hourly_temperature
-            WHERE observed_hour BETWEEN %(when)s - %(gap)s * INTERVAL '1 second'
-                                    AND %(when)s + %(gap)s * INTERVAL '1 second'
-            ORDER BY ABS(EXTRACT(EPOCH FROM (observed_hour - %(when)s)))
-            LIMIT 1
-            """,
-            {"when": when, "gap": MAX_TEMPERATURE_GAP_SECONDS},
-        )
-        row = cur.fetchone()
-    return float(row[0]) if row else None
+        return _temperature_at_cur(cur, when)
 
 
 # A van rebalancing a batch moves several scooters between the same two places
@@ -818,3 +847,262 @@ def route_adherence(gps_points: list[tuple[float, float]],
         "fraction": round(fraction, 4),
         "threshold": ADHERENCE_THRESHOLD,
     }
+
+
+# --- Donated-ride ingestion (PLAN_RIDE_MODE_API.md phase A2, "Battery
+# ingestion"; RIDE_MODE_OVERHAUL_PLAN.md Part 1.4) --------------------------
+#
+# A verified track donation is a SECOND source for this table, alongside the
+# nightly observation-gap mining above — and a better one: a donated trip's
+# distance and endpoints come from an HMAC-signed, chain-verified GPS track
+# rather than a two-point straight-line inference between feed sightings.
+# `source = 'donated_ride'` (sql/051) is what tells the two sources apart,
+# and is what the double-count guards on both sides of this boundary key
+# off of: the DELETE below (mined -> donated direction) and the extra
+# NOT EXISTS clause added to _PAIRS_SQL above (donated -> mined direction).
+
+# Cap on the number of via-points handed to a single Valhalla /route
+# request for the elevation re-derivation below. A donated track can carry
+# up to ~10,800 points (600 batches x 25 pts, per PLAN_RIDE_MODE_API.md's
+# donation cap sanity math) — routing THROUGH that many locations is not
+# what /route is for (trace_attributes, called first, is) and risks a
+# request Valhalla simply refuses. Downsampling to a still-generous handful
+# of via-points keeps the route hugging the actual recorded path (unlike a
+# bare start->end route, which can pick a completely different street
+# pattern and therefore a wrong elevation profile) while staying well
+# inside any sane location limit.
+_MAX_ELEVATION_ROUTE_POINTS = 20
+
+
+def _downsample_for_routing(
+    points: list[tuple[float, float]], max_points: int = _MAX_ELEVATION_ROUTE_POINTS,
+) -> list[tuple[float, float]]:
+    """Evenly-spaced subset of ``points``, always including both ends."""
+    if len(points) <= max_points:
+        return points
+    step = (len(points) - 1) / (max_points - 1)
+    indices = sorted({round(i * step) for i in range(max_points)})
+    return [points[i] for i in indices]
+
+
+def _donated_elevation_gain_meters(points: list[tuple[float, float]]) -> float | None:
+    """Elevation gain for a donated ride's verified waypoint track.
+
+    PLAN_RIDE_MODE_API.md's A2 "Battery ingestion" section calls for this to
+    be "re-derived by map-matching via Valhalla trace_attributes (reuse the
+    shade-scoring trace path)". ``valhalla.trace_attributes()``
+    (src/valhalla.py — the exact call ``route_adherence()`` above and
+    ``src/api_route.py:shade_score()`` both already make) is used here for
+    that map-match, over the FULL recorded track, exactly as those two
+    callers use it — and if the track fails to snap onto the graph at all,
+    that is treated as "the trace call failed": elevation is left NULL and
+    nothing raises, without even trying the fallback below.
+
+    DEVIATION, documented rather than silent: the wrapped trace_attributes()
+    (src/valhalla.py, not owned by this lane) requests only
+    ``edge.way_id``/``edge.length`` — it carries no elevation figure to read
+    off the matched edges directly. Elevation is therefore re-derived the
+    same way this module's own ``_route_and_store()`` already computes it
+    for feed-mined observations: a Valhalla ``/route`` request read through
+    ``elevation_gain_meters()``/``trip_summary()`` — but routed THROUGH a
+    downsampled subset of the same verified points (``_downsample_for_routing``
+    above), not just the two endpoints, so the elevation profile follows the
+    path actually ridden rather than whatever street pattern a bare
+    two-point route happens to pick. If a future change widens
+    trace_attributes' attribute filter (e.g. ``edge.mean_elevation``), this
+    can be simplified to read elevation straight off the matched edges.
+    """
+    if len(points) < 2:
+        return None
+    try:
+        valhalla.trace_attributes(points, {"bicycle_type": "Hybrid"}, shape_match="map_snap")
+    except valhalla.ValhallaError as exc:
+        log.warning("battery ingestion: donated track failed to map-match, "
+                    "elevation left NULL: %s", exc)
+        return None
+
+    try:
+        body = valhalla.route(
+            _downsample_for_routing(points), costing_options={"bicycle_type": "Hybrid"})
+    except valhalla.ValhallaError as exc:
+        log.warning("battery ingestion: elevation route failed, "
+                    "elevation left NULL: %s", exc)
+        return None
+    trips = valhalla.all_trips(body)
+    if not trips:
+        return None
+    return valhalla.trip_summary(trips[0])["elevation_gain_meters"]
+
+
+def _resolve_soc(ride_row: dict[str, Any]) -> tuple[float, float] | None:
+    """(soc_start, soc_end) percent, or None when either end is unknown.
+
+    soc_start prefers feed_start_battery_percent (sql/049, an independent
+    feed-derived reading the rider cannot influence) and falls back to
+    reported_start_battery_percent (what the rider read off the vehicle's
+    own display) only when the feed had no fresh observation at ride start
+    — the same preference order PLAN_RIDE_MODE_API.md's A2 spec states.
+    soc_end is always reported_battery_percent (there is no feed-observed
+    end battery on tracked_rides — gbfs_end_battery_percent exists but is
+    read from the vehicle reappearing on GBFS, an independent corroboration
+    signal used elsewhere, not the battery-model's end-of-trip reading).
+    """
+    start = ride_row.get("feed_start_battery_percent")
+    if start is None:
+        start = ride_row.get("reported_start_battery_percent")
+    end = ride_row.get("reported_battery_percent")
+    if start is None or end is None:
+        return None
+    return float(start), float(end)
+
+
+def ingest_donated_observation(
+    cur, *, ride_row: dict[str, Any], donation_row: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Insert one ``battery_trip_observations`` row, ``source='donated_ride'``,
+    for a verified track donation whose start AND end battery percentages
+    are both resolvable — PLAN_RIDE_MODE_API.md phase A2's "Battery
+    ingestion". The SOLE way a donated ride's battery signal enters this
+    table. Two callers, per the A2 spec:
+
+    * the donation endpoint (owned by another lane), right after a
+      donation verifies ``eligible`` with GBFS already resolved at
+      donation time;
+    * ``src/ride_watch.py:finalize_validation``, on a late
+      ``pending_feed`` -> ``eligible`` settle — the only ingestion path
+      for a donation that arrived before GBFS resolved.
+
+    ``cur`` is an open cursor in the CALLER's transaction (same contract as
+    ``src/points.py:credit_points``) — commit is the caller's
+    responsibility, so this lands atomically with whatever settled the
+    donation as eligible.
+
+    ``ride_row`` — a plain mapping the caller builds from its own
+    ``tracked_rides`` read (this function issues no SELECT against
+    ``tracked_rides`` itself); required keys:
+
+        vehicle_identifier              str
+        track_key_issued_at             datetime  — ride start; departed_at
+        user_reported_ended_at          datetime  — ride end; arrived_at
+        feed_start_battery_percent      int | None
+        reported_start_battery_percent  float | Decimal | None
+        reported_battery_percent        float | Decimal | None  — end battery
+
+    ``donation_row`` — built from the caller's own ``track_donations`` read;
+    required keys:
+
+        id               str | uuid.UUID  — donation_id (donated_track_points FK)
+        vehicle_model    str | None       — NULL for an unconfirmed model
+        distance_meters  float | None     — the verified track distance
+
+    The FIRST and LAST verified waypoints (``from_lat``/``from_lon``,
+    ``to_lat``/``to_lon``) are read from ``donated_track_points`` by
+    ``donation_row["id"]`` here, rather than accepted as extra parameters —
+    this keeps the function self-sufficient for BOTH call sites (the
+    donation endpoint already has the full point list close at hand, but
+    ``finalize_validation`` does not, and re-deriving it from the same
+    stored rows both callers already wrote is cheaper than teaching a
+    second caller how to reconstruct it) and gives the map-matched
+    elevation re-derivation the FULL recorded track it needs, not just the
+    two ends.
+
+    No-op (returns None, writes nothing) when either end's battery percent
+    is unresolvable, ``distance_meters`` is unknown, or the donation has no
+    stored waypoints — every one of those backs a NOT NULL column on
+    ``battery_trip_observations`` (sql/024), so there is nothing honest to
+    insert rather than a row of manufactured nulls.
+
+    DOUBLE-COUNT GUARD (sql/051 / A2 spec): before inserting, deletes any
+    existing ``battery_trip_observations`` row for this vehicle whose
+    ``departed_at`` falls inside [``departed_at``, ``arrived_at``] of THIS
+    ride and whose ``source`` is NOT ``'donated_ride'`` (a NULL source
+    predates sql/051 and is therefore feed-mined) — the nightly
+    ``extract_trips()`` above may already have mined the same trip as a
+    lower-quality observation-gap row before this donation landed. Both
+    statements run in the caller's transaction, so the delete and the
+    insert either both land or neither does.
+    """
+    soc = _resolve_soc(ride_row)
+    if soc is None:
+        return None
+    soc_start, soc_end = soc
+
+    # REVIEW FIX: the feed-mined path (`_accept_pair`, above) rejects a
+    # battery swap (a large jump UP, `burn <= -SWAP_JUMP_PCT`), a zero
+    # delta, and any burn outside `(0, MAX_BURN_PCT]` before a candidate
+    # ever reaches this table — a donated observation skipped all three of
+    # those filters entirely, so e.g. start=5/end=100 (burn=-95) would
+    # settle and enter model training uncontested. Apply the SAME bounds
+    # here so both sources feed the model equally honest data. Points are
+    # unaffected: `credit_battery_contribution` (src/points.py) is a pure
+    # function of verified track distance, never of the battery delta, so
+    # nothing here changes what a rider is credited — this only gates what
+    # reaches `battery_trip_observations` for training.
+    burn = soc_start - soc_end
+    if burn <= -SWAP_JUMP_PCT or burn <= 0 or burn > MAX_BURN_PCT:
+        return None
+
+    distance_m = donation_row.get("distance_meters")
+    if distance_m is None:
+        return None
+
+    departed_at = ride_row["track_key_issued_at"]
+    arrived_at = ride_row["user_reported_ended_at"]
+    vehicle_identifier = ride_row["vehicle_identifier"]
+
+    cur.execute(
+        "SELECT lat, lon FROM donated_track_points WHERE donation_id = %s ORDER BY seq ASC",
+        (str(donation_row["id"]),),
+    )
+    points = [(float(r[0]), float(r[1])) for r in cur.fetchall()]
+    if not points:
+        return None
+    from_lat, from_lon = points[0]
+    to_lat, to_lon = points[-1]
+
+    duration_seconds = (arrived_at - departed_at).total_seconds()
+    elevation_gain = _donated_elevation_gain_meters(points)
+    temperature_c = _temperature_at_cur(cur, departed_at)
+
+    # DOUBLE-COUNT GUARD — see docstring. Must run before the INSERT and in
+    # the same transaction: a crash between the two would either leave a
+    # stale feed-mined duplicate (delete lost) or drop the donated row
+    # (insert lost) — never a mix of both, since neither statement commits
+    # on its own here.
+    cur.execute(
+        """
+        DELETE FROM battery_trip_observations
+        WHERE vehicle_identifier = %s
+          AND departed_at >= %s AND departed_at <= %s
+          AND source IS DISTINCT FROM 'donated_ride'
+        """,
+        (vehicle_identifier, departed_at, arrived_at),
+    )
+
+    cur.execute(
+        """
+        INSERT INTO battery_trip_observations (
+            vehicle_identifier, vehicle_model_name, departed_at, arrived_at,
+            duration_seconds, from_lat, from_lon, to_lat, to_lon,
+            route_distance_meters, elevation_gain_meters, temperature_c,
+            soc_start_percent, soc_end_percent, burn_percent, source
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (vehicle_identifier, departed_at) DO NOTHING
+        RETURNING id
+        """,
+        (vehicle_identifier, donation_row.get("vehicle_model"),
+         departed_at, arrived_at, duration_seconds,
+         from_lat, from_lon, to_lat, to_lon,
+         float(distance_m), elevation_gain, temperature_c,
+         soc_start, soc_end, soc_start - soc_end, "donated_ride"),
+    )
+    row = cur.fetchone()
+    if row is None:
+        log.info("battery ingestion: no-op (already ingested) vehicle=%s departed_at=%s",
+                 vehicle_identifier, departed_at)
+        return None
+    (new_id,) = row
+    log.info("battery ingestion: donated observation id=%s vehicle=%s burn=%.1f",
+              new_id, vehicle_identifier, soc_start - soc_end)
+    return {"id": int(new_id), "source": "donated_ride",
+            "burn_percent": soc_start - soc_end}

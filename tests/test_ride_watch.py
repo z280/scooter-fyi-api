@@ -92,15 +92,33 @@ class _FakeCursor:
         self._watch_rows = watch_rows
         self.executed: list[tuple[str, tuple]] = []
         self.executemany_calls: list[tuple[str, list]] = []
+        # A single, strictly-ordered log spanning BOTH execute() and
+        # executemany() — the two pre-existing lists above are separate,
+        # which makes it impossible to assert real interleaving order (e.g.
+        # "the lock ran before the executemany"). This is additive; nothing
+        # about the two lists above changes.
+        self.call_log: list[tuple[str, str]] = []  # (kind, joined_sql)
 
     def execute(self, sql, params=()):
-        self.executed.append((" ".join(sql.split()), params))
+        joined = " ".join(sql.split())
+        self.executed.append((joined, params))
+        self.call_log.append(("execute", joined))
 
     def executemany(self, sql, seq_of_params):
-        self.executemany_calls.append((" ".join(sql.split()), list(seq_of_params)))
+        joined = " ".join(sql.split())
+        self.executemany_calls.append((joined, list(seq_of_params)))
+        self.call_log.append(("executemany", joined))
 
     def fetchall(self):
         return self._watch_rows
+
+    def fetchone(self):
+        # No ride exists in this fake schema, so finalize_validation's own
+        # `SELECT ... FROM tracked_rides ... FOR UPDATE` (called from
+        # update_watches_for_cycle's post-commit finisher loop, see below)
+        # reads None and returns immediately — the same "no such ride"
+        # no-op path a real, un-donated ride would take here too.
+        return None
 
     def __enter__(self):
         return self
@@ -113,12 +131,16 @@ class _FakeConn:
     def __init__(self, watch_rows):
         self.cur = _FakeCursor(watch_rows)
         self.committed = False
+        self.rolled_back = False
 
     def cursor(self):
         return self.cur
 
     def commit(self):
         self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
 
 
 def _run(monkeypatch, watch_rows, devices):
@@ -189,3 +211,145 @@ def test_unresolved_watches_get_last_checked_cycle_bumped(monkeypatch):
     sqls = [sql for sql, _ in conn.cur.executed]
     assert any("last_checked_cycle_id = %s WHERE id = ANY" in s for s in sqls)
     assert conn.committed
+
+
+# ---------- the ride_watch advisory-lock fix + validation-finisher wiring --
+# (PLAN_RIDE_MODE_API.md phase A2, "Validation finisher")
+
+def test_advisory_lock_is_taken_before_the_gbfs_reappeared_update(monkeypatch):
+    """THE LOAD-BEARING ORDERING. PLAN_RIDE_MODE_API.md's A2 spec: a resolve
+    path that ran its gbfs_* row UPDATE first and locked second would
+    deadlock against a donation mid-flight on the same ride. This fails if
+    that inversion is ever reintroduced — the lock must appear in call_log
+    strictly before the executemany that writes gbfs_reappeared_at.
+
+    finalize_validation is stubbed out here (it takes its own, separately-
+    tested lock in a LATER transaction — see
+    test_finalize_validation_runs_after_the_reappear_transaction_commits —
+    which would otherwise add a second, expected-to-be-later lock call and
+    muddy this specific assertion)."""
+    monkeypatch.setattr(ride_watch, "finalize_validation", lambda cur, ride_id: None)
+    dev = _device("aaaa000000000000", lat=39.7, lon=-105.0, current_range_meters=8000)
+    stats, conn = _run(
+        monkeypatch,
+        watch_rows=[(1, _RIDE_A, "aaaa000000000000", "left_feed")],
+        devices=[dev],
+    )
+    assert stats.newly_reappeared == 1
+
+    kinds_and_sql = conn.cur.call_log
+    lock_positions = [
+        i for i, (kind, sql) in enumerate(kinds_and_sql)
+        if kind == "execute" and "pg_advisory_xact_lock" in sql
+    ]
+    executemany_positions = [
+        i for i, (kind, sql) in enumerate(kinds_and_sql)
+        if kind == "executemany" and "gbfs_reappeared_at" in sql
+    ]
+    assert lock_positions, "expected at least one advisory-lock execute() call"
+    assert executemany_positions, "expected the gbfs_reappeared_at executemany"
+    assert max(lock_positions) < min(executemany_positions), (
+        "the ride_validation advisory lock must be acquired BEFORE the "
+        "tracked_rides gbfs_reappeared_at UPDATE, not after"
+    )
+
+    # And the lock key itself is bound as a parameter (never string-
+    # interpolated into the SQL text), per the hashtextextended(%s, 0) idiom
+    # src/api_tracked_rides.py's start handler uses.
+    lock_sql, lock_params = next(
+        (sql, params) for sql, params in conn.cur.executed
+        if "pg_advisory_xact_lock" in sql
+    )
+    assert lock_sql == "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
+    assert lock_params == (f"ride_validation:{_RIDE_A}",)
+
+
+def test_finalize_validation_is_called_once_per_reappeared_ride(monkeypatch):
+    dev_a = _device("aaaa000000000000")
+    dev_b = _device("bbbb000000000000")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ride_watch, "finalize_validation",
+        lambda cur, ride_id: calls.append(ride_id) or {"status": "eligible"},
+    )
+    stats, conn = _run(
+        monkeypatch,
+        watch_rows=[
+            (1, _RIDE_A, "aaaa000000000000", "left_feed"),
+            (2, _RIDE_B, "bbbb000000000000", "left_feed"),
+        ],
+        devices=[dev_a, dev_b],
+    )
+    assert stats.newly_reappeared == 2
+    assert sorted(calls) == sorted([str(_RIDE_A), str(_RIDE_B)])
+    assert stats.finalized_validations == 2
+
+
+def test_finalize_validation_runs_after_the_reappear_transaction_commits(monkeypatch):
+    """finalize_validation must see gbfs_reappeared_at already committed —
+    the whole point of splitting it into its own, later transaction (see
+    the module's ADVISORY-LOCK ORDERING note). A commit-order probe: the
+    first time finalize_validation is invoked, conn.committed must already
+    be True."""
+    conn = _FakeConn(watch_rows=[(1, _RIDE_A, "aaaa000000000000", "left_feed")])
+    dev = _device("aaaa000000000000")
+    seen_committed_before_finalize = []
+
+    def _fake_finalize(cur, ride_id):
+        seen_committed_before_finalize.append(conn.committed)
+        return None
+
+    @contextmanager
+    def _fake_connection():
+        yield conn
+
+    monkeypatch.setattr(ride_watch, "connection", _fake_connection)
+    monkeypatch.setattr(ride_watch, "finalize_validation", _fake_finalize)
+    ride_watch.update_watches_for_cycle(uuid.uuid4(), datetime.now(timezone.utc), [dev])
+
+    assert seen_committed_before_finalize == [True]
+    assert conn.committed
+
+
+def test_a_failed_finalize_validation_is_rolled_back_and_does_not_stop_the_cycle(monkeypatch):
+    """Isolation, not just crash-safety: one ride's finalize_validation
+    blowing up must not undo the already-committed left/reappeared/
+    unchanged work for this cycle, and must not stop OTHER reappeared
+    rides in the same batch from being finalized."""
+    dev_a = _device("aaaa000000000000")
+    dev_b = _device("bbbb000000000000")
+    seen: list[str] = []
+
+    def _fake_finalize(cur, ride_id):
+        seen.append(ride_id)
+        if ride_id == str(_RIDE_A):
+            raise RuntimeError("battery ingestion blew up")
+        return {"status": "ineligible"}
+
+    monkeypatch.setattr(ride_watch, "finalize_validation", _fake_finalize)
+    stats, conn = _run(
+        monkeypatch,
+        watch_rows=[
+            (1, _RIDE_A, "aaaa000000000000", "left_feed"),
+            (2, _RIDE_B, "bbbb000000000000", "left_feed"),
+        ],
+        devices=[dev_a, dev_b],
+    )
+    assert sorted(seen) == sorted([str(_RIDE_A), str(_RIDE_B)])  # both attempted
+    assert stats.finalized_validations == 1  # only _RIDE_B counted
+    assert conn.rolled_back  # _RIDE_A's failed attempt was rolled back
+    assert conn.committed  # the batch's own work still committed normally
+
+
+def test_finalize_validation_returning_none_is_not_counted(monkeypatch):
+    """A no-op settle (nothing pending, or already settled) must not
+    inflate finalized_validations."""
+    dev = _device("aaaa000000000000")
+    monkeypatch.setattr(ride_watch, "finalize_validation", lambda cur, ride_id: None)
+    stats, conn = _run(
+        monkeypatch,
+        watch_rows=[(1, _RIDE_A, "aaaa000000000000", "left_feed")],
+        devices=[dev],
+    )
+    assert stats.newly_reappeared == 1
+    assert stats.finalized_validations == 0

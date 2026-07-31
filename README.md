@@ -79,7 +79,9 @@ agent process).
 .
 ├── config.json                 non-secret runtime config
 ├── .env.example                env template (secrets ONLY)
-├── docker-compose.yml          four services, hard memory caps
+├── docker-compose.yml          seven services, hard memory caps (Postgres, worker,
+│                               scheduler, the Valhalla routing pair, the Photon
+│                               geocoding pair)
 ├── Dockerfile                  python:3.11-slim + FastAPI + DuckDB + supercronic + tini
 ├── crontab                     supercronic schedule for the scheduler container
 ├── data/                       baked-in boundary files (11)
@@ -90,8 +92,11 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql … 041_ride_hard_caps.sql
-│                              41 migrations, applied idempotently at boot
+├── sql/001_init.sql … 053_ride_mode_points.sql
+│                              51 migrations, applied idempotently at boot
+├── docker/photon/Dockerfile    the Photon geocoding sidecar (pinned + sha256-verified
+│                               official jar; the index itself ships from R2)
+├── scripts/build_photon_index.md  manual runbook for building/refreshing that index
 ├── src/
 │   ├── main.py                 FastAPI app, lifespan, migrations, router mounts
 │   ├── cli.py                  subcommands run by the scheduler container
@@ -135,12 +140,24 @@ agent process).
 │   ├── device_photos.py         device photo upload → PUBLIC R2 bucket
 │   ├── ride_screenshots.py      ride transaction screenshot upload → PRIVATE R2 bucket
 │   ├── qr.py                    QR payload plate extraction + vehicle_identifier validation
-│   ├── points.py                points ledger primitives (credit_points + per-action wrappers;
-│   │                            credit_points is where the 100-points-per-ride cap is enforced)
+│   ├── points.py                points ledger primitives (credit_points + per-action wrappers,
+│   │                            incl. the reshaped ride-mode awards battery_contribution/
+│   │                            nav_distance_bonus; credit_points is where the
+│   │                            100-points-per-ride cap and the even-points assert live)
+│   ├── track_verify.py          pure server-side verifier for the donated waypoint chain:
+│   │                            signature → chain integrity → monotonic/bounds → speed →
+│   │                            GBFS start/end correlation → volume minimums
+│   ├── battery_model.py         empirical battery-burn regression: nightly observation-gap
+│   │                            mining + weekly refit, plus ingest_donated_observation
+│   │                            (the donated-track battery feedback loop, sql/051)
 │   ├── ride_limits.py           the operator's three hard ride invariants — 100 points/ride,
 │   │                            3 km between consecutive path points, 80 km/ride — plus the
 │   │                            shared path measurement both ride modules close out with
 │   ├── polyline.py              Google polyline encode/decode (ride paths)
+│   ├── valhalla.py              Valhalla HTTP client + trip shape/summary/maneuver
+│   │                            extraction (per-leg shape indices re-offset in one pass)
+│   ├── r2_map.py                SigV4 sync of the private R2 sidecar artifacts: the
+│   │                            routing .pbf + canopy sidecar, and the Photon index
 │   ├── badges.py                server-computed profile badges (recomputed on every read;
 │   │                            mileage/streak badges union tracked_rides.distance_meters
 │   │                            with off-feed rides.distance_m — ended rides only)
@@ -150,23 +167,37 @@ agent process).
 │   ├── sentry.py                Sentry SDK init (no-op without DSN)
 │   ├── api_public.py            11 public read-only REST routes
 │   ├── api_h3.py                public H3 aggregate endpoint
-│   ├── api_meta.py              public privacy-policy metadata endpoint
+│   ├── api_meta.py              public metadata endpoints — privacy retention policy
+│   │                            and the Ride Mode sales-tax rate (`/meta/pricing`)
 │   ├── api_user.py              signed-in device map feed
 │   ├── api_profile.py           rider profile GET/PUT + public-username endpoints
 │   ├── api_lexicon.py           emoji-noun / adjective list + search endpoints
+│   ├── api_preferences.py       rider-owned opaque preference blobs: saved map settings,
+│   │                            the find-ride preference, ride-mode "Usuals"
+│   ├── api_route.py             GET /api/v1/route (+ /profiles) — Valhalla proxy, shade
+│   │                            re-ranking, battery estimate, turn-by-turn maneuvers
+│   ├── api_geocode.py           GET /api/v1/geocode/search — proxy over the
+│   │                            self-hosted Photon sidecar (Denver bbox filter,
+│   │                            in_coverage vs the routing graph, 24h LRU cache)
 │   ├── api_auth.py              sign-in doors + session lifecycle
 │   ├── api_tracked_rides.py     GBFS-detected ride tracking: start/list/active/detail/
-│   │                            end-report/waypoints/delete
+│   │                            end-report/track-donation/waypoints(deprecated)/delete
 │   ├── api_rides.py             OFF-FEED rides — vehicles not in the GBFS feed (a personal
 │   │                            scooter, a competitor's rental). Same lifecycle as tracked
 │   │                            rides (start/waypoints/end) plus a one-shot log of a
 │   │                            finished ride, owner-only list/export, hard delete. No
 │   │                            points; client-asserted distances are plausibility-checked
-│   ├── api_points.py            GET /api/v1/points — ledger + running total
+│   ├── api_points.py            GET /api/v1/points — ledger + running total; GET
+│   │                            /api/v1/points/schedule — public action → award map,
+│   │                            generated from src/points.py so UI copy cannot drift
 │   ├── api_device_recommendations.py  POST .../recommend
 │   ├── api_device_photos.py     device photo upload/list/report + GET /api/v1/photos/mine
 │   ├── api_qr.py                POST /api/v1/devices/qr-scan
 │   ├── api_ride_screenshots.py  ride transaction screenshot upload/list
+│   ├── api_ride_surveys.py      POST /api/v1/tracked-rides/{id}/survey — Screen 9's
+│   │                            end-of-ride survey + its three point awards (sql/052)
+│   ├── api_ride_routes.py       POST /api/v1/ride-routes — Screen 4's chosen route,
+│   │                            persisted only when nav_improvement consent is on (sql/052)
 │   ├── api_reports.py           map-pin negative reports + quality feedback
 │   ├── api_frontend_reports.py  account-aware device/discount report flow
 │   ├── api_private.py           bearer-token admin JSON API (distinct from api_admin.py)
@@ -226,6 +257,13 @@ all the natural ratios — bikes_denver, scooters_v1, all_devices_v2, etc.
 - `transmission.endpoints[]` — `{name, url, method, path, auth_env}`
 - `cors.allowed_origins` — strictly enforced
 - `auth.allowed_github_orgs` (default; env overrides)
+- `valhalla.*` — sidecar URL, `graph_bbox`, and the selectable routing profiles
+- `geocode.upstream` / `geocode.enabled` — the Photon sidecar behind
+  `/api/v1/geocode/search`; `enabled: false` is a real kill switch (the
+  endpoint 503s exactly as it does when the sidecar is down)
+- `pricing.tax_rate` / `currency` / `as_of` — served by `/api/v1/meta/pricing`.
+  `tax_rate` is a **fraction** (0.0915, not 9.15); a value outside `[0, 1)` is
+  refused and the built-in default served instead
 
 **Secrets** come from environment variables only (see `.env.example`):
 `POSTGRES_*`, `R2_*`, `SENTRY_DSN`, `OIDC_CLIENT_ID/SECRET`,
@@ -258,6 +296,34 @@ else (curl, server-to-server) is unaffected by CORS.
 | `GET /api/v1/compliance/daily/latest` | Most recent computed daily SLA compliance window |
 | `GET /api/v1/compliance/daily?date=…` | Daily SLA window for one Denver-local date |
 | `GET /api/v1/compliance/daily/range` | Range of daily SLA rows, ascending |
+
+### Routing & geocoding
+
+Both upstreams are self-hosted sidecars in this repo's compose file — a
+Denver-clipped Valhalla graph (`valhalla`) and a Colorado-scoped Photon
+index (`photon`, built from `docker/photon/`, seeded from R2; see
+`scripts/build_photon_index.md`). No third-party routing or geocoding API,
+no API key, and no rider query leaves the box. Both are rate limited per IP
+because a sidecar round trip is expensive.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/route?from=&to=&profile=&maneuvers=` | GeoJSON `Feature`: route geometry, distance/duration/elevation, battery estimate, and — with `maneuvers=true` — turn-by-turn cues whose shape indices are re-offset onto the returned LineString. 30/min per IP |
+| `GET /api/v1/route/profiles` | The selectable routing profiles + `graph_bbox` (config-driven; treat as the live list). 60/min per IP |
+| `GET /api/v1/geocode/search?q=…&lat=…&lon=…&limit=…` | Up to 8 Denver-scoped hits as `{label, lat, lon, kind, in_coverage}`; `in_coverage` is routing-graph membership so clients can grey out un-routable picks. 20/min per IP; 503 `geocoder_unavailable` when the sidecar is down or disabled |
+
+### Leaderboard
+
+FEATURE_PLAN §11: the trailing-28-day H3 r8 "area leader" report,
+recomputed nightly (`src/area_leaders.py`, `sql/048_h3_r8_area_leaders.sql`)
+and served with privacy applied **live** at read time -- an account's
+`show_in_leaderboards`/`show_public_username` choice (or a never-
+backfilled `display_name`) takes effect on the very next request, not at
+tomorrow's 09:15 run. See `src/api_leaderboard.py`.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/leaderboard/map` | `{computed_at, window_start, window_end, cells: {"<h3 string>": {total_points, distinct_earners, leader, runners_up}}}` -- full eligible top-3 per cell in one fetch, so the choropleth and click-through detail come from one request. A skipped-for-privacy rank falls through (leader = highest surviving stored rank). Weak ETag keyed on `(computed_at, sha256(rendered cells))` -- not run-only, so an eligibility/color/name change between recomputes still busts a client's cache. `public, max-age=600` |
 
 ### Sign-in
 
@@ -334,6 +400,7 @@ contact details, not proof. Only typing back a texted code sets
 |---|---|
 | `GET /` | JSON banner listing every mounted endpoint (discovery only) |
 | `GET /api/v1/meta/privacy` | Machine-readable data retention policy |
+| `GET /api/v1/meta/pricing` | Sales-tax rate for the Ride Mode cost breakdown (config-driven, `"pricing"` block) |
 | `GET /legal/terms-of-service` | Static Terms of Service page |
 | `GET /legal/privacy-policy` | Static Privacy Policy page |
 
@@ -364,6 +431,10 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `GET /api/v1/profile/find-ride-pref` | The caller's find-ride preference, or `null` if never set |
 | `PUT /api/v1/profile/find-ride-pref` | Create or replace the find-ride preference (at most one per rider) |
 | `DELETE /api/v1/profile/find-ride-pref` | Clear the find-ride preference (idempotent) |
+| `GET /api/v1/profile/ride-usuals` | Every saved ride-mode "Usual" (options preset) for the caller |
+| `GET /api/v1/profile/ride-usuals/{name}` | One saved Usual |
+| `PUT /api/v1/profile/ride-usuals/{name}` | Create or replace a named Usual (opaque JSON blob: `ride_options` + `label`); 10 per account |
+| `DELETE /api/v1/profile/ride-usuals/{name}` | Delete a named Usual |
 | `GET /api/v1/emoji-nouns` | Full emoji → noun-word list, for building a username picker |
 | `GET /api/v1/emoji-nouns/search?q=…` | Partial word match on the emoji-noun list |
 | `GET /api/v1/adjectives` | Full curated adjective list |
@@ -417,26 +488,42 @@ arbitrary mileage.
 Server-detected ride tracking: you declare a ride start, a watch list
 compares the device against every GBFS ingest cycle for up to 3 hours to
 detect it leaving/rejoining the feed, and you separately report your own
-end. See `sql/027_tracked_rides.sql` / `src/ride_watch.py`.
+end. See `sql/027_tracked_rides.sql` / `src/ride_watch.py`. Ride-mode
+track donation, verification and validation-finishing live in
+`sql/051_track_donations.sql` / `src/track_verify.py` / `src/battery_model.py`.
 
 | Endpoint | Returns |
 |---|---|
-| `POST /api/v1/tracked-rides` | Start a ride + watch (404 unknown device, 409 if one's already active) |
+| `POST /api/v1/tracked-rides` | Start a ride + watch; optional `ride_options` (≤4 KB) and `reported_start_battery_percent`. Returns `track_signing` (per-ride HMAC key, owner-only) + `validation` (404 unknown device, 409 if one's already active, 413 options too large, 422 bad options) |
 | `GET /api/v1/tracked-rides?limit=&before=&status=` | Owner-only paginated list |
 | `GET /api/v1/tracked-rides/active` | The caller's one active ride, or `{"active": null}` |
 | `GET /api/v1/tracked-rides/{ride_id}` | Full detail incl. decoded `path_geojson`; GBFS fields hidden until you report your own end |
-| `PATCH /api/v1/tracked-rides/{ride_id}/end` | Report your end location/battery/cost/metadata (single-shot) |
-| `POST /api/v1/tracked-rides/{ride_id}/waypoints` | Append a GPS waypoint while the ride is active |
+| `PATCH /api/v1/tracked-rides/{ride_id}/end` | Report your end location/battery/cost/metadata plus `reported_minutes` (0–1440) and `reported_plan` (`resident\|visitor\|equity`); sets a provisional `validation.status` (single-shot). No longer credits points (superseded — see `POST .../track` below) |
+| `POST /api/v1/tracked-rides/{ride_id}/track` | Bulk track donation: verifies the signed waypoint chain (`src/track_verify.py`), stores it, awards `battery_contribution`/`nav_distance_bonus`, and feeds the battery model. Owner-only, 6/hour, ≤2 MB / 600 batches. 404 not yours, 409 not ended / already donated, 422 not opted in / chain invalid |
+| `POST /api/v1/tracked-rides/{ride_id}/waypoints` | **Deprecated** — append a GPS waypoint while the ride is active. Superseded by `POST .../track`; earns no points |
 | `GET /api/v1/tracked-rides/{ride_id}/waypoints?limit=&before=` | Paginated waypoint list |
 | `DELETE /api/v1/tracked-rides/{ride_id}` / (bare) | Hard-delete one ride / every ride you own |
 | `POST /api/v1/tracked-rides/{ride_id}/screenshots?screenshot_type=overview\|receipt` | Upload a transaction screenshot (overwrites the same slot) |
 | `GET /api/v1/tracked-rides/{ride_id}/screenshots` | List your screenshots for a ride |
+| `POST /api/v1/tracked-rides/{ride_id}/survey` | Screen 9's end-of-ride survey — scooter-feedback + navigation-feedback panes, single-shot. Awards `ride_survey`/`nav_route_feedback`/`nav_qualitative_feedback`. 404 not yours, 409 not ended / already submitted, 422 bad issue / bad model_bonus / bad ride_route_id. See `src/api_ride_surveys.py` |
+
+### Ride routes
+
+Screen 4's chosen route, stored (only when `ride_options.nav_improvement`
+is on) so the end-of-ride survey above can rate it and `nav_distance_bonus`
+can confirm a route exists. See `sql/052_ride_surveys_routes.sql` /
+`src/api_ride_routes.py`.
+
+| Endpoint | Returns |
+|---|---|
+| `POST /api/v1/ride-routes` | Persist a chosen route; `tracked_ride_id` null in the normal flow, or a ride you own (else 404). 400 unknown profile / bad polyline (<2 decoded points) / out of routing-graph coverage; 422 out-of-bound `distance_meters`/`duration_seconds`/`battery_percent_estimate`. No uniqueness on `tracked_ride_id` — multiple routes per ride is intended. 30/hour per account. → `{ ride_route_id }` |
 
 ### Points & device engagement
 
 | Endpoint | Returns |
 |---|---|
 | `GET /api/v1/points?limit=&before=` | Your points ledger + running total |
+| `GET /api/v1/points/schedule` | **Public** — authoritative action → points map incl. formulas; UI copy is generated from it |
 | `POST /api/v1/devices/{vehicle_identifier}/recommend` | Yes/no — only accepted with a completed ride on that device in the last 24h |
 | `POST /api/v1/devices/qr-scan` | Validate a scanned QR against the claimed device; awards a first-scan bonus |
 
@@ -466,6 +553,7 @@ HTML portal with its own login flow.
 | `GET /api/v1/private/devices/{vehicle_identifier}/history` | Time-ordered position-stop history for one scooter |
 | `GET /api/v1/private/devices/max-ranges` | Devices sorted by highest-ever observed range |
 | `GET /api/v1/private/trips/daily` | Daily trip/popularity rollup for one Denver-local date |
+| `GET /api/v1/private/area-leaders` | Full, unfiltered §11 leaderboard: every stored rank 1-3 per cell with real account ids/points/tie-break provenance -- no privacy filtering |
 | `GET /api/v1/private/reports` | Admin listing of all negative reports |
 | `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback |
 
@@ -516,21 +604,54 @@ curl localhost:8080/api/v1/snapshots/latest   # 503 until first cycle lands (~15
 ```bash
 python3.11 -m pip install -r requirements.txt pytest
 python3.11 -m pytest -v
-# 476 tests across ~60 files. Most run with no real Postgres (a fake
+# ~1300 tests across ~95 files. Most run with no real Postgres (a fake
 # cursor/connection is monkeypatched in) — test_compute_sql exercises the
 # real DuckDB spatial join, and files ending _pg.py additionally skip
 # unless VEO_TEST_PG_DSN points at a real, migratable Postgres instance.
 ```
+
+### Running the `_pg.py` tests
+
+The ~140 `_pg.py` tests are the only coverage of the `sql/` files as Postgres
+actually executes them — the guarded `DO $$` constraint blocks, the partial
+unique indexes, and `test_migration_replay_pg.py`'s replay-over-live-data
+check are all invisible to a fake cursor. **Skipped is not passed**: run them
+before shipping a migration.
+
+Any reachable, migratable Postgres works. Without a Docker daemon, `pgserver`
+ships a server as a wheel:
+
+```bash
+python3.11 -m pip install pgserver   # dev-only; deliberately NOT in
+                                     # requirements.txt (it bundles Postgres
+                                     # binaries the app image must not carry)
+python3.11 - <<'PY'
+import pgserver
+db = pgserver.get_server('/tmp/veopg', cleanup_mode=None)  # None = outlive this process
+db.psql('CREATE DATABASE veotest;')
+print(db.get_uri(database='veotest'))
+PY
+
+VEO_TEST_PG_DSN='postgresql://postgres:@/veotest?host=/tmp/veopg' \
+  python3.11 -m pytest -q          # expect 0 skipped
+```
+
+`cleanup_mode=None` is load-bearing: the default reference-counts the server
+and shuts it down when the starting process exits, so the DSN goes dead and
+every `_pg.py` test silently skips again.
 
 ## Deploy
 
 Push to `main`. `.github/workflows/deploy.yml`:
 
 1. Builds the image, pushes to `ghcr.io/z280/scooter-fyi-api:latest`
-2. SCPs `docker-compose.yml`, `config.json`, `sql/` to `/opt/veo-audit/`
+2. SCPs `docker-compose.yml`, `config.json`, `sql/`, `docker/` to
+   `/opt/veo-audit/` — `docker/` because the `photon` sidecar is built on the
+   box from `docker/photon/`, not pulled from GHCR
 3. SSHes in, renders `.env.new` from GitHub Secrets, `docker compose pull`s
-   with it, and only then `mv`s it over `.env` and rolls containers — a
-   failed pull leaves the live `.env` (and the running stack) untouched
+   with it, and only then `mv`s it over `.env`, builds `photon` (a layer-cache
+   no-op unless its Dockerfile moved) and rolls containers — a failed pull
+   leaves the live `.env` (and the running stack) untouched
 4. `curl /health` — fails the workflow if not green
 
 Renaming the repo? See the
@@ -605,8 +726,14 @@ Enforced via Docker Compose `mem_limit`:
 | `pipeline_worker` | 1.0 GiB | bursts during DuckDB compute (~1 s/cycle) |
 | `denver_spatial_db` | 2.5 GiB | `shared_buffers=2GB`, `max_connections=20` |
 | `scheduler` | 1.0 GiB | supercronic + each job's transient Python process; sized for the 02:00 archive's DuckDB → Parquet burst |
+| `valhalla` | 3.0 GiB | serving a Denver-sized graph needs ~1 GiB; the headroom is for the transient tile build |
+| `photon` | 2.0 GiB | JVM heap capped at 1536m (`JAVA_OPTS`); Photon embeds OpenSearch, so the heap **is** the index budget — this is why the index is Colorado-scoped and not US-wide |
+| `valhalla_map_fetch`, `photon_index_fetch` | 256 MiB each | one-shot sidecars; they exit before the services they feed start serving |
 | `cloudflared` | 128 MiB | tiny — outbound HTTPS tunnel daemon |
 | Native Hermes (host) | ~512 MiB | API-based agent process; **not** enforced by this repo |
 
-Total Docker footprint: ~4.6 GiB on the 12 GiB VPS. The remaining ~7 GiB
-covers Hermes, host OS buffers, and future services.
+Total of the long-running ceilings: ~9.6 GiB on the 12 GiB VPS. These are
+**limits, not steady-state usage** — Valhalla's headroom is only touched
+during a tile rebuild and the two fetch sidecars have exited by then — but the
+sum is now close enough to the box that another always-on service needs a hard
+look at these numbers first, not after.

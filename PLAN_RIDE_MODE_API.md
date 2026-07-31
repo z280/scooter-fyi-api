@@ -22,11 +22,13 @@ House rules that bind every phase:
   update `src/cli.py` (cleanup/de-id jobs), `src/api_meta.py:_PRIVACY`, and
   `src/templates/legal/privacy_policy.html` together.
 - **Even-points invariant (owner rule)**: every point award must be even. Enforced three ways in
-  this program: `CHECK (points % 2 = 0)` on `user_points` (sql/052), an assertion in
+  this program: `CHECK (points % 2 = 0)` on `user_points` (sql/053), an assertion in
   `credit_points()`, and a unit test sweeping every `POINTS_*` constant and formula output.
 
-Migration ownership: this program ships `sql/046`, `047`, `048`–`052`. `sql/045` stays reserved for
-SMS sign-in (FEATURE_PLAN §9) and is not touched.
+Migration ownership: this program ships `sql/047` (§10) and `sql/048` (§11) itself and owns
+**`049`–`053`**. `sql/045` (SMS sign-in codes, FEATURE_PLAN §9) and `sql/046` (comms replies) landed
+on main ahead of this program and are not touched — every number below is shifted +2 from this
+plan's first draft for exactly that reason, with the relative order preserved.
 
 ---
 
@@ -36,17 +38,17 @@ SMS sign-in (FEATURE_PLAN §9) and is not touched.
 material, ride options storage, §10 reported fields, turn-by-turn maneuvers, self-hosted
 geocoding, pricing/points metadata, and Usuals.
 
-**Migrations: `sql/046`, `sql/048`, `sql/049`**
+**Migrations: `sql/047`, `sql/049`, `sql/050`**
 
-- `sql/046_tracked_rides_reported_fields.sql` — FEATURE_PLAN §10's columns and semantics exactly
+- `sql/047_tracked_rides_reported_fields.sql` — FEATURE_PLAN §10's columns and semantics exactly
   (`reported_minutes INTEGER`, 0–1440; `reported_plan TEXT`, `resident|visitor|equity`; `EndRideIn`
   / `_RIDE_COLS` / `_row_to_ride` wiring per §10) — but **not** §10's published DDL, which inlines
   both CHECKs in `ADD COLUMN IF NOT EXISTS` in violation of the house rule above. Install them as
   separate guarded named constraints (`tracked_rides_reported_minutes_range`,
   `tracked_rides_reported_plan_allowed`) instead — the minutes bound behind the sql/041 step-4
   conname-only guard, the plan list behind the value-checked guard: the same two-shape split the
-  sql/048 comment below spells out, and per sql/041 the two guards must not be made to match.
-- `sql/048_ride_sessions.sql`:
+  sql/049 comment below spells out, and per sql/041 the two guards must not be made to match.
+- `sql/049_ride_sessions.sql`:
 
   ```sql
   ALTER TABLE tracked_rides
@@ -78,7 +80,7 @@ geocoding, pricing/points metadata, and Usuals.
   "theme":"light"|"dark"|"auto", "navigation":bool, "save_tracks":bool, "battery_modeling":bool,
   "nav_improvement":bool, "end_survey":bool, "own_device":bool}`. Size cap 4 KB, enforced in the
   handler.
-- `sql/049_ride_mode_usuals.sql` — widen `user_preferences_kind_allowed` to add
+- `sql/050_ride_mode_usuals.sql` — widen `user_preferences_kind_allowed` to add
   `'ride_mode_usual'` and extend `user_preferences_name_matches_kind` so `ride_mode_usual` requires
   a name — both via the sql/042 value-checked guard (read `pg_get_constraintdef`, rewrite only when
   `'ride_mode_usual'` is missing, so a replay after a later widening is a no-op; sql/043 named both
@@ -200,7 +202,7 @@ geocoding, pricing/points metadata, and Usuals.
 - Cron: `0 5 * * *` `refresh_photon_index` (ETag check, no-op most days — same shape as
   `refresh_routing_graph` at 04:30).
 
-**Files:** `sql/046`, `sql/048`, `sql/049`, `src/api_tracked_rides.py`, `src/api_route.py`,
+**Files:** `sql/047`, `sql/049`, `sql/050`, `src/api_tracked_rides.py`, `src/api_route.py`,
 `src/valhalla.py`, new `src/api_geocode.py`, `src/main.py` (mount the new router),
 `src/api_meta.py`, `src/api_points.py`, `src/api_preferences.py`, `src/cli.py`, `src/r2_map.py`
 (the index fetch lives beside `sync_map_assets`), `requirements.txt` (`zstandard`), `config.json`,
@@ -233,9 +235,9 @@ schedule.
 validation states that drive Screen 10, the new points economy, battery-model ingestion, and the
 de-identification sweep.
 
-**Migrations: `sql/050`, `sql/052`**
+**Migrations: `sql/051`, `sql/053`**
 
-- `sql/050_track_donations.sql`:
+- `sql/051_track_donations.sql`:
 
   ```sql
   CREATE TABLE IF NOT EXISTS track_donations (
@@ -280,7 +282,7 @@ de-identification sweep.
   Raw JWS strings are **discarded after verification** — only `chain_root_hash` and the
   `verification` summary persist (retained signatures add nothing once verified and would be one
   more identifying artifact to sweep).
-- `sql/052_ride_mode_points.sql` — widen `user_points_action_allowed` adding
+- `sql/053_ride_mode_points.sql` — widen `user_points_action_allowed` adding
   `'battery_contribution'`, `'nav_route_feedback'`, `'nav_qualitative_feedback'`,
   `'nav_distance_bonus'`, `'ride_survey'` (old values stay — historical rows are forever), using
   the sql/040 guarded shape (rewrite only when `'battery_contribution'` is absent from the live
@@ -421,7 +423,7 @@ trace fails); `soc_start_percent` = `feed_start_battery_percent` (fallback
 `burn_percent` = the difference; `temperature_c` from `hourly_temperature`. Double-count guard —
 the nightly `extract_battery_trips` will mine this SAME trip as an observation gap: the donation
 transaction deletes any overlapping same-vehicle feed-mined row (its `departed_at` inside the
-ride window; match `source IS DISTINCT FROM 'donated_ride'` — rows predating sql/050 carry NULL
+ride window; match `source IS DISTINCT FROM 'donated_ride'` — rows predating sql/051 carry NULL
 and are all feed-mined), and `extract_battery_trips` skips gaps overlapping a
 `source='donated_ride'` row —
 that discrimination is what the `source` column exists for. The weekly `train_battery_model`
@@ -454,10 +456,10 @@ fine geometry loses account linkage within ≤28 h". This clock is also the de f
 `nav_distance_bonus`: a donation landing >28 h after Screen 4 finds its route row already
 de-identified and forfeits that bonus — the Trip-data page's "limited window", disclosed
 behavior, not a bug. Guard that arm with
-`to_regclass('ride_routes')` — sql/051 is A3's and A2 may deploy first. Pre-de-id,
+`to_regclass('ride_routes')` — sql/052 is A3's and A2 may deploy first. Pre-de-id,
 `ON DELETE CASCADE` honors hard-delete; post-de-id the artifact has no owner. Three-address rule
 updates, **scoped to what A2 itself ships** (the `ride_routes`/`ride_surveys` `_PRIVACY` and
-privacy-policy entries ship with sql/051 in A3 — A2-first must not publish privacy copy for
+privacy-policy entries ship with sql/052 in A3 — A2-first must not publish privacy copy for
 tables that don't exist yet): donated tracks ("de-identified ≤28 h after donation" — this entry
 also discloses the derived battery observation: ride endpoints, distance and SoC kept
 indefinitely with no account linkage, matching the owner's ℹ "Our Usage" copy); amend the
@@ -468,7 +470,7 @@ coordinates and the r8 cell indefinitely, deleted only by account cascade, aggre
 public leaderboard subject to the visibility toggles — the master plan calls these rows "the
 leaderboard record" and the privacy page must actually say so).
 
-**Files:** `sql/050`, `sql/052`, new `src/track_verify.py`, `src/api_tracked_rides.py`,
+**Files:** `sql/051`, `sql/053`, new `src/track_verify.py`, `src/api_tracked_rides.py`,
 `src/points.py` (award functions — the constants and `/points/schedule` entries landed in A1),
 `src/ride_watch.py`, `src/battery_model.py`, `src/cli.py`,
 `crontab`, `src/api_meta.py`, `src/templates/legal/privacy_policy.html`, `API.md`, `README.md`,
@@ -499,10 +501,10 @@ endpoint integrates all four last.
 
 **Goal:** what Screen 4 stores and Screen 9 submits. Independent of A2 (both depend only on A1);
 A2's `nav_distance_bonus` checks for a `ride_routes` row defensively, and A3 carries its own
-guarded action-vocabulary widening (in `sql/051`) and de-id arm (in `src/cli.py` — a cron job,
+guarded action-vocabulary widening (in `sql/052`) and de-id arm (in `src/cli.py` — a cron job,
 not migration SQL; below), so landing order between A2/A3 doesn't matter.
 
-**Migration: `sql/051_ride_surveys_routes.sql`**
+**Migration: `sql/052_ride_surveys_routes.sql`**
 
 ```sql
 CREATE TABLE IF NOT EXISTS ride_routes (
@@ -519,7 +521,7 @@ CREATE TABLE IF NOT EXISTS ride_routes (
     created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deidentified_at           TIMESTAMPTZ
 );
--- sql/050's index pair, mirrored: the ride lookup (A2's nav_distance_bonus, the
+-- sql/051's index pair, mirrored: the ride lookup (A2's nav_distance_bonus, the
 -- survey's already-linked check, tracked_rides delete cascades) and the sweep's
 -- predicate (idx_track_donations_deid's twin — the hourly 28 h arm below).
 CREATE INDEX IF NOT EXISTS idx_ride_routes_ride
@@ -557,10 +559,10 @@ NULL` — the partial index above) — NOT A2's donations arm, whose `track_dona
 not exist in the A3-first order — so whichever phase lands second merges the shared arm as a
 no-op and adds its own. Same landing-order
 trap on points: `'ride_survey'`, `'nav_route_feedback'` and `'nav_qualitative_feedback'` enter
-`user_points_action_allowed` via A2's `sql/052` — deployed A3-first, every survey award would
-violate the live CHECK (sql/028, rewritten in sql/037) and 500. `sql/051` therefore widens the
+`user_points_action_allowed` via A2's `sql/053` — deployed A3-first, every survey award would
+violate the live CHECK (sql/028, rewritten in sql/037) and 500. `sql/052` therefore widens the
 constraint for these three actions itself, using the sql/040/042 value-checked guard keyed on
-`'ride_survey'` (052's guard keys on `'battery_contribution'`, so the two migrations no-op
+`'ride_survey'` (053's guard keys on `'battery_contribution'`, so the two migrations no-op
 against each other's work in either order). The `POINTS_*` constants and the full
 `/points/schedule` are **A1's** (single definition, no per-phase copies to drift): A3 only wires
 its three award functions to constants that already exist. Three-address rule: `ride_surveys` (free text)
@@ -633,7 +635,7 @@ and `ride_routes` (geometry) are new stored data, so **this** PR carries their
   `survey_submitted` flag (`src/api_tracked_rides.py:_row_to_ride`, an EXISTS against
   `ride_surveys`).
 
-**Files:** `sql/051`, new `src/api_ride_surveys.py` — decided, not implementer's choice: a
+**Files:** `sql/052`, new `src/api_ride_surveys.py` — decided, not implementer's choice: a
 tracked-rides sub-resource lives in its own router file, the exact `src/api_ride_screenshots.py`
 precedent (`/api/v1/tracked-rides/{ride_id}/screenshots` mounts separately in `main.py`) — new
 `src/api_ride_routes.py` (router for `/ride-routes`; named after the `ride_routes` table, NOT
@@ -654,7 +656,7 @@ post-trim 20-char threshold, `ride_route_id` ownership/linking incl. the cross-r
 28 h `ride_routes` arm boundary.
 
 **Acceptance:** a survey with rating + qualitative + a stored route awards exactly 4+4+6 — on a
-database that has applied `sql/051` but not `sql/052` (the A3-first order must not trip
+database that has applied `sql/052` but not `sql/053` (the A3-first order must not trip
 `user_points_action_allowed`); a second POST 409s; issues outside the vocabulary 422; a
 `ride_route_id` replayed from an earlier ride 422s.
 
@@ -671,11 +673,11 @@ index reconciliation §11 omits; a content-keyed ETag where §11.4's run-keyed o
 own read-time-privacy rule). Independent of A2/A3 mechanics (reads the ledger only); can land
 any time after A2 (earlier is harmless — new actions simply appear as they start being awarded).
 
-**Migration: `sql/047_h3_r8_area_leaders.sql`** — exactly §11.2: `h3_r8_area_report`,
+**Migration: `sql/048_h3_r8_area_leaders.sql`** — exactly §11.2: `h3_r8_area_report`,
 `h3_r8_area_leaders` (top **3** per cell), `h3_r8_area_leader_runs`, plus
 `idx_user_points_h3_8_created` — with one reconciliation §11 doesn't state: `sql/028` already
 ships a plain `idx_user_points_h3_8 ON user_points (h3_8_index)`, which the new composite
-`(h3_8_index, created_at DESC)` strictly subsumes, so 047 also runs
+`(h3_8_index, created_at DESC)` strictly subsumes, so 048 also runs
 `DROP INDEX IF EXISTS idx_user_points_h3_8` (idempotent, replay-safe) instead of leaving every
 `user_points` insert maintaining two indexes over the same leading column.
 
@@ -747,7 +749,7 @@ counts as a retention rule even when derived — so this PR carries the `_PRIVAC
 deleted with the account via cascade, publicly exposed only through the read-time visibility
 filters above). A1–A3 each carry their entries; "it's just a daily report" is not an exemption.
 
-**Files:** `sql/047`, new `src/area_leaders.py`, new `src/api_leaderboard.py`, `src/api_private.py`
+**Files:** `sql/048`, new `src/area_leaders.py`, new `src/api_leaderboard.py`, `src/api_private.py`
 (admin sibling), `src/cli.py`, `crontab`, `src/main.py` (mount), `src/api_meta.py`,
 `src/templates/legal/privacy_policy.html`, `API.md`, `README.md`,
 `API_REQUIREMENTS.md`.

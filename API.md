@@ -30,12 +30,16 @@ HTTP status codes.
 
 **Not required for the map.** Every read endpoint that powers the public
 map and compliance dashboards is unauthenticated, as are
-[routing](#routing) and anonymous device reports.
+[routing](#routing), [geocoding](#geocoding) and anonymous device reports.
+Two published-metadata endpoints are public too:
+[`/api/v1/meta/pricing`](#get-apiv1metapricing) and
+[`/api/v1/points/schedule`](#get-apiv1pointsschedule) — a client needs the
+tax rate and the award table before anyone has signed in.
 
 Everything else takes `Authorization: Bearer <token>` from one of the
 sign-in doors in [Accounts & sessions](#accounts--sessions): profiles and
 public usernames, [tracked rides](#tracked-rides-gbfs-detected),
-[points](#points), [device photos](#device-photos),
+the [points ledger](#points), [device photos](#device-photos),
 [QR scans and recommendations](#device-engagement), discount reports, and
 the signed-in device feed.
 
@@ -938,6 +942,134 @@ GET /api/v1/h3/aggregates?res=9
 
 ---
 
+### `GET /api/v1/leaderboard/map`
+
+FEATURE_PLAN §11's H3 r8 "area leader" report -- the 🏆 Leaderboard
+view's choropleth **and** click-through detail in one fetch. Reads the
+daily recompute (`src/area_leaders.py`, `sql/048_h3_r8_area_leaders.sql`;
+trailing 28 days, `status='confirmed'` ledger rows only, tie-break
+`points DESC, first_point_at ASC, account_id ASC`), but privacy is
+applied **live**, at read time, against `accounts` -- never baked into
+the stored report. An account with `show_in_leaderboards=false`,
+`show_public_username=false`, or a `NULL` `display_name` (an
+unbackfilled username, sql/025) is skipped and the next stored rank
+(1..3) falls through into `leader`; `runners_up` is whatever eligible
+ranks remain. This takes effect on the very next request -- an opted-out
+rider is never shown again, not just from tomorrow's run.
+
+**Request:**
+```http
+GET /api/v1/leaderboard/map
+```
+
+**Response 200:**
+```json
+{
+  "computed_at": "2026-07-29T09:15:00+00:00",
+  "window_start": "2026-07-01T09:15:00+00:00",
+  "window_end": "2026-07-29T09:15:00+00:00",
+  "cells": {
+    "8828308281fffff": {
+      "total_points": 144,
+      "distinct_earners": 4,
+      "leader": {
+        "display_name": "Duke swift🦦",
+        "points": 88,
+        "ruling_color": "#7c54cd",
+        "ruling_border_color": "#382264",
+        "ruling_alpha": 0.6
+      },
+      "runners_up": [
+        { "display_name": "...", "points": 30,
+          "ruling_color": null, "ruling_border_color": null, "ruling_alpha": null }
+      ]
+    },
+    "8828308283fffff": {
+      "total_points": 0, "distinct_earners": 0, "leader": null, "runners_up": []
+    }
+    /* ... ~720 cells ... */
+  }
+}
+```
+
+**Response 503:** no report has ever been computed yet (cold start),
+`{ "detail": "no leaderboard computed yet" }`.
+
+#### Notes
+
+- **Cell keys are canonical h3 strings** (`h3.int_to_str`), never raw
+  64-bit integers -- same JS `MAX_SAFE_INTEGER` reason as
+  [`/api/v1/h3/aggregates`](#get-apiv1h3aggregatesres8910).
+- `total_points`/`distinct_earners` are **not** privacy-filtered -- they
+  are aggregate ledger facts with no identity attached. A cell can show
+  real nonzero totals with `leader: null` when every earner there opted
+  out.
+- `leader` + `runners_up` together are at most 3 entries, and can be
+  fewer (including both empty/null). No `royalty_title` field:
+  `display_name` already composes it (sql/044's generated column).
+- A rider with no claimed ruling-color pair leads with
+  `ruling_color: null` -- the API never invents a default; that's a
+  frontend decision. `ruling_alpha` is nulled alongside an unclaimed
+  pair (it otherwise carries a non-null `0.60` schema default that would
+  leak as a meaningless fill opacity).
+- **ETag is not run-keyed** -- this payload is a live join, not a pure
+  function of the last recompute. The weak ETag is
+  `W/"arealb:<computed_at epoch>:<sha256(cells)[:16]>"` over a canonical
+  (`sort_keys=True`) serialization, so any eligibility/color/name change
+  between runs busts a client's cached copy immediately, and a fresh run
+  with byte-identical cells still gets a new tag (its
+  `computed_at`/`window_*` changed). `Cache-Control: public,
+  max-age=600`, same as `/api/v1/h3/aggregates`.
+
+---
+
+### `GET /api/v1/leaderboard/regional`
+
+The whole-database companion to `/api/v1/leaderboard/map` (sql/054
+`regional_leaders`, `src/area_leaders.py`) -- added per an explicit
+product clarification: the per-cell report already answers "for each
+hexagon where points were earned, who leads it" (no additional spatial
+scoping needed there), and this endpoint answers the separate question
+"across the whole database, who is ranked highest." Same recompute run,
+same trailing-28-day window as the per-cell report -- not split by cell,
+top `MAX_REGIONAL_LEADERS` (25) accounts by summed confirmed points.
+Same read-time privacy filtering as the per-cell endpoint
+(`show_in_leaderboards`, `show_public_username`, non-null
+`display_name`), except an ineligible stored entry is simply dropped
+rather than backfilled from a runner-up pool -- there is no larger stored
+pool beyond the top 25 to fall through into -- so the returned list can
+be shorter than 25, and surviving entries are renumbered to a contiguous
+`rank` starting at 1.
+
+**Request:**
+```http
+GET /api/v1/leaderboard/regional
+```
+
+**Response 200:**
+```json
+{
+  "computed_at": "2026-07-29T09:15:00+00:00",
+  "window_start": "2026-07-01T09:15:00+00:00",
+  "window_end": "2026-07-29T09:15:00+00:00",
+  "leaders": [
+    { "rank": 1, "display_name": "Duke swift🦦", "points": 312,
+      "ruling_color": "#7c54cd", "ruling_border_color": "#382264", "ruling_alpha": 0.6 },
+    { "rank": 2, "display_name": "...", "points": 210,
+      "ruling_color": null, "ruling_border_color": null, "ruling_alpha": null }
+  ]
+}
+```
+
+**Response 503:** no report has ever been computed yet (cold start),
+`{ "detail": "no leaderboard computed yet" }`.
+
+`Cache-Control: public, max-age=600`; ETag is the same weak, content-hash
+scheme as `/api/v1/leaderboard/map` (`W/"arealb:<computed_at
+epoch>:<sha256(leaders)[:16]>"`), for the same live-join reason.
+
+---
+
 ### `GET /api/v1/equity-estimate?ranks=1,2`
 
 Device share inside a **candidate equity-rank cutoff** — the combined
@@ -1144,6 +1276,7 @@ rather than a route.
 | `profile` | no | `safe` \| `range` \| `shade` \| `express`. Defaults to `safe`. |
 | `vehicle_model` | no | `Astro` \| `Cosmo` \| `Apollo` — selects a model-specific battery curve. |
 | `explain` | no | `true` adds a `diagnostics` block. |
+| `maneuvers` | no | `true` adds `properties.maneuvers` — turn-by-turn cues for the nav HUD. |
 
 **Response 200** — a GeoJSON `Feature`, so it drops straight into a map
 source:
@@ -1175,6 +1308,7 @@ source:
 | `battery_percent_estimate` | number \| null | Estimated battery burn for this route, in percentage points. **`null` whenever `battery_model` is `"unavailable"`.** |
 | `battery_model` | `"regression"` \| `"unavailable"` | Whether a fitted model produced the number. Only these two values. |
 | `graph_bbox` | `[w, s, e, n]` | Echoed on every response so clients can pre-filter without a second call. |
+| `maneuvers` | array | **Only present when `maneuvers=true`.** Turn-by-turn cues; shape detailed below. |
 
 > **The battery estimate is currently always `null` in production.** The
 > regression is fitted from accumulated battery-trip observations, and no
@@ -1191,6 +1325,32 @@ default profile's route as a candidate — because shade's own costing
 generates a different route family, re-ranking only within it once
 measured *less* canopy than not asking for shade at all.
 
+**`maneuvers=true`** adds the turn-by-turn cues the nav HUD needs:
+
+```json
+"maneuvers": [
+  { "instruction": "Turn right onto Champa Street", "type": 10,
+    "street_names": ["Champa Street"], "length_meters": 412.0,
+    "time_seconds": 96.0, "begin_shape_index": 14, "end_shape_index": 22 }
+]
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `instruction` | string | Valhalla's written instruction. |
+| `type` | number | Valhalla's maneuver-type enum, passed through unchanged. |
+| `street_names` | string[] | Always an array — empty for an unnamed way. |
+| `length_meters` | number \| null | Converted from Valhalla's kilometres. `null` if omitted upstream. |
+| `time_seconds` | number \| null | `null` if omitted upstream. |
+| `begin_shape_index` / `end_shape_index` | number | Indices into **this response's** `geometry.coordinates`. |
+
+The shape indices are **re-offset for you**. Valhalla numbers them per leg,
+while `geometry` is one concatenated LineString that drops a duplicated
+leg-boundary vertex wherever one exists — so raw per-leg indices would
+misplace every cue on a multi-waypoint route. Cues belonging to a leg that
+contributed no geometry are omitted rather than pointed at the wrong
+coordinate.
+
 **Errors.** These carry a structured object as `detail`, not a bare string:
 
 | Status | `error` | Meaning |
@@ -1200,13 +1360,18 @@ measured *less* canopy than not asking for shade at all.
 | 422 | `no_route_from_location` | No cycling-permitted road near one endpoint (often an HIN exclusion). |
 | 422 | `no_route` | Both endpoints routable, but no path between them. |
 | 503 | `router_unavailable` | The Valhalla sidecar is down or timed out. |
+| 429 | — | More than 30 requests/minute from one IP (`/route`; 60/minute on `/route/profiles`). Carries `Retry-After` in seconds. Unlike the rows above, `detail` is a plain string. |
 
-Malformed `from`/`to` (not two parseable floats) is a plain `400`.
+Malformed `from`/`to` (not two parseable floats) is a plain `400`. The rate
+limit is checked **before** param validation, so a malformed request still
+consumes quota.
 
 ### `GET /api/v1/route/profiles`
 
 Advertises the selectable profiles so clients needn't hardcode them.
 Public, no auth.
+
+Rate limited to 60 requests/minute per IP (429 with `Retry-After`).
 
 ```json
 {
@@ -1223,6 +1388,65 @@ Public, no auth.
 
 Profiles are config-driven (`config.json` → `valhalla.profiles`); treat
 this endpoint, not the table above, as the live list.
+
+---
+
+## Geocoding
+
+Address search for the ride wizard, served by a **self-hosted Photon**
+sidecar over a Colorado-scoped OpenStreetMap index. There is no third-party
+geocoder in this path, no API key, and no rider query leaves the box.
+
+### `GET /api/v1/geocode/search`
+
+Public, no auth. Rate limited to **20 requests/minute per IP** (bucket
+`geocode_ip`); a 429 carries `Retry-After`.
+
+| Param | Required | Description |
+|---|---|---|
+| `q` | yes | Free-text query, 2–100 characters. Interior whitespace is collapsed. |
+| `lat` | no | Bias latitude. Must be sent **with** `lon`. |
+| `lon` | no | Bias longitude. Must be sent **with** `lat`. |
+| `limit` | no | 1–8. Defaults to 6. |
+
+Results are restricted to the Denver envelope (`config.json` →
+`envelope.denver_core`), which is deliberately **wider** than the routing
+graph — that is what makes `in_coverage` meaningful.
+
+**Response 200**
+
+```json
+{
+  "results": [
+    { "label": "1701 Champa St, Denver", "lat": 39.747, "lon": -104.992,
+      "kind": "house", "in_coverage": true }
+  ]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `label` | string | One human-readable line, composed from the matched name/housenumber/street/city/state. Render as-is. |
+| `lat` / `lon` | number | The point to route to, rounded to 6 dp. |
+| `kind` | `"house"` \| `"street"` \| `"poi"` \| `"locality"` | What was matched. Only these four values. |
+| `in_coverage` | boolean | Whether the point is inside the routing `graph_bbox`. **`false` means `GET /api/v1/route` will reject it with `out_of_coverage`** — grey the row out instead of letting the rider pick it and fail one screen later. |
+
+Ordering is the geocoder's relevance ranking (biased by `lat`/`lon` when
+supplied); do not re-sort client-side.
+
+**Errors.** These carry a structured object as `detail`, not a bare string:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| 400 | `bad_bias` | Exactly one of `lat`/`lon` was supplied. Send both or neither. |
+| 422 | `bad_query` | `q` is shorter than 2 or longer than 100 characters. (An out-of-range `limit` is FastAPI's own 422.) |
+| 429 | — | Bucket full; `Retry-After` is seconds. |
+| 503 | `geocoder_unavailable` | The sidecar is down, timed out (3 s), returned an error, **or** geocoding is disabled in config. Deliberately indistinguishable: degrade to a plain "type the address" field. Do not retry in a loop. |
+
+Responses are cached in-process for 24 h (512 entries, keyed on the
+normalized query plus the bias rounded to 2 dp), so a keystroke-debounced
+field costs the sidecar nothing after the first hit. Cached responses still
+count against the rate limit.
 
 ---
 
@@ -1454,6 +1678,30 @@ wholesale. Max 16 KB per blob; max 50 saved map settings per rider.
 Names are 1–64 characters and scoped to you: two riders can both have a
 setting called `commute`.
 
+### Ride Mode Usuals
+
+A **Usual** is a saved answer to the ride wizard's options screen — the
+frontend's `ride_options` object plus a display `label` — applied wholesale
+from the Usuals picker (Screen 2.5). Same store as the saved map settings
+above (`user_preferences`, kind `ride_mode_usual`, `sql/050`) and therefore
+the same rules: **opaque JSON** the API never reads inside, `PUT` replaces
+wholesale, names are 1–64 characters, max 16 KB per blob. Max **10 Usuals**
+per rider.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /api/v1/profile/ride-usuals` | `{ "ride_usuals": [ { "name": "commute", "settings": {…}, "created_at": …, "updated_at": … } ] }`, most recently updated first. |
+| `GET /api/v1/profile/ride-usuals/{name}` | One Usual. `404` if that name isn't yours. |
+| `PUT /api/v1/profile/ride-usuals/{name}` | `{ "settings": { "label": "Morning commute", "ride_options": { … } } }` — creates or replaces. `409` at the 10-Usual cap (you can still overwrite Usuals you already have), `413` over 16 KB, `422` on a name longer than 64 characters. |
+| `DELETE /api/v1/profile/ride-usuals/{name}` | `404` if absent. → `{ "deleted": true, "name": "commute" }` |
+
+The `settings` blob is **not** validated here even though its shape is
+known: `ride_options` is checked when it is used to start a ride
+(`POST /api/v1/tracked-rides`), so a Usual saved by a newer client than the
+API has heard of still round-trips. Usuals and saved map settings are
+separate namespaces — the same rider may hold a map setting **and** a Usual
+both called `commute`.
+
 ---
 
 ## Rider reports
@@ -1640,6 +1888,8 @@ deliberately withholds.
 | `GET /api/v1/private/devices/{vehicle_identifier}/history?since=&until=&limit=` | Time-ordered position-stop history for one scooter. `since` defaults to 7 days ago, `until` to now, `limit` 1–10000 (default 2000). |
 | `GET /api/v1/private/devices/max-ranges?form_factor=&limit=` | Devices sorted by highest-ever observed range. `limit` 1–20000 (default 5000). |
 | `GET /api/v1/private/trips/daily?date=YYYY-MM-DD&limit=` | Daily trip/popularity rollup for one Denver-local date. `limit` 1–5000 (default 100). |
+| `GET /api/v1/private/area-leaders` | Full, unfiltered §11 area-leader report: every stored rank 1-3 per cell with real account ids, points, and `first_point_at` tie-break provenance -- no privacy filtering (that layer belongs only to the public `/api/v1/leaderboard/map`). |
+| `GET /api/v1/private/regional-leaders` | Full, unfiltered whole-database leaderboard (sql/054): every stored rank with real account ids, points, and `first_point_at` tie-break provenance -- admin sibling of the public `/api/v1/leaderboard/regional`. |
 | `GET /api/v1/private/reports` | Admin listing of all negative reports. |
 | `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback. |
 
@@ -1977,17 +2227,38 @@ time.
 ### `POST /api/v1/tracked-rides`
 
 ```json
-{ "vehicle_identifier": "8c4a1f0d2e9b7a35", "start_lat": 39.7392, "start_lon": -104.9876 }
+{ "vehicle_identifier": "8c4a1f0d2e9b7a35", "start_lat": 39.7392, "start_lon": -104.9876,
+  "reported_start_battery_percent": 87.5,
+  "ride_options": { "cost_hud": true, "speedometer": "digital", "theme": "auto",
+                    "navigation": true, "save_tracks": true, "battery_modeling": true,
+                    "nav_improvement": true, "end_survey": true, "own_device": false } }
 ```
 
 `vehicle_identifier` is exactly 16 lowercase hex chars. → the created
 ride (shape below). Limit 20/hour per account.
+
+`reported_start_battery_percent` (optional, 0–100) is what you read off the
+vehicle's own display. The server independently derives
+`feed_start_battery_percent` and a feed-anchored start position from the
+vehicle's newest fresh GBFS observation; those are stored, not returned.
+
+`ride_options` (optional) is a **client-owned** object: stored and handed
+back verbatim, with the server reading only the flags it gates on
+(`save_tracks` gates track donation; `battery_modeling`, `nav_improvement`
+and `end_survey` gate their awards). Keys this version does not know are
+accepted and stored untouched, so the client can add options without
+waiting on an API deploy. The listed keys are type-checked: the nine above
+are booleans except `speedometer` (`classic|digital|none`) and `theme`
+(`light|dark|auto`). Cap 4 KB, measured on the serialized JSON.
 
 - `404` — unknown `vehicle_identifier`.
 - `409` — `"an active ride already exists"`. Resolve by ending or
   deleting the existing ride; `GET /api/v1/tracked-rides/active` tells
   you which. (Concurrent starts are serialized server-side, so exactly
   one of two simultaneous requests wins.)
+- `413` — `ride_options` is larger than the 4 KB limit.
+- `422` — `{"error": "bad_ride_options", "detail": "..."}`: a known option
+  carried the wrong type or a value outside its list.
 
 The start response additionally carries **`plate_display_code`** — a
 short cosmetic code for the vehicle, so the rider can confirm on-screen
@@ -2020,6 +2291,14 @@ that they're tracking the scooter in front of them. It is a display aid,
   "updated_at": "2026-07-27T16:20:00+00:00",
   "distance_meters": null,
   "distance_source": null,
+  "reported_minutes": null,
+  "reported_plan": null,
+  "ride_options": {},
+  "validation": { "status": "pending", "reasons": [] },
+  "track_signing": { "alg": "HS256", "key_id": "3f2a…-uuid",
+                     "key": "<base64url 32 bytes>",
+                     "nonce": "<32 hex chars>",
+                     "issued_at": "2026-07-27T16:20:00+00:00" },
   "path_polyline": null,
   "path_geojson": null
 }
@@ -2029,6 +2308,32 @@ that they're tracking the scooter in front of them. It is a display aid,
 your waypoints on each append; `path_geojson` is the same path already
 decoded to a `LineString` so clients needn't decode it. Both are `null`
 until the first waypoint lands. List responses omit both.
+
+`reported_minutes` and `reported_plan` are what you told us at
+`PATCH .../end`: the duration the operator's app showed you, and the
+rate-plan tier you rode under. Both are stored **as reported** —
+`reported_minutes` is deliberately never reconciled against
+`user_reported_ended_at - started_at`, because a reported field exists
+precisely so it can differ from what we observed. `reported_plan` reuses
+the `resident|visitor|equity` vocabulary from your profile's `rate_plan`,
+and may legitimately differ from it on any given ride.
+
+`ride_options` is the client-owned options object you passed at start,
+echoed back verbatim (`{}` on a ride that sent none).
+
+`validation` is the ride's contribution eligibility: `status` is one of
+`pending` (nothing decided), `pending_feed` (waiting on the live feed to
+show where the vehicle reappeared), `eligible`, `ineligible` (with
+`reasons` from a fixed vocabulary — e.g. `tracking_not_opted`) or `error`.
+`PATCH .../end` sets a provisional status; it is finalised later.
+
+`track_signing` is the **per-ride** HMAC-SHA256 key and nonce for signing
+locally recorded track batches, with `key_id` = the ride id. It is
+**owner-only and returned by three responses only**: the start call,
+`GET .../active` and `GET .../{id}` — so a client that reloaded mid-ride
+can resume signing the same chain. It is **never** present in the list
+response. It is `null` on rides that predate the feature. Treat the key as
+a secret: anyone holding it can mint batches this ride will accept.
 
 ### Distance, and how much to trust it
 
@@ -2078,13 +2383,14 @@ waypoints makes it accurate.
 
 | Endpoint | Notes |
 |---|---|
-| `GET /api/v1/tracked-rides?limit=&before=&status=` | Owner-only, newest first. → `{ count, rides: [...] }`. `before` is an ISO timestamp and **must carry a timezone**. |
-| `GET /api/v1/tracked-rides/active` | → `{ "active": <ride> }`, or `{ "active": null }` when there is none — always wrapped. Call on load to restore a ride that survived a reload. |
-| `GET /api/v1/tracked-rides/{id}` | Full detail incl. `path_geojson`. `404` if it isn't yours. |
+| `GET /api/v1/tracked-rides?limit=&before=&status=` | Owner-only, newest first. → `{ count, rides: [...] }`. `before` is an ISO timestamp and **must carry a timezone**. Never carries `track_signing` — the key is not read here at all. |
+| `GET /api/v1/tracked-rides/active` | → `{ "active": <ride> }`, or `{ "active": null }` when there is none — always wrapped. Call on load to restore a ride that survived a reload: this response carries `track_signing`, so signing resumes on the same chain. |
+| `GET /api/v1/tracked-rides/{id}` | Full detail incl. `path_geojson` and `track_signing`. `404` if it isn't yours. |
 | `PATCH /api/v1/tracked-rides/{id}/end` | See below. |
-| `POST /api/v1/tracked-rides/{id}/waypoints` | See below. |
+| `POST /api/v1/tracked-rides/{id}/track` | Bulk track donation + verification. See below. |
+| `POST /api/v1/tracked-rides/{id}/waypoints` | **Deprecated** — see below. |
 | `GET /api/v1/tracked-rides/{id}/waypoints?limit=&after=&before=` | → `{ count, waypoints: [ { id, waypoint_at, lat, lon, metadata, created_at } ] }`, oldest first. Page **forward** with `after` (the `waypoint_at` of the last waypoint you received) and backward with `before` (the last `limit` waypoints older than the cursor). Both cursors need an explicit UTC offset. Identical contract to `GET /api/v1/rides/{id}/waypoints`. |
-| `DELETE /api/v1/tracked-rides/{id}` | **Immediate hard delete**, cascades to waypoints and the watch list. → `{ "deleted": true }` |
+| `DELETE /api/v1/tracked-rides/{id}` | **Immediate hard delete**, cascades to waypoints, the watch list, and (if not yet de-identified) any track donation. → `{ "deleted": true }` |
 | `DELETE /api/v1/tracked-rides` | **Immediate hard delete of every tracked ride you own.** → `{ "deleted_count": n }` |
 
 Privacy commitment, stated here on purpose: route polylines are the most
@@ -2095,27 +2401,111 @@ and no analytics use of ride routes — ever. See `/api/v1/meta/privacy`.
 
 ```json
 { "ended_at": "2026-07-27T16:45:00Z", "end_lat": 39.7501, "end_lon": -104.9990,
-  "reported_battery_percent": 62.5, "total_cost_cents": 415, "metadata": {} }
+  "reported_battery_percent": 62.5, "total_cost_cents": 415, "metadata": {},
+  "reported_minutes": 24, "reported_plan": "resident" }
 ```
 
 `ended_at`, `end_lat`, `end_lon` required; `ended_at` **must include a UTC
 offset** (`400` otherwise). Sets `status` to `completed` and un-redacts
 the `gbfs_*` fields. → the full ride object.
 
+`reported_minutes` (0–1440, i.e. capped at 24 h) and `reported_plan`
+(`resident|visitor|equity`) are optional and inert — nothing in the
+close-out logic reads them; see [Ride object](#ride-object). This call also
+sets a provisional `validation.status`. It does **not** return
+`track_signing`: the ride is over, and the three owner-only reads above are
+where a client that still needs the key finds it.
+
 **Single-shot** — a second call returns `409 "this ride's end has already
 been reported"`. There is no un-end and no edit. Confirm before sending.
-
-This is also where points are credited: 2 per waypoint you uploaded, plus
-20 if GBFS saw the scooter reappear within 20 m of your reported end
-(`gbfs_trip_validated`). Both are no-ops when their condition isn't met,
-and **both are capped so the ride awards at most 100 points in total** —
-see [Ride limits](#ride-limits). A ledger entry always shows what was
-actually granted, never the pre-cap figure.
 
 It also never fails on a distance cap: an implausible final leg is dropped
 and an over-cap distance is clamped, but the ride always completes.
 
+**No longer credits points**, as of the ride-mode overhaul: the old
+`waypoint` (2/waypoint) and `gbfs_trip_validated` (20, GBFS reappearance
+within 20 m) awards are **superseded**. GBFS reappearance is now an
+*eligibility gate* feeding `validation.status`, not an award in itself;
+the reshaped ride-mode awards (`battery_contribution`, `nav_distance_bonus`,
+etc. — see [Award table](#award-table)) are credited from
+`POST .../track` and `POST .../survey` instead. `waypoint` and
+`gbfs_trip_validated` remain valid historical actions on old ledger rows —
+history is never rewritten — they simply stop being newly granted.
+
+### `POST /api/v1/tracked-rides/{id}/track`
+
+Bulk track donation: uploads the locally-recorded, hash-chained,
+HMAC-signed waypoint chain for server verification, in **one shot** — this
+is the *only* way a track ever reaches the server; ride mode sends nothing
+mid-ride. Owner-only. Limit **6/hour per account**. Body cap **2 MB**; at
+most **600 batches** per request.
+
+```json
+{ "batches": ["<compact JWS>", "<compact JWS>", "..."] }
+```
+
+Each string is one HS256-signed batch, sealed client-side at ≤25 waypoints
+or ≤60 s. Signing key/nonce come from `track_signing` (above); see
+`RIDE_MODE_OVERHAUL_PLAN.md` Part 2 for the exact wire shape and hash
+chain. Raw batches are verified once and then **discarded** — only the
+verification summary and the decoded waypoints persist.
+
+→
+
+```json
+{
+  "donation_id": "9c1e…-uuid",
+  "verification": { "chain": "ok", "monotonic": "ok", "speed": "ok",
+                    "gbfs_start": "ok", "gbfs_end": "ok", "volume": "ok" },
+  "validation": { "status": "eligible", "reasons": [] },
+  "distance_meters": 4312.5, "waypoint_count": 512,
+  "points": [ { "action": "battery_contribution", "points": 14 } ]
+}
+```
+
+`verification` shows each of the six server-side checks (signature/chain
+integrity share one `chain` key). `validation.status` is one of `eligible`,
+`ineligible` (with `reasons` — `start_mismatch`, `end_mismatch`,
+`too_few_waypoints`, `trip_too_short`, `chain_invalid`, `internal_error`),
+or `pending_feed` — GBFS hasn't yet told us where the vehicle reappeared,
+so eligibility can't be decided yet. A `pending_feed` donation is still
+**accepted** (it counts as your one donation for this ride) with its
+distance-dependent points **held**; an hourly/per-cycle background job
+settles it to `eligible`/`ineligible` once the feed resolves or the watch
+window elapses, with no action from you. `points` lists only what was
+actually credited — empty on anything but an immediate `eligible` outcome
+(and even then, empty if a fast-segment ratio flagged the donation for
+review).
+
+Preconditions, in order:
+
+- `404` — no such ride (or not yours).
+- `409` `{"error": "ride_not_ended"}` — report your end first (`PATCH
+  .../end`).
+- `409` `{"error": "already_donated"}` — one donation per ride, ever.
+- `422` `{"error": "tracking_not_opted"}` — this ride's `ride_options.save_tracks`
+  was off, so there was never anything to donate.
+- `422` `{"error": "chain_invalid", "failing_check": "chain", "batch_seq": n}`
+  — the chain failed signature or integrity verification (bad signature,
+  wrong ride binding, or a broken hash chain). The submission is rejected
+  outright — nothing is stored and the donation slot is **not** consumed,
+  so a client that hit a genuine upload bug can retry.
+- `413` — over the 2 MB body cap, or over 600 batches.
+- `429` — over 6/hour.
+
+Award gates: `battery_contribution` requires `ride_options.battery_modeling`,
+not an own-device ride, and both a start and end battery percent known.
+`nav_distance_bonus` requires `ride_options.nav_improvement` and a stored
+route (`POST /api/v1/ride-routes`) — see [Points](#points).
+
 ### `POST /api/v1/tracked-rides/{id}/waypoints`
+
+**Deprecated.** Superseded by `POST .../track` above — ride mode never
+streams a track mid-ride. Retained one release purely as caution for any
+unknown external caller; it earns **no points** as of the ride-mode
+overhaul (the per-waypoint award always lived at `PATCH .../end`, which no
+longer grants it — see above). It is not the transport for ride-mode
+tracks and should not be used by new clients.
 
 ```json
 { "waypoint_at": "2026-07-27T16:31:02Z", "lat": 39.7450, "lon": -104.9910, "metadata": {} }
@@ -2149,6 +2539,148 @@ Evidence of what Veo actually charged, for the cost audit. Stored in a
 | `POST /api/v1/tracked-rides/{id}/screenshots?screenshot_type=overview\|receipt` | `multipart/form-data`. ≤10 MB. Each type is **one slot per ride** — re-uploading replaces it and deletes the old object. → `{ id, ride_id, screenshot_type, created_at, updated_at, replaced_previous }`. 20/hour per account. |
 | `GET /api/v1/tracked-rides/{id}/screenshots` | Owner-only. → `{ ride_id, screenshots: [ { id, screenshot_type, url, created_at, updated_at } ] }`. `url` is a **presigned, expiring** link — fetch it fresh, don't persist it. |
 
+### End-of-ride survey
+
+Screen 9's post-ride feedback — the scooter-condition pane and the
+navigation-feedback pane, submitted together as one request. Owner-only,
+single-shot: a ride can be surveyed once (`ride_surveys.tracked_ride_id`
+is `UNIQUE`, sql/052). Source of three point awards — see
+[Points](#points).
+
+### `POST /api/v1/tracked-rides/{id}/survey`
+
+```json
+{
+  "would_ride_again": true,
+  "was_perfect": false,
+  "issues": ["battery", "brakes"],
+  "model_bonus": { "apollo_top_speed_mph": 18.5 },
+  "nav_route_rating": 8,
+  "nav_deviated": false,
+  "nav_deviated_needs_improvement": null,
+  "nav_nps": 9,
+  "nav_qualitative": "The route through the park was great, thanks!",
+  "ride_route_id": "…-uuid|null"
+}
+```
+
+→ echoes every field back plus:
+
+```json
+{
+  "id": "…-uuid", "ride_id": "…-uuid", "vehicle_model": "Apollo",
+  "created_at": "...",
+  "points": [ { "action": "ride_survey", "points": 4 },
+              { "action": "nav_route_feedback", "points": 4 },
+              { "action": "nav_qualitative_feedback", "points": 6 } ]
+}
+```
+
+Every field is optional — submit only the panes you have answers for.
+`vehicle_model` is stamped **server-side** from
+`device_state.current_vehicle_model_name` for the ride's vehicle
+(`Astro`/`Cosmo`/`Apollo`, or `null` if unconfirmed) — never the client's
+own claim.
+
+`issues` is validated against a fixed 16-item vocabulary: `app_veo`,
+`acceleration`, `basket`, `battery`, `bell`, `brakes`, `connectivity`,
+`customer_service`, `dirty`, `kickstand`, `pedals`, `phone_holder`,
+`price`, `speedometer`, `scooterfyi_issue`, `vandalized`.
+
+`model_bonus` keys are validated against the ride's stamped
+`vehicle_model`: `cosmo_front_basket` (bool, Cosmo only),
+`apollo_top_speed_mph` (number 0–40, Apollo only),
+`astro_landscape_holder` (bool, Astro only). A key present for the wrong
+model — or when the model is unconfirmed — `422`s, same as an
+unrecognized key.
+
+`ride_route_id`, when set, must name a `POST /api/v1/ride-routes` row you
+own that is either unlinked or already linked to this ride; submitting
+the survey is what stamps the link (Screen 4 runs before Screen 6 start,
+so the row predates the ride it's about). A row linked to a *different*
+ride, or one that doesn't resolve to your account at all (including a
+de-identified route — its account link is already gone by the 28h
+sweep), `422`s the same way: a stale id and a guessed one are
+indistinguishable on purpose, so both fail identically.
+
+Award gates (amounts in [Points](#points)):
+
+- `ride_survey` (4) — any scooter-feedback field present
+  (`would_ride_again`, `was_perfect`, `issues`, or `model_bonus`),
+  `ride_options.end_survey` was on for this ride, and it isn't an
+  own-device ride (defensive — an own-device ride never has a
+  `tracked_rides` row to survey in the first place).
+- `nav_route_feedback` (4) — `nav_route_rating` present and
+  `ride_route_id` resolves.
+- `nav_qualitative_feedback` (6) — `nav_qualitative`, trimmed, is at
+  least 20 characters. "Meaningful" isn't machine-checkable; length is
+  the whole check.
+
+- `404` — no such ride (or not yours).
+- `409` `{"error": "ride_not_ended"}` — report your end first (`PATCH
+  .../end`) before surveying it.
+- `409` `{"error": "survey_already_submitted"}` — one survey per ride,
+  ever.
+- `422` `{"error": "bad_issue", "detail": "..."}` — an `issues` entry
+  outside the 16-item vocabulary.
+- `422` `{"error": "bad_model_bonus", "detail": "..."}` — an unrecognized
+  key, a key for the wrong (or unconfirmed) vehicle model, or a value
+  outside that key's type/bounds.
+- `422` `{"error": "bad_ride_route_id", "detail": "..."}` —
+  `ride_route_id` doesn't resolve to a route you own, or is already
+  linked to a different ride.
+
+## Ride routes
+
+Screen 4's chosen route (one of `safe`/`range`/`shade`/`express`, from
+`GET /api/v1/route/profiles`), stored so the end-of-ride survey above can
+rate the leg it names and `nav_distance_bonus` can confirm a route exists
+for the ride. The client calls this **only** when
+`ride_options.nav_improvement` is on.
+
+### `POST /api/v1/ride-routes`
+
+```json
+{
+  "tracked_ride_id": null,
+  "profile": "safe",
+  "origin": [39.7450, -104.9910],
+  "destination": [39.7020, -104.9550],
+  "route_polyline": "<precision-5 encoded polyline>",
+  "distance_meters": 2450.0,
+  "duration_seconds": 620.0,
+  "battery_percent_estimate": 4.5
+}
+```
+
+→ `{ "ride_route_id": "…-uuid" }`
+
+`tracked_ride_id` is `null` in the normal wizard flow — Screen 4 precedes
+ride start, and the survey links the row to a ride later. When non-null
+(the New-Destination loop re-running Screen 4 mid-ride), it must resolve
+to a ride **you own**, else `404` — same no-existence-oracle rule as
+every other tracked-rides sub-resource. No uniqueness on
+`tracked_ride_id`: a ride can accumulate more than one stored route (one
+per deliberate Screen-4 selection); `nav_distance_bonus` is still awarded
+at most once per ride regardless of row count.
+
+Owner-only. Limit **30/hour per account** (`ride_route_account`).
+
+- `400` `{"error": "unknown_profile", "profiles": [...]}` — `profile` isn't
+  a live `GET /api/v1/route/profiles` key.
+- `400` `{"error": "bad_polyline"}` — `route_polyline` doesn't decode
+  (precision 5) to at least 2 points.
+- `400` `{"error": "out_of_coverage", "graph_bbox": [...]}` — `origin` or
+  `destination` falls outside the routing graph, the same rejection
+  `GET /api/v1/route` uses.
+- `404` — `tracked_ride_id` is set and isn't a ride you own.
+- `422` — `distance_meters` outside 0–80 000, `duration_seconds` outside
+  0–10 800, or `battery_percent_estimate` outside 0–100. These are your
+  own client-side estimates, stored as reported; no award ever reads them
+  directly (`nav_distance_bonus` reads the *verified* donation distance
+  instead).
+- `429` — over 30/hour.
+
 ---
 
 ## Points
@@ -2179,20 +2711,22 @@ the whole ledger — not just the returned page.
 | Action | Points | Earned by |
 |---|---|---|
 | `qr_scan` | 100 | First scan of a given device by you |
-| `gbfs_trip_validated` | 20 | GBFS saw your scooter reappear within 20 m of your reported ride end |
 | `report_not_rideable` | 10 | `not_rideable` device report |
 | `report_vehicle_issue` | 10 | `damaged` device report |
 | `report_improper_parking` | 10 | `improperly_parked` device report |
 | `profile_completion` | 10 | One-time, on completing your profile |
 | `report_not_found` | 4 | `not_found` device report |
-| `waypoint` | 2 each | Per waypoint uploaded, credited when the ride ends |
+| `battery_contribution` | `8 + 2 × ⌈km / 2⌉` | A verified, `eligible` `POST .../track` donation, `ride_options.battery_modeling` on, not an own-device ride, both start/end battery known |
+| `nav_distance_bonus` | `2 × ⌈km / 3⌉` | Same donation, `ride_options.nav_improvement` on, and a stored `POST /api/v1/ride-routes` row linked to the ride |
+| `ride_survey` | 4 | `POST .../survey`, any scooter-feedback field present, `ride_options.end_survey` on, not an own-device ride |
+| `nav_route_feedback` | 4 | Same survey, `nav_route_rating` present and its `ride_route_id` resolves |
+| `nav_qualitative_feedback` | 6 | Same survey, `nav_qualitative` trimmed to ≥20 characters |
 
-**Ceiling: 100 points per ride**, summed across every ride award
-(`waypoint` + `gbfs_trip_validated`). A 600-waypoint ride earns 100, not
-1 200. When the ceiling binds, the ledger entry records the **granted**
-amount — `points` in `GET /api/v1/points` is always what you actually
-received, never a pre-cap figure — and an award with no headroom left
-writes no entry at all.
+**Ceiling: 100 points per ride**, summed across every ride award. When the
+ceiling binds, the ledger entry records the **granted** amount — `points`
+in `GET /api/v1/points` is always what you actually received, never a
+pre-cap figure — and an award with no headroom left writes no entry at
+all.
 
 `qr_scan` is exempt: a device scan is not a ride award, and it is worth
 100 on its own. `profile_completion` and report credits are likewise
@@ -2204,6 +2738,64 @@ The ceiling is forward-only; entries predating it were not adjusted. See
 `dead_battery` reports and device recommendations deliberately award
 nothing. Credits are idempotent per source row, so retries don't
 double-credit.
+
+**Superseded** (ride-mode overhaul): `waypoint` (2/waypoint, credited at
+`PATCH .../end`) and `gbfs_trip_validated` (20, GBFS reappearance within
+20 m) are no longer newly granted — GBFS reappearance is now an
+*eligibility gate*, not an award, and the reshaped `battery_contribution`
+above pays for verified distance instead. Both actions remain valid on
+historical ledger rows; nothing is rewritten.
+
+### `GET /api/v1/points/schedule`
+
+Public — no bearer. The authoritative action → award map, generated from
+`src/points.py` at request time. Rider-facing copy is interpolated from this,
+so a hardcoded "+5 points" string in a client can never contradict what the
+ledger pays. `Cache-Control: public, max-age=3600`.
+
+The body **is** the map — no envelope. Index it by action name.
+
+```json
+{
+  "qr_scan": { "points": 100 },
+  "gbfs_trip_validated": { "points": 20 },
+  "waypoint": { "points": 2 },
+  "profile_completion": { "points": 10 },
+  "report_not_rideable": { "points": 10 },
+  "report_not_found": { "points": 4 },
+  "report_vehicle_issue": { "points": 10 },
+  "report_improper_parking": { "points": 10 },
+  "battery_contribution": { "base": 8, "per_step": 2, "step_km": 2 },
+  "nav_route_feedback": { "points": 4 },
+  "nav_qualitative_feedback": { "points": 6 },
+  "nav_distance_bonus": { "base": 0, "per_step": 2, "step_km": 3 },
+  "ride_survey": { "points": 4 }
+}
+```
+
+Two entry shapes, and only two:
+
+| Shape | Fields | Award |
+|---|---|---|
+| flat | `points` | that many points, once |
+| formula | `base`, `per_step`, `step_km` | `base + per_step * ceil(km / step_km)` — a **started** step counts, so 2.1 km pays two |
+
+`nav_distance_bonus` carries `base: 0` because it is purely per-step; it is
+stated rather than omitted so `base + per_step * steps` is a number for every
+formula entry. An action you don't recognise is still renderable (the shapes
+are stable); an action that is **absent** means this API predates it — fall
+back to a baked default rather than showing nothing.
+
+Every published value is **even** — the operator's even-points invariant. It
+holds for formula outputs too: an even base plus an even per-step increment
+cannot sum to an odd award.
+
+The five ride-mode actions (`battery_contribution`, `nav_route_feedback`,
+`nav_qualitative_feedback`, `nav_distance_bonus`, `ride_survey`) were published
+**before** anything awarded them, because the ride wizard's info copy needs the
+numbers the day it ships. Phases A2 (`POST /api/v1/tracked-rides/{id}/track`)
+and A3 (`POST /api/v1/tracked-rides/{id}/survey`) have now wired all five —
+the Award table above is what the ledger pays today.
 
 ---
 
@@ -2312,9 +2904,39 @@ this, so the published policy and the enforced one can't drift:
 ```
 
 Current `data` keys: `sessions`, `magic_link_tokens`, `receipts`, `rides`,
-`reports`, `accounts`, `tracked_rides`, `device_photos`,
-`ride_transaction_screenshots`. Render the list as served — don't
-hardcode it, since new data classes get appended here first.
+`reports`, `accounts`, `user_preferences`, `tracked_rides`,
+`donated_tracks`, `user_points`, `device_photos`, `model_reports`,
+`ride_transaction_screenshots`. Render the list as served — don't hardcode
+it, since new data classes get appended here first.
+
+`donated_tracks` (added with track donation, above): a donated ride track
+loses its account link 4 hours after points settle, with a hard floor of
+28 hours after donation even if points never settle — a `POST .../track`
+response is never the last word on that ride's linkage. `user_points`
+(a pre-existing gap this endpoint now closes): ledger rows keep account,
+h3 cell and ride-start coordinates indefinitely — they're the leaderboard
+record — and are removed only by account deletion.
+
+### `GET /api/v1/meta/pricing`
+
+Public. The sales-tax rate Ride Mode's cost breakdown applies, from the
+`config.json` `"pricing"` block. Veo's rate **plans** stay client-side; the tax
+rate does not, because it changes when a ballot measure passes and every
+installed client would otherwise be wrong until it updated.
+
+```json
+{ "tax_rate": 0.0915, "currency": "USD", "as_of": "2025-01-01" }
+```
+
+`tax_rate` is a **fraction, not a percentage** — 0.0915, never 9.15. Multiply
+the pre-tax fare by it directly. The default is Denver's combined rate
+(2.90 % state + 1.00 % RTD + 0.10 % SCFD + 5.15 % city), effective 2025-01-01;
+`as_of` is that **effective date**, not when the response was generated. A
+configured value outside `[0, 1)` is refused (logged, default served) rather
+than shown to a rider as a hundredfold tax.
+
+Clients bake the same default for offline use, so this endpoint is a refresh,
+never a dependency. `Cache-Control: public, max-age=3600`.
 
 ---
 
@@ -2477,9 +3099,9 @@ const delta = bikeShareV1 - bikeShareDenver;
 | `403` | Forbidden | Valid session but not on the admin allowlist, or an action you haven't earned — e.g. recommending a device you have no recent completed ride on. |
 | `404` | No data | Requested layer has no snapshots (cold start), an unknown `vehicle_identifier`, or the resource isn't yours. |
 | `409` | Conflict | State says no: a second active tracked ride, a re-reported ride end, or a 4th photo on a device. Not retryable — resolve the conflict first. |
-| `413` | Too large | Receipt, device photo, or ride screenshot over 10 MB. |
-| `422` | Unprocessable | A required multipart part is missing, routing found no path (`no_route`, `no_route_from_location`), a client-asserted ride isn't [plausible](#is-this-ride-possible) (`implausible_speed`, `distance_exceeds_polyline`), or a waypoint breaks a [ride limit](#ride-limits) (`waypoint_too_far`, `ride_distance_cap_reached`). |
-| `429` | Rate limited | POST buckets are full — honor the `Retry-After` header (seconds). |
+| `413` | Too large | Receipt, device photo, or ride screenshot over 10 MB; a preference/Usual blob over 16 KB; `ride_options` over 4 KB; a track donation over 2 MB or 600 batches. |
+| `422` | Unprocessable | A required multipart part is missing, routing found no path (`no_route`, `no_route_from_location`), a client-asserted ride isn't [plausible](#is-this-ride-possible) (`implausible_speed`, `distance_exceeds_polyline`), a waypoint breaks a [ride limit](#ride-limits) (`waypoint_too_far`, `ride_distance_cap_reached`), or a track donation's chain failed verification (`chain_invalid`) or was never opted into (`tracking_not_opted`). |
+| `429` | Rate limited | A bucket is full — honor the `Retry-After` header (seconds). Mostly POST buckets, but three public GETs are limited too: `/api/v1/route` (30/min/IP), `/api/v1/route/profiles` (60/min/IP) and `/api/v1/geocode/search` (20/min/IP). |
 | `502` | Upstream failure | Email provider rejected a magic-link send. Retry in a minute. |
 | `503` | Service unavailable | No snapshots exist yet, or the feature isn't configured on this deployment (Google/magic-link/receipts/photo storage/router). |
 | `5xx` (other) | Server error | Worker or Postgres failure. Logged in Sentry; transient — retry. |
@@ -2499,11 +3121,19 @@ Branch on `typeof detail === "object" ? detail.error : detail`.
 | `waypoint_too_far` | `422` | Waypoint append, both ride mechanisms |
 | `ride_distance_cap_reached` | `422` | Waypoint append, both ride mechanisms |
 | `implausible_speed`, `distance_exceeds_polyline` | `422` | `POST /api/v1/rides` |
+| `bad_ride_options` | `422` | `POST /api/v1/tracked-rides` |
+| `ride_not_ended` | `409` | `POST /api/v1/tracked-rides/{id}/track` |
+| `already_donated` | `409` | `POST /api/v1/tracked-rides/{id}/track` |
+| `tracking_not_opted` | `422` | `POST /api/v1/tracked-rides/{id}/track` |
+| `chain_invalid` (carries `failing_check`, `batch_seq`) | `422` | `POST /api/v1/tracked-rides/{id}/track` |
+| `bad_batches`, `too_many_batches`, `donation_too_large` | `422` / `413` | `POST /api/v1/tracked-rides/{id}/track` |
+| `bad_bias`, `bad_query`, `geocoder_unavailable` | `400` / `422` / `503` | `/api/v1/geocode/search` |
 
 **Rate limits are per-account and tight** — most write buckets are 10–30
-per hour. The exception is tracked-ride waypoints at 600/hour. Every POST
-path needs a `429` path with `Retry-After`; treat that as part of wiring
-the endpoint, not as polish.
+per hour. The exception is tracked-ride waypoints at 600/hour; track
+donation is the tightest, at 6/hour, since one ride only ever needs one.
+Every POST path needs a `429` path with `Retry-After`; treat that as part
+of wiring the endpoint, not as polish.
 
 ---
 
@@ -2521,6 +3151,12 @@ Explicit `Cache-Control` headers, per endpoint:
 | `/api/v1/reports/summary` | `public, max-age=600` | — |
 | `/api/v1/reports/export/monthly.csv` | `public, max-age=600` | — |
 | `/api/v1/meta/privacy` | `public, max-age=3600` | — |
+| `/api/v1/meta/pricing` | `public, max-age=3600` | — |
+| `/api/v1/points/schedule` | `public, max-age=3600` | — |
+| `/api/v1/leaderboard/map` | `public, max-age=600` | weak, keyed on `(computed_at epoch, sha256(canonical cells)[:16])` -- deliberately NOT run-only; see the endpoint's notes |
+| `/api/v1/leaderboard/regional` | `public, max-age=600` | weak, same content-hash scheme as `/api/v1/leaderboard/map` |
+| `/api/v1/private/area-leaders` | none (admin) | -- |
+| `/api/v1/private/regional-leaders` | none (admin) | -- |
 
 Endpoints not listed set no cache headers; caching those for ≤30 s is
 safe in practice (a new snapshot lands at most every 10 minutes).

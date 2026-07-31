@@ -22,6 +22,7 @@ would be a worse breach of it than the overpayment was.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import h3
@@ -65,6 +66,44 @@ POINTS_QR_SCAN = 100
 # placeholder is a GUESS and MUST be confirmed or replaced before this
 # ships — search this constant name before launch.
 POINTS_PROFILE_COMPLETION = 10
+
+# --- Ride Mode awards (PLAN_RIDE_MODE_API.md phase A2; values locked by
+# RIDE_MODE_OVERHAUL_PLAN.md Decision 6) ------------------------------------
+#
+# The VALUES land in A1, ahead of the award machinery, on purpose: the whole
+# published schedule (GET /api/v1/points/schedule, src/api_points.py) is
+# generated from the constants below, and frontend F2's Screen 2 ℹ copy and
+# Screen 9 header interpolate it the day they deploy. A2 wires the awards and
+# needs no further edits here. Nothing about the numbers waits on the awards.
+#
+# EVEN-POINTS INVARIANT (owner rule): every point value in this program is
+# even, including every formula output. That is why the qualitative nav award
+# is 6 and not the owner's original 5 — the correction is the rule working,
+# not a typo. Enforced three ways: `CHECK (points % 2 = 0)` on user_points
+# (sql/053), an assert in credit_points (A2), and a sweep over every constant
+# and every published schedule value in the tests. If you add a value here,
+# it is even.
+#
+# Formulas (A2 owns the implementations; both read distance from the
+# track_donations row, and BOTH ROUND UP — the step is "per STARTED km"):
+#     battery_contribution = 8 + 2 * ceil(distance_m / 2000)
+#     nav_distance_bonus   =     2 * ceil(distance_m / 3000)
+POINTS_BATTERY_CONTRIBUTION_BASE = 8
+POINTS_BATTERY_CONTRIBUTION_PER_STEP = 2
+POINTS_NAV_ROUTE_FEEDBACK = 4
+POINTS_NAV_QUALITATIVE = 6      # even-points rule: owner corrected 5 -> 6
+POINTS_NAV_DISTANCE_PER_STEP = 2
+POINTS_RIDE_SURVEY = 4
+
+# Step sizes for the two distance formulas above. Canonical unit is
+# KILOMETRES because that is the unit the rider-facing copy and
+# /points/schedule's `step_km` are written in ("+2 points per 2 km"); the
+# metre forms are DERIVED so a step can never be retuned in one unit and not
+# the other, which is exactly the drift this endpoint exists to prevent.
+BATTERY_CONTRIBUTION_STEP_KM = 2
+NAV_DISTANCE_STEP_KM = 3
+BATTERY_CONTRIBUTION_STEP_METERS = BATTERY_CONTRIBUTION_STEP_KM * 1000
+NAV_DISTANCE_STEP_METERS = NAV_DISTANCE_STEP_KM * 1000
 
 # device_reports.report_type -> (user_points.action, points). Single
 # source of truth for the mapping, imported by
@@ -189,6 +228,17 @@ def credit_points(
     )
     if points is None:
         return None
+
+    # EVEN-POINTS INVARIANT (RIDE_MODE_OVERHAUL_PLAN.md Decision 6, sql/053).
+    # Safe against cap trimming: MAX_POINTS_PER_RIDE (100) and every
+    # POINTS_* constant this module defines are even, and even minus even is
+    # even, so a trimmed remainder from _apply_ride_cap is always even too.
+    # This is the second of three enforcement points (the others: sql/053's
+    # `CHECK (points % 2 = 0)` on user_points, and a test sweeping every
+    # constant and formula output) — an AssertionError here means a caller
+    # requested an odd award, which is a bug in the caller, not in a rider's
+    # input.
+    assert points % 2 == 0, f"odd points award: action={action} points={points}"
 
     h3_8 = h3_8_index_for(lat, lng)
     cur.execute(
@@ -315,6 +365,73 @@ def credit_gbfs_validation_points(
     )
 
 
+def credit_battery_contribution(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    distance_m: float, start_lat: float, start_lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md Decision 6:
+    `POINTS_BATTERY_CONTRIBUTION_BASE` plus
+    `POINTS_BATTERY_CONTRIBUTION_PER_STEP` for every started
+    `BATTERY_CONTRIBUTION_STEP_METERS` of verified track distance, rounded
+    UP — `8 + 2 * ceil(distance_m / 2000)`. `distance_m` is the verified
+    distance off the `track_donations` row, not a client claim.
+
+    Every PRECONDITION (a verified donation, both start/end batteries
+    known, `ride_options.battery_modeling` on, not an own-device ride) is
+    the CALLER's to check — the donation handler / `finalize_validation`,
+    per the A2 spec — this function is only the formula and the ledger
+    write, same division of labor as credit_waypoint_points /
+    credit_gbfs_validation_points above.
+
+    lat/lng = the ride's START point (start_lat/start_lng), NOT its end —
+    RIDE_MODE_OVERHAUL_PLAN.md's Risk 3 rule for the reshaped awards,
+    deliberately unlike the two superseded ride awards above, which file at
+    the ride's end.
+
+    source_table='tracked_rides', source_id=str(ride_id): this is what
+    makes MAX_POINTS_PER_RIDE (src/ride_limits.py) actually bind via
+    _apply_ride_cap/_RIDE_SOURCE_TABLES, and what makes a retried donation
+    dedupe against itself through credit_points' ON CONFLICT. Any other
+    source_table would silently bypass both."""
+    points = POINTS_BATTERY_CONTRIBUTION_BASE + POINTS_BATTERY_CONTRIBUTION_PER_STEP * math.ceil(
+        distance_m / BATTERY_CONTRIBUTION_STEP_METERS
+    )
+    return credit_points(
+        cur, account_id=account_id, action="battery_contribution", points=points,
+        lat=start_lat, lng=start_lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
+    )
+
+
+def credit_nav_distance_bonus(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    distance_m: float, start_lat: float, start_lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md Decision 6:
+    `POINTS_NAV_DISTANCE_PER_STEP` for every started `NAV_DISTANCE_STEP_METERS`
+    of verified track distance, rounded UP — `2 * ceil(distance_m / 3000)`.
+    `distance_m` is the same verified `track_donations` distance
+    credit_battery_contribution reads; there is no flat base term (a 1 km
+    trip earns exactly 2 points, per the owner's copy).
+
+    Same division of labor as credit_battery_contribution:
+    `ride_options.nav_improvement` on and a `ride_routes` row existing are
+    the CALLER's preconditions (PLAN_RIDE_MODE_API.md phase A3), not
+    checked here.
+
+    lat/lng = the ride's START point, same Risk 3 rule as above.
+    source_table='tracked_rides', source_id=str(ride_id): same
+    per-ride-cap/dedupe reason as credit_battery_contribution — this is the
+    award the spec calls out explicitly as a real bug risk if gotten
+    wrong."""
+    points = POINTS_NAV_DISTANCE_PER_STEP * math.ceil(distance_m / NAV_DISTANCE_STEP_METERS)
+    return credit_points(
+        cur, account_id=account_id, action="nav_distance_bonus", points=points,
+        lat=start_lat, lng=start_lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
+    )
+
+
 def maybe_credit_profile_completion(cur, account_id: int) -> dict[str, Any] | None:
     """Call after any successful write to the accounts row that could
     newly satisfy profile completion — wired into
@@ -358,4 +475,81 @@ def maybe_credit_profile_completion(cur, account_id: int) -> dict[str, Any] | No
     return credit_points(
         cur, account_id=account_id, action="profile_completion",
         points=POINTS_PROFILE_COMPLETION, lat=lat, lng=lng,
+    )
+
+
+# --- Ride Mode survey awards (PLAN_RIDE_MODE_API.md phase A3; src/api_ride_surveys.py) -----
+#
+# All three are flat awards (no distance formula) credited from
+# POST /api/v1/tracked-rides/{ride_id}/survey. Same division of labor as
+# credit_battery_contribution / credit_nav_distance_bonus above: every
+# precondition is the CALLER's to check (src/api_ride_surveys.py reads the
+# gates off the ride's ride_options and the survey payload) — these
+# functions are only the ledger write. lat/lng = the ride's START point in
+# every case, the same Risk 3 rule every ride-mode award follows (not the
+# ride's end, unlike the two superseded awards above).
+#
+# source_table='tracked_rides', source_id=str(ride_id) in every case: this
+# is what makes MAX_POINTS_PER_RIDE (src/ride_limits.py) actually bind via
+# _apply_ride_cap/_RIDE_SOURCE_TABLES, and what makes a retried call dedupe
+# against itself through credit_points' ON CONFLICT — a survey is also
+# single-shot at the endpoint level (ride_surveys.tracked_ride_id UNIQUE,
+# sql/052), so that dedupe is only ever a backstop here, same as it is for
+# credit_battery_contribution.
+
+
+def credit_ride_survey(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    lat: float, lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_RIDE_SURVEY` (4) for
+    Screen 9's scooter-feedback pane. The CALLER checks (any scooter-
+    feedback field present) AND `ride_options.end_survey` AND not an
+    own-device ride before calling — own-device is defensive, not a
+    reachable honest path, since an own-device ride never has a
+    `tracked_rides` row to survey in the first place."""
+    return credit_points(
+        cur, account_id=account_id, action="ride_survey", points=POINTS_RIDE_SURVEY,
+        lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
+    )
+
+
+def credit_nav_route_feedback(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    lat: float, lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_NAV_ROUTE_FEEDBACK` (4)
+    for rating the selected route. The CALLER checks `nav_route_rating` is
+    present AND `ride_route_id` resolves to a `ride_routes` row owned by
+    the caller (unlinked, or already linked to this ride — see
+    src/api_ride_surveys.py's linking logic) before calling.
+
+    Not `credit_nav_distance_bonus`'s twin in every respect: unlike that
+    A2 award, this one is not gated here on `ride_options.nav_improvement`
+    — PLAN_RIDE_MODE_API.md's A3 endpoint spec states only the rating +
+    resolved-route precondition for this action, so that is what the
+    caller checks."""
+    return credit_points(
+        cur, account_id=account_id, action="nav_route_feedback",
+        points=POINTS_NAV_ROUTE_FEEDBACK,
+        lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
+    )
+
+
+def credit_nav_qualitative_feedback(
+    cur, *, account_id: int, vehicle_identifier: str | None,
+    lat: float, lng: float, ride_id: str,
+) -> dict[str, Any] | None:
+    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_NAV_QUALITATIVE` (6)
+    for free-text navigation feedback. The CALLER checks
+    `len(nav_qualitative.strip()) >= 20` before calling — "meaningful" is
+    not machine-checkable and no content heuristic is attempted here or
+    upstream."""
+    return credit_points(
+        cur, account_id=account_id, action="nav_qualitative_feedback",
+        points=POINTS_NAV_QUALITATIVE,
+        lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
+        source_table="tracked_rides", source_id=str(ride_id),
     )

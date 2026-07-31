@@ -66,6 +66,16 @@
 # socket to do that itself.
 30 4 * * * cd /app && python -m src.cli refresh_routing_graph
 
+# Photon geocoding index refresh. The index itself is rebuilt BY HAND, roughly
+# quarterly (scripts/build_photon_index.md), so this is only an R2 ETag check
+# and a no-op on all but ~4 days a year. 05:00 keeps it clear of the 04:30
+# routing-graph refresh: both unpack multi-GB artifacts into volumes on the
+# same disk. A changed index is logged loudly, because the photon container has
+# to be RESTARTED to load it (Photon maps the index at JVM startup) and this
+# container deliberately has no Docker socket to do that itself — the same
+# limitation as refresh_routing_graph above.
+0 5 * * * cd /app && python -m src.cli refresh_photon_index
+
 # Battery model. Reads the last ~26h of raw_telemetry_points, so it MUST run
 # BEFORE the 02:00 archive, which flushes that table to R2 and truncates it.
 # Running after would see only the handful of cycles since the truncate. 01:30
@@ -86,3 +96,22 @@
 # enforced upstream at send time regardless, so the only cost of lag here is
 # how long our own UI keeps saying "we'll text you" to someone who opted out.
 */5 * * * * cd /app && python -m src.cli poll_comms_replies
+
+# De-id sweep: severs account linkage on donated ride tracks
+# (track_donations/donated_track_points -- RIDE_MODE_OVERHAUL_PLAN.md's
+# "De-id" glossary entry / PLAN_RIDE_MODE_API.md phase A2) 4h after a
+# ride's points settle, with a hard floor of 28h after donation even if
+# points never settle -- so a donated track is never account-linked past
+# 28h. Also carries a to_regclass('ride_routes')-guarded arm for phase
+# A3's route geometry (sql/052) that is a safe no-op until that table
+# exists, so this line is correct regardless of A2/A3 landing order.
+# Hourly at :15 -- cheap, idempotent (WHERE deidentified_at IS NULL),
+# safe to run every hour forever.
+15 * * * * cd /app && python -m src.cli deidentify_donations
+
+# H3 r8 area leader report (FEATURE_PLAN_2026-07.md §11 / PLAN_RIDE_MODE_API.md
+# phase A4): recomputes the trailing-28-day per-cell leaderboard, full replace
+# (src/area_leaders.py:recompute). Runs at the same 9:00 AM Denver slot as the
+# daily_sla/daily_trips rollups above, but at :15 so it never contends with
+# them for the same few seconds of device_history seq-scan I/O.
+15 9 * * * cd /app && python -m src.cli recompute_area_leaders

@@ -148,22 +148,55 @@ def status() -> dict[str, Any]:
 
 # --- Response helpers --------------------------------------------------------
 
-def trip_shape(trip: dict[str, Any]) -> list[tuple[float, float]]:
-    """Decode and concatenate every leg's shape into (lat, lon) pairs.
+def trip_shape_with_leg_offsets(
+    trip: dict[str, Any],
+) -> tuple[list[tuple[float, float]], list[int | None]]:
+    """Flatten every leg's shape AND report each leg's index offset.
+
+    Returns ``(points, offsets)`` where ``points`` is the concatenated
+    (lat, lon) shape and ``offsets[i]`` is the number to add to a leg-i-local
+    shape index (Valhalla's ``begin_shape_index`` / ``end_shape_index`` are
+    per-leg) to address the same vertex in ``points``. ``offsets[i]`` is None
+    when leg i contributed nothing at all, so its local indices address no
+    coordinate in the flattened shape.
+
+    Shape flattening and offset computation MUST happen in one pass: the
+    duplicated vertex between consecutive legs is dropped **conditionally**
+    (only when the boundary vertex actually repeats) and legs with no shape are
+    skipped entirely, so "one dropped vertex per join" is wrong. Two separate
+    passes would eventually disagree and silently misplace every turn cue —
+    hence ``trip_shape()`` is a thin wrapper over this function rather than its
+    own loop.
 
     Valhalla encodes route shapes at precision 6, not the precision 5 used for
     stored ride polylines — hence the explicit argument.
     """
     points: list[tuple[float, float]] = []
-    for leg in trip.get("legs", []):
+    offsets: list[int | None] = []
+    for leg in trip.get("legs", []) or []:
         encoded = leg.get("shape")
         if not encoded:
+            offsets.append(None)
             continue
         leg_points = decode_polyline(encoded, precision=6)
+        if not leg_points:
+            offsets.append(None)
+            continue
+        offset = len(points)
         # Consecutive legs repeat the shared vertex; drop the duplicate.
-        if points and leg_points and points[-1] == leg_points[0]:
+        if points and points[-1] == leg_points[0]:
             leg_points = leg_points[1:]
+            # This leg's local index 0 is the vertex already emitted as
+            # points[-1], so its indices shift one FURTHER back.
+            offset -= 1
+        offsets.append(offset)
         points.extend(leg_points)
+    return points, offsets
+
+
+def trip_shape(trip: dict[str, Any]) -> list[tuple[float, float]]:
+    """Decode and concatenate every leg's shape into (lat, lon) pairs."""
+    points, _ = trip_shape_with_leg_offsets(trip)
     return points
 
 
@@ -202,6 +235,49 @@ def trip_summary(trip: dict[str, Any]) -> dict[str, Any]:
         "duration_seconds": round(summary.get("time", 0.0), 1),
         "elevation_gain_meters": elevation_gain_meters(trip),
     }
+
+
+def trip_maneuvers(trip: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn-by-turn maneuvers, flattened across legs, for the nav HUD.
+
+    Shape indices are rewritten to address the flattened shape returned by
+    ``trip_shape()`` — Valhalla numbers them per leg, and the flattening drops
+    duplicated boundary vertices, so the raw values would misplace turn cues on
+    any multi-leg route. Maneuvers belonging to a leg that contributed no shape
+    are dropped: an index that addresses no coordinate is worse than a missing
+    instruction.
+
+    ``length`` arrives in KILOMETRES (``route()`` pins
+    ``directions_options.units: "kilometers"``) and is converted to metres the
+    same way ``trip_summary()`` converts ``summary.length``; ``time`` is already
+    seconds. Both stay None when Valhalla omitted them rather than reading as a
+    zero-length, instantaneous maneuver.
+    """
+    _, offsets = trip_shape_with_leg_offsets(trip)
+    out: list[dict[str, Any]] = []
+    # strict=: offsets carries exactly one entry per leg, including the skipped
+    # ones — a mismatch would mean the helper stopped pairing 1:1 with legs and
+    # every index after the gap would be silently wrong.
+    for leg, offset in zip(trip.get("legs", []) or [], offsets, strict=True):
+        if offset is None:
+            continue
+        for man in leg.get("maneuvers", []) or []:
+            length_km = man.get("length")
+            time_s = man.get("time")
+            begin = man.get("begin_shape_index")
+            end = man.get("end_shape_index")
+            out.append({
+                "instruction": man.get("instruction"),
+                "type": man.get("type"),
+                # Always a list: an unnamed way (alley, cycleway link) simply
+                # has no street_names, and clients render the list directly.
+                "street_names": list(man.get("street_names") or []),
+                "length_meters": round(length_km * 1000.0, 1) if length_km is not None else None,
+                "time_seconds": round(time_s, 1) if time_s is not None else None,
+                "begin_shape_index": begin + offset if begin is not None else None,
+                "end_shape_index": end + offset if end is not None else None,
+            })
+    return out
 
 
 def to_geojson(points: list[tuple[float, float]]) -> dict[str, Any]:

@@ -28,7 +28,7 @@
 </header>
 <main>
 <h1>Privacy Policy</h1>
-<p class="updated">Last updated: July 28, 2026</p>
+<p class="updated">Last updated: July 30, 2026</p>
 
 <p>This Privacy Policy explains how <strong>Mile High Technology
 Consulting, LLC</strong>, doing business as <strong>"scooter.fyi"</strong>
@@ -52,6 +52,11 @@ submit a report, or subscribe.</p>
 emailed link), rate-plan preference, theme, favorites</td>
 <td>Sign-in, personalizing the cost ticker, remembering your
 preferences</td></tr>
+<tr><td>Preferences</td><td>Saved map settings, your find-ride preference,
+and ride-mode "Usuals" (saved ride-option presets) — opaque settings blobs
+your browser sends us, stored verbatim and never interpreted</td>
+<td>Remembering how you like the map and the ride wizard set up, across
+devices</td></tr>
 <tr><td>Sessions</td><td>A hashed bearer token, issuing IP address, user
 agent</td><td>Keeping you signed in; detecting abuse</td></tr>
 <tr><td>Reports</td><td>Device failure reports, missed-discount reports,
@@ -63,7 +68,10 @@ browser user-agent string the report arrived with</td>
 vehicle catalog. IP and user-agent are kept to detect abuse of the report
 forms, which accept anonymous submissions</td></tr>
 <tr><td>Ride history</td><td>Ride start/end time, duration, distance,
-estimated cost, route polyline, and any GPS waypoints you upload</td>
+estimated cost, route polyline, any GPS waypoints you upload, the ride-mode
+options you chose for that ride, the ride minutes and rate-plan tier you
+report at the end, and a one-time signing key we issue to your device for
+that ride so your own recording can be verified later</td>
 <td>Your own ride log — opt-in, and deletable by you at any
 time</td></tr>
 <tr><td>Technical</td><td>IP address on requests, standard server
@@ -125,7 +133,62 @@ Deleted automatically after 18 months; the report record itself is kept
 <tr><td>Ride history</td><td>Until you delete it</td><td>Route polylines
 are the most sensitive data we hold. Deleting a ride (or all your rides)
 is an immediate, permanent hard delete — no soft-delete, no backup
-retention, never reused for analytics.</td></tr>
+retention, never reused for analytics. If you donated that ride's track
+(see "Donated ride tracks" below), the delete also cascades to that
+donation record, but only until our hourly de-identification sweep runs
+(within 28 hours of donation) — after that, the donation record has
+already had its account link removed and there is nothing left for a
+ride delete to reach.</td></tr>
+<tr><td>Donated ride tracks</td><td>Account link removed within 28
+hours</td><td>If you opt in to "Improve battery modeling" or
+"Navigation Improvement" during a ride and donate your saved track
+afterward, we verify it once and store a trip record (start/end points,
+distance, timing) linked to your account. An hourly job removes that
+account link 4 hours after your points for the trip settle, with a hard
+floor of 28 hours after donation even if points never settle — so the
+link never survives past 28 hours, and recorded waypoint timestamps are
+coarsened to the minute at the same time. What's left afterward, with no
+account or ride linkage: the trip's derived battery observation (vehicle
+model, start/end battery percentage, distance, duration), which we keep
+indefinitely to improve range predictions for that vehicle model.</td></tr>
+<tr><td>Ride routes</td><td>Account link removed within 28
+hours</td><td>When you turn on "Navigation Improvement" before a ride, each
+route you pick on Screen 4 (including a mid-ride reselect) is stored --
+profile, origin/destination, the route geometry, and your distance/
+duration/battery estimates -- linked to your account and, once known, the
+ride. The same hourly sweep that de-identifies donated tracks removes this
+link 28 hours after the route was stored, whether or not you ever donated
+or surveyed that ride; the route geometry itself is kept afterward with no
+link back to you.</td></tr>
+<tr><td>Ride surveys</td><td>Until you delete the ride, or your
+account</td><td>Your end-of-ride feedback (scooter-condition answers,
+free-text navigation comments, route ratings). It carries no geometry of
+its own, so unlike ride routes above it is never de-identified -- it stays
+linked to your account and ride under the same rule as your ride history:
+deleting the ride cascades to its survey, and deleting your account
+removes every survey you wrote.</td></tr>
+<tr><td>Points ledger</td><td>Indefinite; deleted only with your
+account</td><td>Every points award you earn is recorded permanently —
+your account, the coarse map area (H3 resolution-8 cell) and ride start
+coordinates it was earned at, the action and point value, and, for
+device-tied awards, the vehicle. These rows are the leaderboard record
+itself: the area leaderboard is computed directly from them, so unlike
+donated tracks above they are never de-identified — only deleting your
+account removes them. Whether they appear on the public leaderboard is
+controlled separately by your account's visibility settings (public
+username, leaderboard participation).</td></tr>
+<tr><td>Leaderboard report</td><td>Recomputed nightly; deleted only with
+your account</td><td>Each night we recompute, from the points ledger
+above, who holds the top 3 point totals in each map area (H3
+resolution-8 cell) over the trailing 28 days -- your account id, your
+summed points there, and when you first earned points in that area. This
+report is fully replaced on every nightly run, never accumulates on its
+own, and is deleted immediately if your account is deleted. Whether a
+rank you hold is actually shown on the public leaderboard map is decided
+fresh on every page load from your account's current visibility settings
+(public username, leaderboard participation) -- turning either off
+removes you from the public view right away, not at the next nightly
+run.</td></tr>
 <tr><td>Model-report photos</td><td>18 months</td><td>A photo attached to
 a vehicle-model correction. Same private bucket, same full re-encode that
 strips EXIF/GPS/camera metadata, and the same 18-month deletion job as

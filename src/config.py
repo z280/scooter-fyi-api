@@ -133,6 +133,21 @@ class ValhallaConfig:
 
 
 @dataclass(frozen=True)
+class GeocodeConfig:
+    """The self-hosted Photon sidecar behind /api/v1/geocode/search.
+
+    `upstream` is swappable by config alone: the proxy normalizes and
+    rate-limits, so pointing it at a hosted geocoder is a config change rather
+    than a code change. `enabled: false` makes the endpoint 503 with the same
+    `geocoder_unavailable` a dead sidecar produces — the client's degraded path
+    is already that one, so an operator can turn geocoding off without
+    shipping a frontend.
+    """
+    upstream: str
+    enabled: bool
+
+
+@dataclass(frozen=True)
 class AuthConfig:
     allowed_github_orgs: tuple[str, ...]
     callback_url: str
@@ -160,6 +175,22 @@ class AccountsConfig:
 
 
 @dataclass(frozen=True)
+class PricingConfig:
+    """What GET /api/v1/meta/pricing publishes for Ride Mode's cost breakdown.
+
+    `tax_rate` is a FRACTION (0.0915), never a percentage (9.15) — a
+    hundredfold tax produces no error, just a wrong number in front of a
+    rider, so api_meta refuses an out-of-range value and serves its default.
+    `as_of` is the rate's EFFECTIVE date, not a build date. Veo's rate PLANS
+    stay client-side; only the legal tax rate lives here, because it changes on
+    a city council's schedule rather than a deploy's.
+    """
+    tax_rate: float
+    currency: str
+    as_of: str
+
+
+@dataclass(frozen=True)
 class SpatialConfig:
     # Distance (meters) the actual Denver city polygon is buffered outward
     # before deciding denver_core membership. Veo lets riders start some
@@ -182,8 +213,10 @@ class AppConfig:
     cors_origin_patterns: tuple[str, ...]
     r2: R2Config
     valhalla: ValhallaConfig
+    geocode: GeocodeConfig
     auth: AuthConfig
     accounts: AccountsConfig
+    pricing: PricingConfig
     device_tracking: DeviceTrackingConfig
     spatial: SpatialConfig
     log_level: str
@@ -270,6 +303,13 @@ def load() -> AppConfig:
         cors_origin_patterns=tuple(raw["cors"].get("allowed_origin_patterns", [])),
         r2=R2Config(**raw["r2"]),
         valhalla=_valhalla(raw.get("valhalla", {})),
+        # Defaults to the compose service name and enabled, so a config.json
+        # that predates the block still boots and still reaches the sidecar.
+        geocode=GeocodeConfig(
+            upstream=(raw.get("geocode", {}).get("upstream")
+                      or "http://photon:2322"),
+            enabled=bool(raw.get("geocode", {}).get("enabled", True)),
+        ),
         auth=AuthConfig(
             allowed_github_orgs=tuple(raw["auth"]["allowed_github_orgs"]),
             callback_url=raw["auth"]["callback_url"],
@@ -280,6 +320,14 @@ def load() -> AppConfig:
                     "magic_link_url_template", "https://denver.scooter.fyi/auth?ml={token}"
                 )
             ),
+        ),
+        # Denver's combined rate as of 2025-01-01 (2.90 state + 1.00 RTD +
+        # 0.10 SCFD + 5.15 city). api_meta validates it and falls back to the
+        # same number, so a missing block and a nonsense one behave alike.
+        pricing=PricingConfig(
+            tax_rate=float(raw.get("pricing", {}).get("tax_rate", 0.0915)),
+            currency=raw.get("pricing", {}).get("currency", "USD"),
+            as_of=raw.get("pricing", {}).get("as_of", "2025-01-01"),
         ),
         device_tracking=DeviceTrackingConfig(
             stationary_threshold_meters=float(

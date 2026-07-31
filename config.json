@@ -186,12 +186,21 @@
       }
     ]
   },
+  "geocode": {
+    "upstream": "http://photon:2322",
+    "enabled": true
+  },
   "auth": {
     "allowed_github_orgs": [],
     "callback_url": "https://data.scooter.fyi/admin/auth/callback"
   },
   "accounts": {
     "magic_link_url_template": "https://denver.scooter.fyi/auth?ml={token}"
+  },
+  "pricing": {
+    "tax_rate": 0.0915,
+    "currency": "USD",
+    "as_of": "2025-01-01"
   },
   "device_tracking": {
     "stationary_threshold_meters": 16

@@ -13,4 +13,8 @@ boto3==1.35.65
 pyarrow==18.1.0
 h3==4.1.2
 pillow==11.0.0
+# Unpacking the Photon geocoding index (photon-index-<date>.tar.zst) in
+# src/r2_map.py: stdlib tarfile reads only gz/bz2/xz and the worker image ships
+# no zstd binary. Imported lazily, so src.cli stays importable without it.
+zstandard==0.25.0
 

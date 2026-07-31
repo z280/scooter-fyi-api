@@ -21,6 +21,7 @@ import re
 from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import Any
 
+import h3
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .identity import hash_plate
@@ -401,5 +402,140 @@ def private_trips_daily(
                 "popularity_rank": int(r[6]),
             }
             for r in rows
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/private/area-leaders — admin sibling of GET /api/v1/leaderboard/map
+# (FEATURE_PLAN §11.4: "full ranks, ties, account ids"). Unlike the public
+# endpoint (src/api_leaderboard.py), this view applies NO privacy filtering —
+# every stored rank 1..3, its real account_id, and the raw stored points/
+# first_point_at tie-break provenance, exactly as sql/048's
+# h3_r8_area_leaders table holds them.
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/private/area-leaders")
+def private_area_leaders(
+    user: SessionUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Full, unfiltered §11 H3 r8 area-leader report: every stored rank
+    (1..3) per cell with its real account_id, points, and first_point_at
+    tie-break provenance — no show_in_leaderboards/show_public_username/
+    display_name filtering (that read-time privacy layer belongs to the
+    public GET /api/v1/leaderboard/map only)."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            # REVIEW FIX: same snapshot-consistency issue (and same fix) as
+            # the public GET /api/v1/leaderboard/map sibling — see that
+            # endpoint's own comment. REPEATABLE READ must be set before the
+            # first statement in the transaction.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute(
+                """
+                SELECT computed_at, window_start, window_end, cell_count, led_cells
+                FROM h3_r8_area_leader_runs
+                ORDER BY computed_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            run = cur.fetchone()
+            if not run:
+                raise HTTPException(503, "no leaderboard computed yet")
+            computed_at, window_start, window_end, cell_count, led_cells = run
+
+            cur.execute(
+                """
+                SELECT r.h3_8_index, r.has_devices, r.has_points,
+                       r.total_points, r.distinct_earners,
+                       l.rank, l.account_id, l.points, l.first_point_at
+                FROM h3_r8_area_report r
+                LEFT JOIN h3_r8_area_leaders l ON l.h3_8_index = r.h3_8_index
+                ORDER BY r.h3_8_index, l.rank
+                """
+            )
+            rows = cur.fetchall()
+
+    cells: dict[str, dict[str, Any]] = {}
+    for (h3_idx, has_devices, has_points, total_points, distinct_earners,
+         rank, account_id, points, first_point_at) in rows:
+        key = h3.int_to_str(int(h3_idx))
+        cell = cells.get(key)
+        if cell is None:
+            cell = cells[key] = {
+                "has_devices": bool(has_devices),
+                "has_points": bool(has_points),
+                "total_points": int(total_points),
+                "distinct_earners": int(distinct_earners),
+                "leaders": [],
+            }
+        if rank is None:
+            continue
+        cell["leaders"].append({
+            "rank": int(rank),
+            "account_id": account_id,
+            "points": int(points),
+            "first_point_at": first_point_at.isoformat() if first_point_at else None,
+        })
+
+    return {
+        "viewed_by": user.email,
+        "computed_at": computed_at.isoformat(),
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "cell_count": int(cell_count),
+        "led_cells": int(led_cells),
+        "cells": cells,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/private/regional-leaders — admin sibling of GET
+# /api/v1/leaderboard/regional (sql/054 regional_leaders). Unlike the public
+# endpoint, this view applies NO privacy filtering — every stored rank
+# 1..MAX_REGIONAL_LEADERS, its real account_id, and the raw stored
+# points/first_point_at tie-break provenance.
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/private/regional-leaders")
+def private_regional_leaders(
+    user: SessionUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Full, unfiltered whole-database leaderboard: every stored rank with
+    its real account_id, points, and first_point_at tie-break provenance —
+    no show_in_leaderboards/show_public_username/display_name filtering."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute(
+                """
+                SELECT computed_at, window_start, window_end
+                FROM h3_r8_area_leader_runs
+                ORDER BY computed_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            run = cur.fetchone()
+            if not run:
+                raise HTTPException(503, "no leaderboard computed yet")
+            computed_at, window_start, window_end = run
+
+            cur.execute(
+                "SELECT rank, account_id, points, first_point_at "
+                "FROM regional_leaders ORDER BY rank"
+            )
+            rows = cur.fetchall()
+
+    return {
+        "viewed_by": user.email,
+        "computed_at": computed_at.isoformat(),
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "leaders": [
+            {
+                "rank": int(rank),
+                "account_id": account_id,
+                "points": int(points),
+                "first_point_at": first_point_at.isoformat() if first_point_at else None,
+            }
+            for rank, account_id, points, first_point_at in rows
         ],
     }

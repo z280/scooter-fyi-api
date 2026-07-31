@@ -15,3 +15,10 @@ services:
   pipeline_worker:
     ports:
       - "8080:8080"     # expose worker on host for browser/curl access
+
+  photon:
+    ports:
+      - "2322:2322"     # geocoder on the host: curl /status and /api directly
+                        # when debugging why a lookup returns nothing (the #1
+                        # cause is a lat/lon-ordered bbox — Photon wants
+                        # minLon,minLat,maxLon,maxLat)
