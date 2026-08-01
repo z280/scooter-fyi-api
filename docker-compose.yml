@@ -346,7 +346,24 @@ networks:
   # scheduler. Renamed from the implicit `veo-audit_default`, which had been
   # doubling as the host's PUBLIC INGRESS network for 24 hostnames across six
   # domains. It is now only what its name says.
+  #
+  # `external: true` (deploy fix): the rename commit's own message says "all
+  # five networks already exist... this deploy is a no-op at the connectivity
+  # level" -- i.e. `scooter-internal` was renamed on the VPS AHEAD of this
+  # file landing, precisely so the rollout would be a no-op. But without
+  # `external: true`, Compose does not treat a same-named pre-existing
+  # network as "adopt it" -- it tries to CREATE and own a network called
+  # `scooter-internal`, collides with the one already there (which carries no
+  # compose-managed label, since it wasn't created by this compose project),
+  # and refuses with "network scooter-internal was found but has incorrect
+  # label com.docker.compose.network... exited with status 1". That has
+  # failed `docker compose up -d` on every deploy since this rename merged
+  # (confirmed via the last several `Build and deploy` Action runs), so
+  # nothing has actually rolled out to production since -- silently, because
+  # the earlier build-push job step still goes green. Fixed the same way the
+  # other two externally-owned networks below already are.
   default:
+    external: true
     name: scooter-internal
 
   # z280-comms, the messaging service. Membership IS the access control:
