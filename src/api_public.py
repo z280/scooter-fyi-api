@@ -13,7 +13,9 @@ import h3
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from . import boundaries
+from .api_device_features import feature_payload
 from .api_frontend_reports import reliability_report_type_sql
+from .device_features import STATUS_NEEDS_CONFIRMED as FEATURE_STATUS_NEEDS_CONFIRMED
 from .daily_sla import _AVG_FIELDS
 from .dwell_stats import stats_for_cycle
 from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
@@ -417,7 +419,18 @@ def _devices_current_impl(
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
                 "       r.vehicle_use_type, r.vehicle_model_name, "
                 "       r.vehicle_plate, ds.first_ever_observed_at, "
-                "       ds.max_observed_range_meters, ds.max_observed_range_at "
+                "       ds.max_observed_range_meters, ds.max_observed_range_at, "
+                # Crowdsourced equipment (sql/055). feature_status is on the
+                # wire for EVERY device, unconditionally and without an
+                # ?include= token: it is what the device card's "☑️ Confirm
+                # Features" button reads to decide whether it is offering 12,
+                # 14 or 6 points, so a client that has to opt in would be a
+                # client that shows the wrong number. It is one short string
+                # per device. The four feature columns ride along with it —
+                # they are two booleans' worth of payload and are what any
+                # equipment filter has to read.
+                "       ds.feature_status, ds.has_bell, ds.has_cup_holder, "
+                "       ds.has_phone_holder, ds.features_poor_condition "
                 "FROM raw_telemetry_points r "
                 "LEFT JOIN device_state ds USING (vehicle_identifier) "
                 f"WHERE {' AND '.join(where)} "
@@ -486,6 +499,13 @@ def _devices_current_impl(
             ),
             "vehicle_use_type": r[24],
             "vehicle_model_name": r[25],
+            # sql/055. The LEFT JOIN means a device with no device_state row
+            # yet (first cycle it was ever seen) reads NULL here, not the
+            # column default — so the fallback is applied in Python too.
+            # "Needs features confirmed" is the right answer for a vehicle
+            # we have never even recorded state for.
+            "feature_status": r[30] or FEATURE_STATUS_NEEDS_CONFIRMED,
+            "device_features": feature_payload(r[31], r[32], r[33], r[34]),
         }
         if "h3" in tokens:
             # String-encoded (canonical h3 hex form): the raw 64-bit ints

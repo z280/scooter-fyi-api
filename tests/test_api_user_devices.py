@@ -22,8 +22,9 @@ from src.accounts import SessionUser
 _CYCLE_ID = uuid.UUID("8f3a2d10-1234-4abc-8def-0123456789ab")
 _SNAP = datetime(2026, 7, 6, 14, 30, tzinfo=timezone.utc)
 
-# 30-column row in the exact order _devices_current_impl's SELECT produces
-# (r[0]..r[29]); the last four are the admin-only private fields.
+# 35-column row in the exact order _devices_current_impl's SELECT produces
+# (r[0]..r[34]): r[26:29] are the admin-only private fields, r[30:34] are
+# sql/055's crowdsourced feature columns.
 _ROW = (
     "dev1", "scooter", 39.7392, -104.9876, "denver_core",
     "8c4a1f0d2e9b7a35", False, False, 45293, "electric",
@@ -38,6 +39,11 @@ _ROW = (
     None,           # 27 first_ever_observed_at
     50000,          # 28 max_observed_range_meters
     None,           # 29 max_observed_range_at
+    "up_to_date",   # 30 feature_status
+    True,           # 31 has_bell
+    False,          # 32 has_cup_holder
+    True,           # 33 has_phone_holder
+    [],             # 34 features_poor_condition
 )
 
 _PLATE_FIELDS = (

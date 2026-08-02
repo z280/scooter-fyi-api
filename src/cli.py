@@ -72,6 +72,13 @@ Available commands:
                       2026-07.md §11 / PLAN_RIDE_MODE_API.md phase A4):
                       trailing-28-day per-cell leaderboard, full replace
                       (src/area_leaders.py:recompute).
+    process_device_feature_reports
+                      Grade the crowdsourced device-feature confirmations
+                      that have landed since the last firing (sql/055):
+                      first valid report is authoritative, a later
+                      disagreement flags the vehicle 'needs review', and
+                      three reports resolve one by 2/3 consensus
+                      (src/device_features.py:process_pending).
     migrate           Apply pending SQL migrations.
     admin             Manage the admin allowlist:
                       `admin (list | add <email> | remove <email>)`.
@@ -96,6 +103,7 @@ from .cycle import run_once
 from .r2_map import sync_map_assets, sync_photon_index
 from .daily_sla import run_daily
 from .daily_trips import run_daily as run_daily_trips
+from .device_features import process_pending as process_device_feature_reports
 from .pg import connection, run_migrations
 from .ride_watch import finalize_validation
 from .sentry import capture_exception, init as sentry_init, monitor
@@ -773,6 +781,7 @@ COMMANDS = {
     "poll_comms_replies":    poll_comms_replies,
     "deidentify_donations":  deidentify_donations,
     "recompute_area_leaders": _cli_recompute_area_leaders,
+    "process_device_feature_reports": process_device_feature_reports,
     "migrate":               lambda: run_migrations(),
 }
 

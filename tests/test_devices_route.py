@@ -22,13 +22,20 @@ from src import api_public
 _CYCLE_ID = uuid.UUID("8f3a2d10-1234-4abc-8def-0123456789ab")
 _SNAP = datetime(2026, 7, 6, 14, 30, tzinfo=timezone.utc)
 
-# 26-column public row (r[0]..r[25]); the public path never reads r[26:].
+# 35-column row (r[0]..r[34]) in the exact order _devices_current_impl's
+# SELECT produces. The public path never EMITS r[26:29] (the admin-only
+# plate fields) but it does read r[30:34] (sql/055's feature columns)
+# unconditionally, so the fixture has to carry the full width.
 _ROW = (
     "dev1", "scooter", 39.7392, -104.9876, "denver_core",
     "8c4a1f0d2e9b7a35", False, False, 45293, "electric",
     111, 222, 333,
     "75", "40/52", "3100/4100", "3100/6000", "12/40", "3/8", "1/1",
     False, 52800, 0, None, "standing", "Astro",
+    None, None, None, None,       # 26-29 admin-only private fields
+    "needs_features_confirmed",   # 30 feature_status
+    None, None, None,             # 31-33 has_bell/cup_holder/phone_holder
+    None,                         # 34 features_poor_condition
 )
 
 

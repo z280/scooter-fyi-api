@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .api_admin import router as admin_router
 from .api_auth import router as auth_router
+from .api_device_features import router as device_features_router
 from .api_device_photos import router as device_photos_router
 from .api_device_recommendations import router as device_recommendations_router
 from .api_frontend_reports import router as frontend_reports_router
@@ -114,6 +115,7 @@ app.include_router(tracked_rides_router)
 app.include_router(points_router)
 app.include_router(device_recommendations_router)
 app.include_router(device_photos_router)
+app.include_router(device_features_router)
 app.include_router(qr_router)
 app.include_router(ride_screenshots_router)
 app.include_router(ride_surveys_router)

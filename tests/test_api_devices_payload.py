@@ -40,6 +40,16 @@ _ROW = (
     0,                           # 22 number_failed_starts
     None,                        # 23 first_observed_at_location
     "standing", "Astro",         # 24-25
+    # 26-29 admin-only private fields — always SELECTed, emitted only
+    # under include_plate. Unread on the public path, but present because
+    # the fixture models the SELECT, not the branch.
+    None, None, None, None,
+    # 30-34 crowdsourced features (sql/055). Read UNCONDITIONALLY by the
+    # payload builder, so a fixture that stops short of them is a fixture
+    # the handler cannot run against.
+    "needs_features_confirmed",   # 30 feature_status
+    None, None, None,             # 31-33 has_bell/cup_holder/phone_holder
+    None,                         # 34 features_poor_condition
 )
 
 _RANK_FIELDS = (
