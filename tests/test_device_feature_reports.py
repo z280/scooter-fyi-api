@@ -1,0 +1,339 @@
+"""POST /api/v1/reports/device-features (src/api_device_features.py).
+
+Mirrors the fake-cursor idiom of tests/test_device_report_points_credit.py.
+The behaviours defended here are the ones a reader would otherwise have to
+take on faith from the module docstring:
+
+  * a WRONG plate is a 200 with points_awarded 0, not a 4xx — the owner's
+    "we will accept but give no points for wrong entered plate numbers";
+  * the award tier is chosen by the status the vehicle carried WHEN the
+    report landed (12 / 124 / 6), not by anything the client sent;
+  * an anonymous report is stored and earns nothing;
+  * the endpoint never grades, never votes, and never writes a feature
+    column — that is the ten-minute processor's job alone;
+  * the condition follow-up cannot contradict itself.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from datetime import datetime, timezone
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from src import api_device_features
+from src.accounts import SessionUser, optional_session
+from src.points import (
+    POINTS_DEVICE_FEATURES_FIRST,
+    POINTS_DEVICE_FEATURES_RECONFIRM,
+    POINTS_DEVICE_FEATURES_REVIEW,
+)
+
+_VID = "8c4a1f0d2e9b7a35"
+_PLATE = "1025543"
+_TS = datetime(2026, 7, 5, tzinfo=timezone.utc)
+_USER = SessionUser(
+    account_id=42, email="rider@example.com", scopes=("rider",),
+    expires_at=datetime.now(timezone.utc),
+    sliding=True, method="google", token_sha256="x",
+)
+
+_BODY = {
+    "vehicle_identifier": _VID,
+    "device_id": "bike-77",
+    "submitted_plate": _PLATE,
+    "has_bell": True,
+    "has_cup_holder": False,
+    "has_phone_holder": True,
+    "all_good_condition": True,
+    "poor_condition": [],
+    "lat": 39.7392,
+    "lng": -104.9876,
+}
+
+
+class _FakeCursor:
+    def __init__(self, fetch):
+        self._fetch = list(fetch)
+        self.statements: list[str] = []
+        self.params: list[tuple] = []
+
+    def execute(self, sql, params=None, *a, **k):
+        self.statements.append(" ".join(str(sql).split()))
+        self.params.append(params)
+
+    def fetchone(self):
+        return self._fetch.pop(0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, fetch):
+        self.cur = _FakeCursor(fetch)
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        pass
+
+
+def _client(monkeypatch, fetch, *, authenticated=True):
+    conn = _FakeConn(fetch)
+
+    @contextmanager
+    def _fake_connection():
+        yield conn
+
+    monkeypatch.setattr(api_device_features, "connection", _fake_connection)
+    monkeypatch.setattr(api_device_features, "enforce", lambda cur, **kw: None)
+    app = FastAPI()
+    app.include_router(api_device_features.router)
+    if authenticated:
+        app.dependency_overrides[optional_session] = lambda: _USER
+    else:
+        app.dependency_overrides[optional_session] = lambda: None
+    return TestClient(app), conn
+
+
+def _fetch(status="needs_features_confirmed", plate=_PLATE, awarded=True):
+    """The handler's reads, in order:
+      1. dedupe probe            -> None (no recent identical report)
+      2. device_state lookup     -> (plate, status, h3_10, lat, lon)
+      3. report INSERT RETURNING -> (id, reported_at)
+    then, only when points are actually credited:
+      4. credit_device_feature_points' cooldown probe -> None
+      5. credit_points' INSERT RETURNING              -> (id, created_at)
+    (pg_advisory_xact_lock and the two UPDATEs return nothing.)
+    """
+    rows = [None, (plate, status, None, 39.7392, -104.9876), (7, _TS)]
+    if awarded:
+        rows += [None, (99, _TS)]
+    return rows
+
+
+# --- the plate rule ----------------------------------------------------------
+
+def test_matching_plate_is_valid_and_pays(monkeypatch):
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post("/api/v1/reports/device-features", json=_BODY)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["plate_valid"] is True
+    assert body["points_awarded"] == POINTS_DEVICE_FEATURES_FIRST
+
+
+def test_wrong_plate_is_accepted_and_stored_but_pays_nothing(monkeypatch):
+    """The owner's rule, verbatim. A 4xx here would both throw away a real
+    data-quality signal (riders mixing up adjacent scooters) and hand an
+    attacker a plate oracle."""
+    client, conn = _client(monkeypatch, _fetch(awarded=False))
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "submitted_plate": "9999999"},
+    )
+    assert r.status_code == 200
+    assert r.json()["plate_valid"] is False
+    assert r.json()["points_awarded"] == 0
+    inserts = [s for s in conn.cur.statements if "INSERT INTO device_feature_reports" in s]
+    assert len(inserts) == 1, "the report is still written"
+    assert not any("INSERT INTO user_points" in s for s in conn.cur.statements)
+
+
+@pytest.mark.parametrize("typed", ["1025543", " 1025543 ", "#1025543", "1025-543"])
+def test_plate_matching_forgives_punctuation_and_whitespace(monkeypatch, typed):
+    """A rider who typed the right digits read the right scooter, which is
+    the only thing this check is actually asking."""
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "submitted_plate": typed},
+    )
+    assert r.json()["plate_valid"] is True
+
+
+def test_the_plate_is_stored_as_typed(monkeypatch):
+    """Verbatim, so "why did this vehicle flip to needs_review?" stays
+    answerable — a rash of near-miss plates reads very differently from a
+    rash of empty ones."""
+    client, conn = _client(monkeypatch, _fetch(awarded=False))
+    client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "submitted_plate": "  10255XX  "},
+    )
+    idx = next(
+        i for i, s in enumerate(conn.cur.statements)
+        if "INSERT INTO device_feature_reports" in s
+    )
+    assert "10255XX" in conn.cur.params[idx]
+
+
+# --- award tiers -------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        ("needs_features_confirmed", POINTS_DEVICE_FEATURES_FIRST),
+        ("needs_review", POINTS_DEVICE_FEATURES_REVIEW),
+        ("up_to_date", POINTS_DEVICE_FEATURES_RECONFIRM),
+    ],
+)
+def test_the_tier_follows_the_vehicles_status(monkeypatch, status, expected):
+    client, _ = _client(monkeypatch, _fetch(status=status))
+    r = client.post("/api/v1/reports/device-features", json=_BODY)
+    assert r.json()["points_awarded"] == expected
+    # Echoed back so the modal can say WHY it paid what it paid.
+    assert r.json()["feature_status"] == status
+
+
+def test_the_award_values_are_the_ones_the_owner_specified():
+    """Including the 124 — flagged in src/points.py as suspiciously ~24x the
+    reconfirm tier, and implemented as specified rather than quietly
+    'corrected'. If it is ever retuned, this test is the place that says so
+    out loud."""
+    assert POINTS_DEVICE_FEATURES_FIRST == 12
+    assert POINTS_DEVICE_FEATURES_REVIEW == 124
+    assert POINTS_DEVICE_FEATURES_RECONFIRM == 6
+
+
+def test_anonymous_reports_are_stored_and_earn_nothing(monkeypatch):
+    """Points are never anonymous (sql/028), but the data is still worth
+    having — an anonymous report votes in the consensus exactly like any
+    other."""
+    client, conn = _client(monkeypatch, _fetch(awarded=False), authenticated=False)
+    r = client.post("/api/v1/reports/device-features", json=_BODY)
+    assert r.status_code == 200
+    assert r.json()["points_awarded"] == 0
+    assert any(
+        "INSERT INTO device_feature_reports" in s for s in conn.cur.statements
+    )
+
+
+# --- separation of concerns --------------------------------------------------
+
+def test_the_endpoint_never_writes_a_feature_column_or_a_status(monkeypatch):
+    """The ten-minute processor is the single writer of the consensus. If
+    this endpoint ever starts grading inline, the award tier and the
+    published state stop being independently reproducible from the log."""
+    client, conn = _client(monkeypatch, _fetch())
+    client.post("/api/v1/reports/device-features", json=_BODY)
+    for sql in conn.cur.statements:
+        if "UPDATE device_state" in sql:
+            pytest.fail(f"endpoint wrote device_state: {sql}")
+        if "feature_status =" in sql:
+            pytest.fail(f"endpoint set a feature_status: {sql}")
+
+
+def test_the_status_the_award_used_is_recorded_on_the_report(monkeypatch):
+    """`status_at_report` is what makes a ledger row auditable months later,
+    when the vehicle's live status has long since moved on."""
+    client, conn = _client(monkeypatch, _fetch(status="needs_review"))
+    client.post("/api/v1/reports/device-features", json=_BODY)
+    idx = next(
+        i for i, s in enumerate(conn.cur.statements)
+        if "INSERT INTO device_feature_reports" in s
+    )
+    assert "needs_review" in conn.cur.params[idx]
+
+
+def test_an_unknown_vehicle_is_a_404(monkeypatch):
+    """Unlike a wrong plate: there is no record of the vehicle at all, so
+    there is nothing for the report to attach to and no status to award
+    against."""
+    client, _ = _client(monkeypatch, [None, None])
+    r = client.post("/api/v1/reports/device-features", json=_BODY)
+    assert r.status_code == 404
+
+
+def test_a_duplicate_submission_is_a_no_op(monkeypatch):
+    """A double-tapped Send must not write a second vote — one rider looking
+    at one scooter once is one opinion."""
+    dup = (5, _TS, True, POINTS_DEVICE_FEATURES_FIRST, "needs_features_confirmed")
+    client, conn = _client(monkeypatch, [dup])
+    r = client.post("/api/v1/reports/device-features", json=_BODY)
+    assert r.json() == {
+        "id": 5,
+        "reported_at": _TS.isoformat(),
+        "deduped": True,
+        "plate_valid": True,
+        "points_awarded": POINTS_DEVICE_FEATURES_FIRST,
+        "feature_status": "needs_features_confirmed",
+    }
+    assert not any("INSERT INTO" in s for s in conn.cur.statements)
+
+
+# --- validation --------------------------------------------------------------
+
+def test_every_presence_answer_is_required(monkeypatch):
+    """"Neither pressed by default" is a rule about the modal's initial
+    state, not permission to send a half-answered survey."""
+    client, _ = _client(monkeypatch, _fetch())
+    body = {k: v for k, v in _BODY.items() if k != "has_cup_holder"}
+    assert client.post("/api/v1/reports/device-features", json=body).status_code == 422
+
+
+def test_poor_condition_cannot_name_an_absent_feature(monkeypatch):
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "all_good_condition": False, "poor_condition": ["cup_holder"]},
+    )
+    assert r.status_code == 422
+
+
+def test_poor_condition_cannot_name_an_unknown_feature(monkeypatch):
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "all_good_condition": False, "poor_condition": ["basket"]},
+    )
+    assert r.status_code == 422
+
+
+def test_all_good_true_with_an_itemised_fault_is_rejected(monkeypatch):
+    """The contradiction is surfaced rather than silently normalised, so a
+    client with a bug hears about it instead of having its blanket answer
+    quietly overridden."""
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "all_good_condition": True, "poor_condition": ["bell"]},
+    )
+    assert r.status_code == 422
+
+
+def test_all_good_false_with_nothing_itemised_is_rejected(monkeypatch):
+    """`device_state` stores only the poor-condition list, so an
+    un-itemised "something is wrong" would round-trip as "all good" and
+    ping-pong the vehicle into needs_review forever."""
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "all_good_condition": False, "poor_condition": []},
+    )
+    assert r.status_code == 422
+
+
+def test_a_valid_condition_report_is_accepted(monkeypatch):
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "all_good_condition": False, "poor_condition": ["bell"]},
+    )
+    assert r.status_code == 200
+
+
+def test_the_vehicle_identifier_must_be_16_hex(monkeypatch):
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "vehicle_identifier": "not-an-identifier"},
+    )
+    assert r.status_code == 422

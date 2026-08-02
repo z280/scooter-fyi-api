@@ -49,6 +49,16 @@ _EXISTING_ACTIONS = (
     "report_improper_parking",
 )
 
+# The three device-feature confirmation tiers (sql/055's widened action
+# list). Like the report awards, they are published FROM the mapping that
+# decides them (points.FEATURE_STATUS_POINTS) rather than re-listed in the
+# endpoint — the coverage test below is what holds that property.
+_DEVICE_FEATURE_ACTIONS = (
+    "device_features_first",
+    "device_features_review",
+    "device_features_reconfirm",
+)
+
 _FORMULA_ACTIONS = ("battery_contribution", "nav_distance_bonus")
 
 
@@ -112,8 +122,27 @@ def test_all_five_ride_mode_actions_are_published(schedule):
         assert action in schedule, action
 
 
+def test_all_three_device_feature_actions_are_published(schedule):
+    """The "☑️ Confirm Features" modal interpolates these three into its
+    "+N pts" copy the same way Screen 2 interpolates the ride-mode awards —
+    so an award tier missing from here is a modal promising a number nobody
+    pays."""
+    for action in _DEVICE_FEATURE_ACTIONS:
+        assert action in schedule, action
+
+
+def test_every_device_feature_action_in_the_mapping_is_published(schedule):
+    """Generated from FEATURE_STATUS_POINTS, keyed by ACTION rather than by
+    the feature_status that selects it — same shape as the report awards."""
+    for action, value in points.FEATURE_STATUS_POINTS.values():
+        assert schedule[action] == {"points": value}
+
+
 def test_no_action_is_published_that_the_schedule_does_not_explain(schedule):
-    assert set(schedule) == set(_EXISTING_ACTIONS) | set(_RIDE_MODE_ACTIONS)
+    assert set(schedule) == (
+        set(_EXISTING_ACTIONS) | set(_RIDE_MODE_ACTIONS)
+        | set(_DEVICE_FEATURE_ACTIONS)
+    )
 
 
 def test_every_report_action_in_the_mapping_is_published(schedule):

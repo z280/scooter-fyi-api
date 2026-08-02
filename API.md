@@ -625,7 +625,12 @@ GET /api/v1/devices/current?form_factor=scooter
         "dwell_percentile_hood": 42,
         "dwell_peer_median_hours": 6.4,
         "vehicle_use_type": "standing",
-        "vehicle_model_name": "Astro"
+        "vehicle_model_name": "Astro",
+        "feature_status": "up_to_date",
+        "device_features": {
+          "bell": true, "cup_holder": false, "phone_holder": true,
+          "poor_condition": []
+        }
       }
     },
     {
@@ -648,7 +653,9 @@ GET /api/v1/devices/current?form_factor=scooter
         "dwell_percentile_hood": 18,
         "dwell_peer_median_hours": 7.1,
         "vehicle_use_type": "sitting",
-        "vehicle_model_name": "Apollo"
+        "vehicle_model_name": "Apollo",
+        "feature_status": "needs_features_confirmed",
+        "device_features": null
       }
     }
     /* … ~1,866 more features … */
@@ -720,6 +727,8 @@ most one cycle length.
 | `range_rank_all_devices` | string \| null | **Opt-in via `?include=ranks`.** Same as above but `y` = all eligible scooters across types. |
 | `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | **Opt-in via `?include=ranks`.** Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
 | `has_negative_report` | bool | `true` when ≥1 citizen-submitted report has been filed against this `vehicle_identifier` at this exact `h3_10_index` cell within the last 24h. Becomes `false` automatically when the scooter moves to a different h3_10 cell. Submit reports via `POST /api/v1/reports`. |
+| `feature_status` | string | How much to trust what we know about this vehicle's crowdsourced equipment: `"needs_features_confirmed"` (nobody has ever reported it — every device starts here), `"needs_review"` (two reports disagreed), or `"up_to_date"`. Always on the wire, never behind an `?include=` token: it is what a client's "☑️ Confirm Features" affordance reads to decide whether it is offering 12, 124 or 6 points, so opting in would mean showing the wrong number. See [`POST /api/v1/reports/device-features`](#post-apiv1reportsdevice-features). |
+| `device_features` | object \| null | `{ bell, cup_holder, phone_holder, poor_condition[] }` — the current consensus. **`null` until someone confirms the vehicle**, which is not the same as all-`false`: `false` claims we know a scooter has no bell, `null` says nobody has looked. `poor_condition` lists which of the *present* features are not in good condition (always a subset of the `true` ones; empty means everything works). |
 | `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, active negative reports, and peer-relative dwell outliers (a dwell-outlier per the rules under `dwell_percentile_hood` costs one extra tier, stacking with the absolute-dwell demerits). `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
 | `number_failed_starts` | int \| null | How many times the upstream `bike_id` rotated (someone started a rental) **without the scooter moving** since it arrived at its current location. Resets to 0 when the scooter moves. Null when the device isn't state-tracked (no plate in the upstream payload). |
 | `first_observed_at_location` | string \| null | UTC ISO 8601 timestamp of when we first observed the scooter at its current location. `now - first_observed_at_location` = dwell time. Resets when the scooter moves. Null when the device isn't state-tracked. |
@@ -1758,6 +1767,103 @@ it deliberately does **not** flip `has_negative_report` / `reliability_tier`.
 (The frontend also opens Veo's public Zendesk "improperly parked" form
 pre-filled when a rider files one.)
 
+### `POST /api/v1/reports/device-features`
+
+"I'm standing at this scooter — here's what's actually bolted to it."
+Veo's feed says nothing about bells, cup holders or phone holders, so the
+only way the map can ever be filtered on equipment is riders telling us.
+Anonymous is fine (5/hour per IP); a bearer token links the report to your
+account (40/hour) and is what makes it earn points.
+
+```json
+{ "vehicle_identifier": "8c4a1f0d2e9b7a35", "device_id": "abc123",
+  "submitted_plate": "1025543",
+  "has_bell": true, "has_cup_holder": false, "has_phone_holder": true,
+  "all_good_condition": false, "poor_condition": ["bell"],
+  "lat": 39.7392, "lng": -104.9876 }
+```
+
+All three `has_*` answers are **required** — the client's toggles start
+unpressed, but a half-answered survey is a `422`, not a partial report.
+
+`poor_condition` names which of the features **this same report says are
+present** are not in good condition. Two rules, both enforced with a
+`422`:
+
+* it may only name features you reported present (`["cup_holder"]` with
+  `"has_cup_holder": false` is rejected);
+* it must be non-empty exactly when `all_good_condition` is `false`. The
+  two fields are one fact stated twice, and the server stores the list —
+  so "something's wrong but I won't say what" has nowhere to live, and
+  sending it is a client bug worth hearing about rather than something to
+  silently normalise.
+
+**The plate is the whole anti-abuse story.** You can't confirm a scooter's
+features from your sofa, because you can't read the plate under its QR
+code from there. A **wrong plate is still a `200`**: the report is stored
+(a rash of near-miss plates is a real signal — riders mixing up two
+scooters parked side by side), and the response says `"plate_valid":
+false, "points_awarded": 0`. Nothing downstream ever reads it: the
+consensus job skips invalid rows entirely. Matching ignores whitespace,
+punctuation and case, so `#1025543` and `1025543` both match.
+
+→ `{ "id": 17, "reported_at": "...", "deduped": false, "plate_valid": true,
+     "points_awarded": 124, "feature_status": "needs_review" }`
+
+`feature_status` in the response is the status the vehicle carried **when
+the report landed** — which is what chose the award. The status *after*
+isn't knowable until the grading job runs (see below), and promising a
+status we haven't computed would be worse than a stale one. An identical
+(vehicle, answers, reporter) report within 30 minutes returns the existing
+row with `"deduped": true`.
+
+**Points** (see [Points](#points)): **12** for the first confirmation of a
+device nobody has done before, **124** for confirming one that is
+`needs_review`, **6** for reconfirming one that is already `up_to_date`.
+Requires a bearer token *and* a valid plate. One award per account per
+vehicle per 24 h — a same-day second opinion still votes, it just doesn't
+pay twice.
+
+### `GET /api/v1/devices/{vehicle_identifier}/features`
+
+Current consensus for one vehicle, so a client can render an
+up-to-the-second status instead of whatever its 90-second map poll last
+saw. Public; no plate appears in it.
+
+→ `{ "vehicle_identifier": "...", "feature_status": "up_to_date",
+     "features": { "bell": true, "cup_holder": false,
+                   "phone_holder": true, "poor_condition": ["bell"] },
+     "confirmed_at": "...", "report_count": 3 }`
+
+`features` is `null` — not an all-`false` object — until someone confirms
+the vehicle. `false` would claim we know a scooter has no bell; `null`
+says nobody has looked, which is the same thing
+`"feature_status": "needs_features_confirmed"` says.
+
+#### How a device's `feature_status` moves
+
+Reports are graded by a cron job **every ten minutes, on the 8s**
+(`:08, :18, …`), never inline on your request. So a device's status lags
+its reports by up to ten minutes, by design: your POST writes one row and
+returns, and its latency never depends on how many other people are
+reporting the same scooter.
+
+| From | On | To |
+| --- | --- | --- |
+| `needs_features_confirmed` | the first valid report | `up_to_date` |
+| `up_to_date` | a later report that disagrees | `needs_review` |
+| `needs_review` | 3 valid reports since the flag, 2/3 majority | `up_to_date` |
+
+**The first valid report is authoritative** — not one vote among many.
+Every later report is graded against it, and any disagreement (about
+presence *or* condition) flags the vehicle. Flagging does **not** overwrite
+what we were publishing: one dissenting voice changes the label so more
+people are asked, and only a three-way vote replaces the data.
+
+The vote is **per field**, which is what makes "2/3 of what's correct"
+reachable: three riders who each disagree about a different feature have no
+majority *answer set* at all, but a clear 2/3 on every individual field.
+
 ### `POST /api/v1/reports/discount`
 
 Missed equity-discount evidence. **Bearer required** (evidence needs
@@ -2710,11 +2816,14 @@ the whole ledger — not just the returned page.
 
 | Action | Points | Earned by |
 |---|---|---|
+| `device_features_review` | 124 | A valid `POST /reports/device-features` on a device whose `feature_status` is `needs_review` |
 | `qr_scan` | 100 | First scan of a given device by you |
 | `report_not_rideable` | 10 | `not_rideable` device report |
 | `report_vehicle_issue` | 10 | `damaged` device report |
 | `report_improper_parking` | 10 | `improperly_parked` device report |
 | `profile_completion` | 10 | One-time, on completing your profile |
+| `device_features_first` | 12 | A valid `POST /reports/device-features` on a device nobody has confirmed before |
+| `device_features_reconfirm` | 6 | A valid `POST /reports/device-features` on a device already `up_to_date` |
 | `report_not_found` | 4 | `not_found` device report |
 | `battery_contribution` | `8 + 2 × ⌈km / 2⌉` | A verified, `eligible` `POST .../track` donation, `ride_options.battery_modeling` on, not an own-device ride, both start/end battery known |
 | `nav_distance_bonus` | `2 × ⌈km / 3⌉` | Same donation, `ride_options.nav_improvement` on, and a stored `POST /api/v1/ride-routes` row linked to the ride |
@@ -2729,8 +2838,17 @@ pre-cap figure — and an award with no headroom left writes no entry at
 all.
 
 `qr_scan` is exempt: a device scan is not a ride award, and it is worth
-100 on its own. `profile_completion` and report credits are likewise
-per-account and per-report, not per-ride.
+100 on its own. `profile_completion`, report credits and the three
+`device_features_*` tiers are likewise per-account and per-report, not
+per-ride.
+
+The `device_features_*` tiers all require a **valid plate** — a wrong one
+is accepted and stored but pays nothing — and are limited to **one award
+per account per vehicle per 24 h**. A same-day second opinion still votes
+in the consensus; it just doesn't pay twice. `device_features_review` is
+by some distance the most valuable single action in the program, which is
+deliberate: the `needs_review` queue is the one thing only the crowd can
+unblock.
 
 The ceiling is forward-only; entries predating it were not adjusted. See
 [Ride limits](#ride-limits).

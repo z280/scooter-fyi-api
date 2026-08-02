@@ -95,6 +95,40 @@ POINTS_NAV_QUALITATIVE = 6      # even-points rule: owner corrected 5 -> 6
 POINTS_NAV_DISTANCE_PER_STEP = 2
 POINTS_RIDE_SURVEY = 4
 
+# --- Device feature confirmations (sql/055) --------------------------------
+#
+# Three tiers, one per state of the device's feature_status when the report
+# lands — the owner's rule verbatim: "12 pts for confirming device features
+# for the first time (nobody did this device before), 124 points for
+# confirming devices 'needing review' and 6pts for reconfirming features."
+# All three are even, so the invariant above holds without adjustment.
+#
+# !! THE 124 IS AS SPECIFIED AND IS DELIBERATELY NOT "CORRECTED" TO 24 HERE.
+# It is worth flagging that it is ~24x the reconfirm award and 1.24x the
+# whole per-ride cap (MAX_POINTS_PER_RIDE = 100), which makes clearing the
+# needs-review queue far and away the most lucrative action in the program —
+# quite possibly the intent (that queue is the one thing the crowd alone can
+# unblock), quite possibly a typo for 24. It is a one-line change either way:
+# nothing else in this file or in api_device_features.py encodes the number.
+POINTS_DEVICE_FEATURES_FIRST = 12
+POINTS_DEVICE_FEATURES_REVIEW = 124
+POINTS_DEVICE_FEATURES_RECONFIRM = 6
+
+# device_state.feature_status -> (user_points.action, points) for a valid
+# report landing on a device in that state. Single source of truth for the
+# mapping, imported by src/api_device_features.py and published verbatim by
+# /api/v1/points/schedule rather than re-listed there.
+#
+# 'needs_features_confirmed' is the FIRST-report tier ("nobody did this
+# device before") and 'up_to_date' is the reconfirm tier — the status the
+# device already carries is exactly the question "has anyone done this
+# before?", so no separate count query is needed to tell the two apart.
+FEATURE_STATUS_POINTS: dict[str, tuple[str, int]] = {
+    "needs_features_confirmed": ("device_features_first", POINTS_DEVICE_FEATURES_FIRST),
+    "needs_review":             ("device_features_review", POINTS_DEVICE_FEATURES_REVIEW),
+    "up_to_date":               ("device_features_reconfirm", POINTS_DEVICE_FEATURES_RECONFIRM),
+}
+
 # Step sizes for the two distance formulas above. Canonical unit is
 # KILOMETRES because that is the unit the rider-facing copy and
 # /points/schedule's `step_km` are written in ("+2 points per 2 km"); the
@@ -317,6 +351,81 @@ def credit_qr_scan_points(
     return credit_points(
         cur, account_id=account_id, action="qr_scan", points=POINTS_QR_SCAN,
         lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
+    )
+
+
+# How long an account must wait before the SAME vehicle can pay it feature
+# points again. The award tiers are per-DEVICE-state, not per-account, so
+# without this a rider could re-answer the same four toggles on the same
+# scooter every 30 seconds and mint 6 points a go — the reconfirm tier is
+# the farmable one precisely because it never runs out. A day matches the
+# cadence the data actually changes at (a cup holder does not come and go
+# hourly) while still letting a rider who spots a genuinely broken bell the
+# day after they confirmed it get paid for saying so.
+#
+# Applies to the AWARD only. The report itself is always stored and always
+# feeds the consensus — a same-day second opinion is still evidence, it just
+# isn't a second paycheque.
+FEATURE_POINTS_ACCOUNT_COOLDOWN_HOURS = 24
+
+
+def credit_device_feature_points(
+    cur, *, account_id: int, feature_status: str, lat: float, lng: float,
+    vehicle_identifier: str, report_id: int,
+) -> dict[str, Any] | None:
+    """Award for one VALID device-feature report (sql/055).
+
+    Call only for an authenticated reporter whose typed plate matched — the
+    owner's rule is "we will accept but give no points for wrong entered
+    plate numbers", and the caller enforces that by simply not calling here.
+
+    `feature_status` is the status the vehicle carried BEFORE this report,
+    which is what picks the tier out of FEATURE_STATUS_POINTS. Returns None
+    for an unknown status (defensive — the column is CHECK-constrained), and
+    None when this account has already been paid for this vehicle inside
+    FEATURE_POINTS_ACCOUNT_COOLDOWN_HOURS.
+
+    Advisory-locked on (account, vehicle) for the same reason
+    credit_qr_scan_points is: the cooldown probe below is a check-then-insert
+    and two concurrent submissions would otherwise both see an empty window.
+    """
+    mapping = FEATURE_STATUS_POINTS.get(feature_status)
+    if mapping is None:
+        log.warning(
+            "points: unknown feature_status %r on report %d — no award",
+            feature_status, report_id,
+        )
+        return None
+    action, points = mapping
+
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"device_features:{account_id}:{vehicle_identifier}",),
+    )
+    cur.execute(
+        f"""
+        SELECT 1 FROM user_points
+         WHERE account_id = %s
+           AND vehicle_identifier = %s
+           AND action IN ('device_features_first', 'device_features_review',
+                          'device_features_reconfirm')
+           AND created_at >= NOW() - INTERVAL '{FEATURE_POINTS_ACCOUNT_COOLDOWN_HOURS} hours'
+         LIMIT 1
+        """,
+        (account_id, vehicle_identifier),
+    )
+    if cur.fetchone() is not None:
+        log.info(
+            "points: device-feature cooldown active account=%d vehicle=%s "
+            "— report %d stored, no award",
+            account_id, vehicle_identifier, report_id,
+        )
+        return None
+
+    return credit_points(
+        cur, account_id=account_id, action=action, points=points,
+        lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
+        source_table="device_feature_reports", source_id=str(report_id),
     )
 
 

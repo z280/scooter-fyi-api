@@ -115,3 +115,20 @@
 # daily_sla/daily_trips rollups above, but at :15 so it never contends with
 # them for the same few seconds of device_history seq-scan I/O.
 15 9 * * * cd /app && python -m src.cli recompute_area_leaders
+
+# Device feature confirmations (sql/055 / src/device_features.py). Grades
+# whatever riders submitted since the last firing: the first valid report on
+# a vehicle becomes authoritative, a later report that disagrees flags it
+# 'needs review', and three reports resolve a review by 2/3 consensus.
+#
+# "Every ten minutes on the 8s" is the owner's cadence, spelled out
+# literally: :08, :18, :28, :38, :48, :58. The offset is the point — every
+# other 10-minute-ish job in this file sits on :00 or :15, and the grading
+# pass reads device_state rows the 2-minute ingest cycle writes, so landing
+# on :08 keeps it clear of the top-of-the-minute ingest burst and of the
+# :15 watch/off-feed expiries.
+#
+# Idempotent by construction: a report is claimed by stamping processed_at
+# in the same transaction that writes the state it produced, so a firing
+# that overlaps a slow predecessor re-grades nothing.
+8,18,28,38,48,58 * * * * cd /app && python -m src.cli process_device_feature_reports
