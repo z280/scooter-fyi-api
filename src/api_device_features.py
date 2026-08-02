@@ -118,7 +118,7 @@ class DeviceFeatureReportIn(BaseModel):
         present = {
             k: getattr(self, FEATURE_PRESENCE_COLUMNS[k]) for k in FEATURE_KEYS
         }
-        absent = sorted({k for k in self.poor_condition if not present[k]})
+        absent = [k for k in FEATURE_KEYS if k in set(self.poor_condition) and not present[k]]
         if absent:
             raise ValueError(
                 "poor_condition may only name features this report says are "
@@ -132,7 +132,23 @@ class DeviceFeatureReportIn(BaseModel):
         # here rather than silently normalising it means a client with a bug
         # is told about it instead of having its blanket answer quietly
         # overridden.
-        deduped = sorted(set(self.poor_condition))
+        # Canonicalised in FEATURE_KEYS order, NOT `sorted()`.
+        #
+        # The two happen to agree today (the vocabulary is alphabetical by
+        # accident), which is exactly what makes this worth stating: the
+        # moment a key is added that breaks the coincidence — a "basket", a
+        # "rear_rack" — a lexicographic sort here and
+        # `FeatureAnswers.normalise()`'s FEATURE_KEYS ordering would produce
+        # two different arrays for the same answer. The dedupe probe below
+        # compares `poor_condition = %s` against a stored array literally, so
+        # rows written either side of that change would stop matching and a
+        # double-tapped Send would write a second vote.
+        #
+        # FEATURE_KEYS is the vocabulary; ordering by it means the stored
+        # representation is defined by the vocabulary rather than by string
+        # collation, and stays defined by it through any future edit.
+        keys = set(self.poor_condition)
+        deduped = [k for k in FEATURE_KEYS if k in keys]
         if self.all_good_condition and deduped:
             raise ValueError(
                 "all_good_condition is true but poor_condition names "

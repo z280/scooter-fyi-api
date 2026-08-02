@@ -129,6 +129,17 @@ FEATURE_STATUS_POINTS: dict[str, tuple[str, int]] = {
     "up_to_date":               ("device_features_reconfirm", POINTS_DEVICE_FEATURES_RECONFIRM),
 }
 
+# Every ledger action the mapping above can produce, DERIVED from it rather
+# than re-listed. The cooldown probe in credit_device_feature_points needs
+# "any award this feature has ever paid", and a second hand-maintained copy
+# of that list is exactly the kind of thing a fourth tier would be added
+# without: the new action would earn points, then be invisible to its own
+# cooldown, and the tier would be farmable on a loop. Deriving it means
+# adding a tier to FEATURE_STATUS_POINTS is the only edit required.
+FEATURE_POINT_ACTIONS: tuple[str, ...] = tuple(
+    action for action, _points in FEATURE_STATUS_POINTS.values()
+)
+
 # Step sizes for the two distance formulas above. Canonical unit is
 # KILOMETRES because that is the unit the rider-facing copy and
 # /points/schedule's `step_km` are written in ("+2 points per 2 km"); the
@@ -402,17 +413,22 @@ def credit_device_feature_points(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"device_features:{account_id}:{vehicle_identifier}",),
     )
+    # Both the action list and the window are PARAMETERS, not interpolated
+    # SQL: the list is derived from FEATURE_STATUS_POINTS (see
+    # FEATURE_POINT_ACTIONS) so a future tier cannot be paid by a mapping
+    # this query does not know about, and the interval rides in as a value so
+    # the statement text is constant and the plan is cacheable.
     cur.execute(
-        f"""
+        """
         SELECT 1 FROM user_points
          WHERE account_id = %s
            AND vehicle_identifier = %s
-           AND action IN ('device_features_first', 'device_features_review',
-                          'device_features_reconfirm')
-           AND created_at >= NOW() - INTERVAL '{FEATURE_POINTS_ACCOUNT_COOLDOWN_HOURS} hours'
+           AND action = ANY(%s)
+           AND created_at >= NOW() - make_interval(hours => %s)
          LIMIT 1
         """,
-        (account_id, vehicle_identifier),
+        (account_id, vehicle_identifier, list(FEATURE_POINT_ACTIONS),
+         FEATURE_POINTS_ACCOUNT_COOLDOWN_HOURS),
     )
     if cur.fetchone() is not None:
         log.info(

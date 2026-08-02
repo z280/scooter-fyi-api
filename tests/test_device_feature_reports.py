@@ -337,3 +337,76 @@ def test_the_vehicle_identifier_must_be_16_hex(monkeypatch):
         json={**_BODY, "vehicle_identifier": "not-an-identifier"},
     )
     assert r.status_code == 422
+
+
+# --- drift-proofing (Copilot review, PR #39) ---------------------------------
+
+def test_poor_condition_is_canonicalised_in_vocabulary_order(monkeypatch):
+    """Ordered by FEATURE_KEYS, not by `sorted()`.
+
+    The two agree today only because the vocabulary happens to be
+    alphabetical. The dedupe probe compares `poor_condition = %s` against a
+    stored array literally, and src/device_features.py's
+    FeatureAnswers.normalise() orders by FEATURE_KEYS — so the day a key
+    breaks the coincidence ("basket", "rear_rack"), a lexicographic sort here
+    would write arrays that no longer match either the stored ones or the
+    processor's. This test fails on a reordering of FEATURE_KEYS, which is
+    the moment someone needs to know.
+    """
+    from src.device_features import FEATURE_KEYS
+
+    client, conn = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={
+            **_BODY,
+            "has_cup_holder": True,
+            "all_good_condition": False,
+            # Deliberately reversed, and with a duplicate.
+            "poor_condition": ["phone_holder", "bell", "bell"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    idx = next(
+        i for i, s in enumerate(conn.cur.statements)
+        if "INSERT INTO device_feature_reports" in s
+    )
+    stored = next(p for p in conn.cur.params[idx] if isinstance(p, list))
+    assert stored == [k for k in FEATURE_KEYS if k in {"bell", "phone_holder"}]
+    assert stored == ["bell", "phone_holder"]
+
+
+def test_the_cooldown_probe_derives_its_action_list(monkeypatch):
+    """No hand-maintained copy of the award actions in SQL.
+
+    A fourth tier added to FEATURE_STATUS_POINTS but forgotten in a
+    hardcoded `action IN (...)` would earn points while being invisible to
+    its own cooldown — i.e. farmable on a loop. Deriving the list means
+    adding the tier is the only edit required, and this test is what says so.
+    """
+    from src import points as points_module
+
+    client, conn = _client(monkeypatch, _fetch())
+    client.post("/api/v1/reports/device-features", json=_BODY)
+
+    probe_idx = next(
+        i for i, s in enumerate(conn.cur.statements)
+        if "SELECT 1 FROM user_points" in s
+    )
+    sql = conn.cur.statements[probe_idx]
+    for action in points_module.FEATURE_POINT_ACTIONS:
+        assert action not in sql, f"{action} is hardcoded in the cooldown SQL"
+    assert "= ANY(" in sql
+    # The window rides in as a value too, so the statement text is constant.
+    assert "make_interval" in sql
+    params = conn.cur.params[probe_idx]
+    assert list(points_module.FEATURE_POINT_ACTIONS) in params
+    assert points_module.FEATURE_POINTS_ACCOUNT_COOLDOWN_HOURS in params
+
+
+def test_the_derived_action_list_matches_the_mapping():
+    from src import points as points_module
+
+    assert set(points_module.FEATURE_POINT_ACTIONS) == {
+        action for action, _ in points_module.FEATURE_STATUS_POINTS.values()
+    }
