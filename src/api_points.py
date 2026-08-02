@@ -140,7 +140,7 @@ def points_schedule() -> dict[str, dict[str, int]]:
     # Device feature confirmations (sql/055). Read out of
     # FEATURE_STATUS_POINTS rather than re-listed, for the same reason the
     # report awards are: the mapping that decides the award is the mapping
-    # that gets published, so the "☑️ Confirm Features" modal's "+124 pts"
+    # that gets published, so the "☑️ Confirm Features" modal's "+14 pts"
     # copy cannot promise a tier the endpoint does not pay. Keyed by ACTION
     # (what the ledger records), not by the feature_status that selected it.
     for action, value in p.FEATURE_STATUS_POINTS.values():

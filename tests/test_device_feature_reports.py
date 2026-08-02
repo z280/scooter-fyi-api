@@ -7,7 +7,7 @@ take on faith from the module docstring:
   * a WRONG plate is a 200 with points_awarded 0, not a 4xx — the owner's
     "we will accept but give no points for wrong entered plate numbers";
   * the award tier is chosen by the status the vehicle carried WHEN the
-    report landed (12 / 124 / 6), not by anything the client sent;
+    report landed (12 / 14 / 6), not by anything the client sent;
   * an anonymous report is stored and earns nothing;
   * the endpoint never grades, never votes, and never writes a feature
     column — that is the ten-minute processor's job alone;
@@ -194,13 +194,32 @@ def test_the_tier_follows_the_vehicles_status(monkeypatch, status, expected):
 
 
 def test_the_award_values_are_the_ones_the_owner_specified():
-    """Including the 124 — flagged in src/points.py as suspiciously ~24x the
-    reconfirm tier, and implemented as specified rather than quietly
-    'corrected'. If it is ever retuned, this test is the place that says so
-    out loud."""
+    """The review tier shipped briefly as 124 — flagged in src/points.py as
+    implausible (larger than the whole per-ride cap) and confirmed as a typo
+    for 14. Pinned here so a retune is a deliberate edit rather than a
+    drive-by."""
     assert POINTS_DEVICE_FEATURES_FIRST == 12
-    assert POINTS_DEVICE_FEATURES_REVIEW == 124
+    assert POINTS_DEVICE_FEATURES_REVIEW == 14
     assert POINTS_DEVICE_FEATURES_RECONFIRM == 6
+
+
+def test_every_award_tier_is_even():
+    """The program-wide even-points invariant (sql/053's CHECK, the assert in
+    credit_points, and this sweep). 14 satisfies it exactly as 124 did — the
+    correction did not quietly break the rule."""
+    for value in (POINTS_DEVICE_FEATURES_FIRST, POINTS_DEVICE_FEATURES_REVIEW,
+                  POINTS_DEVICE_FEATURES_RECONFIRM):
+        assert value % 2 == 0, value
+
+
+def test_clearing_a_review_outearns_a_reconfirmation():
+    """The ordering is the product decision, and it is what a rider actually
+    responds to: a needs-review device is the scarcer, more valuable act, so
+    it has to be worth more than routine reconfirmation. Pinned because the
+    three values are otherwise independent constants that could drift into
+    an order nobody intended."""
+    assert POINTS_DEVICE_FEATURES_REVIEW > POINTS_DEVICE_FEATURES_FIRST
+    assert POINTS_DEVICE_FEATURES_FIRST > POINTS_DEVICE_FEATURES_RECONFIRM
 
 
 def test_anonymous_reports_are_stored_and_earn_nothing(monkeypatch):

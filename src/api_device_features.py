@@ -173,7 +173,7 @@ def submit_device_feature_report(
     """Log one feature confirmation and award its points.
 
     Returns the award tier that was paid and the status the vehicle carried
-    when the report landed, so the modal can say "+124 — thanks for clearing
+    when the report landed, so the modal can say "+14 — thanks for clearing
     a review!" rather than a generic thank-you. `feature_status` in the
     response is the status BEFORE this report, which is deliberate: the
     status after is not knowable until the processor runs, up to ten minutes

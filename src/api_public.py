@@ -424,7 +424,7 @@ def _devices_current_impl(
                 # wire for EVERY device, unconditionally and without an
                 # ?include= token: it is what the device card's "☑️ Confirm
                 # Features" button reads to decide whether it is offering 12,
-                # 124 or 6 points, so a client that has to opt in would be a
+                # 14 or 6 points, so a client that has to opt in would be a
                 # client that shows the wrong number. It is one short string
                 # per device. The four feature columns ride along with it —
                 # they are two booleans' worth of payload and are what any

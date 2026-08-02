@@ -727,7 +727,7 @@ most one cycle length.
 | `range_rank_all_devices` | string \| null | **Opt-in via `?include=ranks`.** Same as above but `y` = all eligible scooters across types. |
 | `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | **Opt-in via `?include=ranks`.** Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
 | `has_negative_report` | bool | `true` when ≥1 citizen-submitted report has been filed against this `vehicle_identifier` at this exact `h3_10_index` cell within the last 24h. Becomes `false` automatically when the scooter moves to a different h3_10 cell. Submit reports via `POST /api/v1/reports`. |
-| `feature_status` | string | How much to trust what we know about this vehicle's crowdsourced equipment: `"needs_features_confirmed"` (nobody has ever reported it — every device starts here), `"needs_review"` (two reports disagreed), or `"up_to_date"`. Always on the wire, never behind an `?include=` token: it is what a client's "☑️ Confirm Features" affordance reads to decide whether it is offering 12, 124 or 6 points, so opting in would mean showing the wrong number. See [`POST /api/v1/reports/device-features`](#post-apiv1reportsdevice-features). |
+| `feature_status` | string | How much to trust what we know about this vehicle's crowdsourced equipment: `"needs_features_confirmed"` (nobody has ever reported it — every device starts here), `"needs_review"` (two reports disagreed), or `"up_to_date"`. Always on the wire, never behind an `?include=` token: it is what a client's "☑️ Confirm Features" affordance reads to decide whether it is offering 12, 14 or 6 points, so opting in would mean showing the wrong number. See [`POST /api/v1/reports/device-features`](#post-apiv1reportsdevice-features). |
 | `device_features` | object \| null | `{ bell, cup_holder, phone_holder, poor_condition[] }` — the current consensus. **`null` until someone confirms the vehicle**, which is not the same as all-`false`: `false` claims we know a scooter has no bell, `null` says nobody has looked. `poor_condition` lists which of the *present* features are not in good condition (always a subset of the `true` ones; empty means everything works). |
 | `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, active negative reports, and peer-relative dwell outliers (a dwell-outlier per the rules under `dwell_percentile_hood` costs one extra tier, stacking with the absolute-dwell demerits). `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
 | `number_failed_starts` | int \| null | How many times the upstream `bike_id` rotated (someone started a rental) **without the scooter moving** since it arrived at its current location. Resets to 0 when the scooter moves. Null when the device isn't state-tracked (no plate in the upstream payload). |
@@ -1808,7 +1808,7 @@ consensus job skips invalid rows entirely. Matching ignores whitespace,
 punctuation and case, so `#1025543` and `1025543` both match.
 
 → `{ "id": 17, "reported_at": "...", "deduped": false, "plate_valid": true,
-     "points_awarded": 124, "feature_status": "needs_review" }`
+     "points_awarded": 14, "feature_status": "needs_review" }`
 
 `feature_status` in the response is the status the vehicle carried **when
 the report landed** — which is what chose the award. The status *after*
@@ -1818,7 +1818,7 @@ status we haven't computed would be worse than a stale one. An identical
 row with `"deduped": true`.
 
 **Points** (see [Points](#points)): **12** for the first confirmation of a
-device nobody has done before, **124** for confirming one that is
+device nobody has done before, **14** for confirming one that is
 `needs_review`, **6** for reconfirming one that is already `up_to_date`.
 Requires a bearer token *and* a valid plate. One award per account per
 vehicle per 24 h — a same-day second opinion still votes, it just doesn't
@@ -2816,13 +2816,13 @@ the whole ledger — not just the returned page.
 
 | Action | Points | Earned by |
 |---|---|---|
-| `device_features_review` | 124 | A valid `POST /reports/device-features` on a device whose `feature_status` is `needs_review` |
 | `qr_scan` | 100 | First scan of a given device by you |
+| `device_features_review` | 14 | A valid `POST /reports/device-features` on a device whose `feature_status` is `needs_review` |
+| `device_features_first` | 12 | A valid `POST /reports/device-features` on a device nobody has confirmed before |
 | `report_not_rideable` | 10 | `not_rideable` device report |
 | `report_vehicle_issue` | 10 | `damaged` device report |
 | `report_improper_parking` | 10 | `improperly_parked` device report |
 | `profile_completion` | 10 | One-time, on completing your profile |
-| `device_features_first` | 12 | A valid `POST /reports/device-features` on a device nobody has confirmed before |
 | `device_features_reconfirm` | 6 | A valid `POST /reports/device-features` on a device already `up_to_date` |
 | `report_not_found` | 4 | `not_found` device report |
 | `battery_contribution` | `8 + 2 × ⌈km / 2⌉` | A verified, `eligible` `POST .../track` donation, `ride_options.battery_modeling` on, not an own-device ride, both start/end battery known |
@@ -2845,10 +2845,10 @@ per-ride.
 The `device_features_*` tiers all require a **valid plate** — a wrong one
 is accepted and stored but pays nothing — and are limited to **one award
 per account per vehicle per 24 h**. A same-day second opinion still votes
-in the consensus; it just doesn't pay twice. `device_features_review` is
-by some distance the most valuable single action in the program, which is
-deliberate: the `needs_review` queue is the one thing only the crowd can
-unblock.
+in the consensus; it just doesn't pay twice. `device_features_review` pays
+slightly more than a first confirmation on purpose: clearing the
+`needs_review` queue is the scarcer act, and it is the one thing only the
+crowd can unblock.
 
 The ceiling is forward-only; entries predating it were not adjusted. See
 [Ride limits](#ride-limits).

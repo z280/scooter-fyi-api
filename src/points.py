@@ -98,20 +98,21 @@ POINTS_RIDE_SURVEY = 4
 # --- Device feature confirmations (sql/055) --------------------------------
 #
 # Three tiers, one per state of the device's feature_status when the report
-# lands — the owner's rule verbatim: "12 pts for confirming device features
-# for the first time (nobody did this device before), 124 points for
-# confirming devices 'needing review' and 6pts for reconfirming features."
-# All three are even, so the invariant above holds without adjustment.
+# lands: 12 for the first confirmation of a device nobody has done before,
+# 14 for confirming one that "needs review", 6 for reconfirming one that is
+# already up to date. All three are even, so the invariant above holds
+# without adjustment.
 #
-# !! THE 124 IS AS SPECIFIED AND IS DELIBERATELY NOT "CORRECTED" TO 24 HERE.
-# It is worth flagging that it is ~24x the reconfirm award and 1.24x the
-# whole per-ride cap (MAX_POINTS_PER_RIDE = 100), which makes clearing the
-# needs-review queue far and away the most lucrative action in the program —
-# quite possibly the intent (that queue is the one thing the crowd alone can
-# unblock), quite possibly a typo for 24. It is a one-line change either way:
-# nothing else in this file or in api_device_features.py encodes the number.
+# The review tier was originally specified as 124. That was flagged here as
+# implausible — ~24x the reconfirm award and larger than the entire per-ride
+# cap (MAX_POINTS_PER_RIDE = 100) — and confirmed as a typo for 14. The
+# shape the corrected numbers make is the sensible one: clearing a review is
+# worth marginally MORE than a first confirmation (it is the scarcer, more
+# valuable act — that queue is the one thing only the crowd can unblock) and
+# comfortably more than a routine reconfirmation, without being worth more
+# than a whole ride.
 POINTS_DEVICE_FEATURES_FIRST = 12
-POINTS_DEVICE_FEATURES_REVIEW = 124
+POINTS_DEVICE_FEATURES_REVIEW = 14
 POINTS_DEVICE_FEATURES_RECONFIRM = 6
 
 # device_state.feature_status -> (user_points.action, points) for a valid

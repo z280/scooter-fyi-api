@@ -150,7 +150,7 @@ BEGIN
 END $$;
 
 -- Lets the map payload's "which devices still need features confirmed?"
--- filter (and the leaderboard-facing "what's worth 124 points right now?"
+-- filter (and the leaderboard-facing "what's worth 14 points right now?"
 -- question) hit an index instead of the whole fleet.
 CREATE INDEX IF NOT EXISTS idx_device_state_feature_status
     ON device_state (feature_status);
