@@ -386,23 +386,90 @@ assumes all of them. Declare per provider, serve at
 This table is the honest scope of the project. Don't let the frontend infer
 it from whether a field came back null.
 
-### 7b. The biggest product risk
+### 7b. Denver's other feeds — probed 2026-08-03
 
-GBFS says `bike_id`/`vehicle_id` **must rotate** between trips for
-free-floating fleets, precisely to prevent what this app does. Veo is
-tractable only because they leak a stable plate through `rental_uris`. That
-is a Veo quirk, not an industry norm.
+Denver has one *operator* but three published GBFS endpoints, and all three
+still answer. Probed live:
 
-**Before committing to a provider, verify by fetching their live feed:**
-does anything in the entry survive a trip? If not, that provider is a
-*positions-only* dot on the map — no history, no reliability, no ride
-tracking, no points. Roughly two-thirds of this repo does not apply to them.
+| Feed | `system_id` | GBFS | State | Vehicles |
+|---|---|---|---|---|
+| `data.lime.bike/api/partners/v2/gbfs/denver/` | `lime_denver` | 2.2 | **live, `last_updated` ticking, ttl=60** | 3 scooters |
+| `gbfs.lyft.com/gbfs/2.3/den/` | `lyft_den` | 2.3 | **frozen at 2024-12-16T17:57Z**, byte-identical across pulls | 2,730 (2,530 scooter + 200 e-bike) |
+| `mds.bird.co/gbfs/v2/public/denver/` | `bird-denver` | 2.3 | live endpoint, `last_updated` ticking | **0** |
 
-That check is an afternoon of work and it should gate the whole plan. It is
-also the thing most likely to change the product strategy (e.g. MDS access
-via a city agreement, rather than GBFS scraping, for providers who rotate).
+**Lime is a real, live second Denver provider today.** Three vehicles is a
+feature for this work, not a limitation: it is a genuinely different feed
+shape at effectively zero ingest cost, which is exactly what phase 2 needs.
 
-### 7c. Pricing has to move server-side
+**The stable-identity risk is now confirmed, not hypothetical.** Neither
+Lime nor Lyft publishes `rental_uris`, so there is no plate and no
+`hash_plate()` input:
+
+- **Lime** — `bike_id` is a UUIDv4, no plate. Assume per-trip rotation
+  (GBFS 2.2 says it should).
+- **Lyft** — `bike_id` is a 32-hex hash that is **not unique within a single
+  snapshot**: 2,730 entries, 2,254 distinct ids, one id appearing 15 times
+  at different coordinates with different battery levels. It is not a key
+  even instantaneously, let alone across cycles.
+- **Bird** — no vehicles to inspect; `system_information` advertises only
+  app-level `rental_apps` deep links, nothing per-vehicle.
+
+So: **Veo is the only Denver operator that supports per-vehicle identity,
+and that is a property of Veo's feed, not of our pipeline.** Plan for it to
+stay that way. If per-vehicle intelligence on another operator ever matters,
+the route is MDS under a city agreement, not GBFS scraping.
+
+### 7c. The line this draws: fleet analytics vs per-vehicle intelligence
+
+The confirmation above is less damaging than it first looks, because it
+splits the codebase along a line that is already almost clean:
+
+**Works on anonymous positions — every provider, no identity needed:**
+`compute.py`'s DuckDB spatial join, `snapshot_metadata_core`'s 22 metrics,
+`regional_metrics_narrow`, `api_h3` aggregates, `equity-estimate`,
+`spatial-snapshot`, `analytics/trend`, and the whole daily SLA / compliance
+rollup. **This is the project's origin purpose** — RFP §3.0's "30% of fleet
+in equity areas" is a counting exercise over points. It extends to Lime,
+Lyft and Bird for free.
+
+**Requires a stable identifier — Veo only:** `device_state`, `device_history`,
+dwell, reliability tiers, failed-start detection, `trip_events` and the daily
+trip rollups, `ride_watch`/`tracked_rides`, points, QR scans, device photos,
+per-device reports, and `battery_model`.
+
+Draw the capability boundary here explicitly rather than per-field. One flag,
+`stable_vehicle_id`, gates the entire second list. The capability table in
+§7a stays, but this is the one that matters.
+
+### 7d. Concrete adapter findings from the probes
+
+Real divergences the `GbfsAdapter` has to absorb, all observed:
+
+- **`is_disabled`/`is_reserved` are integers in Lyft's feed** (`0`/`1`), bools
+  in Lime's and Veo's. `ingest.py`'s
+  `if not isinstance(is_disabled, bool): is_disabled = None` silently nulls
+  every Lyft flag. Coerce `0`/`1` explicitly.
+- **`current_range_meters` is a float in Lyft's feed**
+  (`16185.459669359852`), int in Lime's. Today's `int(rng)` handles it.
+- **Duplicate `bike_id`s within one payload** (Lyft). `tag_envelope`'s
+  signature hash and the `COPY` into `raw_telemetry_points` both tolerate it,
+  but anything keyed by device id must not assume uniqueness.
+- **`last_reported` per vehicle** — Lime publishes it, Veo does not. A better
+  freshness signal than our cycle timestamp where available; add it as an
+  optional normalized field.
+- **Junk registry metadata is universal.** Lime's `station_information`
+  returns a single station named "Denver" at `39.3633,-104.9222` — roughly
+  40 km south of the city, near Castle Rock. Same genre as Veo's phantom
+  67,000 m `max_range_meters`. Every provider needs a corrections layer;
+  `_KNOWN_VEHICLE_TYPES` is not a Veo-specific wart.
+- **Coverage is metro, not municipal.** Two of Lime's three vehicles sit
+  outside Denver proper (≈Westminster and ≈Wheat Ridge). They fall inside
+  the coarse `denver_core` bbox and are correctly demoted by
+  `_refine_spatial_status`'s buffered-polygon pass — so the existing
+  machinery already handles this, but expect a much higher
+  `other_outlier` share for metro-wide operators than Veo produces.
+
+### 7e. Pricing has to move server-side
 
 Veo's Denver rate plans are hardcoded in the *frontend*
 (`denver-scooter-fyi/src/config.ts:RATE_PLANS`), and `reported_plan` is a
@@ -448,6 +515,34 @@ it becomes a weekly manual chore.
 
 ---
 
+## 8a. Free data from the probes, independent of any of the above
+
+Three things fall out of §7b that are worth having whether or not the
+multi-tenancy work ever happens:
+
+- **Lyft's last-known Denver pricing**, from `system_pricing_plans`, frozen
+  at shutdown: e-bike `$1.00 unlock + $0.15/min`, scooter
+  `$1.00 unlock + $0.41/min`, both `is_taxable: true`. The frontend's
+  `COMPARATOR` constant is currently an admitted guess ("Lime's typical
+  mid-market US pricing; update … when confirmed"). This is a real, sourced,
+  same-city number — and it says Veo's resident rate ($1 + $0.25/min) was
+  *cheaper* than Lyft's scooter rate, which is worth knowing before
+  publishing a comparator that implies otherwise.
+- **119 Lyft dock locations** with `name`, `address` and `capacity` — the
+  pre-2025 docked network, still georeferenced.
+- **73 live Bird geofencing zones** for Denver, `last_updated` currently
+  ticking, with `ride_allowed: false` and a stricter
+  `ride_through_allowed: false` subset. Nobody else publishes Denver
+  no-ride polygons in machine-readable form. Candidate for a map overlay and
+  for Valhalla avoid-polygons in `api_route.py`. Caveat: this is *Bird's*
+  encoding of Denver's rules, not the city's own publication — treat it as a
+  starting point to verify, not as authority.
+
+The Lyft payload is one frame, not a time series: no trip inference, no
+dwell, no history is recoverable from it. Its value is as a golden fixture
+at realistic scale (2,730 vehicles, real coordinate distribution, real
+malformed edge cases) and as a citable Dec-2024 fleet baseline.
+
 ## 9. Cross-cutting decisions
 
 - **Accounts stay global.** One person, one profile, one points ledger,
@@ -486,9 +581,9 @@ Denver's boundaries, graph and geocoder stay exactly as they are.
 
 | Phase | Scope | Ships behind | Size |
 |---|---|---|---|
-| **0** | Decide: city-in-path vs `?city=`; verify each candidate provider's feed for a stable id (§7b) | — | days |
+| **0** | ~~Verify each candidate provider's feed for a stable id~~ — **done, §7b: none of Lime/Lyft/Bird has one.** Remaining: decide city-in-path vs `?city=` | — | days |
 | **1** | `cities`/`providers`/`feeds` tables; `feed_id` on ~30 tables with a `feed_id=1` backfill; `resolve_scope` dependency; `?city=`/`?provider=` defaulting to denver/veo; `denver_core`→`service_area`; timezone from the city row; `_denver`→`_citywide` | nothing user-visible changes | **L** |
-| **2** | `ProviderAdapter` protocol; `VeoAdapter` extracted verbatim; `GbfsAdapter`; capabilities endpoint; pricing moves server-side; second Denver provider live | capability flags | **L** |
+| **2** | `ProviderAdapter` protocol; `VeoAdapter` extracted verbatim; `GbfsAdapter` (built against Lyft's frozen 2,730-vehicle payload as a fixture, proven live against `lime_denver`); capabilities endpoint; pricing moves server-side | capability flags | **L** |
 | **3** | Frontend de-Denverization (companion doc) — Denver build should be byte-comparable | — | **L** |
 | **4** | City #2: boundaries, combined routing graph, widened Photon index, per-city weather, retention/partitioning | new Pages project | **XL**, infra-bound |
 | **5** | Per-city leaderboards, admin feed filters, per-city compliance config, API.md rewrite | — | **M** |
@@ -500,8 +595,10 @@ user-visible change**. If it does, everything after it is additive.
 
 ## 11. Things that will bite
 
-1. **Rotating vehicle ids** (§7b). Verify before you build. This one can
-   invalidate the plan.
+1. **No stable vehicle id outside Veo** (§7b) — confirmed, not a risk any
+   more. It doesn't invalidate the plan, it bounds it: other operators get
+   fleet analytics (§7c) and nothing per-vehicle. Say so in the UI rather
+   than shipping a map where half the popups are empty.
 2. **The frontend fetches Veo's GBFS directly** for plate resolution
    (`gbfs.ts`), because Veo's feed is CORS-open. Other providers probably
    aren't. A server-side passthrough would put plates back into *our* API
