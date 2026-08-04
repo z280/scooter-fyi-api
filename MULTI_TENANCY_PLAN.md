@@ -394,7 +394,7 @@ still answer. Probed live:
 | Feed | `system_id` | GBFS | State | Vehicles |
 |---|---|---|---|---|
 | `data.lime.bike/api/partners/v2/gbfs/denver/` | `lime_denver` | 2.2 | **live, `last_updated` ticking, ttl=60** | 3 scooters |
-| `gbfs.lyft.com/gbfs/2.3/den/` | `lyft_den` | 2.3 | **frozen at 2024-12-16T17:57Z**, byte-identical across pulls | 2,730 (2,530 scooter + 200 e-bike) |
+| `gbfs.lyft.com/gbfs/2.3/den/` | `lyft_den` | 2.3 | **abandoned** — byte-identical across pulls, frozen stamp 2024-12-16T17:57Z | 2,730 (2,530 scooter + 200 e-bike) |
 | `mds.bird.co/gbfs/v2/public/denver/` | `bird-denver` | 2.3 | live endpoint, `last_updated` ticking | **0** |
 
 **Lime is a real, live second Denver provider today.** Three vehicles is a
@@ -523,8 +523,10 @@ multi-tenancy work ever happens:
 - **Lyft's last-known Denver pricing** → `data/lyft_den_pricing_2024-12-16.json`
   (verbatim) and `data/denver_rate_history.json` (structured, both operators).
   See §8b — the rack rates in the feed are *not* the comparison you want.
-- **119 Lyft dock locations** with `name`, `address` and `capacity` — the
-  pre-2025 docked network, still georeferenced.
+- **119 Lyft dock locations** with `name`, `address` and `capacity` (1,894
+  total), all inside the `denver_core` envelope → `data/lyft_den_stations_2024-12-16.geojson`.
+  Real, geocodable Denver locations — but carrying no reliable date, for the
+  same reason as the vehicle payload. Useful as geography, not as history.
 - **73 live Bird geofencing zones** for Denver, `last_updated` currently
   ticking, with `ride_allowed: false` and a stricter
   `ride_through_allowed: false` subset. Nobody else publishes Denver
@@ -533,48 +535,67 @@ multi-tenancy work ever happens:
   encoding of Denver's rules, not the city's own publication — treat it as a
   starting point to verify, not as authority.
 
-The Lyft payload is one frame, not a time series: no trip inference, no
-dwell, no history is recoverable from it. Its value is as a golden fixture
-at realistic scale (2,730 vehicles, real coordinate distribution, real
-malformed edge cases) and as a citable Dec-2024 fleet baseline.
+**The Lyft payload cannot be dated, and is not a historical record.** Lyft
+stopped operating in Denver long before that 2024-12-16 stamp — the stamp
+marks when the *feed* stopped moving, not when the data was true. So it is
+one undated frame: no time series, no trip inference, no dwell, and no
+defensible claim about Denver's fleet at any particular moment.
+
+Its value is narrower and still real: a **golden fixture** for the
+`GbfsAdapter` at realistic scale — 2,730 entries, a real coordinate
+distribution over Denver, and genuinely malformed edge cases (§7d) that no
+hand-written test payload would think to include. Use it to prove the
+parser, not to prove a point about Denver.
 
 ## 8b. The rack-rate trap
 
-**GBFS `system_pricing_plans` publishes walk-up rates only.** Lyft's frozen
-Denver feed carries exactly two plans — `SCOOTER_SINGLE_RIDE` at
-$1.00 + $0.41/min and `EBIKE_SINGLE_RIDE` at $1.00 + $0.15/min — and no
-bundle. But the products Denver riders actually bought were time passes:
-**$2.99 for 30 minutes** and **$4.99 for 60 minutes**, both with unlocks
-included.
+**The comparator is Lime.** Lime is the operator whose Denver passes riders
+actually bought, and the one `config.ts:COMPARATOR` already names. Lime's
+Denver rates were **$2.99 for 30 minutes** and **$4.99 for 60 minutes**,
+unlocks included.
 
-Those bundles are not recoverable from any open feed. Anyone building a
-price comparison out of GBFS alone — us included, until now — reads the
-rack rate and concludes the wrong thing. It is the chargemaster problem:
-the published price is not the transacted price.
+**Lime publishes no pricing feed at all.** `system_pricing_plans` 404s and
+does not appear in their GBFS discovery document — they advertise only
+`system_information`, `station_information`, `station_status`,
+`free_bike_status`, `vehicle_types`. So Lime's real rates are not
+recoverable from open data by any route.
+
+Lyft's abandoned feed *does* carry pricing, but only walk-up rates —
+`SCOOTER_SINGLE_RIDE` at $1.00 + $0.41/min, `EBIKE_SINGLE_RIDE` at
+$1.00 + $0.15/min, no bundle — and it cannot be dated (§7b), so it says
+nothing about what anyone paid or when.
+
+The trap is the combination: **the rates you can cite are the ones nobody
+paid, and the rates people paid are the ones you cannot cite.** Assemble a
+comparison from GBFS alone and you land on a walk-up price by construction.
+It is the chargemaster problem — the published price is not the transacted
+price, and only the published price is machine-readable.
 
 What the numbers actually say:
 
 | | 15 min | 30 min | 60 min |
 |---|---:|---:|---:|
-| Lyft 30-min pass | $2.99 | $2.99 | — |
-| Lyft 60-min pass | $4.99 | $4.99 | $4.99 |
-| Lyft scooter, walk-up *(the GBFS number)* | $7.15 | $13.30 | $25.60 |
+| **Lime 30-min pass** *(uncited)* | $2.99 | $2.99 | — |
+| **Lime 60-min pass** *(uncited)* | $4.99 | $4.99 | $4.99 |
 | Veo resident | $4.75 | $8.50 | $16.00 |
 | Veo resident + VeoPlus | $3.75 | $7.50 | $15.00 |
 | Veo visitor | $6.85 | $12.70 | $24.40 |
+| Lyft scooter walk-up *(cited, undatable — reference only)* | $7.15 | $13.30 | $25.60 |
 
-A half-hour ride cost **$2.99** under Lyft and costs **$8.50** on Veo today
-— 2.8×. An hour was $4.99, now $16.00 — 3.2×. Compare rack-to-rack and Veo
-looks like the cheaper operator; compare what riders paid and it is roughly
-three times the price.
+A half-hour cost **$2.99** on Lime and costs **$8.50** on Veo — **2.8×**.
+An hour was **$4.99**, now **$16.00** — **3.2×**.
 
-**Provenance discipline.** The rack rates are cited to a retrievable feed
-and marked `"cited": true` in `denver_rate_history.json`. The bundles are
-marked `"cited": false` — they came from recollection of operator marketing
-and still need a durable citation (an archived pricing page or a
-screenshot). For a project whose credibility rests on auditability, do not
-publish the 2.8× figure until that citation exists. The structure is in
-place; the source is the gap.
+**Provenance discipline.** In `denver_rate_history.json` every plan carries
+a `cited` flag. Veo's rates and Lyft's rack rates are `true`; **Lime's
+passes — the entire basis of the 2.8× — are `false`**, sourced to
+recollection of operator marketing. For a project whose credibility rests
+on auditability, that multiple must not ship until an archived pricing page
+or screenshot backs it. The structure is ready to accept the citation; the
+citation is the gap.
+
+Note the irony worth putting in front of a reader: the operator that left
+publishes nothing about its prices, so the only way to show what Denver
+lost is with a source outside the open-data ecosystem entirely.
 
 ## 9. Cross-cutting decisions
 
