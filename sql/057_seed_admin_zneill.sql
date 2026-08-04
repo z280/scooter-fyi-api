@@ -1,0 +1,36 @@
+-- Seed the owner into the admin allowlist.
+--
+-- The allowlist stopped being an environment variable in sql/021 and became
+-- a TABLE, which means it now lives in the database's own lifecycle: it is
+-- carried by pg_dump/pg_restore, and a database brought up fresh — a new
+-- box, a rebuilt volume, a restore that predates a row — starts with it
+-- EMPTY. An empty allowlist is not a degraded state that announces itself.
+-- Every /api/v1/private/* route 403s, the map quietly drops Administrator
+-- Mode, and the proximity bypass on ▶️ Start in Veo and 🧭 Use in Ride Mode
+-- simply stops applying. Nothing errors; the operator is just no longer an
+-- operator. That is exactly how it presented when it happened.
+--
+-- So the owner's own address is seeded here rather than left to a manual
+-- `python -m src.cli admin add`, which is a step someone has to remember on
+-- a box that is by definition not yet reachable through the UI. Migrations
+-- run at boot (src/pg.py:run_migrations), so any environment that starts
+-- this code has at least one admin by the time it serves a request.
+--
+-- IDEMPOTENT in both directions:
+--   * ON CONFLICT DO NOTHING, so re-running changes nothing and an address
+--     already added through the portal or CLI keeps its original added_by
+--     and added_at rather than being rewritten by this file.
+--   * schema_migrations means it only executes once per database anyway.
+--
+-- NOT A LOCK: this is a starting point, not a floor. The address can be
+-- removed again through /admin/admins, the CLI, or DELETE
+-- /api/v1/private/admins — the only removal the API refuses is the one that
+-- would empty the table, and that guard is about the empty state above, not
+-- about this particular row.
+--
+-- The address is already in this repository in plain text (it is the worked
+-- example in tests/test_accounts_logic.py); it identifies the operator, and
+-- is not a credential.
+INSERT INTO admin_allowlist (email, added_by)
+VALUES ('zneill@gmail.com', 'sql/057')
+ON CONFLICT (email) DO NOTHING;
