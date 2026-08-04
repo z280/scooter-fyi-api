@@ -146,6 +146,12 @@ def points_schedule() -> dict[str, dict[str, int]]:
     for action, value in p.FEATURE_STATUS_POINTS.values():
         schedule[action] = {"points": value}
 
+    # Device photos (sql/056). Published for the same reason every other
+    # award is: the "📷 Take Photo" flow tells the rider what a photo is
+    # worth, and the only way that copy cannot drift from what the ledger
+    # pays is for both to read this constant.
+    schedule["device_photo"] = {"points": p.POINTS_DEVICE_PHOTO}
+
     return schedule
 
 

@@ -11,9 +11,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src import api_device_photos
+from src import api_device_photos, points
 from src.accounts import SessionUser, require_session
-from src.device_photos import DevicePhotoError
+from src.device_photos import MAX_PHOTOS_PER_DEVICE, DevicePhotoError
 
 _USER = SessionUser(
     account_id=1, email="rider@example.com", scopes=("rider",),
@@ -78,12 +78,25 @@ def _client(monkeypatch, fetches, bucket="devbucket"):
     return TestClient(_app()), conn
 
 
-def _upload(client):
-    return client.post(f"/api/v1/devices/{_VID}/photos", files={"photo": ("t.jpg", b"fake", "image/jpeg")})
+def _upload(client, **data):
+    return client.post(
+        f"/api/v1/devices/{_VID}/photos",
+        files={"photo": ("t.jpg", b"fake", "image/jpeg")},
+        data=data,
+    )
+
+
+# Fetch sequence for a successful upload that also credits points:
+#   visible-photo count -> insert RETURNING -> [device_state coords]
+#   -> awards-already-paid count -> points INSERT RETURNING
+# The coords fetch is skipped when the client sent lat/lng itself.
+_COORDS = (39.7392, -104.9876)
+_UNPAID = (0,)      # awards already paid for this vehicle
+_CREDITED = (77, _NOW)
 
 
 def test_upload_success(monkeypatch):
-    client, _ = _client(monkeypatch, fetches=[(0,), (5, _NOW)])
+    client, _ = _client(monkeypatch, fetches=[(0,), (5, _NOW), _COORDS, _UNPAID, _CREDITED])
     r = _upload(client)
     assert r.status_code == 200, r.text
     assert r.json()["photo_url"] == "https://cdn.example/device-photos/1/x.jpg"
@@ -131,4 +144,107 @@ def test_list_requires_signed_in_rider():
     app = FastAPI()
     app.include_router(api_device_photos.router)
     r = TestClient(app).get(f"/api/v1/devices/{_VID}/photos")
+    assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Points (sql/056). One credit per accepted upload, POINTS_DEVICE_PHOTO each.
+# The award needs a real lat/lng for its ledger row, so these cover where that
+# location comes from — and what happens when there isn't one.
+# ---------------------------------------------------------------------------
+
+
+def _points_insert(conn):
+    """The INSERT INTO user_points the upload made, or None."""
+    for sql, params in conn.cur.executed:
+        if sql.startswith("INSERT INTO user_points"):
+            return params
+    return None
+
+
+def test_upload_credits_points_using_the_riders_own_coordinates(monkeypatch):
+    # lat/lng supplied -> no device_state lookup, so no coords fetch queued.
+    client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), _UNPAID, _CREDITED])
+    r = _upload(client, lat="39.7392", lng="-104.9876")
+    assert r.status_code == 200, r.text
+    assert r.json()["points_awarded"] == points.POINTS_DEVICE_PHOTO
+
+    params = _points_insert(conn)
+    assert params is not None
+    account_id, action, awarded, lat, lng = params[0], params[1], params[2], params[3], params[4]
+    assert (account_id, action, awarded) == (_USER.account_id, "device_photo",
+                                             points.POINTS_DEVICE_PHOTO)
+    assert (lat, lng) == (39.7392, -104.9876)
+    # Attributed to the photo, which is what makes the credit idempotent.
+    assert params[-2:] == ("device_photos", "5")
+    assert "device_state" not in " ".join(s for s, _ in conn.cur.executed)
+
+
+def test_upload_falls_back_to_the_vehicles_last_known_position(monkeypatch):
+    client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), _COORDS, _UNPAID, _CREDITED])
+    r = _upload(client)  # no coords from the client
+    assert r.status_code == 200, r.text
+    assert r.json()["points_awarded"] == points.POINTS_DEVICE_PHOTO
+    params = _points_insert(conn)
+    assert (params[3], params[4]) == _COORDS
+
+
+def test_upload_still_stores_the_photo_when_no_location_resolves(monkeypatch):
+    # Unknown device / never-observed position -> (None, None) -> no award.
+    client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), None, _UNPAID])
+    r = _upload(client)
+    assert r.status_code == 200, r.text
+    assert r.json()["points_awarded"] == 0
+    assert r.json()["photo_url"]  # the photo is kept regardless
+    assert _points_insert(conn) is None
+
+
+def test_malformed_or_out_of_range_coords_are_dropped_not_fatal(monkeypatch):
+    for bad in ({"lat": "not-a-number", "lng": "-104.9"},
+                {"lat": "91", "lng": "-104.9"},      # out of range
+                {"lat": "39.7", "lng": "181"},       # out of range
+                {"lat": "39.7"}):                    # half a pair
+        client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), _COORDS, _UNPAID, _CREDITED])
+        r = _upload(client, **bad)
+        # Upload succeeds and falls back to the device's position rather than
+        # 422-ing on a field the rider never sees.
+        assert r.status_code == 200, (bad, r.text)
+        assert (_points_insert(conn)[3], _points_insert(conn)[4]) == _COORDS
+
+
+def test_a_vehicle_pays_at_most_three_photo_awards_ever(monkeypatch):
+    """Bounded on the LEDGER, not on how many photos the device holds now.
+
+    sql/031 reserves device_photos.status for a future moderator workflow and
+    the endpoint's cap counts only 'visible' rows — so the day a photo can be
+    hidden, "3 photos per device" would stop bounding "3 awards per device"
+    unless the award counts what it has already paid. This is the test that
+    keeps hide-and-re-upload from becoming a points farm.
+    """
+    client, conn = _client(
+        monkeypatch,
+        # A free photo slot, but three awards already paid for this vehicle.
+        fetches=[(0,), (5, _NOW), _COORDS, (MAX_PHOTOS_PER_DEVICE,)],
+    )
+    r = _upload(client)
+    assert r.status_code == 200, r.text
+    assert r.json()["points_awarded"] == 0
+    assert r.json()["photo_url"]  # still stored — only the award is withheld
+    assert _points_insert(conn) is None
+
+
+def test_the_award_is_even_because_the_ledger_will_not_take_odd(monkeypatch):
+    # The owner asked for 5; sql/053's CHECK and credit_points' assert both
+    # reject odd awards, which is why this constant is 6.
+    assert points.POINTS_DEVICE_PHOTO % 2 == 0
+
+
+def test_upload_is_never_anonymous(monkeypatch):
+    # No session override -> 401 before any storage or ledger work happens.
+    app = FastAPI()
+    app.include_router(api_device_photos.router)
+    r = TestClient(app).post(
+        f"/api/v1/devices/{_VID}/photos",
+        files={"photo": ("t.jpg", b"fake", "image/jpeg")},
+    )
     assert r.status_code == 401

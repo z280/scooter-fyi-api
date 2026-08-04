@@ -19,6 +19,7 @@ from .device_photos import (
     store_device_photo,
 )
 from .pg import connection
+from .points import credit_device_photo_points
 from .ratelimit import enforce
 from .ride_screenshots import presigned_screenshot_url
 
@@ -31,6 +32,49 @@ _LIMIT_PHOTO_REPORT_PER_ACCOUNT = (10, 3600)
 _VID_RE = r"^[0-9a-f]{16}$"
 
 
+def _form_coords(form: Any) -> tuple[float | None, float | None]:
+    """Optional `lat`/`lng` multipart parts — where the rider was when they
+    took the photo, which is the location the points row records.
+
+    OPTIONAL, and silently dropped when malformed or out of range, because
+    the photo is the point of the request: a client that sends garbage
+    coordinates (or none) still gets its upload stored, and simply earns
+    nothing rather than having the whole call rejected. A partial pair is
+    treated as no pair — a lat without a lng cannot index an H3 cell.
+    """
+    raw_lat, raw_lng = form.get("lat"), form.get("lng")
+    if not isinstance(raw_lat, str) or not isinstance(raw_lng, str):
+        return None, None
+    try:
+        lat, lng = float(raw_lat), float(raw_lng)
+    except ValueError:
+        return None, None
+    if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+        return None, None
+    return lat, lng
+
+
+def _device_coords(cur, vehicle_identifier: str) -> tuple[float | None, float | None]:
+    """Fallback location: the vehicle's last known position (sql/004).
+
+    A photo of a scooter is taken AT that scooter, so the device's own
+    position is a faithful stand-in for a client that didn't send coordinates
+    — and it keeps the award working for callers other than our own popup.
+    Returns (None, None) for an unknown device or one whose position has
+    never been observed; credit_device_photo_points then skips rather than
+    invents a location.
+    """
+    cur.execute(
+        "SELECT current_lat, current_lng FROM device_state "
+        "WHERE vehicle_identifier = %s",
+        (vehicle_identifier,),
+    )
+    row = cur.fetchone()
+    if row is None or row[0] is None or row[1] is None:
+        return None, None
+    return float(row[0]), float(row[1])
+
+
 @router.post("/api/v1/devices/{vehicle_identifier}/photos")
 async def upload_device_photo(
     request: Request,
@@ -41,6 +85,7 @@ async def upload_device_photo(
     photo = form.get("photo")
     if photo is None or isinstance(photo, str):
         raise HTTPException(422, "multipart field `photo` is required")
+    lat, lng = _form_coords(form)
     data = await photo.read()
     if len(data) > MAX_DEVICE_PHOTO_BYTES:
         raise HTTPException(413, "photo too large (max 10 MB)")
@@ -78,6 +123,17 @@ async def upload_device_photo(
                     (vehicle_identifier, user.account_id, key),
                 )
                 new_id, created_at = cur.fetchone()
+                # Points (sql/056). Inside the same transaction as the photo
+                # row on purpose: a credit for a photo that then failed to
+                # commit would be points for nothing, and the ledger is the
+                # only definition of a rider's total.
+                if lat is None or lng is None:
+                    lat, lng = _device_coords(cur, vehicle_identifier)
+                awarded = credit_device_photo_points(
+                    cur, account_id=user.account_id,
+                    vehicle_identifier=vehicle_identifier,
+                    photo_id=int(new_id), lat=lat, lng=lng,
+                )
             conn.commit()
     except DevicePhotoError as e:
         raise HTTPException(400, str(e))
@@ -90,7 +146,11 @@ async def upload_device_photo(
         raise
 
     return {"id": int(new_id), "vehicle_identifier": vehicle_identifier,
-            "photo_url": public_photo_url(key), "created_at": created_at.isoformat()}
+            "photo_url": public_photo_url(key), "created_at": created_at.isoformat(),
+            # 0 when no location could be resolved for the ledger row — the
+            # photo is stored either way, and saying 0 is honest where
+            # claiming POINTS_DEVICE_PHOTO would not be.
+            "points_awarded": awarded["points"] if awarded else 0}
 
 
 @router.get("/api/v1/devices/{vehicle_identifier}/photos")

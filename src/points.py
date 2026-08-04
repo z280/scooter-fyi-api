@@ -28,6 +28,7 @@ from typing import Any
 import h3
 
 from .geo import distance_meters
+from .device_photos import MAX_PHOTOS_PER_DEVICE
 from .ride_limits import MAX_POINTS_PER_RIDE
 
 log = logging.getLogger(__name__)
@@ -140,6 +141,26 @@ FEATURE_STATUS_POINTS: dict[str, tuple[str, int]] = {
 FEATURE_POINT_ACTIONS: tuple[str, ...] = tuple(
     action for action, _points in FEATURE_STATUS_POINTS.values()
 )
+
+# --- Device photos (sql/031 content, sql/056 ledger action) ----------------
+#
+# One award per uploaded photo. The owner asked for 5; the EVEN-POINTS
+# INVARIANT above makes 5 unrepresentable — `assert points % 2 == 0` in
+# credit_points and sql/053's `CHECK (points % 2 = 0)` would both reject it —
+# so this is 6, the same correction the rule already produced once for
+# POINTS_NAV_QUALITATIVE. Confirmed with the owner before landing.
+#
+# 6 places a photo level with a feature reconfirm (6) and above a not-found
+# report (4): a photo is seconds of work, but it is the only contribution
+# that shows a rider what a scooter actually looks like before they walk to
+# it, and unlike a report it cannot be filed from an armchair — the uploader
+# has to be holding a camera in front of the vehicle.
+#
+# NO PER-ACCOUNT COOLDOWN, unlike the feature awards. It needs none: a device
+# accepts at most MAX_PHOTOS_PER_DEVICE (3) visible photos across all users,
+# so a vehicle can yield at most 3 × this value however many riders try, and
+# the upload endpoint's 20/hour per-account limit bounds the rest.
+POINTS_DEVICE_PHOTO = 6
 
 # Step sizes for the two distance formulas above. Canonical unit is
 # KILOMETRES because that is the unit the rider-facing copy and
@@ -443,6 +464,70 @@ def credit_device_feature_points(
         cur, account_id=account_id, action=action, points=points,
         lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
         source_table="device_feature_reports", source_id=str(report_id),
+    )
+
+
+def credit_device_photo_points(
+    cur, *, account_id: int, vehicle_identifier: str, photo_id: int,
+    lat: float | None, lng: float | None,
+) -> dict[str, Any] | None:
+    """Award for one uploaded device photo (sql/056).
+
+    Call only after the photo row is inserted, and only for an authenticated
+    uploader — which the endpoint guarantees structurally, since the upload
+    is require_session and points are never anonymous (sql/028).
+
+    Returns None when no location is resolvable. Every ledger row needs a
+    real lat/lng, so this skips the award rather than fabricating one, the
+    same rule credit_report_points follows — the photo is still stored, and
+    the caller reports points_awarded: 0 honestly rather than pretending the
+    upload happened at 0,0.
+
+    Idempotent through credit_points' (source_table, source_id, action)
+    dedupe: the photo's own id is the source, so a credit attempted twice for
+    one photo writes one row.
+
+    AT MOST MAX_PHOTOS_PER_DEVICE AWARDS PER VEHICLE, EVER — counted from the
+    ledger, not from how many photos the device currently holds. The two are
+    the same today only because nothing can remove a photo. sql/031's
+    `status` column exists for a future moderator workflow, and the endpoint's
+    cap query counts `status = 'visible'`, so the day a photo can be hidden is
+    the day "3 photos per device" stops bounding "3 awards per device": hide,
+    re-upload, get paid again, repeat. Bounding on the ledger means the
+    property this award's no-cooldown design rests on stays true when that
+    workflow lands, instead of quietly becoming a farm.
+
+    No extra lock: the caller runs inside the transaction that already holds
+    pg_advisory_xact_lock on `device_photos:{vehicle_identifier}` for its own
+    cap check, so two concurrent uploads to one vehicle serialize here too.
+    """
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM user_points
+         WHERE vehicle_identifier = %s AND action = 'device_photo'
+        """,
+        (vehicle_identifier,),
+    )
+    (already_paid,) = cur.fetchone()
+    if int(already_paid) >= MAX_PHOTOS_PER_DEVICE:
+        log.info(
+            "points: vehicle %s has already paid its %d photo awards — "
+            "photo %d stored, no award",
+            vehicle_identifier, MAX_PHOTOS_PER_DEVICE, photo_id,
+        )
+        return None
+
+    if lat is None or lng is None:
+        log.warning(
+            "points: device photo %d has no resolvable location — skipping "
+            "credit for account=%d", photo_id, account_id,
+        )
+        return None
+    return credit_points(
+        cur, account_id=account_id, action="device_photo",
+        points=POINTS_DEVICE_PHOTO, lat=lat, lng=lng,
+        vehicle_identifier=vehicle_identifier,
+        source_table="device_photos", source_id=str(photo_id),
     )
 
 
