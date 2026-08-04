@@ -113,9 +113,68 @@ def add_admin(email: str, added_by: str | None) -> bool:
     return added
 
 
+class LastAdminError(Exception):
+    """Raised by remove_admin_guarded when the removal would empty the
+    allowlist. Carries the normalized address that was refused."""
+
+    def __init__(self, email: str):
+        super().__init__(f"refusing to remove the last admin ({email})")
+        self.email = email
+
+
+def remove_admin_guarded(email: str) -> bool:
+    """Remove an email, refusing to leave the allowlist EMPTY.
+
+    Returns True if a row was removed, False if it wasn't present. Raises
+    LastAdminError instead of emptying the table.
+
+    ATOMIC, and it has to be. The obvious spelling — read the membership,
+    decide, then call remove_admin() — is two transactions, and the decision
+    it makes is about a count that the second transaction can no longer rely
+    on. With two admins, concurrent removals of DIFFERENT addresses both
+    observe a count of two, both conclude they are not the last, and both
+    delete: the allowlist ends up empty, which is the single state this guard
+    exists to prevent. So the count, the membership probe and the DELETE all
+    happen on one cursor inside one transaction, serialized on an advisory
+    lock the way src/api_device_photos.py serializes its per-device cap.
+
+    The lock is transaction-scoped, so it releases on commit or rollback,
+    and it only serializes callers that take it — remove_admin() below does
+    not. That is deliberate: the GitHub-gated portal and the CLI are the
+    out-of-band way back in, and they are allowed to empty the table.
+    """
+    norm = normalize_email(email)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                ("admin_allowlist",),
+            )
+            cur.execute("SELECT COUNT(*) FROM admin_allowlist")
+            (total,) = cur.fetchone()
+            cur.execute(
+                "SELECT 1 FROM admin_allowlist WHERE email = %s", (norm,)
+            )
+            present = cur.fetchone() is not None
+            # Only a removal that would actually empty the table is refused.
+            # Asking to remove an address that isn't listed is a plain no-op
+            # even when one admin remains — nothing is lost by saying so.
+            if present and int(total) <= 1:
+                raise LastAdminError(norm)
+            cur.execute("DELETE FROM admin_allowlist WHERE email = %s", (norm,))
+            removed = cur.rowcount == 1
+        conn.commit()
+    return removed
+
+
 def remove_admin(email: str) -> bool:
     """Remove an email from the allowlist. Returns True if a row was
-    removed, False if it wasn't present."""
+    removed, False if it wasn't present.
+
+    UNGUARDED: this will happily remove the last admin. That is what the
+    portal and the CLI want — they are reachable when the allowlist is
+    empty, so they are the way back in. Anything reachable only BY an admin
+    should call remove_admin_guarded instead."""
     norm = normalize_email(email)
     with connection() as conn:
         with conn.cursor() as cur:
@@ -685,6 +744,6 @@ def require_admin(request: Request) -> SessionUser:
     removing an admin takes effect on the next request."""
     user = require_session(request)
     if not is_admin_email(user):
-        raise HTTPException(403, "admin access required (email not on ADMIN_EMAILS)")
+        raise HTTPException(403, "admin access required (email not on the admin allowlist)")
     return user
 

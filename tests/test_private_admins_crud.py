@@ -17,7 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src import api_private
+from src import accounts, api_private
 from src.accounts import SessionUser, require_admin
 
 _ME = "boss@example.com"
@@ -59,9 +59,17 @@ class _Allowlist:
                           "added_at": "2026-08-04T00:00:00+00:00"})
         return True
 
-    def remove_admin(self, email):
+    def remove_admin_guarded(self, email):
+        """Mirrors accounts.remove_admin_guarded's CONTRACT — refuse rather
+        than empty the table. Its atomicity is a property of one SQL
+        transaction and is tested against that in
+        tests/test_admin_removal_atomicity.py; what belongs here is that the
+        endpoint translates the refusal into a 409."""
         norm = email.strip().lower()
         self.calls.append(("remove", norm, None))
+        present = any(r["email"] == norm for r in self.rows)
+        if present and len(self.rows) <= 1:
+            raise accounts.LastAdminError(norm)
         before = len(self.rows)
         self.rows = [r for r in self.rows if r["email"] != norm]
         return len(self.rows) != before
@@ -73,7 +81,8 @@ def allow(monkeypatch):
     monkeypatch.setattr(api_private.accounts, "list_admins", book.list_admins)
     monkeypatch.setattr(api_private.accounts, "admin_emails", book.admin_emails)
     monkeypatch.setattr(api_private.accounts, "add_admin", book.add_admin)
-    monkeypatch.setattr(api_private.accounts, "remove_admin", book.remove_admin)
+    monkeypatch.setattr(api_private.accounts, "remove_admin_guarded",
+                        book.remove_admin_guarded)
     # The rate limiter needs a live cursor; these routes are covered for
     # limits by the shared ratelimit tests, not here.
     monkeypatch.setattr(api_private, "connection", _fake_connection)
@@ -169,6 +178,9 @@ def test_removing_yourself_is_allowed_while_someone_else_remains(allow):
 
 
 def test_the_last_admin_cannot_be_removed(allow):
+    """The endpoint's half of the guard: LastAdminError becomes a 409 that
+    names the way out. The race the guard actually defends against is
+    covered in tests/test_admin_removal_atomicity.py."""
     allow.rows = [r for r in allow.rows if r["email"] == _ME]
     r = _client().delete(f"/api/v1/private/admins?email={_ME}")
     assert r.status_code == 409

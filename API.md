@@ -2024,7 +2024,10 @@ Three properties make that survivable, and clients can rely on them:
   every account out of `/private/*` — including these routes — leaving
   only the GitHub portal or `python -m src.cli admin`. Removing
   *yourself* is allowed while others remain; stepping down is
-  legitimate, locking the door on an empty room is not.
+  legitimate, locking the door on an empty room is not. The check and the
+  delete are **one serialized transaction**, so two concurrent removals of
+  different addresses cannot both pass a count of two and both commit —
+  the second is refused.
 - **Writes are rate-limited** 30/hour per account.
 
 Both write routes return the **full refreshed list** alongside their

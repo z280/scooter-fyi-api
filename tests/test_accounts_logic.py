@@ -19,6 +19,11 @@ _NOW = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
 # The admin allowlist now lives in Postgres (admin_allowlist table); the CRUD
 # + membership query are covered in test_admin_allowlist.py. Here we only
 # exercise the pure scope-derivation logic, stubbing the allowlist.
+# The method strings api_auth actually mints (grep `method=` there). Tests
+# that invent a value can't catch a future rule that keys on a real one.
+_REAL_METHODS = ("google", "magic_link", "email_code", "sms_code")
+
+
 def _allow(monkeypatch, *emails):
     # admin_emails takes an optional cursor now (session_scopes passes the one
     # it is already inside), so the stub has to accept it.
@@ -41,14 +46,14 @@ def test_every_door_gets_admin_for_an_allowlisted_email(monkeypatch):
     which has always accepted either door because both prove ownership of
     the same allowlisted address. One address, one answer."""
     _allow(monkeypatch, "zneill@gmail.com")
-    for method in ("google", "magic_link", "email_code", "sms"):
+    for method in _REAL_METHODS:
         assert session_scopes(method=method, email="zneill@gmail.com") == \
             ["rider", "admin"], method
 
 
 def test_non_allowlisted_email_is_rider_only_on_every_door(monkeypatch):
     _allow(monkeypatch, "zneill@gmail.com")
-    for method in ("google", "magic_link", "email_code", "sms"):
+    for method in _REAL_METHODS:
         assert session_scopes(method=method, email="rando@example.com") == \
             ["rider"], method
 
@@ -57,7 +62,7 @@ def test_phone_only_session_has_no_email_to_match(monkeypatch):
     """SMS sign-in on a phone-only account: the allowlist is keyed by email,
     so there is nothing to look up and None must not reach normalize_email."""
     _allow(monkeypatch, "zneill@gmail.com")
-    assert session_scopes(method="sms", email=None) == ["rider"]
+    assert session_scopes(method="sms_code", email=None) == ["rider"]
 
 
 def test_the_allowlist_lookup_uses_a_cursor_it_was_handed(monkeypatch):

@@ -2,14 +2,18 @@
 
 The field answers "is this session allowed to do admin things?", and the
 answer is `is_admin_email` — the check require_admin actually enforces,
-which accepts EITHER sign-in door. It is deliberately NOT `"admin" in
-scopes`: that scope is a Google-only signal (accounts.session_scopes) and
-stopped gating access when is_admin_email became the authorization check.
+which accepts EITHER sign-in door.
 
-The bug these tests exist for: an allowlisted operator signed in by magic
-link was admin to every endpoint while the frontend, which had only the
-scope to go on, showed no Administrator Mode and left the proximity-gated
-map buttons blocked. Authorization said yes; the UI said no.
+It is deliberately NOT `"admin" in scopes`, for two reasons that outlast
+this PR. The scope is a MINT-TIME snapshot, so it is stale for every
+session issued before an allowlist change — including every session
+issued before this PR, when the scope was Google-only and an allowlisted
+operator signed in by magic link was admin to every endpoint while the UI
+showed no Administrator Mode. And a live field is what makes a REVOKED
+admin lose access at once rather than at token expiry.
+
+This PR makes the scope door-agnostic going forward; the tests below
+still cover a session that lacks it, because those sessions exist.
 """
 
 from __future__ import annotations
@@ -58,9 +62,10 @@ def test_google_admin_is_admin():
 
 
 def test_magic_link_admin_is_admin_even_without_the_scope():
-    """The regression this file is named for. Same allowlisted email, other
-    door: no `admin` scope is ever stamped, but require_admin would let this
-    session through — so the session endpoint has to say so."""
+    """The regression this file is named for, and the shape every session
+    minted before this PR still has: an allowlisted email whose stored
+    scopes carry no `admin`. require_admin would let it through, so the
+    session endpoint has to say so rather than reading the stale snapshot."""
     body = _session(_user(email=_ADMIN_EMAIL, scopes=("rider",),
                           method="magic_link"))
     assert body["admin"] is True
@@ -76,7 +81,7 @@ def test_ordinary_rider_is_not_admin():
 def test_phone_only_account_is_not_admin():
     """SMS sign-in with no email on file: the allowlist is keyed by email, so
     there is nothing to match — and None must not reach normalize_email."""
-    body = _session(_user(email=None, scopes=("rider",), method="sms"))
+    body = _session(_user(email=None, scopes=("rider",), method="sms_code"))
     assert body["admin"] is False
 
 

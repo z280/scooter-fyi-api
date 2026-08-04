@@ -634,14 +634,19 @@ def private_admins_remove(
                     limit=_LIMIT_ADMIN_WRITE[0], window_seconds=_LIMIT_ADMIN_WRITE[1])
         conn.commit()
     target = accounts.normalize_email(email)
-    current = accounts.admin_emails()
-    if target in current and len(current) == 1:
+    try:
+        # Guarded, not accounts.remove_admin: the count and the DELETE have to
+        # be one transaction. Checking here and deleting there would let two
+        # concurrent removals of different addresses both pass a count of two
+        # and both commit, emptying the allowlist — the exact state this
+        # refusal exists to prevent.
+        removed = accounts.remove_admin_guarded(target)
+    except accounts.LastAdminError:
         raise HTTPException(
             409,
             "refusing to remove the last admin — add another first, or use "
             "the GitHub-gated portal at /admin/admins",
         )
-    removed = accounts.remove_admin(target)
     if removed:
         log.info("admin allowlist: %s removed %s", user.email, target)
     return {**_admin_rows(user.email), "email": target, "removed": removed}
