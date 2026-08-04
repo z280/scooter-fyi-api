@@ -108,22 +108,25 @@ def _vehicle(pg_conn) -> str:
 
 
 def _report(
-    pg_conn, vid, *, bell=True, cup=True, phone=True, poor=(),
+    pg_conn, vid, *, bell=True, cup=True, phone=True, basket=None, poor=(),
     plate_valid=True, minutes=0, status=STATUS_NEEDS_CONFIRMED,
 ):
+    """`basket` defaults to None — an abstention, the shape of every report
+    from a client older than sql/058 (see that migration on why the column is
+    nullable where the other three are NOT NULL)."""
     with pg_conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO device_feature_reports (
                 vehicle_identifier, reported_at, submitted_plate, plate_valid,
-                has_bell, has_cup_holder, has_phone_holder,
+                has_bell, has_cup_holder, has_phone_holder, has_basket,
                 all_good_condition, poor_condition, status_at_report
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
                 vid, _BASE + timedelta(minutes=minutes), "1025543", plate_valid,
-                bell, cup, phone, not poor, list(poor), status,
+                bell, cup, phone, basket, not poor, list(poor), status,
             ),
         )
         (report_id,) = cur.fetchone()
@@ -137,14 +140,14 @@ def _state(pg_conn, vid) -> dict:
             """
             SELECT feature_status, has_bell, has_cup_holder, has_phone_holder,
                    features_poor_condition, features_confirmed_at,
-                   features_review_since, features_report_count
+                   features_review_since, features_report_count, has_basket
               FROM device_state WHERE vehicle_identifier = %s
             """,
             (vid,),
         )
         row = cur.fetchone()
     keys = ("status", "bell", "cup", "phone", "poor", "confirmed_at",
-            "review_since", "count")
+            "review_since", "count", "basket")
     return dict(zip(keys, row))
 
 
@@ -429,3 +432,94 @@ def test_a_report_for_an_unknown_vehicle_is_retired_not_retried(pg_conn):
     _report(pg_conn, orphan)
     process_pending()
     assert _unprocessed(pg_conn, orphan) == 0
+
+
+# --- the basket, end to end (sql/058) ----------------------------------------
+
+def test_a_first_report_publishes_its_basket_answer(pg_conn):
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=True)
+    process_pending()
+    state = _state(pg_conn, vid)
+    assert state["status"] == STATUS_UP_TO_DATE
+    assert state["basket"] is True
+
+
+def test_a_pre_058_consensus_stays_unknown_rather_than_false(pg_conn):
+    """Every vehicle confirmed before the question existed. NULL is "nobody
+    has told us", which is a different fact from "no basket" — and the one
+    the column is allowed to hold."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=None)
+    process_pending()
+    assert _state(pg_conn, vid)["basket"] is None
+
+
+def test_a_later_report_fills_in_a_basket_nobody_had_answered(pg_conn):
+    """The path that makes the migration worth anything for the existing
+    fleet. The vehicle is up_to_date with a NULL basket; a current client
+    agrees about the three features both were asked about, so this is a
+    RECONFIRMATION — which normally does not rewrite the feature columns.
+    `fill_abstentions` is why the basket lands anyway, instead of waiting for
+    a review that may never come."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=None, minutes=0)
+    process_pending()
+    assert _state(pg_conn, vid)["basket"] is None
+
+    _report(pg_conn, vid, basket=True, minutes=10)
+    process_pending()
+    state = _state(pg_conn, vid)
+    assert state["basket"] is True
+    assert state["status"] == STATUS_UP_TO_DATE, "still a reconfirmation"
+    assert state["count"] == 2
+
+
+def test_an_abstaining_report_does_not_flag_a_confirmed_basket(pg_conn):
+    """The mirror image, and the rollout's real risk: an OLD client reports a
+    vehicle whose consensus already includes a basket. Silence is not
+    dissent, so the vehicle must not enter review."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=True, minutes=0)
+    process_pending()
+    _report(pg_conn, vid, basket=None, minutes=10)
+    process_pending()
+    state = _state(pg_conn, vid)
+    assert state["status"] == STATUS_UP_TO_DATE
+    assert state["basket"] is True
+
+
+def test_two_riders_who_were_both_asked_can_still_open_a_review(pg_conn):
+    """The abstention rule must not swallow a real basket discrepancy."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=True, minutes=0)
+    process_pending()
+    _report(pg_conn, vid, basket=False, minutes=10)
+    process_pending()
+    assert _state(pg_conn, vid)["status"] == STATUS_NEEDS_REVIEW
+
+
+def test_a_review_resolves_the_basket_by_the_riders_who_were_asked(pg_conn):
+    """Four reports, not three: the first is authoritative, the second opens
+    the review AND casts the first vote in it, and the window needs
+    REVIEW_CONSENSUS_REPORTS votes of its own before it resolves."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=True, minutes=0)
+    process_pending()
+    for minute in (10, 20, 30):
+        _report(pg_conn, vid, basket=False, minutes=minute)
+        process_pending()
+    state = _state(pg_conn, vid)
+    assert state["status"] == STATUS_UP_TO_DATE
+    assert state["basket"] is False
+
+
+def test_a_bent_basket_survives_the_round_trip(pg_conn):
+    """The flow the API used to 422 outright: a rider standing at a Trike
+    with a damaged cargo basket."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=True, poor=("basket",))
+    process_pending()
+    state = _state(pg_conn, vid)
+    assert state["basket"] is True
+    assert state["poor"] == ["basket"]

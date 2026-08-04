@@ -36,6 +36,7 @@ _ROW = (
     "needs_features_confirmed",   # 30 feature_status
     None, None, None,             # 31-33 has_bell/cup_holder/phone_holder
     None,                         # 34 features_poor_condition
+    None,                         # 35 has_basket
 )
 
 

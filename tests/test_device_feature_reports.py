@@ -308,10 +308,12 @@ def test_poor_condition_cannot_name_an_absent_feature(monkeypatch):
 
 
 def test_poor_condition_cannot_name_an_unknown_feature(monkeypatch):
+    """`basket` used to be this test's example of an unknown key. sql/058
+    made it a real one, so the example moved rather than the rule."""
     client, _ = _client(monkeypatch, _fetch())
     r = client.post(
         "/api/v1/reports/device-features",
-        json={**_BODY, "all_good_condition": False, "poor_condition": ["basket"]},
+        json={**_BODY, "all_good_condition": False, "poor_condition": ["rear_rack"]},
     )
     assert r.status_code == 422
 
@@ -429,3 +431,104 @@ def test_the_derived_action_list_matches_the_mapping():
     assert set(points_module.FEATURE_POINT_ACTIONS) == {
         action for action, _ in points_module.FEATURE_STATUS_POINTS.values()
     }
+
+
+# --- the basket (sql/058) ----------------------------------------------------
+#
+# Asked of every device, not only the models that ship with one — the Trike's
+# cargo basket is standard equipment and a bent one has to be reportable.
+# OPTIONAL on the wire, and only because the question is newer than the
+# clients: the frontend already deployed asks three questions and knows
+# nothing about a fourth, so a required field would 422 every report it sends
+# the moment this ships.
+
+def _stored_report_params(conn):
+    """The params of the INSERT INTO device_feature_reports."""
+    idx = next(
+        i for i, s in enumerate(conn.cur.statements)
+        if "INSERT INTO device_feature_reports" in s
+    )
+    return conn.cur.params[idx]
+
+
+def test_a_basket_answer_is_stored(monkeypatch):
+    client, conn = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features", json={**_BODY, "has_basket": True},
+    )
+    assert r.status_code == 200, r.text
+    assert True in _stored_report_params(conn)
+
+
+def test_an_omitted_basket_is_stored_as_NULL_not_false(monkeypatch):
+    """The distinction the whole rollout rests on: a client that never asked
+    abstains, and NULL is what an abstention looks like in the table. Storing
+    False would put "this scooter has no basket" on the record in the name of
+    a rider who was never shown the question."""
+    client, conn = _client(monkeypatch, _fetch())
+    r = client.post("/api/v1/reports/device-features", json=_BODY)
+    assert r.status_code == 200, r.text
+    params = _stored_report_params(conn)
+    # The has_basket slot sits between has_phone_holder and
+    # all_good_condition in the INSERT's column list.
+    assert params[10] is None
+
+
+def test_a_basket_may_be_named_in_poor_condition(monkeypatch):
+    """The flow that 422'd before this migration: a rider standing at a
+    Trike with a bent cargo basket."""
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={
+            **_BODY, "has_basket": True,
+            "all_good_condition": False, "poor_condition": ["basket"],
+        },
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_a_report_that_abstained_cannot_itemise_a_basket(monkeypatch):
+    """Same rule as any other absent feature — a client that never asked
+    about baskets cannot coherently report a broken one."""
+    client, _ = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "all_good_condition": False, "poor_condition": ["basket"]},
+    )
+    assert r.status_code == 422
+
+
+def test_poor_condition_orders_the_basket_by_vocabulary_not_alphabet(monkeypatch):
+    """`basket` is the key that broke the FEATURE_KEYS/sorted() coincidence
+    the old comment here anticipated. Stored arrays are compared literally by
+    the dedupe probe, so the endpoint and src/device_features.py have to
+    canonicalise identically — they now share `canonical_poor`."""
+    from src.device_features import FEATURE_KEYS
+
+    client, conn = _client(monkeypatch, _fetch())
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={
+            **_BODY, "has_basket": True,
+            "all_good_condition": False,
+            "poor_condition": ["basket", "bell"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    stored = next(p for p in _stored_report_params(conn) if isinstance(p, list))
+    assert stored == ["bell", "basket"]
+    assert stored == [k for k in FEATURE_KEYS if k in {"bell", "basket"}]
+    assert stored != sorted(stored)
+
+
+def test_the_dedupe_probe_matches_an_abstaining_report(monkeypatch):
+    """`has_basket = NULL` never equals anything, so `=` would miss every row
+    an older client wrote and a double-tapped Send would cast a second vote.
+    IS NOT DISTINCT FROM is what makes NULL match NULL."""
+    client, conn = _client(monkeypatch, _fetch())
+    client.post("/api/v1/reports/device-features", json=_BODY)
+    probe = next(
+        s for s in conn.cur.statements if "FROM device_feature_reports" in s
+    )
+    assert "has_basket IS NOT DISTINCT FROM" in probe

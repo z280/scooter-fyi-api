@@ -74,12 +74,13 @@ _ROW = (
     # under include_plate. Unread on the public path, but present because
     # the fixture models the SELECT, not the branch.
     None, None, None, None,
-    # 30-34 crowdsourced features (sql/055). Read UNCONDITIONALLY by the
-    # payload builder, so a fixture that stops short of them is a fixture
-    # the handler cannot run against.
+    # 30-35 crowdsourced features (sql/055, sql/058). Read UNCONDITIONALLY
+    # by the payload builder, so a fixture that stops short of them is a
+    # fixture the handler cannot run against.
     "needs_features_confirmed",   # 30 feature_status
     None, None, None,             # 31-33 has_bell/cup_holder/phone_holder
     None,                         # 34 features_poor_condition
+    None,                         # 35 has_basket
 )
 
 
