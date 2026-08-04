@@ -59,6 +59,12 @@ _DEVICE_FEATURE_ACTIONS = (
     "device_features_reconfirm",
 )
 
+# Device photos (sql/056). One flat award per accepted upload; the popup's
+# "📷 Take Photo" copy reads it from here for the same reason the Confirm
+# Features modal does — so the number a rider is promised is the number the
+# ledger pays.
+_DEVICE_PHOTO_ACTIONS = ("device_photo",)
+
 _FORMULA_ACTIONS = ("battery_contribution", "nav_distance_bonus")
 
 
@@ -131,6 +137,12 @@ def test_all_three_device_feature_actions_are_published(schedule):
         assert action in schedule, action
 
 
+def test_the_device_photo_award_is_published(schedule):
+    for action in _DEVICE_PHOTO_ACTIONS:
+        assert action in schedule, action
+    assert schedule["device_photo"]["points"] == points.POINTS_DEVICE_PHOTO
+
+
 def test_every_device_feature_action_in_the_mapping_is_published(schedule):
     """Generated from FEATURE_STATUS_POINTS, keyed by ACTION rather than by
     the feature_status that selects it — same shape as the report awards."""
@@ -141,7 +153,7 @@ def test_every_device_feature_action_in_the_mapping_is_published(schedule):
 def test_no_action_is_published_that_the_schedule_does_not_explain(schedule):
     assert set(schedule) == (
         set(_EXISTING_ACTIONS) | set(_RIDE_MODE_ACTIONS)
-        | set(_DEVICE_FEATURE_ACTIONS)
+        | set(_DEVICE_FEATURE_ACTIONS) | set(_DEVICE_PHOTO_ACTIONS)
     )
 
 

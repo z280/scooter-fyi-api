@@ -2824,6 +2824,7 @@ the whole ledger — not just the returned page.
 | `report_improper_parking` | 10 | `improperly_parked` device report |
 | `profile_completion` | 10 | One-time, on completing your profile |
 | `device_features_reconfirm` | 6 | A valid `POST /reports/device-features` on a device already `up_to_date` |
+| `device_photo` | 6 | Each accepted `POST /api/v1/devices/{vid}/photos` upload |
 | `report_not_found` | 4 | `not_found` device report |
 | `battery_contribution` | `8 + 2 × ⌈km / 2⌉` | A verified, `eligible` `POST .../track` donation, `ride_options.battery_modeling` on, not an own-device ride, both start/end battery known |
 | `nav_distance_bonus` | `2 × ⌈km / 3⌉` | Same donation, `ride_options.nav_improvement` on, and a stored `POST /api/v1/ride-routes` row linked to the ride |
@@ -2968,7 +2969,7 @@ and re-encoded on ingest (EXIF/GPS destroyed).
 
 | Endpoint | Notes |
 |---|---|
-| `POST /api/v1/devices/{vehicle_identifier}/photos` | Bearer required. `multipart/form-data` with a `photo` part. → `{ id, vehicle_identifier, photo_url, created_at }`. 20/hour per account. |
+| `POST /api/v1/devices/{vehicle_identifier}/photos` | Bearer required. `multipart/form-data` with a `photo` part, plus optional `lat`/`lng`. → `{ id, vehicle_identifier, photo_url, created_at, points_awarded }`. 20/hour per account. |
 | `GET /api/v1/devices/{vehicle_identifier}/photos` | Bearer required. → `{ vehicle_identifier, count, photos: [ { id, photo_url, created_at, uploaded_by } ] }`, oldest first. |
 | `POST /api/v1/photos/{photo_id}/reports` | Bearer required. `{ "reason": "wrong_device" \| "inappropriate" \| "other", "comment"?: string }` (≤2000 chars). Repeat reports of the same photo by you return `{ photo_id, deduped: true }`. 10/hour per account. |
 | `GET /api/v1/photos/mine` | Bearer required. Everything you've uploaded — see below. |
@@ -2976,6 +2977,23 @@ and re-encoded on ingest (EXIF/GPS destroyed).
 **Cap: 3 photos per device**, across all users. The 4th upload returns
 `409`. Other upload failures: `413` over 10 MB, `422` if the `photo` part
 is missing, `503` if photo storage isn't configured.
+
+**Each accepted upload earns `device_photo` points** (see
+[Points](#points)) — one credit per photo, no per-account cooldown. It
+needs none: the 3-per-device cap means a vehicle can yield at most three
+of these awards however many riders try, and the 20/hour account limit
+bounds the rest. Uploading is bearer-only, so a credited photo always has
+a real account behind it; **points are never anonymous** even when the
+uploader hides their `public_username` (that only nulls `uploaded_by` in
+the public listing).
+
+The optional `lat`/`lng` parts are where the rider was — the location the
+ledger row records. They are optional and forgiving: malformed, out of
+range, or half-supplied coordinates are dropped rather than failing the
+upload, and the server then falls back to the vehicle's last known
+position. If neither resolves, the photo is still stored and
+`points_awarded` is `0` — a ledger row requires a real location, so the
+award is skipped rather than filed against a fabricated one.
 
 `uploaded_by` is the uploader's `public_username`, joined at **read**
 time and `null` when that user has `show_public_username` off — so a
