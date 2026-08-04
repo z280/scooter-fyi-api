@@ -185,18 +185,19 @@ def test_dwell_evidence_fields_passed_through(_fake_db):
 # ---------- unknown via peer-median dwell ratio (end-to-end, not just the
 # compute_reliability_tier unit tests in test_quality.py) ---------------------
 def test_reliability_unknown_via_dwell_ratio_end_to_end(_fake_db, monkeypatch):
-    """10h dwell vs a 4h peer median (2.5x) is well under the 3x/p90/48h
-    high_risk outlier bar, but should still surface as "unknown" through
-    the real handler — exercises the peer_median_dwell_hours wiring at the
-    api_public.py call site, not compute_reliability_tier in isolation."""
+    """40h dwell vs a 4h peer median (10x) is well under the 3x/p90/48h
+    high_risk outlier bar, but clears the min(36h, 16x median) patience
+    floor and should surface as "unknown" through the real handler —
+    exercises the peer_median_dwell_hours wiring at the api_public.py call
+    site, not compute_reliability_tier in isolation."""
     now = datetime.now(timezone.utc)
-    row = _ROW[:23] + (now - timedelta(hours=10),) + _ROW[24:]
+    row = _ROW[:23] + (now - timedelta(hours=40),) + _ROW[24:]
     monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
     monkeypatch.setattr(
         api_public, "stats_for_cycle",
         lambda cycle_id, snapshot_time: {
             "8c4a1f0d2e9b7a35": DwellPeerStats(
-                dwell_hours=10.0, percentile=0.7, peer_median_hours=4.0,
+                dwell_hours=40.0, percentile=0.7, peer_median_hours=4.0,
                 peer_count=6, is_outlier=False,
             )
         },
@@ -206,8 +207,27 @@ def test_reliability_unknown_via_dwell_ratio_end_to_end(_fake_db, monkeypatch):
 
 
 def test_reliability_ok_when_under_dwell_ratio_end_to_end(_fake_db, monkeypatch):
-    """Same 10h dwell, but a 6h peer median keeps the ratio under 2x —
+    """Same 40h dwell, but a 22h peer median keeps the ratio under 2x —
     confirms it's the ratio gating this, not merely having peer stats at all."""
+    now = datetime.now(timezone.utc)
+    row = _ROW[:23] + (now - timedelta(hours=40),) + _ROW[24:]
+    monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
+    monkeypatch.setattr(
+        api_public, "stats_for_cycle",
+        lambda cycle_id, snapshot_time: {
+            "8c4a1f0d2e9b7a35": DwellPeerStats(
+                dwell_hours=40.0, percentile=0.4, peer_median_hours=22.0,
+                peer_count=6, is_outlier=False,
+            )
+        },
+    )
+    props = _call()["features"][0]["properties"]
+    assert props["reliability_tier"] == "ok"
+
+
+def test_reliability_ok_when_under_dwell_floor_end_to_end(_fake_db, monkeypatch):
+    """10h dwell at 2.5x a 4h median used to read "unknown"; the patience
+    floor (36h here) now keeps it "ok"."""
     now = datetime.now(timezone.utc)
     row = _ROW[:23] + (now - timedelta(hours=10),) + _ROW[24:]
     monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
@@ -215,7 +235,7 @@ def test_reliability_ok_when_under_dwell_ratio_end_to_end(_fake_db, monkeypatch)
         api_public, "stats_for_cycle",
         lambda cycle_id, snapshot_time: {
             "8c4a1f0d2e9b7a35": DwellPeerStats(
-                dwell_hours=10.0, percentile=0.4, peer_median_hours=6.0,
+                dwell_hours=10.0, percentile=0.7, peer_median_hours=4.0,
                 peer_count=6, is_outlier=False,
             )
         },
