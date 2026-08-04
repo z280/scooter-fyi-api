@@ -260,13 +260,13 @@ def test_reliability_poor_quality_alone_stays_ok():
 
 
 # ---------- Reliability tier: peer-median dwell ratio (unknown) -------------
-def test_reliability_dwell_2x_peer_median_is_unknown():
+def test_reliability_dwell_ratio_is_unknown_once_past_the_floor():
     """Below the high_risk outlier's 3x/p90/48h bar, but still a meaningful
     peer-relative outlier — reads as unknown rather than a clean "ok"."""
     out = compute_reliability_tier(**{
         **_REL_BASE,
         "peer_median_dwell_hours": 5.0,
-        "now": _denver("2026-06-01", 20),  # 10h dwell = exactly 2x
+        "now": _denver("2026-06-02", 23),  # 37h dwell: 7.4x, past the 36h floor
     })
     assert out == "unknown"
 
@@ -274,10 +274,89 @@ def test_reliability_dwell_2x_peer_median_is_unknown():
 def test_reliability_dwell_under_2x_peer_median_stays_ok():
     out = compute_reliability_tier(**{
         **_REL_BASE,
-        "peer_median_dwell_hours": 5.1,
-        "now": _denver("2026-06-01", 20),  # 10h dwell < 2 * 5.1
+        "peer_median_dwell_hours": 20.0,
+        "now": _denver("2026-06-02", 20),  # 34h dwell < 2 * 20, and < 36h
     })
     assert out == "ok"
+
+
+def test_reliability_dwell_2x_peer_median_alone_is_no_longer_unknown():
+    """The 2x ratio used to fire on its own. A busy block (5h median) now
+    has to sit through the patience floor — min(36h, 16 x 5h) = 36h —
+    before 10h of dwell means anything."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "peer_median_dwell_hours": 5.0,
+        "now": _denver("2026-06-01", 20),  # 10h dwell = exactly 2x
+    })
+    assert out == "ok"
+
+
+# ---------- The patience floor: min(36h, 16 x peer median) ------------------
+def test_reliability_floor_is_16x_median_on_a_high_turnover_block():
+    """1h median → floor is 16h, not the flat 36h."""
+    fast_block = {**_REL_BASE, "peer_median_dwell_hours": 1.0}
+    just_under = compute_reliability_tier(**{
+        **fast_block,
+        "now": _denver("2026-06-02", 1, 59),  # 15h59m
+    })
+    at_floor = compute_reliability_tier(**{
+        **fast_block,
+        "now": _denver("2026-06-02", 2),      # 16h = 16 x the 1h median
+    })
+    assert just_under == "ok"
+    assert at_floor == "unknown"
+
+
+def test_reliability_floor_caps_at_36h_on_a_slow_block():
+    """8h median → 16x would be 128h, so the flat 36h cap governs."""
+    slow_block = {**_REL_BASE, "peer_median_dwell_hours": 8.0}
+    just_under = compute_reliability_tier(**{
+        **slow_block,
+        "now": _denver("2026-06-02", 21, 59),  # 35h59m
+    })
+    at_floor = compute_reliability_tier(**{
+        **slow_block,
+        "now": _denver("2026-06-02", 22),      # 36h
+    })
+    assert just_under == "ok"
+    assert at_floor == "unknown"
+
+
+def test_reliability_floor_never_flags_earlier_than_the_ratio():
+    """A genuinely sleepy block (20h median) clears the 36h floor at 36h but
+    still waits for its own 2x ratio — the floor only ever delays."""
+    sleepy = {**_REL_BASE, "peer_median_dwell_hours": 20.0}
+    past_floor_under_ratio = compute_reliability_tier(**{
+        **sleepy,
+        "now": _denver("2026-06-02", 23),  # 37h: past 36h, under 2 x 20h
+    })
+    past_both = compute_reliability_tier(**{
+        **sleepy,
+        "now": _denver("2026-06-03", 2),   # 40h = exactly 2 x 20h
+    })
+    assert past_floor_under_ratio == "ok"
+    assert past_both == "unknown"
+
+
+def test_reliability_floor_does_not_gate_failed_starts():
+    """"Notwithstanding a false start" — an actual failure signal never waits
+    on the dwell floor. 1h dwell on a 5h-median block is still unknown."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "number_failed_starts": 1,
+        "peer_median_dwell_hours": 5.0,
+    })
+    assert out == "unknown"
+
+
+def test_reliability_floor_does_not_gate_negative_reports():
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "has_negative_report": True,
+        "peer_median_dwell_hours": 5.0,
+    })
+    assert out == "high_risk"
 
 
 def test_reliability_zero_peer_median_does_not_false_positive():

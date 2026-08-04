@@ -70,8 +70,8 @@ evaluated in order (first match wins):
               | dwell ≥ 2 × peer-median dwell     (softer, earlier-warning
                                                     version of the dwell-
                                                     outlier rule above — just
-                                                    the ratio, no percentile
-                                                    or absolute-hour floor)
+                                                    the ratio, no percentile)
+                AND dwell ≥ min(36h, 16 × peer-median dwell)   (patience floor)
     ok        : everything else
 
 A single failed start no longer stays "ok" — it now reads "unknown" rather
@@ -81,11 +81,27 @@ more, or one plus a day of dwell, remain outright high_risk. Dwell counters
 reset when the scooter moves (see src/device_state.py), so both inputs are
 naturally scoped to the current location — that's the "recent window".
 
-The 2x-median rule's missing floor (unlike the outlier rule's 24h one) is
-deliberate, not an oversight: this audit's fleet is large enough that the
-cost of an over-eager "unknown" is a rider glancing at one extra scooter,
-while the cost of a false "ok" is a rider walking to one that doesn't
-start. Asymmetric costs, asymmetric leniency.
+The 2x-median rule used to have no floor at all (unlike the outlier rule's
+24h one), which on a high-turnover block meant a 1h peer median demoted a
+scooter after two idle hours — far too twitchy to mean anything. It now
+carries a *patience floor*, relative like the rule it guards:
+
+    floor = min(36h, 16 × peer-median dwell)
+
+so a block with a 1h median can't flag anything before 16h, and any block
+with a median above 2.25h tops out at the flat 36h. The floor only ever
+delays a verdict: it is applied on top of the 2x ratio, never instead of
+it, so a genuinely sleepy block (median ≥ 18h, where 2 × median already
+exceeds 36h) keeps waiting for its own ratio rather than being flagged
+earlier than it used to be. Failed starts and negative reports bypass the
+floor entirely — they have their own rules above, and evidence of an
+actual failure shouldn't wait on a dwell clock.
+
+The floor is deliberately generous because the cost is asymmetric in the
+other direction from what the pre-floor rule assumed: an "unknown" badge
+on a scooter that is merely parked on a busy block is a false alarm the
+rider pays for on every glance, while the real ghost scooters are still
+caught by the 3x/p90/48h outlier rule and the 72h ghost rule above.
 
 The clean-dwell ghost threshold was recalibrated from 96h to 72h against
 the 2026-07-06 production snapshot (8,449 devices): citywide dwell
@@ -173,13 +189,31 @@ _RELIABILITY_FS_HARD = 2           # failed starts that alone mean high_risk
 _RELIABILITY_FS_DWELL_HOURS = 24.0 # 1 failed start + this much dwell
 _RELIABILITY_IDLE_HOURS = 72.0     # dwell alone (ghost scooter; was 96h pre-recalibration)
 _RELIABILITY_OUTLIER_DWELL_HOURS = 48.0  # peer-relative dwell outlier + this much dwell
-_RELIABILITY_UNKNOWN_DWELL_MULT = 2.0    # dwell ≥ this × peer median alone → unknown
+_RELIABILITY_UNKNOWN_DWELL_MULT = 2.0    # dwell ≥ this × peer median → unknown…
+# …but not before the patience floor below: min(36h, 16 × peer median). Keeps a
+# high-turnover block (1h median) from flagging at 2h while still letting a
+# sleepy one be judged on its own baseline. See module docstring.
+_RELIABILITY_UNKNOWN_FLOOR_HOURS = 36.0
+_RELIABILITY_UNKNOWN_FLOOR_MULT = 16.0
 
 # Dwell-outlier thresholds (see module docstring).
 _DWELL_OUTLIER_MIN_PEERS = 5       # below this, widen the ring / fall back
 _DWELL_OUTLIER_PERCENTILE = 0.90   # ≤-fraction within the peer set
 _DWELL_OUTLIER_MEDIAN_MULT = 3.0   # dwell must be ≥ this × peer median
 _DWELL_OUTLIER_FLOOR_HOURS = 24.0  # absolute floor; high-turnover blocks can't flag fresh scooters
+
+
+def unknown_dwell_floor_hours(peer_median_dwell_hours: float) -> float:
+    """Earliest dwell (hours) at which the peer-median ratio may say "unknown".
+
+    The lesser of a flat 36h and 16 × the block's median dwell, so a
+    high-turnover block gets a proportionally short fuse (1h median → 16h)
+    and everything sleepier than a 2.25h median waits the full 36h.
+    """
+    return min(
+        _RELIABILITY_UNKNOWN_FLOOR_HOURS,
+        _RELIABILITY_UNKNOWN_FLOOR_MULT * peer_median_dwell_hours,
+    )
 
 
 def _baseline_tier(battery_percent: int) -> str:
@@ -435,6 +469,7 @@ def compute_reliability_tier(
         peer_median_dwell_hours is not None
         and peer_median_dwell_hours > 0
         and dwell_hours >= _RELIABILITY_UNKNOWN_DWELL_MULT * peer_median_dwell_hours
+        and dwell_hours >= unknown_dwell_floor_hours(peer_median_dwell_hours)
     ):
         return "unknown"
 
