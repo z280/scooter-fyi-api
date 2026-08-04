@@ -3006,8 +3006,8 @@ Limit 30/hour per account.
 ## Device photos
 
 Rider-contributed photos of a specific scooter — **public content**,
-attributed to the uploader's public username. Stored in a public bucket
-and re-encoded on ingest (EXIF/GPS destroyed).
+attributed to the uploader's public username, re-encoded on ingest
+(EXIF/GPS destroyed).
 
 | Endpoint | Notes |
 |---|---|
@@ -3046,8 +3046,20 @@ username change or privacy flip is reflected immediately, retroactively,
 everywhere.
 
 Listing requires a session like every rider endpoint. The photos are
-nonetheless "public" in the sense that matters: `photo_url` points at an
-unauthenticated static object, so a URL works anywhere once you have it.
+nonetheless "public" in the sense that matters: `photo_url` needs no
+credentials of its own, so it works anywhere once you have it — drop it
+straight into an `<img>`.
+
+It is always an absolute `https://` URL, in one of two forms depending on
+deployment, and clients should treat it as opaque and re-read it from the
+listing rather than storing it:
+
+- **Static**, when `r2.public_base_url` is configured — permanent and
+  cacheable. This is the preferred form, but it requires the object store
+  to have a public origin, which is only appropriate for a bucket that
+  holds nothing but public objects.
+- **Presigned**, otherwise — signed per response and **valid for one
+  hour**, so it is not a durable handout of an object we may later hide.
 
 ### `GET /api/v1/photos/mine`
 
@@ -3067,8 +3079,8 @@ Two different content models kept as two keys, both scoped to you:
 ```
 
 Device photos are public and carry a `status`; screenshot `url`s are
-presigned and expire. "Private" means "not visible to other accounts,"
-which is why your own screenshots appear here.
+always presigned and expire in ten minutes. "Private" means "not visible
+to other accounts," which is why your own screenshots appear here.
 
 ---
 
