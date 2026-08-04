@@ -2980,15 +2980,18 @@ is missing, `503` if photo storage isn't configured.
 
 **Each accepted upload earns `device_photo` points** (see
 [Points](#points)) — one credit per photo, no per-account cooldown. It
-needs none: the 3-per-device cap means a vehicle can yield at most three
-of these awards however many riders try, and the 20/hour account limit
-bounds the rest. Uploading is bearer-only, so a credited photo always has
+needs none: a vehicle pays **at most 3 of these awards, ever**, counted
+from the ledger rather than from how many photos it currently holds (so
+a photo hidden by a future moderator workflow does not free a slot to be
+paid for again), and the 20/hour account limit bounds the rest. Uploading is bearer-only, so a credited photo always has
 a real account behind it; **points are never anonymous** even when the
 uploader hides their `public_username` (that only nulls `uploaded_by` in
 the public listing).
 
-The optional `lat`/`lng` parts are where the rider was — the location the
-ledger row records. They are optional and forgiving: malformed, out of
+The optional `lat`/`lng` parts are where the photo was taken — the
+location the ledger row records. Our own client sends the **vehicle's**
+position rather than the rider's fix, since that is what the photo is
+of; either is a fair answer. They are optional and forgiving: malformed, out of
 range, or half-supplied coordinates are dropped rather than failing the
 upload, and the server then falls back to the vehicle's last known
 position. If neither resolves, the photo is still stored and

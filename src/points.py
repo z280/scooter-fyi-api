@@ -28,6 +28,7 @@ from typing import Any
 import h3
 
 from .geo import distance_meters
+from .device_photos import MAX_PHOTOS_PER_DEVICE
 from .ride_limits import MAX_POINTS_PER_RIDE
 
 log = logging.getLogger(__name__)
@@ -485,7 +486,37 @@ def credit_device_photo_points(
     Idempotent through credit_points' (source_table, source_id, action)
     dedupe: the photo's own id is the source, so a credit attempted twice for
     one photo writes one row.
+
+    AT MOST MAX_PHOTOS_PER_DEVICE AWARDS PER VEHICLE, EVER — counted from the
+    ledger, not from how many photos the device currently holds. The two are
+    the same today only because nothing can remove a photo. sql/031's
+    `status` column exists for a future moderator workflow, and the endpoint's
+    cap query counts `status = 'visible'`, so the day a photo can be hidden is
+    the day "3 photos per device" stops bounding "3 awards per device": hide,
+    re-upload, get paid again, repeat. Bounding on the ledger means the
+    property this award's no-cooldown design rests on stays true when that
+    workflow lands, instead of quietly becoming a farm.
+
+    No extra lock: the caller runs inside the transaction that already holds
+    pg_advisory_xact_lock on `device_photos:{vehicle_identifier}` for its own
+    cap check, so two concurrent uploads to one vehicle serialize here too.
     """
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM user_points
+         WHERE vehicle_identifier = %s AND action = 'device_photo'
+        """,
+        (vehicle_identifier,),
+    )
+    (already_paid,) = cur.fetchone()
+    if int(already_paid) >= MAX_PHOTOS_PER_DEVICE:
+        log.info(
+            "points: vehicle %s has already paid its %d photo awards — "
+            "photo %d stored, no award",
+            vehicle_identifier, MAX_PHOTOS_PER_DEVICE, photo_id,
+        )
+        return None
+
     if lat is None or lng is None:
         log.warning(
             "points: device photo %d has no resolvable location — skipping "

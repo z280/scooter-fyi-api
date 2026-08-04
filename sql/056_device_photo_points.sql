@@ -17,14 +17,19 @@
 -- definition of a rider's total.
 --
 -- ABUSE BOUND, for the record: this award needs no per-account cooldown of
--- the kind sql/055's feature awards carry. A device holds at most
--- MAX_PHOTOS_PER_DEVICE (3) visible photos across ALL users, enforced under
--- an advisory lock in src/api_device_photos.py, so a single vehicle can
--- yield at most 3 × POINTS_DEVICE_PHOTO no matter who uploads or how often;
--- the 20/hour per-account rate limit bounds the rest. Deleting a photo does
--- not claw the points back (nothing in this program does), but it also does
--- not free a slot for a fresh award: the ledger row survives, and status
--- 'hidden' rows keep their history.
+-- the kind sql/055's feature awards carry, because it is bounded per
+-- VEHICLE instead — at most MAX_PHOTOS_PER_DEVICE (3) awards each, counted
+-- from THIS LEDGER by credit_device_photo_points, not from how many photos
+-- the device currently holds.
+--
+-- The distinction matters and is the whole reason the check reads the
+-- ledger. The endpoint's own cap query counts `status = 'visible'`, and
+-- sql/031 reserves that column for a future moderator workflow. The day a
+-- photo can be hidden is the day "3 photos per device" stops bounding
+-- "3 awards per device" — hide, re-upload, get paid again, on a loop.
+-- Counting paid awards instead keeps the bound true whatever that workflow
+-- does later. (Points are never clawed back when a photo goes away; nothing
+-- in this program reverses a credit.)
 --
 -- POINTS ARE NEVER ANONYMOUS (sql/028). That holds here by construction:
 -- the upload endpoint is require_session, so every credited photo has a real

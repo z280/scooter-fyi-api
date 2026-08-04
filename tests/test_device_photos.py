@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from src import api_device_photos, points
 from src.accounts import SessionUser, require_session
-from src.device_photos import DevicePhotoError
+from src.device_photos import MAX_PHOTOS_PER_DEVICE, DevicePhotoError
 
 _USER = SessionUser(
     account_id=1, email="rider@example.com", scopes=("rider",),
@@ -87,14 +87,16 @@ def _upload(client, **data):
 
 
 # Fetch sequence for a successful upload that also credits points:
-#   count -> insert RETURNING -> [device_state coords] -> points INSERT RETURNING
+#   visible-photo count -> insert RETURNING -> [device_state coords]
+#   -> awards-already-paid count -> points INSERT RETURNING
 # The coords fetch is skipped when the client sent lat/lng itself.
 _COORDS = (39.7392, -104.9876)
+_UNPAID = (0,)      # awards already paid for this vehicle
 _CREDITED = (77, _NOW)
 
 
 def test_upload_success(monkeypatch):
-    client, _ = _client(monkeypatch, fetches=[(0,), (5, _NOW), _COORDS, _CREDITED])
+    client, _ = _client(monkeypatch, fetches=[(0,), (5, _NOW), _COORDS, _UNPAID, _CREDITED])
     r = _upload(client)
     assert r.status_code == 200, r.text
     assert r.json()["photo_url"] == "https://cdn.example/device-photos/1/x.jpg"
@@ -162,7 +164,7 @@ def _points_insert(conn):
 
 def test_upload_credits_points_using_the_riders_own_coordinates(monkeypatch):
     # lat/lng supplied -> no device_state lookup, so no coords fetch queued.
-    client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), _CREDITED])
+    client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), _UNPAID, _CREDITED])
     r = _upload(client, lat="39.7392", lng="-104.9876")
     assert r.status_code == 200, r.text
     assert r.json()["points_awarded"] == points.POINTS_DEVICE_PHOTO
@@ -179,7 +181,7 @@ def test_upload_credits_points_using_the_riders_own_coordinates(monkeypatch):
 
 
 def test_upload_falls_back_to_the_vehicles_last_known_position(monkeypatch):
-    client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), _COORDS, _CREDITED])
+    client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), _COORDS, _UNPAID, _CREDITED])
     r = _upload(client)  # no coords from the client
     assert r.status_code == 200, r.text
     assert r.json()["points_awarded"] == points.POINTS_DEVICE_PHOTO
@@ -189,7 +191,7 @@ def test_upload_falls_back_to_the_vehicles_last_known_position(monkeypatch):
 
 def test_upload_still_stores_the_photo_when_no_location_resolves(monkeypatch):
     # Unknown device / never-observed position -> (None, None) -> no award.
-    client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), None])
+    client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), None, _UNPAID])
     r = _upload(client)
     assert r.status_code == 200, r.text
     assert r.json()["points_awarded"] == 0
@@ -202,12 +204,33 @@ def test_malformed_or_out_of_range_coords_are_dropped_not_fatal(monkeypatch):
                 {"lat": "91", "lng": "-104.9"},      # out of range
                 {"lat": "39.7", "lng": "181"},       # out of range
                 {"lat": "39.7"}):                    # half a pair
-        client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), _COORDS, _CREDITED])
+        client, conn = _client(monkeypatch, fetches=[(0,), (5, _NOW), _COORDS, _UNPAID, _CREDITED])
         r = _upload(client, **bad)
         # Upload succeeds and falls back to the device's position rather than
         # 422-ing on a field the rider never sees.
         assert r.status_code == 200, (bad, r.text)
         assert (_points_insert(conn)[3], _points_insert(conn)[4]) == _COORDS
+
+
+def test_a_vehicle_pays_at_most_three_photo_awards_ever(monkeypatch):
+    """Bounded on the LEDGER, not on how many photos the device holds now.
+
+    sql/031 reserves device_photos.status for a future moderator workflow and
+    the endpoint's cap counts only 'visible' rows — so the day a photo can be
+    hidden, "3 photos per device" would stop bounding "3 awards per device"
+    unless the award counts what it has already paid. This is the test that
+    keeps hide-and-re-upload from becoming a points farm.
+    """
+    client, conn = _client(
+        monkeypatch,
+        # A free photo slot, but three awards already paid for this vehicle.
+        fetches=[(0,), (5, _NOW), _COORDS, (MAX_PHOTOS_PER_DEVICE,)],
+    )
+    r = _upload(client)
+    assert r.status_code == 200, r.text
+    assert r.json()["points_awarded"] == 0
+    assert r.json()["photo_url"]  # still stored — only the award is withheld
+    assert _points_insert(conn) is None
 
 
 def test_the_award_is_even_because_the_ledger_will_not_take_odd(monkeypatch):
