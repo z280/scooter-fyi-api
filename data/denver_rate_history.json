@@ -1,0 +1,123 @@
+{
+  "_note": "Denver shared-micromobility rate history. Feeds pricing comparisons; the eventual GET /api/v1/meta/pricing (see MULTI_TENANCY_PLAN.md 7e) should serve this rather than the frontend hardcoding it. Amounts in CENTS.",
+  "_provenance_warning": "The rates that matter for a rider-facing comparison are the LEAST citable ones. Lime -- whose 30/60-minute passes are what Denver riders actually bought -- publishes NO pricing feed at all: system_pricing_plans 404s and is absent from their GBFS discovery document. Lyft publishes rack rates only (data/lyft_den_pricing_2024-12-16.json), and no bundle. So a price comparison assembled from open data can only ever show walk-up rates, which is not what anyone paid. Plans below carry a per-plan `cited` flag; do not publish a derived multiple that depends on an uncited plan. Note also that Lyft's feed is abandoned rather than merely stale: its freeze stamp post-dates its own operating period by an unknown margin, so nothing in it can be dated. Lime is the meaningful comparator for Denver -- and the one that publishes no pricing at all.",
+  "currency": "USD",
+  "operators": [
+    {
+      "slug": "lime",
+      "display_name": "Lime",
+      "city": "denver",
+      "status": "departed",
+      "gbfs": "https://data.lime.bike/api/partners/v2/gbfs/denver/gbfs.json",
+      "gbfs_state": "live as of 2026-08-03 (3 vehicles); advertises no pricing feed",
+      "source": {
+        "bundles": "operator marketing / recollection; CITATION NEEDED -- not recoverable from GBFS, see _provenance_warning"
+      },
+      "plans": [
+        {
+          "key": "pass_30",
+          "kind": "bundle",
+          "label": "30-minute pass",
+          "price_cents": 299,
+          "included_minutes": 30,
+          "unlock_cents": 0,
+          "overage_per_min_cents": null,
+          "cited": false
+        },
+        {
+          "key": "pass_60",
+          "kind": "bundle",
+          "label": "60-minute pass",
+          "price_cents": 499,
+          "included_minutes": 60,
+          "unlock_cents": 0,
+          "overage_per_min_cents": null,
+          "cited": false
+        }
+      ]
+    },
+    {
+      "slug": "lyft",
+      "display_name": "Lyft",
+      "city": "denver",
+      "status": "departed (long before the feed froze; exact date unknown)",
+      "gbfs": "https://gbfs.lyft.com/gbfs/2.3/den/gbfs.json",
+      "gbfs_state": "frozen: byte-identical on every request, last_updated 2024-12-16T17:57:06Z. That is the FEED's freeze stamp, not an operating date -- Lyft stopped operating in Denver well before it. The payload's actual vintage is unknown.",
+      "source": {
+        "rack": "system_pricing_plans, frozen feed; verbatim copy in data/lyft_den_pricing_2024-12-16.json"
+      },
+      "plans": [
+        {
+          "key": "scooter_single",
+          "kind": "rack",
+          "label": "Scooter, walk-up",
+          "unlock_cents": 100,
+          "per_min_cents": 41,
+          "cited": true
+        },
+        {
+          "key": "ebike_single",
+          "kind": "rack",
+          "label": "E-bike, walk-up",
+          "unlock_cents": 100,
+          "per_min_cents": 15,
+          "cited": true
+        }
+      ],
+      "_note": "Treat these rates as 'the numbers in Lyft's abandoned Denver feed', with no claim about when they were in force. Cited to a retrievable source, but the source's own currency is unestablished. Not usable as a 'last-known Denver rate' without external corroboration."
+    },
+    {
+      "slug": "veo",
+      "display_name": "Veo",
+      "city": "denver",
+      "status": "current",
+      "operated_from": "2025-01-01",
+      "source": {
+        "all": "Denver licensing agreement; mirrored in denver-scooter-fyi/src/config.ts RATE_PLANS"
+      },
+      "plans": [
+        {
+          "key": "resident",
+          "kind": "rack",
+          "label": "Resident",
+          "unlock_cents": 100,
+          "per_min_cents": 25,
+          "cited": true
+        },
+        {
+          "key": "resident_plus",
+          "kind": "rack",
+          "label": "Resident w/ VeoPlus Pass",
+          "unlock_cents": 0,
+          "per_min_cents": 25,
+          "cited": true
+        },
+        {
+          "key": "visitor",
+          "kind": "rack",
+          "label": "Visitor",
+          "unlock_cents": 100,
+          "per_min_cents": 39,
+          "cited": true
+        },
+        {
+          "key": "visitor_plus",
+          "kind": "rack",
+          "label": "Visitor w/ VeoPlus Pass",
+          "unlock_cents": 0,
+          "per_min_cents": 39,
+          "cited": true
+        },
+        {
+          "key": "equity",
+          "kind": "rack",
+          "label": "Equity program",
+          "unlock_cents": 0,
+          "per_min_cents": 15,
+          "free_minutes_per_day": 60,
+          "cited": true
+        }
+      ]
+    }
+  ]
+}

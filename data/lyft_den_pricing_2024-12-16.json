@@ -1,0 +1,39 @@
+{
+  "data": {
+    "plans": [
+      {
+        "is_taxable": true,
+        "currency": "USD",
+        "description": "$1.00 unlock fee, $0.15 per minute.",
+        "plan_id": "EBIKE_SINGLE_RIDE",
+        "per_min_pricing": [
+          {
+            "rate": 0.15,
+            "interval": 1,
+            "start": 0
+          }
+        ],
+        "name": "EBIKE SINGLE RIDE",
+        "price": "1.00"
+      },
+      {
+        "is_taxable": true,
+        "currency": "USD",
+        "description": "$1.00 unlock fee, $0.41 per minute.",
+        "plan_id": "SCOOTER_SINGLE_RIDE",
+        "per_min_pricing": [
+          {
+            "rate": 0.41,
+            "interval": 1,
+            "start": 0
+          }
+        ],
+        "name": "SCOOTER SINGLE RIDE",
+        "price": "1.00"
+      }
+    ]
+  },
+  "last_updated": 1734371826,
+  "ttl": 60,
+  "version": "2.3"
+}
