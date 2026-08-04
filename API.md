@@ -2000,9 +2000,46 @@ deliberately withholds.
 | `GET /api/v1/private/regional-leaders` | Full, unfiltered whole-database leaderboard (sql/054): every stored rank with real account ids, points, and `first_point_at` tie-break provenance -- admin sibling of the public `/api/v1/leaderboard/regional`. |
 | `GET /api/v1/private/reports` | Admin listing of all negative reports. |
 | `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback. |
+| `GET /api/v1/private/admins` | The admin allowlist. → `{ count, admins: [ { email, added_by, added_at, is_you } ] }`, newest first. |
+| `POST /api/v1/private/admins` | `{ "email": "..." }` → `{ count, admins, email, added }`. Idempotent: re-adding an existing admin is `200` with `added: false`. `400` if it isn't an email address. |
+| `DELETE /api/v1/private/admins?email=...` | → `{ count, admins, email, removed }`. `409` if it would remove the **last** admin. Removing an address that isn't listed is `200` with `removed: false`. |
 
 A non-allowlisted but validly signed-in caller gets `403`; no token at
 all gets `401`.
+
+### Managing the allowlist
+
+The three `/admins` routes let an account admin grant and revoke account
+admin. **This is a wider trust boundary than the `/admin/admins` HTML
+portal**, whose GitHub OAuth gate is separate: there, a GitHub operator
+decides who counts as an account admin, and an account admin cannot
+promote anyone. Both surfaces edit the same `admin_allowlist` table, and
+the portal remains the out-of-band way back in.
+
+Three properties make that survivable, and clients can rely on them:
+
+- **Every write is attributed.** `added_by` records the acting admin's
+  email, so the table is an audit trail rather than a bare set.
+- **The last admin cannot be removed** (`409`). An empty allowlist locks
+  every account out of `/private/*` — including these routes — leaving
+  only the GitHub portal or `python -m src.cli admin`. Removing
+  *yourself* is allowed while others remain; stepping down is
+  legitimate, locking the door on an empty room is not.
+- **Writes are rate-limited** 30/hour per account.
+
+Both write routes return the **full refreshed list** alongside their
+result, so a UI never needs a follow-up `GET` to redraw. `is_you` is
+computed server-side against the same normalization the allowlist is
+keyed by (`strip().lower()`), so a client never has to reimplement it to
+know which row is dangerous to remove.
+
+`DELETE` takes the address as a **query parameter**, not a path segment:
+email addresses are full of characters a path segment handles badly —
+dots, `+`, and an `@` that some proxies normalize.
+
+Because `is_admin_email` is evaluated live per request, a change here
+takes effect on the target's **next request** — no new sign-in, and a
+revoked admin loses access immediately rather than at token expiry.
 
 ---
 
