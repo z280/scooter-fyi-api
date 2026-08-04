@@ -385,7 +385,14 @@ before hashing; `sha256(jws_n)` is over the ASCII bytes of the compact JWS strin
     "pts":[[...],...], "rec":false}` — `rec:true` marks a batch sealed from crash-recovered
     unsealed points.
 - Rolling chain hash: `H_n = sha256(H_{n-1} || sha256(jws_n))`, `H_-1 = sha256(nonce)`. The client
-  computes and stores `H_n` per batch and reports the final value as `chain_root_hash` at donation.
+  computes and stores `H_n` per batch — that is what lets a resumed ride continue an existing chain
+  rather than starting a new one. It is **not transmitted**: the donation body is `batches` alone,
+  and the **server** recomputes the final value from the uploaded batches and stores it as
+  `chain_root_hash`, its audit anchor. A client-supplied root would be unverifiable — the client
+  holds the signing key, so a dishonest one would simply send a matching pair — and it would go
+  stale the moment a client uploaded a truncated prefix (see the known limit below). Drift between
+  the two implementations is caught by the golden vectors, before deploy, not by a field on the
+  wire.
 - **Forward compatibility (deliberate)**: nothing transmits mid-ride, but the rolling hash is
   defined and computed now, so a future live-checkpoint endpoint would only need to transmit
   `(seq, H_n)` — **no change to the chain or batch format**. Do not redesign the format to add
