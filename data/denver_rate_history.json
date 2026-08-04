@@ -1,0 +1,107 @@
+{
+  "_note": "Denver shared-micromobility rate history. Feeds pricing comparisons; the eventual GET /api/v1/meta/pricing (see MULTI_TENANCY_PLAN.md 7e) should serve this rather than the frontend hardcoding it. Amounts in CENTS.",
+  "_provenance_warning": "GBFS system_pricing_plans publishes RACK RATES ONLY. Lyft's frozen Denver feed (data/lyft_den_pricing_2024-12-16.json) carries the two single-ride plans and no bundle. The bundles below are what most riders actually bought and are NOT recoverable from open data -- they are recorded here from operator marketing and still need a durable citation (archived pricing page / screenshot). Any comparison built from the GBFS feed alone will systematically overstate what riders paid.",
+  "currency": "USD",
+  "operators": [
+    {
+      "slug": "lyft",
+      "display_name": "Lyft",
+      "city": "denver",
+      "status": "departed",
+      "operated_until": "2024-12-16",
+      "source": {
+        "rack": "https://gbfs.lyft.com/gbfs/2.3/den/en/system_pricing_plans.json (frozen 2024-12-16T17:57:06Z)",
+        "bundles": "operator marketing; CITATION NEEDED"
+      },
+      "plans": [
+        {
+          "key": "scooter_single",
+          "kind": "rack",
+          "label": "Scooter, walk-up",
+          "unlock_cents": 100,
+          "per_min_cents": 41,
+          "cited": true
+        },
+        {
+          "key": "ebike_single",
+          "kind": "rack",
+          "label": "E-bike, walk-up",
+          "unlock_cents": 100,
+          "per_min_cents": 15,
+          "cited": true
+        },
+        {
+          "key": "bundle_30",
+          "kind": "bundle",
+          "label": "30-minute pass",
+          "price_cents": 299,
+          "included_minutes": 30,
+          "unlock_cents": 0,
+          "cited": false
+        },
+        {
+          "key": "bundle_60",
+          "kind": "bundle",
+          "label": "60-minute pass",
+          "price_cents": 499,
+          "included_minutes": 60,
+          "unlock_cents": 0,
+          "cited": false
+        }
+      ]
+    },
+    {
+      "slug": "veo",
+      "display_name": "Veo",
+      "city": "denver",
+      "status": "current",
+      "operated_from": "2025-01-01",
+      "source": {
+        "all": "Denver licensing agreement; mirrored in denver-scooter-fyi/src/config.ts RATE_PLANS"
+      },
+      "plans": [
+        {
+          "key": "resident",
+          "kind": "rack",
+          "label": "Resident",
+          "unlock_cents": 100,
+          "per_min_cents": 25,
+          "cited": true
+        },
+        {
+          "key": "resident_plus",
+          "kind": "rack",
+          "label": "Resident w/ VeoPlus Pass",
+          "unlock_cents": 0,
+          "per_min_cents": 25,
+          "cited": true
+        },
+        {
+          "key": "visitor",
+          "kind": "rack",
+          "label": "Visitor",
+          "unlock_cents": 100,
+          "per_min_cents": 39,
+          "cited": true
+        },
+        {
+          "key": "visitor_plus",
+          "kind": "rack",
+          "label": "Visitor w/ VeoPlus Pass",
+          "unlock_cents": 0,
+          "per_min_cents": 39,
+          "cited": true
+        },
+        {
+          "key": "equity",
+          "kind": "rack",
+          "label": "Equity program",
+          "unlock_cents": 0,
+          "per_min_cents": 15,
+          "free_minutes_per_day": 60,
+          "cited": true
+        }
+      ]
+    }
+  ]
+}

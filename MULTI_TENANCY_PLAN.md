@@ -520,14 +520,9 @@ it becomes a weekly manual chore.
 Three things fall out of §7b that are worth having whether or not the
 multi-tenancy work ever happens:
 
-- **Lyft's last-known Denver pricing**, from `system_pricing_plans`, frozen
-  at shutdown: e-bike `$1.00 unlock + $0.15/min`, scooter
-  `$1.00 unlock + $0.41/min`, both `is_taxable: true`. The frontend's
-  `COMPARATOR` constant is currently an admitted guess ("Lime's typical
-  mid-market US pricing; update … when confirmed"). This is a real, sourced,
-  same-city number — and it says Veo's resident rate ($1 + $0.25/min) was
-  *cheaper* than Lyft's scooter rate, which is worth knowing before
-  publishing a comparator that implies otherwise.
+- **Lyft's last-known Denver pricing** → `data/lyft_den_pricing_2024-12-16.json`
+  (verbatim) and `data/denver_rate_history.json` (structured, both operators).
+  See §8b — the rack rates in the feed are *not* the comparison you want.
 - **119 Lyft dock locations** with `name`, `address` and `capacity` — the
   pre-2025 docked network, still georeferenced.
 - **73 live Bird geofencing zones** for Denver, `last_updated` currently
@@ -542,6 +537,44 @@ The Lyft payload is one frame, not a time series: no trip inference, no
 dwell, no history is recoverable from it. Its value is as a golden fixture
 at realistic scale (2,730 vehicles, real coordinate distribution, real
 malformed edge cases) and as a citable Dec-2024 fleet baseline.
+
+## 8b. The rack-rate trap
+
+**GBFS `system_pricing_plans` publishes walk-up rates only.** Lyft's frozen
+Denver feed carries exactly two plans — `SCOOTER_SINGLE_RIDE` at
+$1.00 + $0.41/min and `EBIKE_SINGLE_RIDE` at $1.00 + $0.15/min — and no
+bundle. But the products Denver riders actually bought were time passes:
+**$2.99 for 30 minutes** and **$4.99 for 60 minutes**, both with unlocks
+included.
+
+Those bundles are not recoverable from any open feed. Anyone building a
+price comparison out of GBFS alone — us included, until now — reads the
+rack rate and concludes the wrong thing. It is the chargemaster problem:
+the published price is not the transacted price.
+
+What the numbers actually say:
+
+| | 15 min | 30 min | 60 min |
+|---|---:|---:|---:|
+| Lyft 30-min pass | $2.99 | $2.99 | — |
+| Lyft 60-min pass | $4.99 | $4.99 | $4.99 |
+| Lyft scooter, walk-up *(the GBFS number)* | $7.15 | $13.30 | $25.60 |
+| Veo resident | $4.75 | $8.50 | $16.00 |
+| Veo resident + VeoPlus | $3.75 | $7.50 | $15.00 |
+| Veo visitor | $6.85 | $12.70 | $24.40 |
+
+A half-hour ride cost **$2.99** under Lyft and costs **$8.50** on Veo today
+— 2.8×. An hour was $4.99, now $16.00 — 3.2×. Compare rack-to-rack and Veo
+looks like the cheaper operator; compare what riders paid and it is roughly
+three times the price.
+
+**Provenance discipline.** The rack rates are cited to a retrievable feed
+and marked `"cited": true` in `denver_rate_history.json`. The bundles are
+marked `"cited": false` — they came from recollection of operator marketing
+and still need a durable citation (an archived pricing page or a
+screenshot). For a project whose credibility rests on auditability, do not
+publish the 2.8× figure until that citation exists. The structure is in
+place; the source is the gap.
 
 ## 9. Cross-cutting decisions
 
