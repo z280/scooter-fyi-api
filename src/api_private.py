@@ -8,9 +8,9 @@ stable identifier is the boundary GBFS's per-trip rotation is meant to
 prevent.
 
 All routes require `Authorization: Bearer <token>` for a session whose
-email is on the ADMIN_EMAILS allowlist (see src/accounts.py
-`require_admin` / `is_admin_email`) — reachable via EITHER sign-in door,
-magic-link or Google, not the Google-only `admin` scope. This replaced the
+email is on the admin allowlist (see src/accounts.py `require_admin` /
+`is_admin_email`) — reachable via ANY sign-in door, and checked live
+against the table rather than read off the session's scopes. This replaced the
 retired GitHub map-auth bearer flow (API_REQUIREMENTS.md §2.5).
 """
 

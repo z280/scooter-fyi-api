@@ -1471,11 +1471,13 @@ user clicks) and **typed code** (we email a short `AA000AA` code the user
 types back — handy for signing in on the same tab/device without leaving
 to an inbox app). Both mint the same kind of session.
 
-**Scopes:** every session has `rider`. `admin` is a Google-only signal
-scope (granted on Google sign-in for an allowlisted email) — but it no
-longer gates anything: **admin authorization is membership in the admin
-allowlist regardless of sign-in door**, so an allowlisted operator using
-magic-link reaches the admin/`/api/v1/private/*` surface too. The
+**Scopes:** every session has `rider`. `admin` is a signal scope, granted
+at sign-in for an allowlisted email through **any** door — but it gates
+nothing: **admin authorization is membership in the admin allowlist**,
+evaluated live per request, so an allowlist change applies immediately
+rather than at the next sign-in. Read `admin` from
+`GET /api/v1/auth/session` for that live answer; the scope is only a
+snapshot of it. The
 allowlist is stored in Postgres (`admin_allowlist` table) and managed from
 the GitHub-gated admin portal at `/admin/admins` (or
 `python -m src.cli admin add <email>`) — it replaced the `ADMIN_EMAILS`
@@ -1508,7 +1510,7 @@ Postmark config). Cached `public, max-age=300`.
 | `POST /api/v1/auth/sms/code` | `{ "phone_number": "(303) 555-1212" }` → `202 { "sent": true }`. Texts a short `AA000AA` code (10-min TTL) via z280-comms. US numbers only, any format. Limits: 3/hour per number, 5/hour per IP, 250/day globally — the daily ceiling is **skipped for a number already verified**, so a rider whose only door is SMS can't be locked out by other traffic. A failed send does **not** invalidate a code you already hold. `400` unusable number, `409` **the recipient has blocked texts — show `detail` verbatim, it names the keyword and number that unblock**, `429` over quota, `502` send failed, `503` if unconfigured. |
 | `POST /api/v1/auth/sms/code/verify` | `{ "phone_number": "(303) 555-1212", "code": "AB123XY" }` → `{token, expires}`. Case-insensitive; spaces/hyphens ignored. Typing the code back is what marks the number **verified** — an account is created if none has proved that number yet. `401` wrong/expired/too many tries (5), `409` if the number is contested (needs an operator). Limits: 10/hour per number, 30/hour per IP. |
 | `POST /api/v1/auth/refresh` | Bearer required. → `{token, expires}` (new token; old one revoked). |
-| `GET /api/v1/auth/session` | Bearer required. → `{ email, scopes, admin, expires }`. `401` when invalid/expired — treat as signed out. **`admin` is the authorization answer** (`is_admin_email` — the allowlist check `/private/*` enforces), not the Google-only `admin` *scope*: an allowlisted operator signed in by magic link is `admin: true` with no `admin` in `scopes`. Clients gating admin UI must read `admin`, never the scope. |
+| `GET /api/v1/auth/session` | Bearer required. → `{ email, scopes, admin, expires }`. `401` when invalid/expired — treat as signed out. **`admin` is the authorization answer** (`is_admin_email` — the allowlist check `/private/*` enforces) and is evaluated **live**, so an allowlist change applies on the next request without re-signing in. The `admin` *scope* is a mint-time snapshot of the same allowlist; both are agnostic to the sign-in door. Clients gating admin UI should read `admin`. |
 | `POST /api/v1/auth/signout` | Bearer required. Revokes the token. → `{ "revoked": true }` |
 
 ### `GET /api/v1/profile` / `PUT /api/v1/profile`

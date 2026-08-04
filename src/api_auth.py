@@ -897,13 +897,11 @@ def auth_session(user: SessionUser = Depends(require_session)) -> dict[str, Any]
     `is_admin_email` — the same check require_admin uses for /private/* and
     the plate fields, and which accepts EITHER sign-in door.
 
-    It is deliberately not `"admin" in scopes`. That scope is a Google-only
-    SIGNAL (see accounts.session_scopes) and stopped gating access when
-    is_admin_email became the authorization check; leaving the client to
-    infer admin from it meant an allowlisted operator signed in by magic link
-    was admin to every endpoint while the map told them they were nobody —
-    no "Administrator Mode", and no bypass on the proximity-gated buttons.
-    The two are now the same question with the same answer.
+    It is deliberately not `"admin" in scopes`, even though that scope is now
+    stamped for any door too. The scope is fixed when the session is MINTED;
+    this is evaluated live, so adding someone to the allowlist takes effect on
+    their very next request rather than at their next sign-in — and removing
+    someone takes effect just as promptly, which matters more.
 
     `scopes` still ships verbatim, so a client that wants to know which door
     was used can still see it.
