@@ -8,9 +8,9 @@ stable identifier is the boundary GBFS's per-trip rotation is meant to
 prevent.
 
 All routes require `Authorization: Bearer <token>` for a session whose
-email is on the ADMIN_EMAILS allowlist (see src/accounts.py
-`require_admin` / `is_admin_email`) — reachable via EITHER sign-in door,
-magic-link or Google, not the Google-only `admin` scope. This replaced the
+email is on the admin allowlist (see src/accounts.py `require_admin` /
+`is_admin_email`) — reachable via ANY sign-in door, and checked live
+against the table rather than read off the session's scopes. This replaced the
 retired GitHub map-auth bearer flow (API_REQUIREMENTS.md §2.5).
 """
 
@@ -22,11 +22,14 @@ from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import Any
 
 import h3
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from .identity import hash_plate
+from . import accounts
 from .accounts import SessionUser, require_admin
 from .pg import connection
+from .ratelimit import enforce
 
 log = logging.getLogger(__name__)
 
@@ -539,3 +542,111 @@ def private_regional_leaders(
             for rank, account_id, points, first_point_at in rows
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/private/admins — CRUD on the admin allowlist
+# ---------------------------------------------------------------------------
+# TRUST BOUNDARY, stated plainly: these routes are gated by require_admin,
+# which is allowlist membership. So an account-session admin can grant and
+# revoke account-session admin. That is a real change from the portal at
+# /admin/admins, whose GitHub-OAuth gate is a SEPARATE boundary — there, a
+# GitHub operator decides who counts as an account admin, and an account
+# admin could not promote anyone.
+#
+# The portal still exists and still works; it is now the out-of-band way in
+# when nobody holds an account admin session. Two consequences follow, and
+# both are handled below rather than left implicit:
+#
+#   * The list is self-propagating. Adding an admin hands over exactly the
+#     power you hold, including this endpoint. `added_by` records who did it
+#     so the table is an audit trail rather than just a set.
+#   * The list can be emptied. Removing the final admin would lock every
+#     account out of /private/* and of this endpoint — recoverable only
+#     through the GitHub portal or the CLI. That is refused (409); every
+#     other removal, including your own, is allowed.
+_LIMIT_ADMIN_WRITE = (30, 3600)
+
+
+class AdminEmailIn(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+
+
+def _admin_rows(you: str | None) -> dict[str, Any]:
+    """The allowlist as the UI renders it. `is_you` is computed server-side
+    against the SAME normalization the allowlist is keyed by, so the client
+    never has to reimplement it to decide which row is dangerous to remove."""
+    rows = accounts.list_admins()
+    me = accounts.normalize_email(you) if you else None
+    return {
+        "count": len(rows),
+        "admins": [{**r, "is_you": r["email"] == me} for r in rows],
+    }
+
+
+@router.get("/api/v1/private/admins")
+def private_admins_list(
+    user: SessionUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Everyone on the admin allowlist, newest first."""
+    return _admin_rows(user.email)
+
+
+@router.post("/api/v1/private/admins")
+def private_admins_add(
+    payload: AdminEmailIn = Body(...),
+    user: SessionUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Add an email. Idempotent: re-adding an existing admin is a 200 with
+    `added: false`, not a conflict — the caller's intent is satisfied either
+    way, and a 409 here would just be noise in a UI that re-submits."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            enforce(cur, bucket="admin_allowlist_write", key=str(user.account_id),
+                    limit=_LIMIT_ADMIN_WRITE[0], window_seconds=_LIMIT_ADMIN_WRITE[1])
+        conn.commit()
+    try:
+        added = accounts.add_admin(payload.email, added_by=user.email)
+    except ValueError:
+        raise HTTPException(400, "not an email address")
+    if added:
+        log.info("admin allowlist: %s added %s", user.email, payload.email)
+    return {**_admin_rows(user.email),
+            "email": accounts.normalize_email(payload.email), "added": added}
+
+
+@router.delete("/api/v1/private/admins")
+def private_admins_remove(
+    user: SessionUser = Depends(require_admin),
+    email: str = Query(..., description="Address to remove; matched normalized"),
+) -> dict[str, Any]:
+    """Remove an email. `email` rides in the query string rather than the
+    path because an address is full of characters a path segment handles
+    badly — dots, `+`, and an `@` that some proxies normalize.
+
+    Refuses to remove the LAST admin (409). Removing yourself is allowed
+    while others remain: stepping down is legitimate, locking the door on
+    an empty room is not.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            enforce(cur, bucket="admin_allowlist_write", key=str(user.account_id),
+                    limit=_LIMIT_ADMIN_WRITE[0], window_seconds=_LIMIT_ADMIN_WRITE[1])
+        conn.commit()
+    target = accounts.normalize_email(email)
+    try:
+        # Guarded, not accounts.remove_admin: the count and the DELETE have to
+        # be one transaction. Checking here and deleting there would let two
+        # concurrent removals of different addresses both pass a count of two
+        # and both commit, emptying the allowlist — the exact state this
+        # refusal exists to prevent.
+        removed = accounts.remove_admin_guarded(target)
+    except accounts.LastAdminError:
+        raise HTTPException(
+            409,
+            "refusing to remove the last admin — add another first, or use "
+            "the GitHub-gated portal at /admin/admins",
+        )
+    if removed:
+        log.info("admin allowlist: %s removed %s", user.email, target)
+    return {**_admin_rows(user.email), "email": target, "removed": removed}

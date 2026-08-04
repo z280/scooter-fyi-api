@@ -6,12 +6,14 @@ Opaque bearer tokens: 32 bytes of urandom (256 bits), handed to the client
 once, stored only as sha256 hex in auth_sessions. Scopes:
 
     rider      — every session; gates profile + report attribution
-    admin      — a Google-only SIGNAL scope (Google sign-in AND email on
-                 ADMIN_EMAILS). It no longer gates access: admin
-                 authorization is ADMIN_EMAILS membership via either door
-                 (see is_admin_email / require_admin), so an allowlisted
-                 operator can use magic-link too. The scope is still handy
-                 for the frontend to know a Google admin door was used.
+    admin      — a SIGNAL scope: the session's email was on the allowlist
+                 when the session was minted, via ANY door. It does not
+                 gate access — authorization is allowlist membership,
+                 evaluated live (see is_admin_email / require_admin). The
+                 scope was once Google-only, which made it disagree with
+                 the check that actually authorizes; an allowlisted
+                 operator signed in by magic link had full access and a UI
+                 that said otherwise.
 
 Expiry policy:
     rider sessions  — 30 days, sliding: POST /api/v1/auth/refresh rotates
@@ -48,21 +50,30 @@ RIDER_SESSION_DAYS = 30
 ADMIN_SESSION_HOURS = 24
 
 
-def admin_emails() -> frozenset[str]:
+def admin_emails(cur=None) -> frozenset[str]:
     """The admin allowlist (normalized, lowercased).
 
     Source of truth is the `admin_allowlist` table, managed from the
     GitHub-gated admin portal (/admin/admins) and `python -m src.cli admin`.
     Empty when the table is empty. (Replaced the ADMIN_EMAILS env var — see
     sql/021_admin_allowlist.sql.)
+
+    Pass `cur` when you already hold one. session_scopes does, because it
+    runs inside mint_session's transaction: checking out a SECOND pooled
+    connection while holding one is a deadlock vector on a pool this small
+    (max 8), and sign-in is not the place to take that risk. Every other
+    caller is a plain request handler holding nothing, and passes nothing.
     """
+    # Normalize on read too: add_admin normalizes before insert, but a
+    # manual/backfilled row with mixed case or whitespace shouldn't silently
+    # fail the is_admin_email() check.
+    if cur is not None:
+        cur.execute("SELECT email FROM admin_allowlist")
+        return frozenset(normalize_email(r[0]) for r in cur.fetchall())
     with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT email FROM admin_allowlist")
-            # Normalize on read too: add_admin normalizes before insert, but
-            # a manual/backfilled row with mixed case or whitespace shouldn't
-            # silently fail the is_admin_email() check.
-            return frozenset(normalize_email(r[0]) for r in cur.fetchall())
+        with conn.cursor() as cur2:
+            cur2.execute("SELECT email FROM admin_allowlist")
+            return frozenset(normalize_email(r[0]) for r in cur2.fetchall())
 
 
 def list_admins() -> list[dict[str, Any]]:
@@ -102,9 +113,68 @@ def add_admin(email: str, added_by: str | None) -> bool:
     return added
 
 
+class LastAdminError(Exception):
+    """Raised by remove_admin_guarded when the removal would empty the
+    allowlist. Carries the normalized address that was refused."""
+
+    def __init__(self, email: str):
+        super().__init__(f"refusing to remove the last admin ({email})")
+        self.email = email
+
+
+def remove_admin_guarded(email: str) -> bool:
+    """Remove an email, refusing to leave the allowlist EMPTY.
+
+    Returns True if a row was removed, False if it wasn't present. Raises
+    LastAdminError instead of emptying the table.
+
+    ATOMIC, and it has to be. The obvious spelling — read the membership,
+    decide, then call remove_admin() — is two transactions, and the decision
+    it makes is about a count that the second transaction can no longer rely
+    on. With two admins, concurrent removals of DIFFERENT addresses both
+    observe a count of two, both conclude they are not the last, and both
+    delete: the allowlist ends up empty, which is the single state this guard
+    exists to prevent. So the count, the membership probe and the DELETE all
+    happen on one cursor inside one transaction, serialized on an advisory
+    lock the way src/api_device_photos.py serializes its per-device cap.
+
+    The lock is transaction-scoped, so it releases on commit or rollback,
+    and it only serializes callers that take it — remove_admin() below does
+    not. That is deliberate: the GitHub-gated portal and the CLI are the
+    out-of-band way back in, and they are allowed to empty the table.
+    """
+    norm = normalize_email(email)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                ("admin_allowlist",),
+            )
+            cur.execute("SELECT COUNT(*) FROM admin_allowlist")
+            (total,) = cur.fetchone()
+            cur.execute(
+                "SELECT 1 FROM admin_allowlist WHERE email = %s", (norm,)
+            )
+            present = cur.fetchone() is not None
+            # Only a removal that would actually empty the table is refused.
+            # Asking to remove an address that isn't listed is a plain no-op
+            # even when one admin remains — nothing is lost by saying so.
+            if present and int(total) <= 1:
+                raise LastAdminError(norm)
+            cur.execute("DELETE FROM admin_allowlist WHERE email = %s", (norm,))
+            removed = cur.rowcount == 1
+        conn.commit()
+    return removed
+
+
 def remove_admin(email: str) -> bool:
     """Remove an email from the allowlist. Returns True if a row was
-    removed, False if it wasn't present."""
+    removed, False if it wasn't present.
+
+    UNGUARDED: this will happily remove the last admin. That is what the
+    portal and the CLI want — they are reachable when the allowlist is
+    empty, so they are the way back in. Anything reachable only BY an admin
+    should call remove_admin_guarded instead."""
     norm = normalize_email(email)
     with connection() as conn:
         with conn.cursor() as cur:
@@ -205,8 +275,14 @@ def is_admin_email(user: "SessionUser") -> bool:
     This — NOT the `admin` scope — is the admin authorization check for the
     /api/v1/private/* endpoints and the /api/v1/user plate fields, so an
     allowlisted operator can use EITHER sign-in door (magic-link or Google).
-    Both doors prove ownership of the email. The `admin` scope stays a
-    Google-only signal (see session_scopes) but no longer gates access.
+    Both doors prove ownership of the email.
+
+    The `admin` scope is now stamped from this same allowlist for any door
+    (see session_scopes), so the two agree. It still does not GATE anything
+    — this function is the gate — but it is no longer a different answer to
+    the same question. Note the scope is fixed at mint time while this is
+    evaluated live, so adding someone to the allowlist grants access on
+    their very next request without a new sign-in.
     """
     if not user.email:
         return False
@@ -217,15 +293,33 @@ def hash_token(raw: str) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
-def session_scopes(*, method: str, email: str | None) -> list[str]:
-    """Stored scopes for a new session. The `admin` scope is a Google-only
-    signal (it does NOT gate access — require_admin uses is_admin_email).
+def session_scopes(*, method: str, email: str | None, cur=None) -> list[str]:
+    """Stored scopes for a new session.
 
-    `email` is None for an SMS session on a phone-only account; Google is
-    the only method that can earn `admin` anyway, and Google always carries
-    a verified email, so there is nothing to look up in that case."""
+    THE `admin` SCOPE IS AGNOSTIC TO THE SIGN-IN METHOD: any door, same
+    allowlist, same answer. It was Google-only, which made it disagree with
+    is_admin_email — the check that actually authorizes /private/* and the
+    plate fields, and which has always accepted either door because both
+    prove ownership of the same allowlisted email. One address was admin or
+    not depending on which button they pressed, and only the *signal*
+    disagreed, so the effect was an operator with full access whose UI
+    insisted they had none.
+
+    `method` is kept in the signature: it still records which door was used
+    (auth_sessions.method), and a future rule that genuinely depends on the
+    door belongs here rather than being re-derived elsewhere.
+
+    `email` is None for an SMS session on a phone-only account — the
+    allowlist is keyed by email, so there is nothing to match and no lookup
+    to make.
+
+    Consequence worth naming: session_expiry keys the 24h non-sliding
+    admin lifetime off this scope, so an email-door admin now gets that
+    lifetime too, rather than a 30-day rider session. That is the point of
+    making it agnostic — an admin session is an admin session.
+    """
     scopes = ["rider"]
-    if method == "google" and email and normalize_email(email) in admin_emails():
+    if email and normalize_email(email) in admin_emails(cur):
         scopes.append("admin")
     return scopes
 
@@ -552,7 +646,7 @@ def mint_session(
     never logged, never stored.
     """
     now = datetime.now(timezone.utc)
-    scopes = session_scopes(method=method, email=email)
+    scopes = session_scopes(method=method, email=email, cur=cur)
     expires_at, sliding = session_expiry(scopes=scopes, now=now)
     raw = secrets.token_urlsafe(32)
     cur.execute(
@@ -644,11 +738,12 @@ def optional_session(request: Request) -> SessionUser | None:
 
 
 def require_admin(request: Request) -> SessionUser:
-    """Gate on ADMIN_EMAILS membership, so an allowlisted operator reaches
-    the /api/v1/private/* endpoints via EITHER sign-in door (magic-link or
-    Google) — not the Google-only `admin` scope."""
+    """Gate on admin-allowlist membership, so an allowlisted operator reaches
+    the /api/v1/private/* endpoints via ANY sign-in door. Evaluated live
+    against the table rather than read off the session's scopes, so adding or
+    removing an admin takes effect on the next request."""
     user = require_session(request)
     if not is_admin_email(user):
-        raise HTTPException(403, "admin access required (email not on ADMIN_EMAILS)")
+        raise HTTPException(403, "admin access required (email not on the admin allowlist)")
     return user
 

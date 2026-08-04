@@ -34,6 +34,7 @@ from .accounts import (
     PhoneNumberContested,
     SessionUser,
     hash_token,
+    is_admin_email,
     mint_session,
     normalize_email,
     normalize_us_phone,
@@ -892,9 +893,23 @@ def auth_refresh(request: Request, user: SessionUser = Depends(require_session))
 # ---------------------------------------------------------------------------
 @router.get("/api/v1/auth/session")
 def auth_session(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
+    """`admin` reports what this session is actually ALLOWED to do, which is
+    `is_admin_email` — the same check require_admin uses for /private/* and
+    the plate fields, and which accepts EITHER sign-in door.
+
+    It is deliberately not `"admin" in scopes`, even though that scope is now
+    stamped for any door too. The scope is fixed when the session is MINTED;
+    this is evaluated live, so adding someone to the allowlist takes effect on
+    their very next request rather than at their next sign-in — and removing
+    someone takes effect just as promptly, which matters more.
+
+    `scopes` still ships verbatim, so a client that wants to know which door
+    was used can still see it.
+    """
     return {
         "email": user.email,
         "scopes": list(user.scopes),
+        "admin": is_admin_email(user),
         "expires": user.expires_at.isoformat(),
     }
 

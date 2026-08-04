@@ -1471,11 +1471,13 @@ user clicks) and **typed code** (we email a short `AA000AA` code the user
 types back — handy for signing in on the same tab/device without leaving
 to an inbox app). Both mint the same kind of session.
 
-**Scopes:** every session has `rider`. `admin` is a Google-only signal
-scope (granted on Google sign-in for an allowlisted email) — but it no
-longer gates anything: **admin authorization is membership in the admin
-allowlist regardless of sign-in door**, so an allowlisted operator using
-magic-link reaches the admin/`/api/v1/private/*` surface too. The
+**Scopes:** every session has `rider`. `admin` is a signal scope, granted
+at sign-in for an allowlisted email through **any** door — but it gates
+nothing: **admin authorization is membership in the admin allowlist**,
+evaluated live per request, so an allowlist change applies immediately
+rather than at the next sign-in. Read `admin` from
+`GET /api/v1/auth/session` for that live answer; the scope is only a
+snapshot of it. The
 allowlist is stored in Postgres (`admin_allowlist` table) and managed from
 the GitHub-gated admin portal at `/admin/admins` (or
 `python -m src.cli admin add <email>`) — it replaced the `ADMIN_EMAILS`
@@ -1508,7 +1510,7 @@ Postmark config). Cached `public, max-age=300`.
 | `POST /api/v1/auth/sms/code` | `{ "phone_number": "(303) 555-1212" }` → `202 { "sent": true }`. Texts a short `AA000AA` code (10-min TTL) via z280-comms. US numbers only, any format. Limits: 3/hour per number, 5/hour per IP, 250/day globally — the daily ceiling is **skipped for a number already verified**, so a rider whose only door is SMS can't be locked out by other traffic. A failed send does **not** invalidate a code you already hold. `400` unusable number, `409` **the recipient has blocked texts — show `detail` verbatim, it names the keyword and number that unblock**, `429` over quota, `502` send failed, `503` if unconfigured. |
 | `POST /api/v1/auth/sms/code/verify` | `{ "phone_number": "(303) 555-1212", "code": "AB123XY" }` → `{token, expires}`. Case-insensitive; spaces/hyphens ignored. Typing the code back is what marks the number **verified** — an account is created if none has proved that number yet. `401` wrong/expired/too many tries (5), `409` if the number is contested (needs an operator). Limits: 10/hour per number, 30/hour per IP. |
 | `POST /api/v1/auth/refresh` | Bearer required. → `{token, expires}` (new token; old one revoked). |
-| `GET /api/v1/auth/session` | Bearer required. → `{ email, scopes, expires }`. `401` when invalid/expired — treat as signed out. |
+| `GET /api/v1/auth/session` | Bearer required. → `{ email, scopes, admin, expires }`. `401` when invalid/expired — treat as signed out. **`admin` is the authorization answer** (`is_admin_email` — the allowlist check `/private/*` enforces) and is evaluated **live**, so an allowlist change applies on the next request without re-signing in. The `admin` *scope* is a mint-time snapshot of the same allowlist; both are agnostic to the sign-in door. Clients gating admin UI should read `admin`. |
 | `POST /api/v1/auth/signout` | Bearer required. Revokes the token. → `{ "revoked": true }` |
 
 ### `GET /api/v1/profile` / `PUT /api/v1/profile`
@@ -1998,9 +2000,49 @@ deliberately withholds.
 | `GET /api/v1/private/regional-leaders` | Full, unfiltered whole-database leaderboard (sql/054): every stored rank with real account ids, points, and `first_point_at` tie-break provenance -- admin sibling of the public `/api/v1/leaderboard/regional`. |
 | `GET /api/v1/private/reports` | Admin listing of all negative reports. |
 | `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback. |
+| `GET /api/v1/private/admins` | The admin allowlist. → `{ count, admins: [ { email, added_by, added_at, is_you } ] }`, newest first. |
+| `POST /api/v1/private/admins` | `{ "email": "..." }` → `{ count, admins, email, added }`. Idempotent: re-adding an existing admin is `200` with `added: false`. `400` if it isn't an email address. |
+| `DELETE /api/v1/private/admins?email=...` | → `{ count, admins, email, removed }`. `409` if it would remove the **last** admin. Removing an address that isn't listed is `200` with `removed: false`. |
 
 A non-allowlisted but validly signed-in caller gets `403`; no token at
 all gets `401`.
+
+### Managing the allowlist
+
+The three `/admins` routes let an account admin grant and revoke account
+admin. **This is a wider trust boundary than the `/admin/admins` HTML
+portal**, whose GitHub OAuth gate is separate: there, a GitHub operator
+decides who counts as an account admin, and an account admin cannot
+promote anyone. Both surfaces edit the same `admin_allowlist` table, and
+the portal remains the out-of-band way back in.
+
+Three properties make that survivable, and clients can rely on them:
+
+- **Every write is attributed.** `added_by` records the acting admin's
+  email, so the table is an audit trail rather than a bare set.
+- **The last admin cannot be removed** (`409`). An empty allowlist locks
+  every account out of `/private/*` — including these routes — leaving
+  only the GitHub portal or `python -m src.cli admin`. Removing
+  *yourself* is allowed while others remain; stepping down is
+  legitimate, locking the door on an empty room is not. The check and the
+  delete are **one serialized transaction**, so two concurrent removals of
+  different addresses cannot both pass a count of two and both commit —
+  the second is refused.
+- **Writes are rate-limited** 30/hour per account.
+
+Both write routes return the **full refreshed list** alongside their
+result, so a UI never needs a follow-up `GET` to redraw. `is_you` is
+computed server-side against the same normalization the allowlist is
+keyed by (`strip().lower()`), so a client never has to reimplement it to
+know which row is dangerous to remove.
+
+`DELETE` takes the address as a **query parameter**, not a path segment:
+email addresses are full of characters a path segment handles badly —
+dots, `+`, and an `@` that some proxies normalize.
+
+Because `is_admin_email` is evaluated live per request, a change here
+takes effect on the target's **next request** — no new sign-in, and a
+revoked admin loses access immediately rather than at token expiry.
 
 ---
 
