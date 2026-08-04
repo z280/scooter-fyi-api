@@ -34,6 +34,7 @@ from .accounts import (
     PhoneNumberContested,
     SessionUser,
     hash_token,
+    is_admin_email,
     mint_session,
     normalize_email,
     normalize_us_phone,
@@ -892,9 +893,25 @@ def auth_refresh(request: Request, user: SessionUser = Depends(require_session))
 # ---------------------------------------------------------------------------
 @router.get("/api/v1/auth/session")
 def auth_session(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
+    """`admin` reports what this session is actually ALLOWED to do, which is
+    `is_admin_email` — the same check require_admin uses for /private/* and
+    the plate fields, and which accepts EITHER sign-in door.
+
+    It is deliberately not `"admin" in scopes`. That scope is a Google-only
+    SIGNAL (see accounts.session_scopes) and stopped gating access when
+    is_admin_email became the authorization check; leaving the client to
+    infer admin from it meant an allowlisted operator signed in by magic link
+    was admin to every endpoint while the map told them they were nobody —
+    no "Administrator Mode", and no bypass on the proximity-gated buttons.
+    The two are now the same question with the same answer.
+
+    `scopes` still ships verbatim, so a client that wants to know which door
+    was used can still see it.
+    """
     return {
         "email": user.email,
         "scopes": list(user.scopes),
+        "admin": is_admin_email(user),
         "expires": user.expires_at.isoformat(),
     }
 
