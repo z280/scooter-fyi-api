@@ -650,3 +650,112 @@ def private_admins_remove(
     if removed:
         log.info("admin allowlist: %s removed %s", user.email, target)
     return {**_admin_rows(user.email), "email": target, "removed": removed}
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/private/analytics/* — read back src/analytics.py's rollups
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/private/analytics/daily")
+def private_analytics_daily(
+    user: SessionUser = Depends(require_admin),
+    days: int = Query(30, ge=1, le=3650),
+) -> dict[str, Any]:
+    """Per-day totals from telemetry_daily (computed at 9:20am Denver by
+    `python -m src.cli rollup_analytics`). Aggregate-only — the raw
+    tables are never exposed over HTTP.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT day, SUM(events)::int,
+                       MAX(visitors)::int, MAX(sessions)::int
+                FROM telemetry_daily
+                WHERE day >= CURRENT_DATE - %s
+                GROUP BY day ORDER BY day DESC
+                """,
+                (days,),
+            )
+            rows = [
+                {
+                    "day": str(day),
+                    "events": events,
+                    # Per-event-name visitor counts can't be summed
+                    # (one visitor fires many event names); MAX of the
+                    # per-name distinct counts is a lower bound, with
+                    # page_load's count the practical daily-active figure.
+                    "max_event_visitors": visitors,
+                    "max_event_sessions": sessions,
+                }
+                for day, events, visitors, sessions in cur.fetchall()
+            ]
+    return {"days": days, "daily": rows}
+
+
+@router.get("/api/v1/private/analytics/events")
+def private_analytics_events(
+    user: SessionUser = Depends(require_admin),
+    name: str = Query(..., min_length=1, max_length=64),
+    days: int = Query(30, ge=1, le=3650),
+) -> dict[str, Any]:
+    """One event name's daily rollup rows, prop_summary included."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT day, city_id, events, visitors, sessions, prop_summary
+                FROM telemetry_daily
+                WHERE name = %s AND day >= CURRENT_DATE - %s
+                ORDER BY day DESC
+                """,
+                (name, days),
+            )
+            rows = [
+                {
+                    "day": str(day),
+                    "city_id": city_id,
+                    "events": events,
+                    "visitors": visitors,
+                    "sessions": sessions,
+                    "prop_summary": prop_summary,
+                }
+                for day, city_id, events, visitors, sessions, prop_summary
+                in cur.fetchall()
+            ]
+    return {"name": name, "days": days, "daily": rows}
+
+
+@router.get("/api/v1/private/analytics/requests/daily")
+def private_analytics_requests_daily(
+    user: SessionUser = Depends(require_admin),
+    days: int = Query(30, ge=1, le=3650),
+) -> dict[str, Any]:
+    """request_metrics_daily rows for the window, newest first."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT day, city_id, route, method, status_class,
+                       requests, p50_ms, p95_ms, authed_requests
+                FROM request_metrics_daily
+                WHERE day >= CURRENT_DATE - %s
+                ORDER BY day DESC, requests DESC
+                """,
+                (days,),
+            )
+            rows = [
+                {
+                    "day": str(day),
+                    "city_id": city_id,
+                    "route": route,
+                    "method": method,
+                    "status_class": status_class,
+                    "requests": requests,
+                    "p50_ms": p50,
+                    "p95_ms": p95,
+                    "authed_requests": authed,
+                }
+                for day, city_id, route, method, status_class,
+                    requests, p50, p95, authed in cur.fetchall()
+            ]
+    return {"days": days, "daily": rows}

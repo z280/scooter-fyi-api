@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 _PRIVACY = {
-    "updated": "2026-07-30",
+    "updated": "2026-08-05",
     "contact": "zneill@gmail.com",
     "retention": [
         {
@@ -245,6 +245,37 @@ _PRIVACY = {
                       "to the uploader. Mirrors the receipts retention window "
                       "above; a matching cleanup job removes the image after "
                       "18 months.",
+        },
+        {
+            "data": "telemetry_events",
+            "retention": "90 days raw",
+            "detail": "First-party, cookieless usage events from the web app "
+                      "(which drawer opened, which mode, which wizard screen "
+                      "— allowlisted names, no free text, no coordinates, no "
+                      "ride content, no preference blobs). No account id is "
+                      "ever stored — only a signed-in yes/no flag. Visitor "
+                      "counting uses sha256(daily salt + IP + user-agent); "
+                      "the salt is destroyed after 2 days, after which the "
+                      "hash cannot be recomputed by anyone. Neither the IP "
+                      "nor the user-agent is stored. Opt out any time via "
+                      "the Account drawer toggle (stored on your device).",
+        },
+        {
+            "data": "request_metrics",
+            "retention": "30 days raw",
+            "detail": "Per-request API metrics: route template (never the "
+                      "raw path), method, status, duration, and a coarse "
+                      "device class/OS bucket derived from the user-agent. "
+                      "No IP, no raw user-agent, no account id — only "
+                      "whether a bearer token was presented.",
+        },
+        {
+            "data": "analytics_rollups",
+            "retention": "indefinite, aggregated",
+            "detail": "Daily aggregate tables (event counts, distinct-"
+                      "visitor counts, latency percentiles) computed from "
+                      "the two raw tables above before they are pruned. "
+                      "Contain no identifiers of any kind.",
         },
     ],
 }

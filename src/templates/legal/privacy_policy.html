@@ -28,7 +28,7 @@
 </header>
 <main>
 <h1>Privacy Policy</h1>
-<p class="updated">Last updated: July 30, 2026</p>
+<p class="updated">Last updated: August 5, 2026</p>
 
 <p>This Privacy Policy explains how <strong>Mile High Technology
 Consulting, LLC</strong>, doing business as <strong>"scooter.fyi"</strong>
@@ -76,10 +76,25 @@ that ride so your own recording can be verified later</td>
 time</td></tr>
 <tr><td>Technical</td><td>IP address on requests, standard server
 logs</td><td>Rate limiting, abuse prevention, debugging</td></tr>
+<tr><td>Usage analytics</td><td>First-party, cookieless usage events from
+the web app: which panel or mode was opened, which wizard screen was
+reached, coarse device class (mobile/tablet/desktop), operating-system
+family, viewport size bucket, and referrer domain. Event names come from
+a fixed allowlist — no free text, no search queries, no coordinates, no
+ride content, and no preference values are ever included. No account id
+is attached, only a signed-in yes/no flag. Distinct visitors are counted
+with a hash of a daily-rotating secret plus IP and user-agent; the secret
+is destroyed after two days, after which the hash cannot be linked to
+anyone. Neither the IP nor the user-agent is stored with events</td>
+<td>Understanding which features are used, on what kinds of devices, so
+we can improve the app. We run this ourselves — no third-party analytics
+service ever sees it. You can switch it off in the Account drawer</td></tr>
 </table>
 <p>We do not use tracking cookies or cross-site advertising pixels. Your
 session token is stored in your browser's local storage, not a
-third-party cookie.</p>
+third-party cookie. Our usage analytics are first-party and cookieless:
+no analytics cookies, no third-party scripts, and no persistent device
+identifier of any kind.</p>
 
 <h2>2. How we use information</h2>
 <ul>
@@ -206,6 +221,17 @@ the aggregate.</td></tr>
 <tr><td>Accounts</td><td>Until you ask us to delete it</td><td>Email us
 at the address below to delete your account and associated
 preferences.</td></tr>
+<tr><td>Usage analytics (raw events)</td><td>90 days</td><td>Raw
+first-party usage events (see §1) are pruned by a daily job after 90
+days. The daily-rotating visitor-hash secret is destroyed after 2 days,
+which makes the visitor hash permanently unlinkable well before the raw
+rows expire.</td></tr>
+<tr><td>API request metrics (raw)</td><td>30 days</td><td>Per-request
+route template, status, duration, and coarse device bucket. No IP, no
+raw user-agent, no account id.</td></tr>
+<tr><td>Analytics rollups</td><td>Indefinite, aggregated</td><td>Daily
+aggregate counts (events, distinct visitors, latency percentiles)
+computed before the raw rows are pruned. Contain no identifiers.</td></tr>
 </table>
 
 <h2>5. Your choices and rights</h2>
@@ -217,6 +243,11 @@ or <code>DELETE /api/v1/rides</code> at any time — immediate and
 irreversible.</li>
 <li><strong>Delete your account:</strong> email us (below); we don't yet
 have self-serve account deletion.</li>
+<li><strong>Opt out of usage analytics:</strong> the "Private analytics"
+toggle in the Account drawer turns off all usage-event collection for
+that browser. The choice is stored on your device and works whether or
+not you're signed in. Browsers sending Global Privacy Control are opted
+out automatically.</li>
 <li>We do not sell personal information, so there is nothing to opt out
 of in that sense.</li>
 </ul>

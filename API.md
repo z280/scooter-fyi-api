@@ -2090,6 +2090,9 @@ deliberately withholds.
 | `GET /api/v1/private/trips/daily?date=YYYY-MM-DD&limit=` | Daily trip/popularity rollup for one Denver-local date. `limit` 1–5000 (default 100). |
 | `GET /api/v1/private/area-leaders` | Full, unfiltered §11 area-leader report: every stored rank 1-3 per cell with real account ids, points, and `first_point_at` tie-break provenance -- no privacy filtering (that layer belongs only to the public `/api/v1/leaderboard/map`). |
 | `GET /api/v1/private/regional-leaders` | Full, unfiltered whole-database leaderboard (sql/054): every stored rank with real account ids, points, and `first_point_at` tie-break provenance -- admin sibling of the public `/api/v1/leaderboard/regional`. |
+| `GET /api/v1/private/analytics/daily?days=` | Per-day totals from the user-analytics rollup (`telemetry_daily`): events plus a max-per-event-name distinct-visitor/session figure. `days` 1–3650 (default 30). |
+| `GET /api/v1/private/analytics/events?name=&days=` | One event name's daily rollup rows, including `prop_summary` (top-k prop-value counts). |
+| `GET /api/v1/private/analytics/requests/daily?days=` | `request_metrics_daily` rows: per route/method/status-class request counts and p50/p95 latency. |
 | `GET /api/v1/private/reports` | Admin listing of all negative reports. |
 | `GET /api/v1/private/quality-feedback` | Admin listing of all quality feedback. |
 | `GET /api/v1/private/admins` | The admin allowlist. → `{ count, admins: [ { email, added_by, added_at, is_you } ] }`, newest first. |
@@ -3191,7 +3194,8 @@ this, so the published policy and the enforced one can't drift:
 Current `data` keys: `sessions`, `magic_link_tokens`, `receipts`, `rides`,
 `reports`, `accounts`, `user_preferences`, `tracked_rides`,
 `donated_tracks`, `user_points`, `device_photos`, `model_reports`,
-`ride_transaction_screenshots`. Render the list as served — don't hardcode
+`ride_transaction_screenshots`, `telemetry_events`, `request_metrics`,
+`analytics_rollups`. Render the list as served — don't hardcode
 it, since new data classes get appended here first.
 
 `donated_tracks` (added with track donation, above): a donated ride track
@@ -3224,6 +3228,44 @@ Clients bake the same default for offline use, so this endpoint is a refresh,
 never a dependency. `Cache-Control: public, max-age=3600`.
 
 ---
+
+## Telemetry
+
+### `POST /api/v1/telemetry/events`
+
+First-party usage-analytics ingest for the official frontend. Anonymous,
+no auth. Third-party clients have no reason to call this — events from
+unknown names are dropped, and there is nothing to read back.
+
+```json
+{
+  "v": 1,
+  "page": { "vp": "md", "dc": "mobile", "os": "ios",
+            "ref": "google.com", "theme": "dark", "auth": false },
+  "events": [
+    { "n": "page_load", "t": 1754400000000, "sid": "k3f9x2ab41mz",
+      "p": { "first_of_day": true } }
+  ]
+}
+```
+
+Behavior:
+
+- Always `204` — malformed bodies, unknown event names, and oversized
+  payloads are **dropped silently**, never `4xx`. A stale cached bundle
+  must not error-spam, and there is no useful client reaction to a
+  rejected analytics batch.
+- Caps: ≤ 50 events per batch, body ≤ 32 KB, ≤ 12 props per event,
+  prop values truncated at 120 chars, `sid` at 16 chars. Timestamps
+  outside ±1 h of server time are replaced with arrival time.
+- Event names come from a fixed allowlist (mirrored in the frontend's
+  `src/telemetry.ts`); `page.dc` / `page.os` / `page.vp` are vocabulary-
+  checked and fall back to `other`.
+- Rate limit: 120 batches per IP per hour → `429` with `Retry-After`.
+- Privacy: no account id is ever accepted or stored; visitor counting
+  uses a daily-salted hash of IP + user-agent whose salt is destroyed
+  after 2 days (see `GET /api/v1/meta/privacy`, keys `telemetry_events`,
+  `request_metrics`, `analytics_rollups`).
 
 ## Layer reference
 

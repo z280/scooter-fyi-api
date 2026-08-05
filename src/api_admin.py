@@ -442,3 +442,203 @@ def admins_remove(
     return RedirectResponse(
         f"/admin/admins?saved={'removed' if removed else 'not+found'}", status_code=303
     )
+
+
+# --- User analytics ---------------------------------------------------------
+# Reads the RAW telemetry tables (sql/061) directly: at this deployment's
+# traffic a few GROUP BYs over 30 days of events are instant, and the raw
+# retention windows (90d events / 30d request metrics) comfortably cover
+# every range this page offers. The *_daily rollups exist for the private
+# JSON endpoints and for history beyond the raw windows.
+
+
+@router.get("/analytics", response_class=HTMLResponse)
+def analytics(
+    request: Request,
+    days: int = Query(30, ge=1, le=90),
+    user: dict = Depends(auth.require_admin),
+):
+    from datetime import timedelta, timezone
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT (received_at AT TIME ZONE 'America/Denver')::date AS day,
+                       COUNT(DISTINCT visitor_hash) AS visitors,
+                       COUNT(DISTINCT session_id) AS sessions,
+                       COUNT(*) AS events
+                FROM telemetry_events
+                WHERE received_at >= %s
+                GROUP BY 1 ORDER BY 1 DESC
+                """,
+                (since,),
+            )
+            daily = [
+                {"day": d, "visitors": v, "sessions": s, "events": e}
+                for d, v, s, e in cur.fetchall()
+            ]
+
+            cur.execute(
+                """
+                SELECT name, COUNT(*) AS events,
+                       COUNT(DISTINCT visitor_hash) AS visitors
+                FROM telemetry_events
+                WHERE received_at >= %s
+                GROUP BY name ORDER BY events DESC
+                """,
+                (since,),
+            )
+            top_events = [
+                {"name": n, "events": e, "visitors": v}
+                for n, e, v in cur.fetchall()
+            ]
+
+            def _prop_counts(event: str, prop: str, limit: int = 12):
+                cur.execute(
+                    """
+                    SELECT props->>%s AS value, COUNT(*) AS n
+                    FROM telemetry_events
+                    WHERE name = %s AND received_at >= %s
+                          AND props ? %s
+                    GROUP BY 1 ORDER BY n DESC LIMIT %s
+                    """,
+                    (prop, event, since, prop, limit),
+                )
+                return [{"value": v, "n": n} for v, n in cur.fetchall()]
+
+            drawers = _prop_counts("drawer_open", "drawer")
+            modes = _prop_counts("mode_switch", "mode")
+            popup_actions = _prop_counts("popup_action", "action")
+            controls = _prop_counts("control_change", "control", limit=20)
+
+            # Ride funnel: event totals in flow order.
+            cur.execute(
+                """
+                SELECT name, COALESCE(props->>'screen', '') AS screen,
+                       COUNT(*) AS n
+                FROM telemetry_events
+                WHERE received_at >= %s
+                      AND name IN ('ride_open', 'ride_screen',
+                                   'ride_complete', 'ride_abandon')
+                GROUP BY 1, 2
+                """,
+                (since,),
+            )
+            ride_raw = cur.fetchall()
+            ride_open = sum(n for name, _, n in ride_raw if name == "ride_open")
+            ride_complete = sum(
+                n for name, _, n in ride_raw if name == "ride_complete"
+            )
+            ride_screens = sorted(
+                (
+                    {"screen": screen, "n": n}
+                    for name, screen, n in ride_raw
+                    if name == "ride_screen" and screen
+                ),
+                key=lambda r: float(r["screen"])
+                if r["screen"].replace(".", "").isdigit()
+                else 99,
+            )
+            ride_abandons = sum(
+                n for name, _, n in ride_raw if name == "ride_abandon"
+            )
+
+            cur.execute(
+                """
+                SELECT name, props->>'method' AS method, COUNT(*) AS n
+                FROM telemetry_events
+                WHERE received_at >= %s
+                      AND name IN ('auth_start', 'auth_success', 'auth_error')
+                GROUP BY 1, 2 ORDER BY 2, 1
+                """,
+                (since,),
+            )
+            auth_funnel = [
+                {"name": n, "method": m or "?", "n": c}
+                for n, m, c in cur.fetchall()
+            ]
+
+            cur.execute(
+                """
+                SELECT device_class, os_family, viewport,
+                       COUNT(DISTINCT visitor_hash) AS visitors
+                FROM telemetry_events
+                WHERE received_at >= %s
+                GROUP BY 1, 2, 3 ORDER BY visitors DESC
+                """,
+                (since,),
+            )
+            devices = [
+                {"device": d, "os": o, "viewport": vp, "visitors": v}
+                for d, o, vp, v in cur.fetchall()
+            ]
+
+            # Simple paths: first mode chosen per session, and which drawer
+            # sets sessions touch. Deliberately not sequence mining.
+            cur.execute(
+                """
+                SELECT mode, COUNT(*) AS n FROM (
+                    SELECT DISTINCT ON (session_id)
+                           session_id, props->>'mode' AS mode
+                    FROM telemetry_events
+                    WHERE name = 'mode_switch' AND received_at >= %s
+                    ORDER BY session_id, received_at
+                ) t GROUP BY mode ORDER BY n DESC
+                """,
+                (since,),
+            )
+            entry_modes = [{"mode": m or "?", "n": n} for m, n in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT drawers, COUNT(*) AS n FROM (
+                    SELECT session_id,
+                           string_agg(DISTINCT props->>'drawer', ' + ') AS drawers
+                    FROM telemetry_events
+                    WHERE name = 'drawer_open' AND received_at >= %s
+                    GROUP BY session_id
+                ) t GROUP BY drawers ORDER BY n DESC LIMIT 15
+                """,
+                (since,),
+            )
+            drawer_sets = [{"drawers": d, "n": n} for d, n in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT route, COUNT(*) AS requests,
+                       COALESCE(percentile_cont(0.95)
+                           WITHIN GROUP (ORDER BY duration_ms), 0)::int AS p95,
+                       COUNT(*) FILTER (WHERE status >= 500) AS errors
+                FROM request_metrics
+                WHERE at >= %s
+                GROUP BY route ORDER BY requests DESC LIMIT 25
+                """,
+                (since,),
+            )
+            api_health = [
+                {"route": r, "requests": n, "p95": p, "errors": e}
+                for r, n, p, e in cur.fetchall()
+            ]
+
+    return _render(
+        "analytics.html",
+        user=user,
+        days=days,
+        daily=daily,
+        top_events=top_events,
+        drawers=drawers,
+        modes=modes,
+        popup_actions=popup_actions,
+        controls=controls,
+        ride_open=ride_open,
+        ride_screens=ride_screens,
+        ride_complete=ride_complete,
+        ride_abandons=ride_abandons,
+        auth_funnel=auth_funnel,
+        devices=devices,
+        entry_modes=entry_modes,
+        drawer_sets=drawer_sets,
+        api_health=api_health,
+    )

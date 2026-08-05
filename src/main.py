@@ -8,6 +8,7 @@ container restart freely without resetting cron timing.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -39,9 +40,11 @@ from .api_private import router as private_router
 from .api_profile import router as profile_router
 from .api_public import router as public_router
 from .api_reports import router as reports_router
+from .api_telemetry import router as telemetry_router
 from .api_tracked_rides import router as tracked_rides_router
 from .api_route import router as route_router
 from .api_user import router as user_router
+from . import request_metrics
 from .config import load, session_https_only, session_secret
 from .pg import run_migrations
 from .sentry import init as sentry_init
@@ -65,7 +68,15 @@ async def lifespan(app: FastAPI):
         "Worker started. Scheduling lives in the `scheduler` container "
         "(supercronic + /app/crontab) — this process serves HTTP only."
     )
+    metrics_stop = asyncio.Event()
+    metrics_task = asyncio.create_task(request_metrics.flush_loop(metrics_stop))
     yield
+    metrics_stop.set()
+    await metrics_task
+    try:
+        request_metrics.flush_pending()
+    except Exception:  # noqa: BLE001 — shutdown must not hang on a dead DB
+        log.exception("final request_metrics flush failed")
 
 
 app = FastAPI(title="veo-audit", version="3.3", lifespan=lifespan)
@@ -99,6 +110,9 @@ app.add_middleware(
 # are compressed even for clients that bypass the CDN; behind Cloudflare
 # the edge re-encodes to brotli for browsers that prefer it.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+# Registered AFTER GZip: add_middleware wraps outermost-last, so this sits
+# innermost — timing the app's own work, not compression or CORS handling.
+app.middleware("http")(request_metrics.middleware)
 
 app.include_router(public_router)
 app.include_router(h3_router)
@@ -129,6 +143,7 @@ app.include_router(route_router)
 # same graph_bbox /route rejects on.
 app.include_router(geocode_router)
 app.include_router(leaderboard_router)
+app.include_router(telemetry_router)
 
 
 @app.get("/", include_in_schema=False)
