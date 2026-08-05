@@ -426,11 +426,15 @@ def _devices_current_impl(
                 # Features" button reads to decide whether it is offering 12,
                 # 14 or 6 points, so a client that has to opt in would be a
                 # client that shows the wrong number. It is one short string
-                # per device. The four feature columns ride along with it —
-                # they are two booleans' worth of payload and are what any
+                # per device. The feature columns ride along with it — they
+                # are a few booleans' worth of payload and are what any
                 # equipment filter has to read.
                 "       ds.feature_status, ds.has_bell, ds.has_cup_holder, "
-                "       ds.has_phone_holder, ds.features_poor_condition "
+                "       ds.has_phone_holder, ds.features_poor_condition, "
+                # sql/058, appended rather than slotted in next to the other
+                # three presence columns so every positional index below
+                # stays where it was.
+                "       ds.has_basket "
                 "FROM raw_telemetry_points r "
                 "LEFT JOIN device_state ds USING (vehicle_identifier) "
                 f"WHERE {' AND '.join(where)} "
@@ -505,7 +509,7 @@ def _devices_current_impl(
             # "Needs features confirmed" is the right answer for a vehicle
             # we have never even recorded state for.
             "feature_status": r[30] or FEATURE_STATUS_NEEDS_CONFIRMED,
-            "device_features": feature_payload(r[31], r[32], r[33], r[34]),
+            "device_features": feature_payload(r[31], r[32], r[33], r[34], r[35]),
         }
         if "h3" in tokens:
             # String-encoded (canonical h3 hex form): the raw 64-bit ints

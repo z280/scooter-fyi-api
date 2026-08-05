@@ -44,6 +44,7 @@ _ROW = (
     False,          # 32 has_cup_holder
     True,           # 33 has_phone_holder
     [],             # 34 features_poor_condition
+    False,          # 35 has_basket (sql/058)
 )
 
 _PLATE_FIELDS = (

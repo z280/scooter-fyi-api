@@ -69,10 +69,20 @@ STATUS_UP_TO_DATE = "up_to_date"
 #: Every legal `device_state.feature_status`. Mirrors sql/055's CHECK.
 FEATURE_STATUSES = (STATUS_NEEDS_CONFIRMED, STATUS_NEEDS_REVIEW, STATUS_UP_TO_DATE)
 
-#: The three features a rider is asked about, in the order the modal asks.
+#: The features a rider is asked about, in the order the modal asks.
 #: These strings are the wire vocabulary for `poor_condition` — the client
 #: sends them back verbatim, so renaming one is a breaking API change.
-FEATURE_KEYS = ("bell", "cup_holder", "phone_holder")
+#:
+#: ORDER IS THE VOCABULARY'S, NOT `sorted()`'s. Until `basket` arrived
+#: (sql/058) the two coincided, because the first three keys happen to be in
+#: alphabetical order; `basket` is the key that broke the coincidence, which
+#: is why everything that canonicalises a `poor_condition` list — the
+#: endpoint's validator and `FeatureAnswers.normalise()` alike — now orders
+#: by this tuple explicitly. A lexicographic sort in one of them and a
+#: FEATURE_KEYS walk in the other would produce two different arrays for the
+#: same answer, and the endpoint's dedupe probe compares stored arrays
+#: literally.
+FEATURE_KEYS = ("bell", "cup_holder", "phone_holder", "basket")
 
 #: `FEATURE_KEYS` -> the `device_feature_reports` / `device_state` column
 #: holding "is it present?". One mapping so the report writer, the consensus
@@ -81,7 +91,19 @@ FEATURE_PRESENCE_COLUMNS = {
     "bell": "has_bell",
     "cup_holder": "has_cup_holder",
     "phone_holder": "has_phone_holder",
+    "basket": "has_basket",
 }
+
+def canonical_poor(keys: Iterable[str]) -> tuple[str, ...]:
+    """`keys` deduped and ordered by FEATURE_KEYS, dropping anything unknown.
+
+    The single definition of "what a poor_condition array looks like when we
+    store or compare one", so the endpoint and the processor cannot disagree
+    about it.
+    """
+    present = set(keys)
+    return tuple(k for k in FEATURE_KEYS if k in present)
+
 
 #: How many valid reports a `needs_review` vehicle needs before the vote
 #: runs, and therefore what "2/3" means. The owner specified three; the
@@ -90,10 +112,16 @@ FEATURE_PRESENCE_COLUMNS = {
 REVIEW_CONSENSUS_REPORTS = 3
 
 
-def _majority_threshold() -> int:
-    """Votes needed to win a field. 3 -> 2, 5 -> 3. Derived so raising
-    REVIEW_CONSENSUS_REPORTS cannot leave a stale "2" behind."""
-    return REVIEW_CONSENSUS_REPORTS // 2 + 1
+def _majority_threshold(voters: int = REVIEW_CONSENSUS_REPORTS) -> int:
+    """Votes needed to win a field among `voters` of them. 3 -> 2, 5 -> 3.
+    Derived so raising REVIEW_CONSENSUS_REPORTS cannot leave a stale "2"
+    behind.
+
+    Takes a count because an abstainable feature is decided by the reporters
+    who were actually asked about it, which can be fewer than the three the
+    review window collected — see `consensus`.
+    """
+    return voters // 2 + 1
 
 
 # ---------------------------------------------------------------------------
@@ -102,32 +130,53 @@ def _majority_threshold() -> int:
 
 @dataclass(frozen=True)
 class FeatureAnswers:
-    """The four toggles plus the condition follow-up, normalised.
+    """The presence toggles plus the condition follow-up, normalised.
 
-    `poor_condition` is always sorted and always a subset of the features
-    this same answer set reports PRESENT — `normalise()` enforces both, so
-    equality comparison is meaningful and an answer claiming a broken cup
-    holder on a scooter with no cup holder cannot exist downstream.
+    `poor_condition` is always canonically ordered and always a subset of the
+    features this same answer set reports PRESENT — `normalise()` enforces
+    both, so equality comparison is meaningful and an answer claiming a
+    broken cup holder on a scooter with no cup holder cannot exist
+    downstream.
+
+    `has_basket` is the one field that may be `None`, and it is last in the
+    field order only because a defaulted field cannot precede an undefaulted
+    one. `None` is an ABSTENTION — a client that predates the question, not
+    a rider who said no — and `answers_agree`/`consensus` skip it rather
+    than reading it as `False`. Nothing enumerates which fields may abstain:
+    `answered()` reads it off the value, so the day `has_basket` becomes
+    required (see sql/058 — it is a rollout affordance, not a permanent
+    rule) the abstention branches simply stop being reachable.
     """
     has_bell: bool
     has_cup_holder: bool
     has_phone_holder: bool
     all_good_condition: bool
     poor_condition: tuple[str, ...] = ()
+    has_basket: bool | None = None
+
+    def answered(self, key: str) -> bool:
+        """Did this reporter's client put `key` to them at all?"""
+        return getattr(self, FEATURE_PRESENCE_COLUMNS[key]) is not None
 
     def present(self, key: str) -> bool:
+        """Is `key` bolted on? An abstention reads False — it is the safe
+        answer for "should this feature appear in poor_condition?", which is
+        the only question `present` is asked. Use `answered` first wherever
+        the difference between "no" and "didn't say" matters."""
         return bool(getattr(self, FEATURE_PRESENCE_COLUMNS[key]))
 
     def normalise(self) -> "FeatureAnswers":
-        """Drop condition claims about absent features, sort what's left,
-        and DERIVE `all_good_condition` from the result.
+        """Drop condition claims about absent features, canonicalise what's
+        left, and DERIVE `all_good_condition` from the result.
 
         Two rules, and the second one is load-bearing:
 
         1. A condition claim about a feature the same answer says isn't
            there is dropped. The UI only offers "which are not in good
            condition?" over the features the rider just confirmed present,
-           so this only fires on a hand-rolled or stale payload.
+           so this only fires on a hand-rolled or stale payload. An
+           abstention is "not there" for this purpose: a client that never
+           asked about baskets cannot coherently report a broken one.
 
         2. `all_good_condition` is not an independent field — it is exactly
            `poor_condition == ()`. It has to be, because `device_state`
@@ -140,22 +189,26 @@ class FeatureAnswers:
            equivalence at the edge (422) so a client cannot silently have
            its blanket answer overridden here; this is the backstop that
            makes the round-trip lossless regardless.
+
+        `has_basket` passes through as-is, `None` included: normalising an
+        abstention into `False` is precisely the lie the whole abstention
+        mechanism exists to avoid.
         """
-        cleaned = tuple(sorted(
-            k for k in FEATURE_KEYS
-            if k in set(self.poor_condition) and self.present(k)
-        ))
+        cleaned = canonical_poor(
+            k for k in self.poor_condition if self.present(k)
+        )
         return FeatureAnswers(
             has_bell=bool(self.has_bell),
             has_cup_holder=bool(self.has_cup_holder),
             has_phone_holder=bool(self.has_phone_holder),
+            has_basket=None if self.has_basket is None else bool(self.has_basket),
             all_good_condition=not cleaned,
             poor_condition=cleaned,
         )
 
 
 def answers_agree(a: FeatureAnswers, b: FeatureAnswers) -> bool:
-    """Do two reports say the same thing? Compared on all five fields —
+    """Do two reports say the same thing? Compared on every field —
     condition included, because the owner's needs_review flow explicitly
     asks later reporters to "confirm features AND their condition", so a
     disagreement about a broken bell is as much a discrepancy as one about
@@ -164,49 +217,127 @@ def answers_agree(a: FeatureAnswers, b: FeatureAnswers) -> bool:
     Both sides are normalised first, so two answers that differ only in
     noise the UI can produce (a stale condition tick for a feature the rider
     then toggled to absent) agree rather than triggering a review.
+
+    A feature ONE SIDE ABSTAINED ON is not a disagreement, and it drops out
+    of BOTH halves of the comparison — its presence bool and its place in
+    `poor_condition`. During the sql/058 rollout a current client and an
+    older one report the same scooter and differ only in that one of them
+    was never asked about the basket; that is not two riders seeing
+    different things, and treating it as one would flip healthy vehicles
+    into `needs_review` for the length of the rollout, burning three riders'
+    work to resolve a dispute nobody had.
+
+    Once every client answers every question, "mutually answered" is all of
+    FEATURE_KEYS and this is exactly the whole-record comparison it replaced.
+    Comparing the restricted poor lists also covers `all_good_condition`,
+    which `normalise()` has already made a synonym for "that list is empty".
     """
-    return a.normalise() == b.normalise()
+    a, b = a.normalise(), b.normalise()
+    mutual = [k for k in FEATURE_KEYS if a.answered(k) and b.answered(k)]
+    if any(a.present(k) != b.present(k) for k in mutual):
+        return False
+    restricted = set(mutual)
+    return (
+        canonical_poor(k for k in a.poor_condition if k in restricted)
+        == canonical_poor(k for k in b.poor_condition if k in restricted)
+    )
+
+
+def fill_abstentions(
+    stored: FeatureAnswers, report: FeatureAnswers
+) -> FeatureAnswers:
+    """`stored`, plus `report`'s answer for every feature `stored` abstained
+    on. Returns `stored` unchanged when there is nothing to fill.
+
+    This is how a vehicle whose consensus predates sql/058 ever learns about
+    its basket. Such a vehicle is `up_to_date` with `has_basket` NULL, and a
+    later report that answers the basket AGREES with it — an abstention is
+    not a disagreement — so it takes the reconfirmation path, which by design
+    does not rewrite the feature columns. Without this the basket would stay
+    unknown until something dragged the vehicle through a review, i.e. for
+    most of the fleet, forever.
+
+    Filling is the same rule the module already applies to a vehicle nobody
+    has reported at all — first answer is authoritative — scoped to the one
+    field that had no answer. It cannot overwrite anything: a feature the
+    stored consensus has an opinion about is left alone, and a report that
+    disagrees with that opinion never reaches here (it opens a review
+    instead).
+    """
+    missing = [
+        k for k in FEATURE_KEYS if not stored.answered(k) and report.answered(k)
+    ]
+    if not missing:
+        return stored
+    filled = {FEATURE_PRESENCE_COLUMNS[k]: report.present(k) for k in missing}
+    poor = canonical_poor(
+        list(stored.poor_condition)
+        + [k for k in missing if k in report.poor_condition]
+    )
+    return FeatureAnswers(
+        has_bell=filled.get("has_bell", stored.has_bell),
+        has_cup_holder=filled.get("has_cup_holder", stored.has_cup_holder),
+        has_phone_holder=filled.get("has_phone_holder", stored.has_phone_holder),
+        has_basket=filled.get("has_basket", stored.has_basket),
+        all_good_condition=not poor,
+        poor_condition=poor,
+    ).normalise()
 
 
 def consensus(reports: Sequence[FeatureAnswers]) -> FeatureAnswers:
     """Field-by-field majority over `reports`.
 
-    Each of the three presence booleans and `all_good_condition` is voted
-    independently, and `poor_condition` is voted per feature ("did a
-    majority say THIS feature is present but not in good condition?"). With
-    an odd `REVIEW_CONSENSUS_REPORTS` every boolean vote has a strict
-    winner, so there is no tie-break rule to get wrong.
+    Each presence boolean and `all_good_condition` is voted independently,
+    and `poor_condition` is voted per feature ("did a majority say THIS
+    feature is present but not in good condition?"). With an odd
+    `REVIEW_CONSENSUS_REPORTS` every boolean vote has a strict winner, so
+    there is no tie-break rule to get wrong.
 
     Voting per FIELD rather than picking the most popular whole ANSWER SET
     is what makes 2/3 mean what the owner said it means: three riders who
     each agree on two of three features but disagree on the third produce a
     correct answer for the two they agree on, where whole-set voting would
     find no majority at all and be stuck.
+
+    ABSTENTIONS DON'T VOTE, and they don't lower the bar either: a feature
+    is decided by a majority of the reporters who were actually ASKED about
+    it, so during the sql/058 rollout one rider's "yes, it has a basket"
+    carries the field if the other two were never asked, rather than losing
+    2-1 to two silences. A feature nobody was asked about stays `None` —
+    unknown, not absent — which is the one honest answer available and is
+    what keeps a pre-058 consensus from being overwritten with a confident
+    "no basket" the moment a review resolves.
     """
     if not reports:
         raise ValueError("consensus() needs at least one report")
     normalised = [r.normalise() for r in reports]
-    need = _majority_threshold()
 
-    def wins(pred) -> bool:
-        return sum(1 for r in normalised if pred(r)) >= need
+    def wins(voters: Sequence[FeatureAnswers], pred) -> bool:
+        return sum(1 for r in voters if pred(r)) >= _majority_threshold(len(voters))
 
-    presence = {
-        key: wins(lambda r, k=key: r.present(k)) for key in FEATURE_KEYS
-    }
+    presence: dict[str, bool | None] = {}
+    for key in FEATURE_KEYS:
+        asked = [r for r in normalised if r.answered(key)]
+        presence[key] = wins(asked, lambda r, k=key: r.present(k)) if asked else None
     # A feature can only be voted "in poor condition" if it also won its
     # presence vote — otherwise the consensus would describe the condition
     # of something the same consensus says isn't there. normalise() below
     # would strip it anyway; doing it in the predicate keeps the two from
-    # relying on each other.
-    poor = tuple(sorted(
+    # relying on each other. Voted among the same reporters who were asked
+    # about the feature, for the same reason the presence vote is.
+    poor = canonical_poor(
         key for key in FEATURE_KEYS
-        if presence[key] and wins(lambda r, k=key: k in r.poor_condition)
-    ))
+        if presence[key]
+        and wins(
+            [r for r in normalised if r.answered(key)],
+            lambda r, k=key: k in r.poor_condition,
+        )
+    )
     return FeatureAnswers(
-        has_bell=presence["bell"],
-        has_cup_holder=presence["cup_holder"],
-        has_phone_holder=presence["phone_holder"],
+        has_bell=bool(presence["bell"]),
+        has_cup_holder=bool(presence["cup_holder"]),
+        has_phone_holder=bool(presence["phone_holder"]),
+        has_basket=presence["basket"],
         # Not voted on: `normalise()` derives it from the poor-condition
         # vote below (see rule 2 there). Passing the derived value in rather
         # than a vote result keeps the two from ever disagreeing — three
@@ -222,13 +353,24 @@ def consensus(reports: Sequence[FeatureAnswers]) -> FeatureAnswers:
 def answers_from_row(row: Any, offset: int = 0) -> FeatureAnswers:
     """Build answers from a SELECT of
     (has_bell, has_cup_holder, has_phone_holder, all_good_condition,
-     poor_condition) starting at `offset`."""
+     poor_condition, has_basket) starting at `offset`.
+
+    `has_basket` is last because it was added last (sql/058) and every query
+    below appends it, which keeps the existing offsets — and any caller that
+    hardcoded one — correct. A row that stops short of it (a pre-058 query
+    that was never updated) reads as an abstention rather than raising,
+    which is the same thing the column being NULL means.
+    """
     return FeatureAnswers(
         has_bell=bool(row[offset]),
         has_cup_holder=bool(row[offset + 1]),
         has_phone_holder=bool(row[offset + 2]),
         all_good_condition=bool(row[offset + 3]),
         poor_condition=tuple(row[offset + 4] or ()),
+        has_basket=(
+            None if len(row) <= offset + 5 or row[offset + 5] is None
+            else bool(row[offset + 5])
+        ),
     ).normalise()
 
 
@@ -251,7 +393,7 @@ _PENDING_SQL = """
 # same millisecond) so the ordering is total and the job is deterministic.
 _VEHICLE_REPORTS_SQL = """
     SELECT id, reported_at, has_bell, has_cup_holder, has_phone_holder,
-           all_good_condition, poor_condition
+           all_good_condition, poor_condition, has_basket
       FROM device_feature_reports
      WHERE vehicle_identifier = %s
        AND processed_at IS NULL
@@ -352,7 +494,7 @@ def _process_vehicle(cur, vehicle: str, stats: ProcessStats) -> None:
         """
         SELECT feature_status, has_bell, has_cup_holder, has_phone_holder,
                features_poor_condition, features_confirmed_at,
-               features_review_since, features_report_count
+               features_review_since, features_report_count, has_basket
           FROM device_state
          WHERE vehicle_identifier = %s
            FOR UPDATE
@@ -391,10 +533,17 @@ def _process_vehicle(cur, vehicle: str, stats: ProcessStats) -> None:
     # good" is that list being empty. Reconstituting the flag from the list
     # is exactly what `normalise()` would do to it anyway, so a stored
     # consensus and a fresh report compare on equal terms.
+    # state[8] (has_basket) is NULL for every vehicle whose consensus predates
+    # sql/058, which reads as an abstention — so a rider who reports a basket
+    # on such a vehicle does not "disagree" with a stored answer that was
+    # never given, and the vehicle is reconfirmed rather than flipped into
+    # review. The basket itself stays unknown until a review resolves or a
+    # first report lands, which is the honest state.
     stored = FeatureAnswers(
         has_bell=bool(state[1]),
         has_cup_holder=bool(state[2]),
         has_phone_holder=bool(state[3]),
+        has_basket=None if state[8] is None else bool(state[8]),
         all_good_condition=not poor,
         poor_condition=poor,
     ).normalise() if confirmed_at is not None else None
@@ -414,11 +563,21 @@ def _process_vehicle(cur, vehicle: str, stats: ProcessStats) -> None:
             # ---- Grading against the authoritative answer.
             if answers_agree(answers, stored):
                 count += 1
-                cur.execute(
-                    "UPDATE device_state SET features_report_count = %s "
-                    "WHERE vehicle_identifier = %s",
-                    (count, vehicle),
-                )
+                filled = fill_abstentions(stored, answers)
+                if filled != stored:
+                    # The reporter answered something the stored consensus
+                    # never had an opinion about (a basket, on a vehicle
+                    # confirmed before sql/058). Publish it: agreeing about
+                    # the rest is exactly what makes this rider's first-ever
+                    # answer for that feature authoritative.
+                    _write_consensus(cur, vehicle, filled, count=count)
+                    stored = filled
+                else:
+                    cur.execute(
+                        "UPDATE device_state SET features_report_count = %s "
+                        "WHERE vehicle_identifier = %s",
+                        (count, vehicle),
+                    )
                 stats.reconfirmations += 1
             else:
                 # Discrepancy. The vehicle's PUBLISHED features stay exactly
@@ -470,7 +629,7 @@ def _review_votes(
     cur.execute(
         """
         SELECT has_bell, has_cup_holder, has_phone_holder,
-               all_good_condition, poor_condition
+               all_good_condition, poor_condition, has_basket
           FROM device_feature_reports
          WHERE vehicle_identifier = %s
            AND plate_valid
@@ -498,6 +657,7 @@ def _write_consensus(
            SET has_bell = %s,
                has_cup_holder = %s,
                has_phone_holder = %s,
+               has_basket = %s,
                features_poor_condition = %s,
                feature_status = %s,
                features_confirmed_at = NOW(),
@@ -509,6 +669,9 @@ def _write_consensus(
             answers.has_bell,
             answers.has_cup_holder,
             answers.has_phone_holder,
+            # NULL when nobody who voted was asked — "unknown", which is what
+            # the column means and is not the same as "no basket".
+            answers.has_basket,
             list(answers.poor_condition),
             STATUS_UP_TO_DATE,
             count,

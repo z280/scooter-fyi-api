@@ -50,6 +50,7 @@ from .device_features import (
     FEATURE_KEYS,
     FEATURE_PRESENCE_COLUMNS,
     STATUS_NEEDS_CONFIRMED,
+    canonical_poor,
 )
 from .pg import connection
 from .points import credit_device_feature_points
@@ -88,12 +89,20 @@ def normalise_plate(raw: str) -> str:
 
 
 class DeviceFeatureReportIn(BaseModel):
-    """The four toggles, the condition follow-up, and the plate.
+    """The presence toggles, the condition follow-up, and the plate.
 
-    Every presence toggle is REQUIRED. "Neither pressed by default" is a
-    rule about the modal's initial state, not permission to send a
-    half-answered survey — a missing answer is a 422 here, and the client
-    keeps its Send button disabled until all four are pressed.
+    Every presence toggle is REQUIRED except `has_basket`. "Neither pressed
+    by default" is a rule about the modal's initial state, not permission to
+    send a half-answered survey — a missing answer is a 422 here, and the
+    client keeps its Send button disabled until every toggle is pressed.
+
+    `has_basket` is optional ONLY because the question is newer than the
+    clients (sql/058). Making it required would 422 every report from the
+    frontend already in the wild, which asks three questions and knows
+    nothing about a fourth. Omitting it is an ABSTENTION, not a "no": the
+    row stores NULL, and `src/device_features.py` excludes the field from
+    that report's agreement check and from the consensus vote. Once no
+    deployed client omits it, this can become required like the others.
     """
     vehicle_identifier: str = Field(..., pattern=_VEHICLE_IDENTIFIER_RE)
     #: The rotating GBFS bike_id the client had on screen. Audit only.
@@ -102,6 +111,7 @@ class DeviceFeatureReportIn(BaseModel):
     has_bell: bool
     has_cup_holder: bool
     has_phone_holder: bool
+    has_basket: bool | None = None
     all_good_condition: bool
     poor_condition: list[str] = Field(default_factory=list, max_length=len(FEATURE_KEYS))
     lat: float | None = Field(default=None, ge=-90, le=90)
@@ -118,6 +128,10 @@ class DeviceFeatureReportIn(BaseModel):
         present = {
             k: getattr(self, FEATURE_PRESENCE_COLUMNS[k]) for k in FEATURE_KEYS
         }
+        # A feature the report abstained on (`None`) is not present for this
+        # purpose: a client that never asked about baskets cannot coherently
+        # report a broken one, and `FeatureAnswers.normalise()` would strip
+        # the claim downstream anyway.
         absent = [k for k in FEATURE_KEYS if k in set(self.poor_condition) and not present[k]]
         if absent:
             raise ValueError(
@@ -132,23 +146,19 @@ class DeviceFeatureReportIn(BaseModel):
         # here rather than silently normalising it means a client with a bug
         # is told about it instead of having its blanket answer quietly
         # overridden.
-        # Canonicalised in FEATURE_KEYS order, NOT `sorted()`.
+        # Canonicalised in FEATURE_KEYS order, NOT `sorted()`, by the same
+        # `canonical_poor` the processor uses.
         #
-        # The two happen to agree today (the vocabulary is alphabetical by
-        # accident), which is exactly what makes this worth stating: the
-        # moment a key is added that breaks the coincidence — a "basket", a
-        # "rear_rack" — a lexicographic sort here and
-        # `FeatureAnswers.normalise()`'s FEATURE_KEYS ordering would produce
-        # two different arrays for the same answer. The dedupe probe below
-        # compares `poor_condition = %s` against a stored array literally, so
-        # rows written either side of that change would stop matching and a
-        # double-tapped Send would write a second vote.
-        #
-        # FEATURE_KEYS is the vocabulary; ordering by it means the stored
-        # representation is defined by the vocabulary rather than by string
-        # collation, and stays defined by it through any future edit.
-        keys = set(self.poor_condition)
-        deduped = [k for k in FEATURE_KEYS if k in keys]
+        # The two USED to agree by accident, because the original vocabulary
+        # was alphabetical. sql/058's "basket" is the key that broke the
+        # coincidence — exactly the case the previous note here anticipated —
+        # and `FeatureAnswers.normalise()` was ordering lexicographically at
+        # the time, so both sides moved to the shared helper rather than one
+        # of them being trusted to stay in step by hand. The dedupe probe
+        # below compares `poor_condition = %s` against a stored array
+        # literally, so two orderings for one answer would mean a
+        # double-tapped Send writes a second vote.
+        deduped = list(canonical_poor(self.poor_condition))
         if self.all_good_condition and deduped:
             raise ValueError(
                 "all_good_condition is true but poor_condition names "
@@ -204,12 +214,19 @@ def submit_device_feature_report(
                    AND reported_at >= NOW() - INTERVAL '{_DEDUPE_WINDOW_MINUTES} minutes'
                    AND has_bell = %s AND has_cup_holder = %s
                    AND has_phone_holder = %s AND poor_condition = %s
+                   -- IS NOT DISTINCT FROM, not `=`: has_basket is NULL for
+                   -- a report from a client that never asked (sql/058), and
+                   -- `NULL = NULL` is NULL, so `=` would never match those
+                   -- rows and every retry from an older client would write a
+                   -- fresh vote instead of deduping.
+                   AND has_basket IS NOT DISTINCT FROM %s
                  ORDER BY reported_at DESC LIMIT 1
                 """,
                 (
                     payload.vehicle_identifier, reporter_val,
                     payload.has_bell, payload.has_cup_holder,
                     payload.has_phone_holder, payload.poor_condition,
+                    payload.has_basket,
                 ),
             )
             dup = cur.fetchone()
@@ -266,9 +283,9 @@ def submit_device_feature_report(
                 INSERT INTO device_feature_reports (
                     vehicle_identifier, device_id, account_id, reporter_ip,
                     reporter_user_agent, submitted_plate, plate_valid,
-                    has_bell, has_cup_holder, has_phone_holder,
+                    has_bell, has_cup_holder, has_phone_holder, has_basket,
                     all_good_condition, poor_condition, status_at_report
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, reported_at
                 """,
                 (
@@ -276,7 +293,8 @@ def submit_device_feature_report(
                     user.account_id if user else None, ip, ua,
                     payload.submitted_plate.strip(), plate_valid,
                     payload.has_bell, payload.has_cup_holder,
-                    payload.has_phone_holder, payload.all_good_condition,
+                    payload.has_phone_holder, payload.has_basket,
+                    payload.all_good_condition,
                     payload.poor_condition, status,
                 ),
             )
@@ -338,7 +356,8 @@ def device_features(
                 """
                 SELECT feature_status, has_bell, has_cup_holder,
                        has_phone_holder, features_poor_condition,
-                       features_confirmed_at, features_report_count
+                       features_confirmed_at, features_report_count,
+                       has_basket
                   FROM device_state
                  WHERE vehicle_identifier = %s
                 """,
@@ -350,7 +369,7 @@ def device_features(
     return {
         "vehicle_identifier": vehicle_identifier,
         "feature_status": row[0] or STATUS_NEEDS_CONFIRMED,
-        "features": feature_payload(row[1], row[2], row[3], row[4]),
+        "features": feature_payload(row[1], row[2], row[3], row[4], row[7]),
         "confirmed_at": row[5].isoformat() if row[5] else None,
         "report_count": int(row[6] or 0),
     }
@@ -358,7 +377,7 @@ def device_features(
 
 def feature_payload(
     has_bell: Any, has_cup_holder: Any, has_phone_holder: Any,
-    poor_condition: Any,
+    poor_condition: Any, has_basket: Any = None,
 ) -> dict[str, Any] | None:
     """The `device_features` object for a map feature / detail response, or
     None when nobody has confirmed this vehicle yet.
@@ -369,14 +388,26 @@ def feature_payload(
     and this returning None is the same statement in the shape a client
     checks with one `if`.
 
+    A vehicle confirmed BEFORE sql/058 has a consensus for the first three
+    features and NULL for the basket. That is still a confirmed vehicle, so
+    it gets an object — with `basket: false`, the same answer this returned
+    before the question existed. The distinction between "no basket" and
+    "nobody has been asked yet" is deliberately not published per-feature:
+    the object is all-or-nothing by design, and one reconfirmation replaces
+    the guess with an answer.
+
     Shared with src/api_public.py's payload builder so the two cannot drift
     on the object's shape.
     """
-    if has_bell is None and has_cup_holder is None and has_phone_holder is None:
+    if (
+        has_bell is None and has_cup_holder is None
+        and has_phone_holder is None and has_basket is None
+    ):
         return None
     return {
         "bell": bool(has_bell),
         "cup_holder": bool(has_cup_holder),
         "phone_holder": bool(has_phone_holder),
+        "basket": bool(has_basket),
         "poor_condition": sorted(poor_condition or []),
     }

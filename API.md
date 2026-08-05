@@ -629,7 +629,7 @@ GET /api/v1/devices/current?form_factor=scooter
         "feature_status": "up_to_date",
         "device_features": {
           "bell": true, "cup_holder": false, "phone_holder": true,
-          "poor_condition": []
+          "basket": false, "poor_condition": []
         }
       }
     },
@@ -728,7 +728,7 @@ most one cycle length.
 | `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | **Opt-in via `?include=ranks`.** Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
 | `has_negative_report` | bool | `true` when ≥1 citizen-submitted report has been filed against this `vehicle_identifier` at this exact `h3_10_index` cell within the last 24h. Becomes `false` automatically when the scooter moves to a different h3_10 cell. Submit reports via `POST /api/v1/reports`. |
 | `feature_status` | string | How much to trust what we know about this vehicle's crowdsourced equipment: `"needs_features_confirmed"` (nobody has ever reported it — every device starts here), `"needs_review"` (two reports disagreed), or `"up_to_date"`. Always on the wire, never behind an `?include=` token: it is what a client's "☑️ Confirm Features" affordance reads to decide whether it is offering 12, 14 or 6 points, so opting in would mean showing the wrong number. See [`POST /api/v1/reports/device-features`](#post-apiv1reportsdevice-features). |
-| `device_features` | object \| null | `{ bell, cup_holder, phone_holder, poor_condition[] }` — the current consensus. **`null` until someone confirms the vehicle**, which is not the same as all-`false`: `false` claims we know a scooter has no bell, `null` says nobody has looked. `poor_condition` lists which of the *present* features are not in good condition (always a subset of the `true` ones; empty means everything works). |
+| `device_features` | object \| null | `{ bell, cup_holder, phone_holder, basket, poor_condition[] }` — the current consensus. **`null` until someone confirms the vehicle**, which is not the same as all-`false`: `false` claims we know a scooter has no bell, `null` says nobody has looked. `poor_condition` lists which of the *present* features are not in good condition (always a subset of the `true` ones; empty means everything works). `basket` arrived later than the other three (sql/058); a vehicle confirmed before it reads `false` until someone reconfirms. |
 | `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, active negative reports, and peer-relative dwell outliers (a dwell-outlier per the rules under `dwell_percentile_hood` costs one extra tier, stacking with the absolute-dwell demerits). `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
 | `number_failed_starts` | int \| null | How many times the upstream `bike_id` rotated (someone started a rental) **without the scooter moving** since it arrived at its current location. Resets to 0 when the scooter moves. Null when the device isn't state-tracked (no plate in the upstream payload). |
 | `first_observed_at_location` | string \| null | UTC ISO 8601 timestamp of when we first observed the scooter at its current location. `now - first_observed_at_location` = dwell time. Resets when the scooter moves. Null when the device isn't state-tracked. |
@@ -1772,28 +1772,47 @@ pre-filled when a rider files one.)
 ### `POST /api/v1/reports/device-features`
 
 "I'm standing at this scooter — here's what's actually bolted to it."
-Veo's feed says nothing about bells, cup holders or phone holders, so the
-only way the map can ever be filtered on equipment is riders telling us.
-Anonymous is fine (5/hour per IP); a bearer token links the report to your
-account (40/hour) and is what makes it earn points.
+Veo's feed says nothing about bells, cup holders, phone holders or baskets,
+so the only way the map can ever be filtered on equipment is riders telling
+us. Anonymous is fine (5/hour per IP); a bearer token links the report to
+your account (40/hour) and is what makes it earn points.
 
 ```json
 { "vehicle_identifier": "8c4a1f0d2e9b7a35", "device_id": "abc123",
   "submitted_plate": "1025543",
   "has_bell": true, "has_cup_holder": false, "has_phone_holder": true,
+  "has_basket": false,
   "all_good_condition": false, "poor_condition": ["bell"],
   "lat": 39.7392, "lng": -104.9876 }
 ```
 
-All three `has_*` answers are **required** — the client's toggles start
-unpressed, but a half-answered survey is a `422`, not a partial report.
+`has_bell`, `has_cup_holder` and `has_phone_holder` are **required** — the
+client's toggles start unpressed, but a half-answered survey is a `422`, not
+a partial report.
+
+**`has_basket` is optional, and omitting it is not a "no".** The question is
+newer than the clients (sql/058), so a client that predates it sends nothing
+and the report stores `NULL` — an *abstention*. An abstained feature is
+excluded from that report's agreement check and from the consensus vote, so
+an older client and a current one reporting the same scooter agree about the
+three features they both asked about instead of flipping the vehicle into
+`needs_review` over a question only one of them put to the rider. Send the
+field if you ask the question; omit it if you don't. Do not send `false` for
+a rider you never asked.
+
+Ask about the basket on **every** model, not only the ones that usually
+carry one: the Trike's cargo basket is standard equipment (and bends), the
+Cosmo's is optional, and a confirmed "no" on an Astro is what makes an
+equipment filter trustworthy rather than full of holes.
 
 `poor_condition` names which of the features **this same report says are
 present** are not in good condition. Two rules, both enforced with a
 `422`:
 
 * it may only name features you reported present (`["cup_holder"]` with
-  `"has_cup_holder": false` is rejected);
+  `"has_cup_holder": false` is rejected — and an *abstained* feature counts
+  as not present, so `["basket"]` with no `has_basket` is rejected too: a
+  client that never asked about baskets cannot report a broken one);
 * it must be non-empty exactly when `all_good_condition` is `false`. The
   two fields are one fact stated twice, and the server stores the list —
   so "something's wrong but I won't say what" has nowhere to live, and
@@ -1834,7 +1853,8 @@ saw. Public; no plate appears in it.
 
 → `{ "vehicle_identifier": "...", "feature_status": "up_to_date",
      "features": { "bell": true, "cup_holder": false,
-                   "phone_holder": true, "poor_condition": ["bell"] },
+                   "phone_holder": true, "basket": false,
+                   "poor_condition": ["bell"] },
      "confirmed_at": "...", "report_count": 3 }`
 
 `features` is `null` — not an all-`false` object — until someone confirms
@@ -1858,7 +1878,13 @@ reporting the same scooter.
 
 **The first valid report is authoritative** — not one vote among many.
 Every later report is graded against it, and any disagreement (about
-presence *or* condition) flags the vehicle. Flagging does **not** overwrite
+presence *or* condition) flags the vehicle. An **abstention is not a
+disagreement**: a report that omits `has_basket` is silent about the
+basket, not opposed to it, and is graded only on the features it actually
+answered. If it turns out to answer a feature the stored consensus has no
+opinion about — a basket, on a vehicle confirmed before sql/058 — that
+answer is published on the spot, by the same "first answer is
+authoritative" rule that handles a vehicle nobody has reported at all. Flagging does **not** overwrite
 what we were publishing: one dissenting voice changes the label so more
 people are asked, and only a three-way vote replaces the data.
 
