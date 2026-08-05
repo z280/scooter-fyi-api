@@ -52,6 +52,13 @@
 # window and slot in the same daily 3:30am run.
 30 3 * * * cd /app && python -m src.cli cleanup_ride_screenshots
 
+# Job-run ledger retention (sql/062): drop /admin/scheduler's run rows older
+# than 30 days. Shares the 3:30am retention slot with the sweeps around it.
+# The table is small -- every command except the 2-minute ingest cycle, so
+# roughly 700 rows a day -- but it is append-only and nothing else would ever
+# bound it.
+30 3 * * * cd /app && python -m src.cli cleanup_job_runs
+
 # Model-report photo retention: same private bucket, same 18-month window
 # and same 3:30am slot as the receipts job above. sql/038 added
 # photo_deleted_at and nothing set it, so these objects were retained

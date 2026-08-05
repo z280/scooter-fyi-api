@@ -102,6 +102,8 @@ agent process).
 │   ├── cli.py                  subcommands run by the scheduler container
 │   ├── config.py               loads config.json (non-secret) + env (secrets)
 │   ├── pg.py                   psycopg pool + migration runner
+│   ├── job_runs.py             job-run ledger — every scheduled command's
+│   │                           last run, status and summary (/admin/scheduler)
 │   ├── duck.py                 ephemeral DuckDB session factory
 │   ├── ingest.py               GBFS fetch + freshness + envelope tagging
 │   ├── identity.py              HMAC plate → vehicle_identifier (the privacy boundary),

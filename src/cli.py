@@ -67,6 +67,10 @@ Available commands:
                       never settle. Also sweeps ride_routes on its own 28h
                       clock once sql/052 (phase A3) exists -- a
                       to_regclass-guarded no-op until then.
+    cleanup_job_runs
+                      Delete /admin/scheduler's job-run rows older than 30
+                      days (sql/062). The table is small, but it is
+                      append-only and nothing else would ever bound it.
     refresh_area_universe
                       Refresh the H3 r8 cell universe -- every cell that has
                       ever had an observed device or a point, all-time, full
@@ -97,6 +101,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from .archive import run_archive
+from . import job_runs
 from .area_leaders import refresh_universe as refresh_area_universe
 from .battery_model import (
     backfill_trips_from_archive,
@@ -614,6 +619,14 @@ def _cli_refresh_area_universe() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Job-run ledger retention (sql/062). Cron: `30 3 * * * python -m src.cli
+# cleanup_job_runs`, sharing the slot with the other retention sweeps.
+# ---------------------------------------------------------------------------
+def _cli_cleanup_job_runs() -> dict:
+    return job_runs.prune()
+
+
+# ---------------------------------------------------------------------------
 # De-id sweep (PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md
 # glossary "De-id"). Cron: `15 * * * * python -m src.cli deidentify_donations`.
 # ---------------------------------------------------------------------------
@@ -787,6 +800,7 @@ COMMANDS = {
     "poll_comms_replies":    poll_comms_replies,
     "deidentify_donations":  deidentify_donations,
     "refresh_area_universe": _cli_refresh_area_universe,
+    "cleanup_job_runs":      _cli_cleanup_job_runs,
     # Deprecated alias. The live crontab is an admin-editable copy on the
     # scheduler_state volume, so a rename here would break the deployed
     # schedule until someone edits it by hand -- this keeps the old name
@@ -863,13 +877,24 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     cmd = args[0]
+    # ONE place records every scheduled operation (sql/062, /admin/scheduler).
+    # Wrapping the dispatch rather than each command is the point: a job added
+    # to COMMANDS later is recorded because it exists, not because somebody
+    # remembered to instrument it. `ingest_cycle` opts out — see
+    # src/job_runs.py — and start() returning None makes that a no-op here
+    # rather than a branch.
+    run_id = job_runs.start(cmd)
     try:
         result = COMMANDS[cmd]()
         log.info("cli command %s done: %r", cmd, result)
+        job_runs.finish(run_id, status="ok", summary=result)
         return 0
     except Exception as e:  # noqa: BLE001
         log.exception("cli command %s failed", cmd)
         capture_exception(e)
+        # The traceback belongs in the log and in Sentry; the page just needs
+        # to say which run failed and roughly why.
+        job_runs.finish(run_id, status="error", error=f"{type(e).__name__}: {e}")
         return 1
 
 
