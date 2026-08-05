@@ -26,7 +26,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .identity import hash_plate
-from . import accounts
+from . import accounts, area_leaders
 from .accounts import SessionUser, require_admin
 from .pg import connection
 from .ratelimit import enforce
@@ -412,69 +412,89 @@ def private_trips_daily(
 # ---------------------------------------------------------------------------
 # /api/v1/private/area-leaders — admin sibling of GET /api/v1/leaderboard/map
 # (FEATURE_PLAN §11.4: "full ranks, ties, account ids"). Unlike the public
-# endpoint (src/api_leaderboard.py), this view applies NO privacy filtering —
-# every stored rank 1..3, its real account_id, and the raw stored points/
-# first_point_at tie-break provenance, exactly as sql/048's
-# h3_r8_area_leaders table holds them.
+# endpoint (src/api_leaderboard.py), this view applies NO privacy filtering
+# and no podium cap — EVERY earner in each cell, with real account ids and
+# the points/first_point_at tie-break provenance behind the ordering.
+# Computed live from the ledger since sql/061, like its public sibling.
 # ---------------------------------------------------------------------------
 @router.get("/api/v1/private/area-leaders")
 def private_area_leaders(
     user: SessionUser = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Full, unfiltered §11 H3 r8 area-leader report: every stored rank
-    (1..3) per cell with its real account_id, points, and first_point_at
-    tie-break provenance — no show_in_leaderboards/show_public_username/
-    display_name filtering (that read-time privacy layer belongs to the
-    public GET /api/v1/leaderboard/map only)."""
+    """Full, unfiltered H3 r8 area-leader report: every eligible-or-not
+    earner's real account_id, points, and first_point_at tie-break
+    provenance — no show_in_leaderboards/show_public_username/display_name
+    filtering (that read-time privacy layer belongs to the public
+    GET /api/v1/leaderboard/map only).
+
+    Computed live from `user_points`, same as its public sibling — sql/061
+    dropped the stored `h3_r8_area_leaders` table. `has_devices`/`has_points`
+    still come from the universe (`h3_r8_area_report`), which is the one
+    part that is still precomputed; `universe_refreshed_at` reports when,
+    and is null on a database whose universe has never been refreshed (this
+    endpoint no longer 503s in that case — it just reports the cells that
+    have points).
+    """
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(days=area_leaders.DEFAULT_WINDOW_DAYS)
+
     with connection() as conn:
         with conn.cursor() as cur:
-            # REVIEW FIX: same snapshot-consistency issue (and same fix) as
-            # the public GET /api/v1/leaderboard/map sibling — see that
-            # endpoint's own comment. REPEATABLE READ must be set before the
-            # first statement in the transaction.
-            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute(
-                """
-                SELECT computed_at, window_start, window_end, cell_count, led_cells
-                FROM h3_r8_area_leader_runs
-                ORDER BY computed_at DESC, id DESC
-                LIMIT 1
-                """
+                "SELECT computed_at, cell_count FROM h3_r8_area_leader_runs "
+                "ORDER BY computed_at DESC, id DESC LIMIT 1"
             )
             run = cur.fetchone()
-            if not run:
-                raise HTTPException(503, "no leaderboard computed yet")
-            computed_at, window_start, window_end, cell_count, led_cells = run
+            universe_refreshed_at, cell_count = run if run else (None, None)
+
+            cur.execute("SELECT h3_8_index, has_devices, has_points FROM h3_r8_area_report")
+            universe = {int(r[0]): (bool(r[1]), bool(r[2])) for r in cur.fetchall()}
 
             cur.execute(
                 """
-                SELECT r.h3_8_index, r.has_devices, r.has_points,
-                       r.total_points, r.distinct_earners,
-                       l.rank, l.account_id, l.points, l.first_point_at
-                FROM h3_r8_area_report r
-                LEFT JOIN h3_r8_area_leaders l ON l.h3_8_index = r.h3_8_index
-                ORDER BY r.h3_8_index, l.rank
-                """
+                SELECT h3_8_index, account_id,
+                       SUM(points) AS points, MIN(created_at) AS first_point_at
+                FROM user_points
+                WHERE status = 'confirmed' AND created_at >= %s
+                GROUP BY h3_8_index, account_id
+                ORDER BY h3_8_index, points DESC, first_point_at ASC, account_id ASC
+                """,
+                (window_start,),
             )
             rows = cur.fetchall()
 
     cells: dict[str, dict[str, Any]] = {}
-    for (h3_idx, has_devices, has_points, total_points, distinct_earners,
-         rank, account_id, points, first_point_at) in rows:
+
+    def cell_for(h3_idx: int) -> dict[str, Any]:
         key = h3.int_to_str(int(h3_idx))
         cell = cells.get(key)
         if cell is None:
+            has_devices, has_points = universe.get(int(h3_idx), (False, False))
             cell = cells[key] = {
-                "has_devices": bool(has_devices),
-                "has_points": bool(has_points),
-                "total_points": int(total_points),
-                "distinct_earners": int(distinct_earners),
+                "has_devices": has_devices,
+                "has_points": has_points,
+                "total_points": 0,
+                "distinct_earners": 0,
                 "leaders": [],
             }
-        if rank is None:
-            continue
+        return cell
+
+    for h3_idx in universe:
+        cell_for(h3_idx)
+    for h3_idx, account_id, points, first_point_at in rows:
+        cell = cell_for(h3_idx)
+        # An aggregated row IS proof the cell has points in the window, so
+        # this is asserted from the ledger rather than trusted from the
+        # universe snapshot. It matters most in the two cases where the
+        # snapshot is wrong: a cell claimed since the last weekly refresh
+        # (absent from the universe entirely) and a never-refreshed
+        # database (where every cell would otherwise read has_points=false
+        # while visibly holding leaders).
+        cell["has_points"] = True
+        cell["total_points"] += int(points)
+        cell["distinct_earners"] += 1
         cell["leaders"].append({
-            "rank": int(rank),
+            "rank": len(cell["leaders"]) + 1,
             "account_id": account_id,
             "points": int(points),
             "first_point_at": first_point_at.isoformat() if first_point_at else None,
@@ -482,64 +502,74 @@ def private_area_leaders(
 
     return {
         "viewed_by": user.email,
-        "computed_at": computed_at.isoformat(),
+        "computed_at": now.isoformat(),
         "window_start": window_start.isoformat(),
-        "window_end": window_end.isoformat(),
-        "cell_count": int(cell_count),
-        "led_cells": int(led_cells),
+        "window_end": now.isoformat(),
+        "universe_refreshed_at": universe_refreshed_at.isoformat() if universe_refreshed_at else None,
+        # Two different counts, because they answer two different questions
+        # and can legitimately disagree: `universe_cell_count` is what the
+        # last refresh stored, and `cell_count` is what this response
+        # actually contains — larger whenever a cell has been claimed since
+        # that refresh, and non-zero even when the universe has never been
+        # refreshed at all.
+        "universe_cell_count": int(cell_count) if cell_count is not None else 0,
+        "cell_count": len(cells),
+        "led_cells": sum(1 for c in cells.values() if c["leaders"]),
         "cells": cells,
     }
 
 
 # ---------------------------------------------------------------------------
 # /api/v1/private/regional-leaders — admin sibling of GET
-# /api/v1/leaderboard/regional (sql/054 regional_leaders). Unlike the public
-# endpoint, this view applies NO privacy filtering — every stored rank
-# 1..MAX_REGIONAL_LEADERS, its real account_id, and the raw stored
-# points/first_point_at tie-break provenance.
+# /api/v1/leaderboard/regional. Unlike the public endpoint, this view
+# applies NO privacy filtering — the top MAX_REGIONAL_LEADERS earners
+# outright, with real account ids and the points/first_point_at tie-break
+# provenance. Computed live from the ledger since sql/061.
 # ---------------------------------------------------------------------------
 @router.get("/api/v1/private/regional-leaders")
 def private_regional_leaders(
     user: SessionUser = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Full, unfiltered whole-database leaderboard: every stored rank with
-    its real account_id, points, and first_point_at tie-break provenance —
-    no show_in_leaderboards/show_public_username/display_name filtering."""
+    """Full, unfiltered whole-database leaderboard: every earner's real
+    account_id, points, and first_point_at tie-break provenance — no
+    show_in_leaderboards/show_public_username/display_name filtering.
+
+    Live, like its public sibling (sql/061 dropped `regional_leaders`).
+    Because nothing is filtered out here, the depth cap can be applied in
+    SQL — unlike the public endpoint, where filtering happens after the
+    aggregate and a pre-truncated set would come up short.
+    """
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(days=area_leaders.DEFAULT_WINDOW_DAYS)
+
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute(
                 """
-                SELECT computed_at, window_start, window_end
-                FROM h3_r8_area_leader_runs
-                ORDER BY computed_at DESC, id DESC
-                LIMIT 1
-                """
-            )
-            run = cur.fetchone()
-            if not run:
-                raise HTTPException(503, "no leaderboard computed yet")
-            computed_at, window_start, window_end = run
-
-            cur.execute(
-                "SELECT rank, account_id, points, first_point_at "
-                "FROM regional_leaders ORDER BY rank"
+                SELECT account_id, SUM(points) AS points, MIN(created_at) AS first_point_at
+                FROM user_points
+                WHERE status = 'confirmed' AND created_at >= %s
+                GROUP BY account_id
+                ORDER BY points DESC, first_point_at ASC, account_id ASC
+                LIMIT %s
+                """,
+                (window_start, area_leaders.MAX_REGIONAL_LEADERS),
             )
             rows = cur.fetchall()
 
     return {
         "viewed_by": user.email,
-        "computed_at": computed_at.isoformat(),
+        "computed_at": now.isoformat(),
         "window_start": window_start.isoformat(),
-        "window_end": window_end.isoformat(),
+        "window_end": now.isoformat(),
         "leaders": [
             {
-                "rank": int(rank),
+                "rank": i + 1,
                 "account_id": account_id,
                 "points": int(points),
                 "first_point_at": first_point_at.isoformat() if first_point_at else None,
             }
-            for rank, account_id, points, first_point_at in rows
+            for i, (account_id, points, first_point_at) in enumerate(rows)
         ],
     }
 

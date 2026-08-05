@@ -195,22 +195,27 @@ class TestAggregateRegionalPoints:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end through recompute() against a fake cursor/connection.
+# End-to-end through refresh_universe() against a fake cursor/connection.
+#
+# The job is universe-only since sql/061: it reads no points and ranks
+# nobody. The ranking helpers above are still exercised as pure logic
+# because the READ path (src/api_leaderboard.py) is what uses them now —
+# and the last test in this file pins that endpoint's SQL ORDER BY to
+# `_rank_cell`, so the two definitions of "who holds a territory" cannot
+# drift apart now that they live in different modules.
 # ---------------------------------------------------------------------------
 class _FakeCursor:
-    """Matches the literal SQL text area_leaders.recompute() issues and
-    returns canned rows. Also records every INSERT/DELETE it sees so the
-    test can assert on exactly what would have been written.
-    """
+    """Matches the literal SQL text area_leaders.refresh_universe() issues
+    and returns canned rows. Also records every INSERT/DELETE it sees so a
+    test can assert on exactly what would have been written."""
 
     def __init__(self, canned: dict) -> None:
         self._canned = canned
         self._result: list[tuple] = []
         self.deletes: list[str] = []
         self.inserted_report_rows: list[tuple] = []
-        self.inserted_leader_rows: list[tuple] = []
-        self.inserted_regional_rows: list[tuple] = []
         self.run_row: tuple | None = None
+        self.statements: list[str] = []
 
     def __enter__(self):
         return self
@@ -224,6 +229,7 @@ class _FakeCursor:
 
     def execute(self, sql, params=()):
         s = self._norm(sql)
+        self.statements.append(s)
         self._result = []
 
         if s == "SELECT DISTINCT h3_8_index FROM device_history WHERE h3_8_index IS NOT NULL":
@@ -234,11 +240,7 @@ class _FakeCursor:
         elif s == "SELECT DISTINCT h3_8_index FROM user_points WHERE status = %s":
             assert params == (area_leaders._CONFIRMED_STATUS,)
             self._result = [(c,) for c in self._canned["points_cells"]]
-        elif s.startswith("SELECT h3_8_index, account_id, points, created_at, status FROM user_points"):
-            self._result = self._canned["window_rows"]
         elif s == "DELETE FROM h3_r8_area_report":
-            self.deletes.append(s)
-        elif s == "DELETE FROM regional_leaders":
             self.deletes.append(s)
         elif s.startswith("INSERT INTO h3_r8_area_leader_runs"):
             self.run_row = params
@@ -251,10 +253,6 @@ class _FakeCursor:
         rows = list(rows)
         if s.startswith("INSERT INTO h3_r8_area_report"):
             self.inserted_report_rows.extend(rows)
-        elif s.startswith("INSERT INTO h3_r8_area_leaders"):
-            self.inserted_leader_rows.extend(rows)
-        elif s.startswith("INSERT INTO regional_leaders"):
-            self.inserted_regional_rows.extend(rows)
         else:
             raise AssertionError(f"unexpected executemany SQL: {s!r}")
 
@@ -278,10 +276,9 @@ class _FakeConn:
 
 
 @pytest.fixture()
-def fake_recompute(monkeypatch):
-    """Returns a function seed(canned) -> (result, cur) that runs
-    area_leaders.recompute() against a fake connection built from `canned`.
-    """
+def fake_refresh(monkeypatch):
+    """Returns a function seed(canned) -> (result, cur, conn) that runs
+    area_leaders.refresh_universe() against a fake connection."""
 
     def _run(canned: dict, window_days: int = 28):
         cur = _FakeCursor(canned)
@@ -292,178 +289,101 @@ def fake_recompute(monkeypatch):
             yield conn
 
         monkeypatch.setattr(area_leaders, "connection", _fake_connection)
-        result = area_leaders.recompute(window_days=window_days)
+        result = area_leaders.refresh_universe(window_days=window_days)
         return result, cur, conn
 
     return _run
 
 
-def test_recompute_universe_union_deduped_across_sources(fake_recompute):
-    canned = {
+def test_universe_is_the_union_of_all_three_sources_deduped(fake_refresh):
+    _result, cur, conn = fake_refresh({
         "device_history_cells": [1, 2],
-        "device_state_cells": [2, 3],          # 2 overlaps device_history
-        "points_cells": [3, 4],                # 3 overlaps device_state
-        "window_rows": [],
-    }
-    result, cur, conn = fake_recompute(canned)
-
-    cells_written = {row[0] for row in cur.inserted_report_rows}
-    assert cells_written == {1, 2, 3, 4}
-    assert result["cell_count"] == 4
-    assert conn.committed is True
-    # DELETE ran exactly once, before the fresh INSERTs (full replace).
-    assert cur.deletes == ["DELETE FROM h3_r8_area_report", "DELETE FROM regional_leaders"]
+        "device_state_cells": [2, 3],       # 2 overlaps device_history
+        "points_cells": [3, 4],             # 3 overlaps device_state
+    })
+    written = {row[0]: (row[1], row[2]) for row in cur.inserted_report_rows}
+    assert sorted(written) == [1, 2, 3, 4], "each cell appears exactly once"
+    assert written[1] == (True, False), "device_history only"
+    assert written[2] == (True, False), "both device sources, still device-only"
+    assert written[3] == (True, True), "device_state AND points"
+    assert written[4] == (False, True), "points only"
+    assert conn.committed
 
 
-def test_recompute_only_confirmed_rows_become_leaders_or_totals(fake_recompute):
-    canned = {
-        "device_history_cells": [],
-        "device_state_cells": [],
-        "points_cells": [100],
-        "window_rows": [
-            (100, 1, 40, _t(0), "confirmed"),
-            (100, 2, 998, _t(1), "pending_review"),   # must not outrank account 1
-        ],
-    }
-    result, cur, conn = fake_recompute(canned)
-
-    leaders_for_100 = [row for row in cur.inserted_leader_rows if row[0] == 100]
-    assert len(leaders_for_100) == 1
-    _, rank, account_id, points, _first_point_at = leaders_for_100[0]
-    assert (rank, account_id, points) == (1, 1, 40)
-
-    report_row = next(row for row in cur.inserted_report_rows if row[0] == 100)
-    _, has_devices, has_points, total_points, distinct_earners = report_row
-    assert (total_points, distinct_earners) == (40, 1), \
-        "the pending_review row must not count toward total_points/distinct_earners either"
-    assert result["led_cells"] == 1
+def test_full_replace_deletes_before_inserting(fake_refresh):
+    _result, cur, _conn = fake_refresh({
+        "device_history_cells": [1], "device_state_cells": [], "points_cells": [],
+    })
+    assert cur.deletes == ["DELETE FROM h3_r8_area_report"]
 
 
-def test_recompute_stores_top_3_but_counts_every_earner_in_totals(fake_recompute):
-    window_rows = [
-        (100, acct, points, _t(acct), "confirmed")
-        for acct, points in [(1, 10), (2, 40), (3, 30), (4, 20)]
-    ]
-    canned = {
-        "device_history_cells": [],
-        "device_state_cells": [],
-        "points_cells": [100],
-        "window_rows": window_rows,
-    }
-    result, cur, conn = fake_recompute(canned)
-
-    leaders_for_100 = sorted(
-        (row for row in cur.inserted_leader_rows if row[0] == 100), key=lambda r: r[1]
-    )
-    assert [row[2] for row in leaders_for_100] == [2, 3, 4], "top 3 by points DESC"
-    assert [row[1] for row in leaders_for_100] == [1, 2, 3], "ranks 1..3"
-
-    report_row = next(row for row in cur.inserted_report_rows if row[0] == 100)
-    _, _has_devices, _has_points, total_points, distinct_earners = report_row
-    assert total_points == 10 + 40 + 30 + 20
-    assert distinct_earners == 4, "all 4 earners count even though only 3 are stored as leaders"
+def test_only_confirmed_points_contribute_a_cell(fake_refresh):
+    # The status filter lives in the SQL for this source, so the assertion
+    # is on the parameter the job binds — the fake asserts it too.
+    _result, cur, _conn = fake_refresh({
+        "device_history_cells": [], "device_state_cells": [], "points_cells": [9],
+    })
+    assert [r[0] for r in cur.inserted_report_rows] == [9]
 
 
-def test_recompute_regional_leaderboard_sums_across_cells_and_ranks_globally(fake_recompute):
-    # Account 1 earns points in two different cells; account 2 earns more
-    # in a single cell. The regional table must rank by the CROSS-CELL
-    # total, not any single cell's total — unlike h3_r8_area_leaders, which
-    # stores each cell's own top 3 independently.
-    window_rows = [
-        (100, 1, 10, _t(0), "confirmed"),
-        (200, 1, 10, _t(1), "confirmed"),   # account 1: 20 total, across two cells
-        (100, 2, 15, _t(0), "confirmed"),   # account 2: 15 total, in one cell
-    ]
-    canned = {
-        "device_history_cells": [],
-        "device_state_cells": [],
-        "points_cells": [100, 200],
-        "window_rows": window_rows,
-    }
-    result, cur, conn = fake_recompute(canned)
-
-    assert [row[:3] for row in cur.inserted_regional_rows] == [(1, 1, 20), (2, 2, 15)]
-    assert result["regional_leader_count"] == 2
+def test_no_points_are_read_and_nobody_is_ranked(fake_refresh):
+    """The whole point of sql/061: the scheduled job stopped touching the
+    leaderboard. A windowed ledger read here would be the old behavior
+    creeping back in."""
+    _result, cur, _conn = fake_refresh({
+        "device_history_cells": [1], "device_state_cells": [], "points_cells": [1],
+    })
+    windowed = [s for s in cur.statements
+                if "FROM user_points" in s and "created_at" in s]
+    assert windowed == [], "refresh_universe must not read the points window"
+    assert not any("h3_r8_area_leaders" in s for s in cur.statements)
+    assert not any("regional_leaders" in s for s in cur.statements)
 
 
-def test_recompute_regional_leaderboard_caps_at_max_regional_leaders(fake_recompute):
-    window_rows = [
-        (100, acct, 100 - acct, _t(acct), "confirmed")
-        for acct in range(1, area_leaders.MAX_REGIONAL_LEADERS + 10)
-    ]
-    canned = {
-        "device_history_cells": [],
-        "device_state_cells": [],
-        "points_cells": [100],
-        "window_rows": window_rows,
-    }
-    result, cur, conn = fake_recompute(canned)
-
-    assert len(cur.inserted_regional_rows) == area_leaders.MAX_REGIONAL_LEADERS
-    assert result["regional_leader_count"] == area_leaders.MAX_REGIONAL_LEADERS
-    assert [row[0] for row in cur.inserted_regional_rows] == list(
-        range(1, area_leaders.MAX_REGIONAL_LEADERS + 1)
-    ), "ranks are contiguous 1..MAX_REGIONAL_LEADERS"
+def test_run_row_records_the_refresh(fake_refresh):
+    result, cur, _conn = fake_refresh({
+        "device_history_cells": [1, 2], "device_state_cells": [], "points_cells": [3],
+    }, window_days=28)
+    run_at, cell_count = cur.run_row
+    assert cell_count == 3
+    assert result["cell_count"] == 3
+    assert result["computed_at"] == run_at
+    assert result["run_id"] == 1
+    assert result["window_days"] == 28, \
+        "reported for continuity with the read path's window; nothing here filters on it"
 
 
-def test_recompute_tie_break_order_end_to_end(fake_recompute):
-    # Two accounts tied on points; the earlier first_point_at wins rank 1.
-    window_rows = [
-        (100, 5, 50, _t(0), "confirmed"),
-        (100, 5, 0,  _t(0), "confirmed"),     # same account, folded into one total
-        (100, 9, 50, _t(-10), "confirmed"),   # earlier -> should outrank account 5
-    ]
-    canned = {
-        "device_history_cells": [],
-        "device_state_cells": [],
-        "points_cells": [100],
-        "window_rows": window_rows,
-    }
-    result, cur, conn = fake_recompute(canned)
-
-    leaders_for_100 = sorted(
-        (row for row in cur.inserted_leader_rows if row[0] == 100), key=lambda r: r[1]
-    )
-    assert [row[2] for row in leaders_for_100] == [9, 5]
-
-
-def test_recompute_run_row_stamps_window_and_counts(fake_recompute):
-    canned = {
-        "device_history_cells": [1],
-        "device_state_cells": [],
-        "points_cells": [2],
-        "window_rows": [(2, 1, 10, _t(0), "confirmed")],
-    }
-    result, cur, conn = fake_recompute(canned, window_days=28)
-
-    computed_at, window_start, window_end, cell_count, led_cells = cur.run_row
-    assert cell_count == 2
-    assert led_cells == 1
-    assert window_end - window_start == timedelta(days=28)
-    assert window_end == computed_at
-    assert result == {
-        "run_id": 1,
-        "computed_at": computed_at,
-        "window_start": window_start,
-        "window_end": window_end,
-        "cell_count": 2,
-        "led_cells": 1,
-        "regional_leader_count": 1,
-    }
-
-
-def test_recompute_empty_universe_skips_inserts_without_error(fake_recompute):
-    canned = {
-        "device_history_cells": [],
-        "device_state_cells": [],
-        "points_cells": [],
-        "window_rows": [],
-    }
-    result, cur, conn = fake_recompute(canned)
-    assert result["cell_count"] == 0
-    assert result["led_cells"] == 0
-    assert result["regional_leader_count"] == 0
+def test_empty_universe_skips_the_insert_without_error(fake_refresh):
+    result, cur, conn = fake_refresh({
+        "device_history_cells": [], "device_state_cells": [], "points_cells": [],
+    })
     assert cur.inserted_report_rows == []
-    assert cur.inserted_leader_rows == []
-    assert cur.inserted_regional_rows == []
-    assert conn.committed is True
+    assert cur.deletes == ["DELETE FROM h3_r8_area_report"], "still a full replace"
+    assert result["cell_count"] == 0
+    assert conn.committed
+
+
+# ---------------------------------------------------------------------------
+# The tie-break lives in two places now — `_rank_cell` here, and an ORDER BY
+# in src/api_leaderboard.py. This holds them to each other.
+# ---------------------------------------------------------------------------
+def test_read_paths_sql_order_by_matches_rank_cell(monkeypatch):
+    from src import api_leaderboard
+
+    assert api_leaderboard._TIE_BREAK == "points DESC, first_point_at ASC, account_id ASC"
+
+    # And that string really is what `_rank_cell` does: same points, earlier
+    # first_point_at wins; same both, lower account_id wins.
+    t_early = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    t_late = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    entries = [
+        area_leaders._CellAccountTotal(1, 300, 10, t_late),
+        area_leaders._CellAccountTotal(1, 100, 10, t_early),
+        area_leaders._CellAccountTotal(1, 200, 10, t_early),
+        area_leaders._CellAccountTotal(1, 400, 99, t_late),
+    ]
+    ranked = area_leaders._rank_cell(entries)
+    assert [e.account_id for e in ranked] == [400, 100, 200, 300], (
+        "points DESC first, then first_point_at ASC, then account_id ASC — "
+        "the same order the endpoint's ORDER BY asks Postgres for"
+    )

@@ -1,16 +1,28 @@
-"""Postgres-backed coverage for sql/048_h3_r8_area_leaders.sql +
-src/area_leaders.py:recompute() — the parts a fake cursor cannot exercise:
+"""Postgres-backed coverage for territory control against a real database —
+src/area_leaders.py:refresh_universe() and, since sql/061 moved the
+leaderboard to read time, the LIVE read path in src/api_leaderboard.py.
+
+The read path is now the part that most needs a real Postgres. A fake
+cursor can prove the handler groups and filters what it is handed; only a
+real database can prove the SQL asks for the right rows in the right
+order — the `GROUP BY (h3_8_index, account_id)`, the window boundary, and
+the `points DESC, first_point_at ASC, account_id ASC` tie-break that used
+to be a Python sort inside the nightly job.
+
+So this file covers:
 
   * the universe union actually matching real device_history /
     device_state / user_points contents (not just three canned lists),
   * full-replace idempotence against a real transaction (re-running with
-    unchanged underlying data produces byte-identical h3_r8_area_leaders
-    rows, not an accumulation),
-  * the account -> h3_r8_area_leaders ON DELETE CASCADE actually firing.
+    unchanged data replaces rather than accumulates),
+  * the live per-cell and regional reads over real ledger rows, including
+    the tie-break and the window boundary, and
+  * account deletion cascading through user_points so a deleted rider
+    stops holding territory.
 
-tests/test_area_leaders_logic.py covers the tie-break / confirmed-only /
-union-dedup LOGIC with a fake cursor; this file trusts that logic and
-instead exercises the real SQL and real constraints around it.
+tests/test_area_leaders_logic.py covers the union-dedup and ranking LOGIC
+with a fake cursor; this file trusts that logic and exercises the real SQL
+and real constraints around it.
 
 SKIPS unless a reachable, migratable test database is provided via
 VEO_TEST_PG_DSN (same contract as tests/test_daily_trips_rollup_pg.py /
@@ -31,7 +43,7 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
-from src import area_leaders  # noqa: E402
+from src import api_leaderboard, area_leaders  # noqa: E402
 from src.accounts import upsert_account  # noqa: E402
 
 SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
@@ -89,8 +101,7 @@ def pg_conn(monkeypatch):
     # tests/test_daily_trips_rollup_pg.py's fixture.
     with conn.cursor() as cur:
         cur.execute("DELETE FROM h3_r8_area_leader_runs")
-        cur.execute("DELETE FROM h3_r8_area_report")  # cascades h3_r8_area_leaders
-        cur.execute("DELETE FROM regional_leaders")  # not FK-cascaded from h3_r8_area_report
+        cur.execute("DELETE FROM h3_r8_area_report")
         cur.execute("DELETE FROM user_points")
         cur.execute("DELETE FROM device_history")
         cur.execute("DELETE FROM device_state")
@@ -102,6 +113,9 @@ def pg_conn(monkeypatch):
         yield conn
 
     monkeypatch.setattr(area_leaders, "connection", _fake_connection)
+    # The read path opens its own connection; point it at the same one so a
+    # test can seed and then read inside one transaction.
+    monkeypatch.setattr(api_leaderboard, "connection", _fake_connection)
     try:
         yield conn
     finally:
@@ -169,19 +183,31 @@ def _insert_point(
 def _report_rows(conn) -> dict[int, tuple]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT h3_8_index, has_devices, has_points, total_points, distinct_earners "
+            "SELECT h3_8_index, has_devices, has_points "
             "FROM h3_r8_area_report ORDER BY h3_8_index"
         )
         return {r[0]: r[1:] for r in cur.fetchall()}
 
 
-def _leader_rows(conn) -> list[tuple]:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT h3_8_index, rank, account_id, points, first_point_at "
-            "FROM h3_r8_area_leaders ORDER BY h3_8_index, rank"
-        )
-        return cur.fetchall()
+def _map_cells(conn) -> dict[int, dict]:
+    """Drive the real live handler and re-key its payload by integer cell id
+    so tests can index it the same way they seed."""
+    from fastapi import Response
+    from starlette.requests import Request
+
+    req = Request({"type": "http", "method": "GET", "path": "/api/v1/leaderboard/map",
+                   "headers": [], "query_string": b""})
+    out = api_leaderboard.leaderboard_map(req, Response())
+    return {int(key, 16): cell for key, cell in out["cells"].items()}
+
+
+def _regional(conn) -> list[dict]:
+    from fastapi import Response
+    from starlette.requests import Request
+
+    req = Request({"type": "http", "method": "GET", "path": "/api/v1/leaderboard/regional",
+                   "headers": [], "query_string": b""})
+    return api_leaderboard.leaderboard_regional(req, Response())["leaders"]
 
 
 # ---------------------------------------------------------------------------
@@ -201,148 +227,137 @@ def test_universe_union_matches_real_table_contents(pg_conn):
     # user_points (confirmed) overlaps device_state's 1002 and adds a new one (1003).
     _insert_point(pg_conn, account_id, 1002, 10, _RECENT)
     _insert_point(pg_conn, account_id, 1003, 10, _RECENT)
-    # pending_review, in a cell of its own — must NOT enter the universe at all.
+    # pending_review, in a cell of its own — must NOT enter the universe.
     _insert_point(pg_conn, account_id, 9999, 10, _RECENT, status="pending_review")
 
-    area_leaders.recompute(window_days=28)
+    area_leaders.refresh_universe(window_days=28)
 
     report = _report_rows(pg_conn)
     assert set(report) == {1001, 1002, 1003}, "NULL h3 excluded; pending_review cell excluded"
-
-    has_devices_1001, has_points_1001, _, _ = report[1001]
-    assert (has_devices_1001, has_points_1001) == (True, False)
-
-    has_devices_1002, has_points_1002, _, _ = report[1002]
-    assert (has_devices_1002, has_points_1002) == (True, True), "seen by both device_state and user_points"
-
-    has_devices_1003, has_points_1003, _, _ = report[1003]
-    assert (has_devices_1003, has_points_1003) == (False, True)
+    assert report[1001] == (True, False), "device sources only"
+    assert report[1002] == (True, True), "device_state AND points"
+    assert report[1003] == (False, True), "points only"
 
 
-# ---------------------------------------------------------------------------
-# Full-replace idempotence
-# ---------------------------------------------------------------------------
-def test_full_replace_idempotence(pg_conn):
-    a1 = _account(pg_conn)
-    a2 = _account(pg_conn)
-    a3 = _account(pg_conn)
-    a4 = _account(pg_conn)
+def test_refresh_is_a_full_replace_not_an_accumulation(pg_conn):
+    _insert_device_history(pg_conn, 1001)
+    area_leaders.refresh_universe(window_days=28)
+    first = _report_rows(pg_conn)
 
-    # Cell 2001 gets 4 earners (only top 3 stored as leaders); cell 2002 gets 1.
-    _insert_point(pg_conn, a1, 2001, 40, _RECENT)
-    _insert_point(pg_conn, a2, 2001, 30, _RECENT)
-    _insert_point(pg_conn, a3, 2001, 20, _RECENT)
-    _insert_point(pg_conn, a4, 2001, 10, _RECENT)
-    _insert_point(pg_conn, a1, 2002, 6, _RECENT)
+    area_leaders.refresh_universe(window_days=28)
+    second = _report_rows(pg_conn)
+    assert first == second, "same underlying data -> byte-identical rows, not doubled"
 
-    area_leaders.recompute(window_days=28)
-    first_report = _report_rows(pg_conn)
-    first_leaders = _leader_rows(pg_conn)
-
-    assert set(first_report) == {2001, 2002}
-    assert len(first_leaders) == 3 + 1, "top 3 of 4 earners in 2001, plus the lone earner in 2002"
-
-    area_leaders.recompute(window_days=28)
-    second_report = _report_rows(pg_conn)
-    second_leaders = _leader_rows(pg_conn)
-
-    assert second_report == first_report
-    assert second_leaders == first_leaders, "re-running with unchanged data must not accumulate/reorder rows"
-
-    # The run log is the one APPEND-ONLY table — two calls, two rows.
     with pg_conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*), COUNT(DISTINCT cell_count), COUNT(DISTINCT led_cells) "
-                    "FROM h3_r8_area_leader_runs")
-        run_count, distinct_cell_counts, distinct_led_cells = cur.fetchone()
-    assert run_count == 2
-    assert distinct_cell_counts == 1, "same underlying data -> same cell_count both runs"
-    assert distinct_led_cells == 1, "same underlying data -> same led_cells both runs"
+        cur.execute("SELECT COUNT(*), COUNT(DISTINCT cell_count) FROM h3_r8_area_leader_runs")
+        run_count, distinct_cell_counts = cur.fetchone()
+    assert run_count == 2, "the runs table is append-only — one row per call"
+    assert distinct_cell_counts == 1, "same data -> same cell_count both runs"
+
+
+def test_a_cell_that_drops_out_of_the_universe_is_removed(pg_conn):
+    _insert_device_history(pg_conn, 1001)
+    area_leaders.refresh_universe(window_days=28)
+    assert set(_report_rows(pg_conn)) == {1001}
+
+    with pg_conn.cursor() as cur:
+        cur.execute("DELETE FROM device_history")
+    pg_conn.commit()
+    area_leaders.refresh_universe(window_days=28)
+    assert _report_rows(pg_conn) == {}, "full replace, so a vanished cell really vanishes"
 
 
 # ---------------------------------------------------------------------------
-# Account-delete CASCADE
+# The live read path, against real ledger rows
 # ---------------------------------------------------------------------------
-def test_account_delete_cascade_removes_leader_rows(pg_conn):
+def test_live_map_groups_by_cell_and_account_with_real_totals(pg_conn):
+    a1, a2 = _account(pg_conn), _account(pg_conn)
+    # a1 earns twice in cell 1001 — the GROUP BY must sum them into one entry.
+    _insert_point(pg_conn, a1, 1001, 30, _RECENT)
+    _insert_point(pg_conn, a1, 1001, 20, _RECENT)
+    _insert_point(pg_conn, a2, 1001, 40, _RECENT)
+    area_leaders.refresh_universe(window_days=28)
+
+    cell = _map_cells(pg_conn)[1001]
+    assert cell["leader"]["points"] == 50, "two rows for one rider sum to one entry"
+    assert [r["points"] for r in cell["runners_up"]] == [40]
+    assert cell["total_points"] == 90
+    assert cell["distinct_earners"] == 2, "earners, not ledger rows"
+
+
+def test_live_map_tie_break_prefers_whoever_got_there_first(pg_conn):
+    earlier, later = _account(pg_conn), _account(pg_conn)
+    # Equal points; `later` was created first, so account_id order would put
+    # it on top if first_point_at were not the second key.
+    _insert_point(pg_conn, later, 1001, 10, _NOW - timedelta(days=2))
+    _insert_point(pg_conn, earlier, 1001, 10, _NOW - timedelta(days=5))
+    area_leaders.refresh_universe(window_days=28)
+
+    cell = _map_cells(pg_conn)[1001]
+    assert cell["leader"]["points"] == 10
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT display_name FROM accounts WHERE id = %s", (earlier,))
+        (name,) = cur.fetchone()
+    assert cell["leader"]["display_name"] == name, \
+        "whoever got there first holds the territory"
+
+
+def test_live_map_excludes_points_older_than_the_window(pg_conn):
     account_id = _account(pg_conn)
-    _insert_point(pg_conn, account_id, 3001, 50, _RECENT)
+    _insert_point(pg_conn, account_id, 1001, 10, _NOW - timedelta(days=29))
+    _insert_device_history(pg_conn, 1001)
+    area_leaders.refresh_universe(window_days=28)
 
-    area_leaders.recompute(window_days=28)
-    leaders_before = _leader_rows(pg_conn)
-    assert any(row[2] == account_id for row in leaders_before)
+    cell = _map_cells(pg_conn)[1001]
+    assert cell["leader"] is None and cell["total_points"] == 0, \
+        "the cell is still on the map (it has devices) but nobody holds it"
+
+
+def test_live_map_excludes_pending_review_points(pg_conn):
+    account_id = _account(pg_conn)
+    _insert_point(pg_conn, account_id, 1001, 10, _RECENT, status="pending_review")
+    _insert_device_history(pg_conn, 1001)
+    area_leaders.refresh_universe(window_days=28)
+    assert _map_cells(pg_conn)[1001]["leader"] is None
+
+
+def test_live_map_shows_a_cell_the_universe_has_not_seen_yet(pg_conn):
+    # The universe is refreshed weekly; a first point in a brand-new cell
+    # must not wait for it.
+    account_id = _account(pg_conn)
+    area_leaders.refresh_universe(window_days=28)      # universe is empty
+    _insert_point(pg_conn, account_id, 4242, 10, _RECENT)
+
+    cell = _map_cells(pg_conn)[4242]
+    assert cell["leader"]["points"] == 10
+
+
+def test_live_regional_sums_one_rider_across_cells(pg_conn):
+    a1, a2 = _account(pg_conn), _account(pg_conn)
+    _insert_point(pg_conn, a1, 1001, 30, _RECENT)
+    _insert_point(pg_conn, a1, 1002, 30, _RECENT)   # same rider, another cell
+    _insert_point(pg_conn, a2, 1001, 50, _RECENT)
+
+    leaders = _regional(pg_conn)
+    assert [e["points"] for e in leaders] == [60, 50], \
+        "the regional board collapses the cell dimension away"
+    assert [e["rank"] for e in leaders] == [1, 2]
+
+
+def test_deleting_an_account_releases_its_territory(pg_conn):
+    holder, other = _account(pg_conn), _account(pg_conn)
+    _insert_point(pg_conn, holder, 1001, 98, _RECENT)
+    _insert_point(pg_conn, other, 1001, 10, _RECENT)
+    area_leaders.refresh_universe(window_days=28)
+    assert _map_cells(pg_conn)[1001]["leader"]["points"] == 98
 
     with pg_conn.cursor() as cur:
-        cur.execute("DELETE FROM accounts WHERE id = %s", (account_id,))
+        cur.execute("DELETE FROM accounts WHERE id = %s", (holder,))
     pg_conn.commit()
 
-    leaders_after = _leader_rows(pg_conn)
-    assert all(row[2] != account_id for row in leaders_after), \
-        "ON DELETE CASCADE on h3_r8_area_leaders.account_id must remove the deleted account's rows"
-
-    # The cell's report row is untouched by the cascade — it is a separate
-    # FK (h3_8_index -> h3_r8_area_report), not account-keyed, and is only
-    # ever refreshed by the next recompute(), not reactively by a delete.
-    report = _report_rows(pg_conn)
-    assert 3001 in report
-
-
-# ---------------------------------------------------------------------------
-# Regional (whole-database) leaderboard (sql/054) — real cross-cell sums
-# and full-replace idempotence against real constraints.
-# ---------------------------------------------------------------------------
-def _regional_rows(conn) -> list[tuple]:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT rank, account_id, points, first_point_at "
-            "FROM regional_leaders ORDER BY rank"
-        )
-        return cur.fetchall()
-
-
-def test_regional_leaderboard_sums_across_cells_against_real_constraints(pg_conn):
-    a1 = _account(pg_conn)
-    a2 = _account(pg_conn)
-
-    # a1 earns in two different cells; a2 earns more in a single cell.
-    _insert_point(pg_conn, a1, 4001, 12, _RECENT)
-    _insert_point(pg_conn, a1, 4002, 14, _RECENT)   # a1 total: 26, across two cells
-    _insert_point(pg_conn, a2, 4001, 20, _RECENT)   # a2 total: 20, in one cell
-
-    area_leaders.recompute(window_days=28)
-
-    regional = _regional_rows(pg_conn)
-    assert [(rank, account_id, points) for rank, account_id, points, _ in regional] == [
-        (1, a1, 26), (2, a2, 20),
-    ]
-
-    # Each cell's OWN top-3 is still independent of the regional ranking —
-    # a2 alone leads cell 4001 with 20 vs a1's 12 there.
-    cell_4001_leaders = [row for row in _leader_rows(pg_conn) if row[0] == 4001]
-    assert cell_4001_leaders[0][2] == a2
-
-
-def test_regional_leaderboard_full_replace_idempotence(pg_conn):
-    a1 = _account(pg_conn)
-    _insert_point(pg_conn, a1, 5001, 30, _RECENT)
-
-    area_leaders.recompute(window_days=28)
-    first = _regional_rows(pg_conn)
-    area_leaders.recompute(window_days=28)
-    second = _regional_rows(pg_conn)
-
-    assert first == second, "re-running with unchanged data must not accumulate/reorder rows"
-    assert len(first) == 1
-
-
-def test_regional_leaderboard_account_delete_cascade(pg_conn):
-    account_id = _account(pg_conn)
-    _insert_point(pg_conn, account_id, 6001, 50, _RECENT)
-
-    area_leaders.recompute(window_days=28)
-    assert any(row[1] == account_id for row in _regional_rows(pg_conn))
-
-    with pg_conn.cursor() as cur:
-        cur.execute("DELETE FROM accounts WHERE id = %s", (account_id,))
-    pg_conn.commit()
-
-    assert all(row[1] != account_id for row in _regional_rows(pg_conn)), \
-        "ON DELETE CASCADE on regional_leaders.account_id must remove the deleted account's row"
+    cell = _map_cells(pg_conn)[1001]
+    assert cell["leader"]["points"] == 10, (
+        "user_points ON DELETE CASCADE removes the rows, and because the "
+        "board is computed at read time the hexagon changes hands immediately"
+    )
+    assert cell["distinct_earners"] == 1
