@@ -982,7 +982,7 @@ GET /api/v1/leaderboard/map
       "total_points": 144,
       "distinct_earners": 4,
       "leader": {
-        "display_name": "Duke swift🦦",
+        "display_name": "Duke Swift 🦦",
         "points": 88,
         "ruling_color": "#7c54cd",
         "ruling_border_color": "#382264",
@@ -1073,7 +1073,7 @@ GET /api/v1/leaderboard/regional
   "window_start": "2026-07-01T09:15:00+00:00",
   "window_end": "2026-07-29T09:15:00+00:00",
   "leaders": [
-    { "rank": 1, "display_name": "Duke swift🦦", "points": 312,
+    { "rank": 1, "display_name": "Duke Swift 🦦", "points": 312,
       "ruling_color": "#7c54cd", "ruling_border_color": "#382264", "ruling_alpha": 0.6 },
     { "rank": 2, "display_name": "...", "points": 210,
       "ruling_color": null, "ruling_border_color": null, "ruling_alpha": null }
@@ -1538,7 +1538,7 @@ Bearer required. GET returns:
 {
   "email": "you@example.com",
   "phone_number": "+13035550123",
-  "public_username": "brave🦉owl",
+  "public_username": "Brave 🦉",
   "show_public_username": true,
   "show_in_leaderboards": false,
   "rate_plan": "resident",
@@ -1549,7 +1549,7 @@ Bearer required. GET returns:
   "work_lat": null,
   "work_lng": null,
   "royalty_title": "Queen",
-  "display_name": "Queen brave🦉owl",
+  "display_name": "Queen Brave 🦉",
   "ruling_color": "#c53637",
   "ruling_border_color": "#026fd7",
   "ruling_alpha": 0.6,
@@ -1624,7 +1624,10 @@ as anyone else's.
 ### Public usernames
 
 Every account gets a generated `public_username`: a curated adjective plus
-an emoji-noun (e.g. `brave🦉owl`). Both halves are validated against
+an emoji-noun, presented as the capitalized adjective, a space, then the
+emoji -- e.g. `Brave 🦉` (sql/060; `src/accounts.py:format_public_username`
+is the one place Python knows that presentation, and it must match the
+generated column character for character). Both halves are validated against
 server-side lists — **never free text** — so usernames can be shown
 publicly without moderation. Usernames are unique.
 

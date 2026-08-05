@@ -114,7 +114,7 @@
 # device or a point — all-time, not windowed (src/area_leaders.py:
 # refresh_universe).
 #
-# WEEKLY, not daily, since sql/060. This used to compute the whole
+# WEEKLY, not daily, since sql/061. This used to compute the whole
 # leaderboard nightly; now the leaderboard is computed per request and this
 # job keeps only the half that cannot be: the all-time universe, whose one
 # expensive step is a DISTINCT scan of ~7.3M unindexed device_history rows.

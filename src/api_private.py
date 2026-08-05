@@ -483,6 +483,14 @@ def private_area_leaders(
         cell_for(h3_idx)
     for h3_idx, account_id, points, first_point_at in rows:
         cell = cell_for(h3_idx)
+        # An aggregated row IS proof the cell has points in the window, so
+        # this is asserted from the ledger rather than trusted from the
+        # universe snapshot. It matters most in the two cases where the
+        # snapshot is wrong: a cell claimed since the last weekly refresh
+        # (absent from the universe entirely) and a never-refreshed
+        # database (where every cell would otherwise read has_points=false
+        # while visibly holding leaders).
+        cell["has_points"] = True
         cell["total_points"] += int(points)
         cell["distinct_earners"] += 1
         cell["leaders"].append({
@@ -498,7 +506,14 @@ def private_area_leaders(
         "window_start": window_start.isoformat(),
         "window_end": now.isoformat(),
         "universe_refreshed_at": universe_refreshed_at.isoformat() if universe_refreshed_at else None,
-        "cell_count": int(cell_count) if cell_count is not None else len(universe),
+        # Two different counts, because they answer two different questions
+        # and can legitimately disagree: `universe_cell_count` is what the
+        # last refresh stored, and `cell_count` is what this response
+        # actually contains — larger whenever a cell has been claimed since
+        # that refresh, and non-zero even when the universe has never been
+        # refreshed at all.
+        "universe_cell_count": int(cell_count) if cell_count is not None else 0,
+        "cell_count": len(cells),
         "led_cells": sum(1 for c in cells.values() if c["leaders"]),
         "cells": cells,
     }

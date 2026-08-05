@@ -359,6 +359,29 @@ def test_private_area_leaders_is_unfiltered_with_real_account_ids(monkeypatch):
     assert body["viewed_by"] == "admin@example.com"
 
 
+def test_private_area_leaders_asserts_has_points_from_the_ledger(monkeypatch):
+    # The universe is refreshed weekly and knows nothing about a cell claimed
+    # since. Trusting its snapshot would report has_points=false for a cell
+    # that visibly holds leaders — and would do it for EVERY cell on a
+    # never-refreshed database.
+    _install(monkeypatch, api_private, _TOTALS, [], _ALL_ELIGIBLE)
+    client = _admin_client(monkeypatch, _TOTALS, [], _ALL_ELIGIBLE)
+    body = client.get("/api/v1/private/area-leaders").json()
+    cell = body["cells"][h3.int_to_str(_CELL)]
+    assert cell["has_points"] is True
+    assert cell["leaders"], "and it does hold leaders, which is the proof"
+
+
+def test_private_area_leaders_counts_universe_and_response_separately(monkeypatch):
+    # A cell claimed since the last refresh means the response legitimately
+    # holds more cells than the universe stored; one number must not be
+    # reported as the other.
+    client = _admin_client(monkeypatch, _TOTALS, [(_EMPTY_CELL, True, False)], _ALL_ELIGIBLE)
+    body = client.get("/api/v1/private/area-leaders").json()
+    assert body["universe_cell_count"] == 1
+    assert body["cell_count"] == 2, "the claimed cell plus the stored one"
+
+
 def test_private_area_leaders_answers_without_a_universe_refresh(monkeypatch):
     client = _admin_client(monkeypatch, [], [], [])
     resp = client.get("/api/v1/private/area-leaders")
