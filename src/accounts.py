@@ -353,6 +353,22 @@ class InvalidUsernameChoice(Exception):
 _USERNAME_MAX_ATTEMPTS = 25
 
 
+def format_public_username(adjective: str, emoji: str) -> str:
+    """Compose the two stored halves into the display string —
+    "brave" + "🦉" -> "Brave 🦉".
+
+    THE one place Python knows the presentation. It must produce exactly
+    what sql/060's public_username generated column produces for the same
+    pair, character for character: assign_public_username checks a
+    candidate for collisions by comparing this string against that
+    column, so any divergence reads as "free" when it isn't. Capitalizing
+    the first character (rather than str.capitalize() or SQL initcap())
+    is the operation both languages agree on for any input — see the
+    sql/060 header.
+    """
+    return f"{adjective[:1].upper()}{adjective[1:]} {emoji}"
+
+
 def generate_public_username(cur) -> tuple[str, str]:
     """One random (adjective, emoji) pair, e.g. ('brave', '🦉'). Reads from
     sfw_adjectives/emoji_nouns (sql/025) rather than a hardcoded Python
@@ -388,7 +404,7 @@ def assign_public_username(cur, account_id: int, *, max_attempts: int = _USERNAM
     """
     for _ in range(max_attempts):
         adjective, emoji = generate_public_username(cur)
-        candidate = f"{adjective}{emoji}"
+        candidate = format_public_username(adjective, emoji)
         # Serializes two concurrent callers who happen to draw the exact
         # same pair — same technique src/ratelimit.py uses for its own
         # check-then-act race. Auto-releases at COMMIT/ROLLBACK.
@@ -453,7 +469,7 @@ def choose_public_username(
         "UPDATE accounts SET username_adjective = %s, username_emoji = %s WHERE id = %s",
         (new_adjective, new_emoji, account_id),
     )
-    return f"{new_adjective}{new_emoji}"
+    return format_public_username(new_adjective, new_emoji)
 
 
 def upsert_account(cur, email: str) -> int:

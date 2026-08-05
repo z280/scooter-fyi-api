@@ -45,9 +45,10 @@ color pair is NULL; forwarding the column default would leak a
 meaningless number as if it were a real fill opacity.
 
 No ``royalty_title`` field: ``display_name`` already composes it
-(sql/044's generated column: ``COALESCE(royalty_title || ' ', '') ||
-username_adjective || username_emoji``) — shipping the title again would
-be a second copy of the same fact that can only drift.
+(sql/044's generated column, restyled by sql/060: the title, a space,
+then the capitalized adjective, a space, and the emoji — "Duke Swift
+🦦") — shipping the title again would be a second copy of the same fact
+that can only drift.
 
 ETAG — deliberately NOT run-keyed. ``/api/v1/h3/aggregates`` can key its
 weak ETag on the ingest cycle because that payload is a pure function of

@@ -118,9 +118,31 @@ def test_choose_public_username_persists_a_specific_pair(pg_conn):
         cur.execute("SELECT emoji FROM emoji_nouns LIMIT 1")
         (emoji,) = cur.fetchone()
         result = accounts.choose_public_username(cur, account_id, adjective=adjective, emoji=emoji)
-        assert result == f"{adjective}{emoji}"
+        expected = accounts.format_public_username(adjective, emoji)
+        assert result == expected
         cur.execute("SELECT public_username FROM accounts WHERE id = %s", (account_id,))
-        assert cur.fetchone()[0] == f"{adjective}{emoji}"
+        # The real point of this assertion: Python's formula (sql/060's
+        # header calls it out) agreeing with the generated column's.
+        assert cur.fetchone()[0] == expected
+    pg_conn.commit()
+
+
+def test_generated_columns_capitalize_the_adjective_and_space_the_emoji(pg_conn):
+    """sql/060's presentation, on both generated columns at once — the
+    title only prefixes what public_username already shows."""
+    with pg_conn.cursor() as cur:
+        account_id = accounts.upsert_account(cur, "pgtest-format@example.com")
+        accounts.choose_public_username(cur, account_id, adjective="brave", emoji="🦉")
+        cur.execute("SELECT public_username, display_name FROM accounts WHERE id = %s", (account_id,))
+        username, display_name = cur.fetchone()
+        assert username == "Brave 🦉"
+        assert display_name == "Brave 🦉"
+
+        cur.execute("SELECT title FROM royalty_titles ORDER BY sort_order, title LIMIT 1")
+        (title,) = cur.fetchone()
+        cur.execute("UPDATE accounts SET royalty_title = %s WHERE id = %s", (title, account_id))
+        cur.execute("SELECT display_name FROM accounts WHERE id = %s", (account_id,))
+        assert cur.fetchone()[0] == f"{title} Brave 🦉"
     pg_conn.commit()
 
 

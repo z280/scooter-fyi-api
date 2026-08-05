@@ -9,7 +9,9 @@
 -- WHAT DISPLAY_NAME IS
 -- --------------------
 -- "King brave-owl-emoji" — the title, a space, then the existing
--- adjective+emoji public username. It is built from the PARTS
+-- adjective+emoji public username. (sql/060 restyled the username half
+-- to "Brave 🦉"; the title-then-space part is unchanged.) It is built
+-- from the PARTS
 -- (royalty_title, username_adjective, username_emoji) and NOT from
 -- public_username, because Postgres forbids a stored generated column
 -- referencing another stored generated column. Same NULL propagation as

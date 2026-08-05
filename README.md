@@ -92,8 +92,8 @@ agent process).
 │   ├── NB.geojson              78 neighborhoods
 │   ├── CD.geojson              council districts (11 numbered + 2 at-large)
 │   └── CN.geojson              13 community networks
-├── sql/001_init.sql … 053_ride_mode_points.sql
-│                              51 migrations, applied idempotently at boot
+├── sql/001_init.sql … 060_username_presentation.sql
+│                              60 migrations, applied idempotently at boot
 ├── docker/photon/Dockerfile    the Photon geocoding sidecar (pinned + sha256-verified
 │                               official jar; the index itself ships from R2)
 ├── scripts/build_photon_index.md  manual runbook for building/refreshing that index

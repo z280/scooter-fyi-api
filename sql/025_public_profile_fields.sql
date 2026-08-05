@@ -5,7 +5,10 @@
 -- public_username is a GENERATED column, not a plain TEXT column: it is
 -- always exactly username_adjective || username_emoji, computed by
 -- Postgres itself, so the display string can never drift out of sync
--- with its two constituent parts. The parts are stored separately (not
+-- with its two constituent parts. (sql/060 later restyled that formula
+-- to a capitalized adjective, a space, then the emoji — "Brave 🦉".
+-- Everything below is unchanged by it; only the presentation moved.)
+-- The parts are stored separately (not
 -- just concatenated in Python) specifically so a rider can change just
 -- one half later (PUT /api/v1/profile/username) without needing to parse
 -- a combined string back apart.
