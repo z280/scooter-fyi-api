@@ -3,37 +3,110 @@
 {% block content %}
 <h1>Scheduler</h1>
 
-<p>The schedule lives in the <code>scheduler</code> container, which runs
-<a href="https://github.com/aptible/supercronic">supercronic</a> against
-the crontab below. Container TZ is <code>America/Denver</code>, so the
-9 AM daily SLA job is DST-aware. The ingest job's cadence drifts by 60
-minutes twice a year at DST transitions.</p>
+<p>Every scheduled operation, what it is supposed to do, and what it last
+actually did. The schedule lives in the <code>scheduler</code> container,
+which runs <a href="https://github.com/aptible/supercronic">supercronic</a>
+against the crontab below. Container TZ is <code>America/Denver</code>, so
+the 9 AM daily jobs are DST-aware.</p>
+
+<h2>Operations</h2>
+<p style="font-size: 12px; opacity: 0.75;">
+  <strong>Schedule</strong> is parsed out of the active crontab;
+  <strong>last run</strong> comes from the job-run ledger, which every
+  command writes through <code>src/cli.py</code>'s single dispatch point.
+  A row with a schedule but no run has never fired since the ledger
+  existed &mdash; that is the row worth looking at, so those sort first,
+  then failures, then by recency.
+</p>
+<table>
+  <thead><tr>
+    <th>command</th>
+    <th>schedule</th>
+    <th>last run (Denver)</th>
+    <th>status</th>
+    <th>took</th>
+    <th>result</th>
+  </tr></thead>
+  <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><code>{{ r.command }}</code>
+          {% if not r.known %}
+            <br><span style="font-size: 11px; opacity: 0.7;">not a known command &mdash; renamed or removed?</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if r.schedule %}<code>{{ r.schedule }}</code>
+          {% else %}<span style="opacity: 0.6;">not scheduled</span>{% endif %}
+        </td>
+        <td>
+          {% if r.run %}<code>{{ r.run.started_at | denver_ts }}</code>
+          {% else %}<span style="opacity: 0.6;">never</span>{% endif %}
+        </td>
+        <td class="status-{{ r.run.status if r.run else 'none' }}">
+          {{ r.run.status if r.run else '—' }}
+        </td>
+        <td>
+          {% if r.run and r.run.duration_ms is not none %}
+            <code>{{ '%.1f'|format(r.run.duration_ms / 1000) }}s</code>
+          {% else %}—{% endif %}
+        </td>
+        <td style="font-size: 12px;">
+          {% if r.run and r.run.error %}
+            <code>{{ r.run.error }}</code>
+          {% elif r.run and r.run.summary %}
+            <code>{{ r.run.summary }}</code>
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if excluded %}
+  <p style="font-size: 12px; opacity: 0.75; margin-top: 12px;">
+    Deliberately not listed here:
+    {% for cmd, why in excluded.items() %}
+      <code>{{ cmd }}</code> ({{ why }}){{ "; " if not loop.last }}
+    {% endfor %}
+  </p>
+{% endif %}
+
+<h2>Recent runs (last 50)</h2>
+<table>
+  <thead><tr>
+    <th>started (Denver)</th>
+    <th>command</th>
+    <th>status</th>
+    <th>took</th>
+    <th>result</th>
+  </tr></thead>
+  <tbody>
+    {% for r in recent %}
+      <tr>
+        <td><code>{{ r.started_at | denver_ts }}</code></td>
+        <td><code>{{ r.command }}</code></td>
+        <td class="status-{{ r.status }}">{{ r.status }}</td>
+        <td>
+          {% if r.duration_ms is not none %}
+            <code>{{ '%.1f'|format(r.duration_ms / 1000) }}s</code>
+          {% else %}—{% endif %}
+        </td>
+        <td style="font-size: 12px;">
+          {% if r.error %}<code>{{ r.error }}</code>
+          {% elif r.summary %}<code>{{ r.summary }}</code>
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    {% if not recent %}
+      <tr><td colspan="5" style="opacity: 0.6;">No runs recorded yet.</td></tr>
+    {% endif %}
+  </tbody>
+</table>
 
 <p style="margin: 16px 0;"><strong>Active crontab</strong> &mdash;
 <a href="/admin/scheduler/edit">edit</a></p>
 <p style="font-size: 12px; opacity: 0.7;">source: <code>{{ crontab_source }}</code></p>
 <pre>{{ crontab or '(crontab file not found)' }}</pre>
-
-<h2>Recent cycle cadence (last 30)</h2>
-<p>The <code>gap_minutes</code> column is minutes between this cycle's
-<code>start_ts</code> and the previous one's. For a healthy 10-min schedule
-this should be ~10.0 with occasional <code>stale_aborted</code> rows.</p>
-<table>
-  <thead><tr>
-    <th>start_ts (UTC)</th>
-    <th>start_ts (Denver)</th>
-    <th>job_status</th>
-    <th>gap_minutes</th>
-  </tr></thead>
-  <tbody>
-    {% for r in recent %}
-      <tr>
-        <td><code>{{ r.start_ts }}</code></td>
-        <td><code>{{ r.start_ts | denver_ts }}</code></td>
-        <td class="status-{{ r.job_status }}">{{ r.job_status }}</td>
-        <td><code>{{ r.gap_minutes if r.gap_minutes is not none else '—' }}</code></td>
-      </tr>
-    {% endfor %}
-  </tbody>
-</table>
 {% endblock %}
