@@ -13,6 +13,7 @@ from src.accounts import (
     InvalidUsernameChoice,
     assign_public_username,
     choose_public_username,
+    format_public_username,
     generate_public_username,
     is_valid_phone_number,
     normalize_phone_number,
@@ -36,13 +37,29 @@ def test_generate_public_username_returns_adjective_and_emoji():
     assert generate_public_username(cur) == ("brave", "🦉")
 
 
+# ---------- format_public_username (the presentation formula) --------------
+
+def test_format_capitalizes_the_adjective_and_spaces_the_emoji():
+    assert format_public_username("brave", "🦉") == "Brave 🦉"
+
+
+def test_format_capitalizes_only_the_first_character():
+    """Matches sql/060's upper(left(w,1)) || substr(w,2) — NOT initcap(),
+    which would give 'Easy-Going' and drift from the generated column."""
+    assert format_public_username("easy-going", "🦊") == "Easy-going 🦊"
+
+
+def test_format_leaves_an_already_capitalized_adjective_alone():
+    assert format_public_username("Brave", "🦉") == "Brave 🦉"
+
+
 # ---------- assign_public_username (random) --------------------------------
 
 def test_assign_public_username_persists_first_free_candidate():
     # word draw, emoji draw, lock (no fetch), "is it taken?" -> None (free).
     cur = _FakeCursor([("brave",), ("🦉",), None])
     result = assign_public_username(cur, account_id=7)
-    assert result == "brave🦉"
+    assert result == "Brave 🦉"
     last_sql, last_params = cur.executed[-1]
     assert "UPDATE accounts SET username_adjective" in last_sql
     assert last_params == ("brave", "🦉", 7)
@@ -62,7 +79,7 @@ def test_assign_public_username_retries_on_taken_candidate():
         ("brave",), ("🦉",), (1,),
         ("bold",), ("🦊",), None,
     ])
-    assert assign_public_username(cur, account_id=7) == "bold🦊"
+    assert assign_public_username(cur, account_id=7) == "Bold 🦊"
 
 
 def test_assign_public_username_gives_up_after_max_attempts():
@@ -80,7 +97,7 @@ def test_choose_both_halves_explicitly():
     # current (adjective, emoji), adjective-valid check, emoji-valid check.
     cur = _FakeCursor([("brave", "🦉"), (1,), (1,)])
     result = choose_public_username(cur, 7, adjective="bold", emoji="🦊")
-    assert result == "bold🦊"
+    assert result == "Bold 🦊"
     last_sql, last_params = cur.executed[-1]
     assert "UPDATE accounts SET username_adjective" in last_sql
     assert last_params == ("bold", "🦊", 7)
@@ -89,13 +106,13 @@ def test_choose_both_halves_explicitly():
 def test_choose_only_adjective_keeps_current_emoji():
     cur = _FakeCursor([("brave", "🦉"), (1,)])  # current row, adjective-valid check
     result = choose_public_username(cur, 7, adjective="bold", emoji=None)
-    assert result == "bold🦉"
+    assert result == "Bold 🦉"
 
 
 def test_choose_only_emoji_keeps_current_adjective():
     cur = _FakeCursor([("brave", "🦉"), (1,)])  # current row, emoji-valid check
     result = choose_public_username(cur, 7, adjective=None, emoji="🦊")
-    assert result == "brave🦊"
+    assert result == "Brave 🦊"
 
 
 def test_choose_rejects_adjective_not_in_list():
