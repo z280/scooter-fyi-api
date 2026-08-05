@@ -67,11 +67,17 @@ Available commands:
                       never settle. Also sweeps ride_routes on its own 28h
                       clock once sql/052 (phase A3) exists -- a
                       to_regclass-guarded no-op until then.
-    recompute_area_leaders
-                      Recompute the H3 r8 area leader report (FEATURE_PLAN_
-                      2026-07.md §11 / PLAN_RIDE_MODE_API.md phase A4):
-                      trailing-28-day per-cell leaderboard, full replace
-                      (src/area_leaders.py:recompute).
+    refresh_area_universe
+                      Refresh the H3 r8 cell universe -- every cell that has
+                      ever had an observed device or a point, all-time, full
+                      replace (src/area_leaders.py:refresh_universe). WEEKLY:
+                      the answer is all-time, so it barely moves, and its
+                      device_history DISTINCT scan is the only expensive part
+                      of territory control. The leaderboard itself is no
+                      longer computed here at all -- sql/061 moved it to read
+                      time so territory can change while a rider is watching.
+                      Aliased as `recompute_area_leaders` for the crontab
+                      already deployed under the old name.
     process_device_feature_reports
                       Grade the crowdsourced device-feature confirmations
                       that have landed since the last firing (sql/055):
@@ -91,7 +97,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from .archive import run_archive
-from .area_leaders import recompute as recompute_area_leaders
+from .area_leaders import refresh_universe as refresh_area_universe
 from .battery_model import (
     backfill_trips_from_archive,
     extract_trips,
@@ -600,11 +606,11 @@ def _cli_backfill_battery_trips() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# H3 r8 area leader report (FEATURE_PLAN_2026-07.md §11 / PLAN_RIDE_MODE_API.md
-# phase A4). Cron: `15 9 * * * python -m src.cli recompute_area_leaders`.
+# H3 r8 cell universe (FEATURE_PLAN_2026-07.md §11 / PLAN_RIDE_MODE_API.md
+# phase A4). Cron: `15 9 * * 1 python -m src.cli refresh_area_universe`.
 # ---------------------------------------------------------------------------
-def _cli_recompute_area_leaders() -> dict:
-    return recompute_area_leaders()
+def _cli_refresh_area_universe() -> dict:
+    return refresh_area_universe()
 
 
 # ---------------------------------------------------------------------------
@@ -780,7 +786,12 @@ COMMANDS = {
     "backfill_battery_trips": _cli_backfill_battery_trips,
     "poll_comms_replies":    poll_comms_replies,
     "deidentify_donations":  deidentify_donations,
-    "recompute_area_leaders": _cli_recompute_area_leaders,
+    "refresh_area_universe": _cli_refresh_area_universe,
+    # Deprecated alias. The live crontab is an admin-editable copy on the
+    # scheduler_state volume, so a rename here would break the deployed
+    # schedule until someone edits it by hand -- this keeps the old name
+    # working until /admin/scheduler/edit catches up.
+    "recompute_area_leaders": _cli_refresh_area_universe,
     "process_device_feature_reports": process_device_feature_reports,
     "migrate":               lambda: run_migrations(),
 }

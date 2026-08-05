@@ -192,24 +192,24 @@ _PRIVACY = {
                       "underlying rows.",
         },
         {
-            "data": "h3_r8_area_leaders",
-            "retention": "recomputed nightly; deleted only with the account",
-            "detail": "The public leaderboard's per-cell top-3 report (H3 "
-                      "resolution-8 area, your account id, your summed "
-                      "points in that cell over the trailing 28 days, and "
-                      "when you first earned points there) is derived "
-                      "entirely from the points ledger above and fully "
-                      "replaced every night at 9:15am -- nothing here "
-                      "accumulates beyond that nightly recompute. It is "
-                      "deleted immediately if your account is deleted "
-                      "(cascade), and is never a separate retention clock "
-                      "from the ledger it's derived from. Whether a rank "
-                      "you hold is shown on the public leaderboard map is "
+            "data": "h3_r8_area_report",
+            "retention": "no personal data; refreshed weekly",
+            "detail": "The list of map hexagons -- every H3 "
+                      "resolution-8 area that has ever had a scooter "
+                      "observed in it or a point earned in it. It holds "
+                      "cell identifiers and two yes/no flags, and no "
+                      "account ids, names or points: nothing in it is "
+                      "about you. The leaderboard standings themselves are "
+                      "no longer stored anywhere. They are computed from "
+                      "the points ledger above at the moment someone loads "
+                      "the map, so there is no second copy of your ranking "
+                      "to retain, and deleting your account removes you "
+                      "from every board on the very next request. Whether "
+                      "a rank you hold is shown publicly is likewise "
                       "decided fresh on every request from your account's "
                       "current visibility toggles (public username, "
                       "leaderboard participation) -- turning either off "
-                      "removes you from the public view immediately, not "
-                      "at the next nightly recompute.",
+                      "removes you from the public view immediately.",
         },
         {
             "data": "device_photos",

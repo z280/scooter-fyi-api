@@ -496,6 +496,8 @@ or backfill always reflects current data.
 
 ### 11.3 Job
 
+> **Superseded (sql/061).** The nightly `recompute` described below was split: `src/area_leaders.py:refresh_universe` now runs WEEKLY and refreshes only the all-time cell universe, and the leaderboard itself is computed per request in `src/api_leaderboard.py`. The stored `h3_r8_area_leaders`/`regional_leaders` tables are gone. The window, the confirmed-only rule and the tie-break are unchanged — only where and when they are applied. See API.md's `/api/v1/leaderboard/map` section.
+
 `src/area_leaders.py:recompute(window_days=28)`, exposed as
 `python -m src.cli recompute_area_leaders`, crontab:
 

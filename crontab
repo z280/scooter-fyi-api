@@ -109,12 +109,23 @@
 # safe to run every hour forever.
 15 * * * * cd /app && python -m src.cli deidentify_donations
 
-# H3 r8 area leader report (FEATURE_PLAN_2026-07.md §11 / PLAN_RIDE_MODE_API.md
-# phase A4): recomputes the trailing-28-day per-cell leaderboard, full replace
-# (src/area_leaders.py:recompute). Runs at the same 9:00 AM Denver slot as the
-# daily_sla/daily_trips rollups above, but at :15 so it never contends with
-# them for the same few seconds of device_history seq-scan I/O.
-15 9 * * * cd /app && python -m src.cli recompute_area_leaders
+# H3 r8 cell universe (FEATURE_PLAN_2026-07.md §11 / PLAN_RIDE_MODE_API.md
+# phase A4): full-replaces the list of cells that have EVER had an observed
+# device or a point — all-time, not windowed (src/area_leaders.py:
+# refresh_universe).
+#
+# WEEKLY, not daily, since sql/060. This used to compute the whole
+# leaderboard nightly; now the leaderboard is computed per request and this
+# job keeps only the half that cannot be: the all-time universe, whose one
+# expensive step is a DISTINCT scan of ~7.3M unindexed device_history rows.
+# An all-time answer barely moves week to week, and the read path unions
+# this list with whatever has points in the window anyway — so a cell that
+# saw its first device on Tuesday still renders on Tuesday, not next Monday.
+#
+# Monday 09:15 keeps the old slot's reasoning: the 9:00 AM Denver rollups
+# (daily_sla/daily_trips) are above, and :15 keeps this off their seq-scan
+# I/O rather than contending for the same few seconds.
+15 9 * * 1 cd /app && python -m src.cli refresh_area_universe
 
 # Device feature confirmations (sql/055 / src/device_features.py). Grades
 # whatever riders submitted since the last firing: the first valid report on
