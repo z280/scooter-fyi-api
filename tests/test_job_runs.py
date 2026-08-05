@@ -330,3 +330,48 @@ def test_the_scheduler_page_lists_a_scheduled_job_that_has_never_run(monkeypatch
     html = api_admin.scheduler_status(None, user={"login": "tester"}).body.decode()
     assert "cleanup_receipts" in html
     assert "never" in html
+
+
+def test_the_page_lists_scheduled_or_ever_run_but_not_every_manual_tool(monkeypatch):
+    """`migrate` and the backfills are real commands, but they are one-off
+    manual tools. Listing them as "not scheduled / never" on a page about
+    the schedule buries the rows that matter."""
+    from src import api_admin
+
+    monkeypatch.setattr(api_admin.job_runs, "latest_per_command", lambda: [])
+    monkeypatch.setattr(api_admin.job_runs, "recent", lambda limit=50: [])
+    monkeypatch.setattr(
+        api_admin, "_read_active_crontab",
+        lambda: ("0 9 * * * cd /app && python -m src.cli daily_sla\n", "(test)"),
+    )
+    html = api_admin.scheduler_status(None, user={"login": "tester"}).body.decode()
+    ops = html.split("<h2>Operations</h2>")[1].split("<h2>Recent runs")[0]
+
+    assert "daily_sla" in ops
+    assert "<code>migrate</code>" not in ops, "a manual command nobody has run is not an operation"
+    assert "backfill_battery_trips" not in ops
+
+
+def test_a_manual_command_appears_once_somebody_actually_runs_it(monkeypatch):
+    from src import api_admin
+
+    run = {"command": "backfill_battery_trips", "started_at": datetime.now(timezone.utc),
+           "finished_at": datetime.now(timezone.utc), "status": "ok",
+           "duration_ms": 90_000, "summary": {"rides": 40}, "error": None}
+    monkeypatch.setattr(api_admin.job_runs, "latest_per_command", lambda: [run])
+    monkeypatch.setattr(api_admin.job_runs, "recent", lambda limit=50: [run])
+    monkeypatch.setattr(api_admin, "_read_active_crontab", lambda: ("", "(test)"))
+
+    html = api_admin.scheduler_status(None, user={"login": "tester"}).body.decode()
+    ops = html.split("<h2>Operations</h2>")[1].split("<h2>Recent runs")[0]
+    assert "backfill_battery_trips" in ops, "running it is what makes it worth showing"
+    assert "not scheduled" in ops
+
+
+def test_prune_does_not_swallow_its_own_failure(monkeypatch):
+    """The docstring rule is specific: start/finish swallow because they are
+    bookkeeping attached to another job. prune IS a job — if it cannot
+    delete, it has failed, and cleanup_job_runs should exit non-zero."""
+    _install(monkeypatch, unreachable=True)
+    with pytest.raises(Exception):
+        job_runs.prune(keep_days=30)

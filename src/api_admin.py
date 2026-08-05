@@ -273,11 +273,17 @@ def scheduler_status(request: Request, user: dict = Depends(auth.require_admin))
 
     latest = {r["command"]: r for r in job_runs.latest_per_command()}
 
-    # The union of "scheduled" and "has ever run", so the page shows a job
-    # that is scheduled but has never fired (the interesting failure) as well
-    # as one that ran under a name no longer in the crontab (a rename, or a
-    # line someone removed without meaning to).
-    commands = sorted(set(schedules) | set(latest) | set(COMMANDS))
+    # Scheduled, or has ever run. Both halves earn their place: a command
+    # that is scheduled but has never fired is the interesting failure, and
+    # one that has run but is no longer in the crontab is a rename or a line
+    # someone deleted without meaning to.
+    #
+    # Deliberately NOT every entry in COMMANDS. Plenty of those are one-off
+    # manual tools — `migrate`, the backfills, the artifact fetchers — and
+    # listing them as "not scheduled / never" on a page about the schedule
+    # is noise that buries the rows above. One of them becomes visible the
+    # moment somebody actually runs it, which is when it is worth seeing.
+    commands = sorted(set(schedules) | set(latest))
     rows = []
     for cmd in commands:
         if not job_runs.is_recorded(cmd):
