@@ -1079,6 +1079,65 @@ epoch>:<sha256(leaders)[:16]>"`), for the same live-join reason.
 
 ---
 
+### `GET /api/v1/leaderboard/regional/live`
+
+The same whole-database ranking as
+[`/api/v1/leaderboard/regional`](#get-apiv1leaderboardregional), but
+aggregated **from the ledger at request time** instead of read out of
+sql/054's nightly `regional_leaders` table. `regional_leaders` is written
+once a night by `src/area_leaders.py:recompute`, so between runs it
+cannot show points earned today; this endpoint pays for a live
+`SUM(points) GROUP BY account_id` over the trailing 28 days (indexed by
+sql/059) so a QR scan or a finished ride moves the board while the rider
+is still looking at it. It backs the frontend Leaderboard panel's "Total
+Regional Points (live)" tally.
+
+Everything else is deliberately identical to the stored endpoint, so the
+two can be read interchangeably: same trailing-28-day window, same
+`status = 'confirmed'`-only rule, same `points DESC, first_point_at ASC,
+account_id ASC` tie-break (expressed in SQL here, in Python there), same
+read-time privacy filtering, same `MAX_REGIONAL_LEADERS` (25) depth, and
+the same entry shape.
+
+Two differences follow from having no recompute behind it:
+
+- The window is measured from **now**, and `computed_at` reports when the
+  aggregate was taken (`window_end` == `computed_at`).
+- **There is no 503.** The stored endpoint 503s before the first
+  recompute; this one reads `user_points` directly and answers
+  `leaders: []` on a database that has never been recomputed.
+
+The SQL is deliberately **not** capped to 25. Eligibility is applied
+after the aggregate, so a pre-truncated set would return fewer than the
+published depth whenever a top earner has opted out; the cap is applied
+to eligible entries instead.
+
+**Request:**
+```http
+GET /api/v1/leaderboard/regional/live
+```
+
+**Response 200:** identical shape to `/api/v1/leaderboard/regional`.
+```json
+{
+  "computed_at": "2026-07-29T18:42:11+00:00",
+  "window_start": "2026-07-01T18:42:11+00:00",
+  "window_end": "2026-07-29T18:42:11+00:00",
+  "leaders": [
+    { "rank": 1, "display_name": "Duke swift🦦", "points": 318,
+      "ruling_color": "#7c54cd", "ruling_border_color": "#382264", "ruling_alpha": 0.6 }
+  ]
+}
+```
+
+`Cache-Control: public, max-age=30` -- long enough that a burst of opens
+shares one aggregate, short enough that "live" is not a lie. The weak
+ETag is **content-only** (`W/"arealblive:<sha256(leaders)[:16]>"`): there
+is no run id to key on, and `computed_at` moves every request, so keying
+on it would make every tag unique and defeat the 304 entirely.
+
+---
+
 ### `GET /api/v1/equity-estimate?ranks=1,2`
 
 Device share inside a **candidate equity-rank cutoff** — the combined
@@ -3374,6 +3433,7 @@ Explicit `Cache-Control` headers, per endpoint:
 | `/api/v1/points/schedule` | `public, max-age=3600` | — |
 | `/api/v1/leaderboard/map` | `public, max-age=600` | weak, keyed on `(computed_at epoch, sha256(canonical cells)[:16])` -- deliberately NOT run-only; see the endpoint's notes |
 | `/api/v1/leaderboard/regional` | `public, max-age=600` | weak, same content-hash scheme as `/api/v1/leaderboard/map` |
+| `/api/v1/leaderboard/regional/live` | `public, max-age=30` | weak, content-only (`sha256(leaders)[:16]`) -- no run id to key on, and `computed_at` moves every request |
 | `/api/v1/private/area-leaders` | none (admin) | -- |
 | `/api/v1/private/regional-leaders` | none (admin) | -- |
 

@@ -76,17 +76,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import h3
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from .api_public import _if_none_match_hit
+from .area_leaders import DEFAULT_WINDOW_DAYS, MAX_REGIONAL_LEADERS
 from .pg import connection
 
 router = APIRouter()
 
 _CACHE_HEADER = "public, max-age=600"
+# The live regional tally (see `leaderboard_regional_live`) is not tied to a
+# nightly run, so it gets its own much shorter freshness budget: long enough
+# that a burst of opens shares one aggregate, short enough that "live" is not
+# a lie. A rider who just earned points sees them within the minute.
+_LIVE_CACHE_HEADER = "public, max-age=30"
 
 
 def _is_eligible(display_name: str | None, show_in_leaderboards: bool, show_public_username: bool) -> bool:
@@ -179,7 +186,7 @@ def _etag_for(computed_at, payload: Any) -> str:
 
 
 def _build_regional_leaders(
-    leader_rows, accounts_by_id: dict[int, tuple],
+    leader_rows, accounts_by_id: dict[int, tuple], limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """`leader_rows` are (rank, account_id, points, first_point_at) from
     `regional_leaders`, already ordered by rank. Same eligibility rule as
@@ -189,9 +196,17 @@ def _build_regional_leaders(
     `MAX_REGIONAL_LEADERS` to fall through into), so the output list can
     be shorter than what was stored, and its `rank` reflects display
     position among eligible entries, not the original stored rank.
+
+    `limit` caps the number of ELIGIBLE entries returned, and is what lets
+    the live endpoint below feed in every earner in the window (its SQL
+    cannot pre-truncate, or an opted-out account near the top would shorten
+    the list) and still publish the same depth as the stored dashboard.
+    Left None for the stored rows, which the recompute already capped.
     """
     out: list[dict[str, Any]] = []
     for _stored_rank, account_id, points, _first_point_at in leader_rows:
+        if limit is not None and len(out) >= limit:
+            break
         acct = accounts_by_id.get(account_id)
         if acct is None:
             continue
@@ -349,5 +364,101 @@ def leaderboard_regional(request: Request, response: Response) -> Any:
         "computed_at": computed_at.isoformat(),
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
+        "leaders": leaders,
+    }
+
+
+@router.get("/api/v1/leaderboard/regional/live")
+def leaderboard_regional_live(request: Request, response: Response) -> Any:
+    """The same whole-database ranking as GET /api/v1/leaderboard/regional,
+    aggregated FROM THE LEDGER AT REQUEST TIME instead of read out of
+    sql/054's `regional_leaders` table.
+
+    Why both exist: `regional_leaders` is written once a night by
+    src/area_leaders.py:recompute, so between runs it cannot show points
+    earned today. The rider-facing "Total Regional Points (live)" tally
+    wants exactly those — a QR scan or a finished ride should move the
+    board while the rider is still looking at it — so this endpoint pays
+    for a live `SUM(points) GROUP BY account_id` over the trailing window
+    (sql/059 indexes it) rather than reporting yesterday's snapshot.
+
+    Everything else is deliberately identical to the stored endpoint so
+    the two can be read interchangeably: the same trailing
+    `DEFAULT_WINDOW_DAYS` window, the same `confirmed`-only rule, the same
+    `points DESC, first_point_at ASC, account_id ASC` tie-break (expressed
+    here in SQL — it is the exact ordering `area_leaders._rank_cell`
+    applies in Python), the same read-time privacy filtering, the same
+    `MAX_REGIONAL_LEADERS` depth, and the same entry shape.
+
+    The window is measured from NOW, not from a run's `computed_at` (there
+    is no run behind this payload), and `computed_at` reports when the
+    aggregate was taken. The SQL is deliberately NOT capped to
+    `MAX_REGIONAL_LEADERS`: eligibility is applied after the fact, so a
+    pre-truncated set would return fewer than the published depth whenever
+    a top earner has opted out. It groups by account, so it returns one
+    row per account with confirmed points in the window — bounded by
+    active riders, not by ledger size.
+
+        const r = await fetch("/api/v1/leaderboard/regional/live");
+        const { leaders } = await r.json();
+    """
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(days=DEFAULT_WINDOW_DAYS)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT account_id, SUM(points) AS points, MIN(created_at) AS first_point_at
+                FROM user_points
+                WHERE status = 'confirmed' AND created_at >= %s
+                GROUP BY account_id
+                ORDER BY points DESC, first_point_at ASC, account_id ASC
+                """,
+                (window_start,),
+            )
+            totals = cur.fetchall()
+
+            account_ids = sorted({row[0] for row in totals})
+            accounts_by_id: dict[int, tuple] = {}
+            if account_ids:
+                cur.execute(
+                    """
+                    SELECT id, display_name, show_in_leaderboards, show_public_username,
+                           ruling_color, ruling_border_color, ruling_alpha
+                    FROM accounts
+                    WHERE id = ANY(%s)
+                    """,
+                    (account_ids,),
+                )
+                accounts_by_id = {a[0]: tuple(a[1:]) for a in cur.fetchall()}
+
+    # `_build_regional_leaders` reads (rank, account_id, points,
+    # first_point_at) and ignores the stored rank — these rows arrive
+    # already in rank order from the SQL above, so a placeholder goes in
+    # its slot rather than a second ranking pass.
+    leaders = _build_regional_leaders(
+        [(None, account_id, points, first_point_at) for account_id, points, first_point_at in totals],
+        accounts_by_id,
+        limit=MAX_REGIONAL_LEADERS,
+    )
+
+    # Content-only ETag: there is no run id to key on, and `now` moves every
+    # request — keying on it would make every tag unique and defeat the 304
+    # entirely. A tally that has not changed revalidates for free; the
+    # 30-second Cache-Control bounds how stale a hit can be.
+    etag = f'W/"arealblive:{_digest(leaders)}"'
+    if _if_none_match_hit(request, etag):
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Cache-Control": _LIVE_CACHE_HEADER},
+        )
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = _LIVE_CACHE_HEADER
+
+    return {
+        "computed_at": now.isoformat(),
+        "window_start": window_start.isoformat(),
+        "window_end": now.isoformat(),
         "leaders": leaders,
     }
