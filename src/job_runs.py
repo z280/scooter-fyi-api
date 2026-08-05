@@ -16,11 +16,20 @@ ingest cycle was never one of them, and letting it in would swamp the
 table to duplicate a better page.
 
 **Recording must never break the job.** A scheduled command's purpose is
-its work, not its bookkeeping. Every function here swallows its own
-exceptions and logs them: a ledger that is down must not turn a healthy
-archive run into a failed one. That is also why `start()` returning None
-is an ordinary outcome the caller carries through rather than a special
-case it has to check.
+its work, not its bookkeeping, so `start()` and `finish()` swallow their
+own exceptions and log them: a ledger that is down must not turn a
+healthy archive run into a failed one. That is also why `start()`
+returning None is an ordinary outcome the caller carries through rather
+than a special case it has to check.
+
+That rule is specific to those two, and the rest deliberately do NOT
+follow it. `prune()` is a scheduled job in its own right
+(`cleanup_job_runs`), not bookkeeping attached to someone else's work —
+if it cannot delete, it has failed, and it should say so through the same
+exit code and the same ledger row as any other job. `latest_per_command()`
+and `recent()` back an admin page, where a 500 is the honest answer to a
+database that will not answer; swallowing there would render an empty
+table that looks like "nothing has run".
 """
 
 from __future__ import annotations
