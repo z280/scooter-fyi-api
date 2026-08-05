@@ -1,76 +1,60 @@
-"""H3 r8 area leader report (FEATURE_PLAN_2026-07.md §11 /
-PLAN_RIDE_MODE_API.md Phase A4; sql/048_h3_r8_area_leaders.sql).
+"""H3 r8 territory control: the nightly UNIVERSE refresh, plus the window
+and ranking rules the read path shares with it.
 
-"All r8 hexagons in the local network, with the user who earned the most
-points there in the last four weeks, recalculated." `recompute()` is the
-nightly job (`python -m src.cli recompute_area_leaders`, crontab
-`15 9 * * *`); this module owns only the recompute side — the read
-endpoints (`GET /api/v1/leaderboard/map`, `GET /api/v1/private/area-leaders`)
-and their read-time privacy filtering live in src/api_leaderboard.py /
-src/api_private.py (a different lane; not touched here).
+This module used to compute the whole leaderboard on a schedule and store
+it. It no longer does. sql/061 moved everything derived from the points
+ledger to read time, because the two halves of the old job had wildly
+different costs and only one of them ever had to be scheduled:
 
-UNIVERSE (h3_r8_area_report rows): every r8 cell that has ever had an
-observed device OR points history — ALL-TIME, not windowed ("720 distinct
-r8 cells observed all-time today", FEATURE_PLAN §11.1) — unioned from three
-sources:
+    UNIVERSE (still here, `refresh_universe`) -- "every r8 cell that has
+    ever had an observed device OR points history", ALL-TIME. Needs
+    ``SELECT DISTINCT h3_8_index FROM device_history`` over ~7.3M rows
+    with no index on that column: a seq scan of a few seconds. That is the
+    reason this job exists at all, and why it now runs WEEKLY rather than
+    nightly -- the answer is all-time, so it barely moves, and a cell that
+    only just saw its first device is already covered by the read path's
+    own fallback (see src/api_leaderboard.py).
+
+    LEADERS (gone from here; see src/api_leaderboard.py) -- the trailing
+    `DEFAULT_WINDOW_DAYS` of ``user_points``, which sql/059's index serves
+    directly. Storing these meant territory could not change until the
+    next 09:15 run, so a rider could never watch themselves take a
+    hexagon. They are ranked per request now, off the same single scan
+    that already served the regional leaderboard.
+
+UNIVERSE SOURCES, unioned in Python (`_build_universe`) rather than as a
+fourth SQL UNION -- each query returns at most a few hundred small
+integers, and the union-with-overlaps logic is directly unit-testable with
+a fake cursor instead of only through a live Postgres run:
 
     SELECT DISTINCT h3_8_index         FROM device_history
     SELECT DISTINCT current_h3_8_index FROM device_state
     SELECT DISTINCT h3_8_index         FROM user_points WHERE status = 'confirmed'
 
-device_history is ~7.3M rows with no index on h3_8_index — the plain
-DISTINCT scan is a deliberate, acknowledged cost ("a seq scan of a few
-seconds, once a day, off-peak" — FEATURE_PLAN §11.1) rather than maintaining
-a ~150 MB index at boot in every environment for one daily query. Each of
-the three queries returns at most a few hundred small integers, so the
-union/dedup happens in Python (`_build_universe`) rather than as a fourth
-SQL UNION — that also makes the union-with-overlaps logic directly
-unit-testable with a fake cursor instead of only through a live Postgres
-run.
+What stays here besides the job is the shared vocabulary the read path
+needs, so the two cannot drift apart:
 
-WINDOW (what total_points / distinct_earners / the leaders themselves
-measure): the trailing `window_days` (28) ending at the run's start,
-stamped into h3_r8_area_leader_runs so the report says what it measured.
-Only `status = 'confirmed'` ledger rows ever count — sql/028's own
-docstring: nothing in this codebase's current era writes any other status,
-but a future moderator-approval workflow might, and this report must not
-count a row nobody has confirmed. The confirmed-only filter and the
-points/first_point_at aggregation both happen in Python
-(`_aggregate_window_points`) for the same testability reason as the
-universe union: user_points, unlike device_history, is naturally bounded by
-the 28-day window (SQL narrows to that range before any row reaches
-Python), so aggregating client-side costs nothing at this scale and buys a
-tie-break implementation that a fake-cursor test can exercise directly.
+    DEFAULT_WINDOW_DAYS   the trailing window both describe
+    MAX_LEADERS_PER_CELL  per-cell podium depth
+    MAX_REGIONAL_LEADERS  whole-database leaderboard depth
+    _aggregate_window_points / _aggregate_regional_points / _rank_cell
 
 TIE-BREAK (`_rank_cell`), deterministic and total: `points DESC`, then
 `first_point_at ASC` ("whoever got there first holds the territory"), then
-`account_id ASC` as the final tiebreak. Top 3 per cell are stored — not just
-the winner — because privacy (`show_in_leaderboards` / `show_public_username`)
-is applied at READ time by the endpoint and can flip at any moment; storing
-only the winner would mean an opt-out blanks a hex until tomorrow's run
-instead of falling through to the runner-up immediately.
+`account_id ASC` as the final tiebreak. The read path expresses that same
+order in SQL; this stays the reference implementation, and a test holds
+the two to each other.
 
-FULL-REPLACE, not accumulation — mirrors src/daily_trips.py:compute_for_date.
-One transaction: `DELETE FROM h3_r8_area_report` (cascades to
-h3_r8_area_leaders via its FK) -> INSERT the fresh universe -> INSERT the
-fresh leaders -> INSERT one new h3_r8_area_leader_runs row. The runs table is
+Only `status = 'confirmed'` ledger rows ever count -- sql/028's own
+docstring: nothing in this codebase's current era writes any other status,
+but a future moderator-approval workflow might, and this report must not
+count a row nobody has confirmed.
+
+FULL-REPLACE, not accumulation -- mirrors src/daily_trips.py:compute_for_date.
+One transaction: `DELETE FROM h3_r8_area_report` -> INSERT the fresh
+universe -> INSERT one new `h3_r8_area_leader_runs` row. The runs table is
 the one exception to "replace": it is an APPEND-ONLY audit log, one row per
 call, never deleted here.
-
-REGIONAL LEADERBOARD (sql/054, `regional_leaders`) — a second dashboard,
-computed in this SAME transaction and SAME window: the top
-`MAX_REGIONAL_LEADERS` accounts by total confirmed points across the WHOLE
-database, not split by cell. Per @zNeill's 2026-07-30 clarification on the
-review that originally flagged this module for a spatial_status filter:
-the per-cell report already answers the right question (every cell that
-has ever seen points/devices, no narrower scope needed) — what was
-missing was this second, ungrouped view. Built by collapsing the same
-`by_cell` per-(cell, account) totals this module already computes down to
-one total per account (`_aggregate_regional_points`), then ranked with the
-same tie-break as the per-cell leaders (`_rank_cell` — it never looks at
-`h3_8_index`, so it works unchanged here). Full-replace, like
-h3_r8_area_leaders; no separate runs table (read it against
-h3_r8_area_leader_runs' latest row, exactly as the per-cell leaders do).
 """
 
 from __future__ import annotations
@@ -94,12 +78,16 @@ DEFAULT_WINDOW_DAYS = 28
 # it).
 _CONFIRMED_STATUS = "confirmed"
 
-# Top 3 per cell, not just the winner — see the module docstring.
-_MAX_LEADERS_PER_CELL = 3
+# Top 3 per cell, not just the winner. The read path drops an entry whose
+# owner has opted out, so a winner-only model would blank a hexagon rather
+# than fall through to the runner-up. Public because that read path is now
+# the only thing that uses it.
+MAX_LEADERS_PER_CELL = 3
 
 # The regional (whole-database) dashboard's leaderboard depth — a real
-# leaderboard length, not a 3-entry podium; see the module docstring.
-# Matches sql/054's `regional_leaders.rank` CHECK bound.
+# leaderboard length, not a 3-entry podium; see the module docstring. Was
+# also sql/054's `regional_leaders.rank` CHECK bound until sql/061 dropped
+# that table, so this constant is now the only place the depth is stated.
 MAX_REGIONAL_LEADERS = 25
 
 
@@ -226,29 +214,35 @@ def _aggregate_regional_points(
 # ---------------------------------------------------------------------------
 # The job.
 # ---------------------------------------------------------------------------
-def recompute(window_days: int = DEFAULT_WINDOW_DAYS) -> dict[str, Any]:
-    """Recompute the H3 r8 area leader report. Safe to call repeatedly —
-    each call fully replaces `h3_r8_area_report` / `h3_r8_area_leaders`
-    (DELETE-cascade then INSERT, in one transaction — the
-    src/daily_trips.py:compute_for_date idiom) and appends one new row to
-    the append-only `h3_r8_area_leader_runs` audit log.
+def refresh_universe(window_days: int = DEFAULT_WINDOW_DAYS) -> dict[str, Any]:
+    """Refresh the r8 cell UNIVERSE. Safe to call repeatedly — each call
+    fully replaces `h3_r8_area_report` and appends one row to the
+    append-only `h3_r8_area_leader_runs` audit log.
+
+    This is the whole job now. It reads no points and ranks nobody: the
+    leaderboard is computed per request (src/api_leaderboard.py). What it
+    produces is the cell list the map draws — crucially including the
+    cells with NO points at all, which is the part a read-time query
+    genuinely cannot know, because "a device has been seen here" is an
+    all-time fact about `device_history` rather than a fact about the
+    trailing window.
+
+    `window_days` is accepted and reported only so the CLI summary says
+    which window the cells it just refreshed will be read against. Nothing
+    here filters on it.
 
     Returns a summary dict (mirrors src/daily_trips.py's
     compute_for_date/run_daily convention — src/cli.py logs whatever each
-    command returns).
+    command returns, and /admin/scheduler renders it).
     """
     run_at = datetime.now(timezone.utc)
-    window_start = run_at - timedelta(days=window_days)
-    window_end = run_at
-
-    log.info(
-        "area_leaders.recompute: window %s .. %s (window_days=%d)",
-        window_start, window_end, window_days,
-    )
+    log.info("area_leaders.refresh_universe: starting (window_days=%d)", window_days)
 
     with connection() as conn:
         with conn.cursor() as cur:
             # ---- universe: three cheap DISTINCT scans, unioned in Python ----
+            # The device_history scan is the expensive one, and the entire
+            # reason this runs on a schedule instead of per request.
             cur.execute("SELECT DISTINCT h3_8_index FROM device_history WHERE h3_8_index IS NOT NULL")
             device_history_cells = [r[0] for r in cur.fetchall()]
 
@@ -266,97 +260,37 @@ def recompute(window_days: int = DEFAULT_WINDOW_DAYS) -> dict[str, Any]:
 
             universe = _build_universe(device_history_cells, device_state_cells, points_cells)
 
-            # ---- windowed ledger rows -> per-(cell, account) totals ----
-            cur.execute(
-                """
-                SELECT h3_8_index, account_id, points, created_at, status
-                FROM user_points
-                WHERE created_at >= %s AND created_at < %s
-                """,
-                (window_start, window_end),
-            )
-            by_cell = _aggregate_window_points(cur.fetchall())
-
-            # ---- full replace: report + leaders ----
+            # ---- full replace ----
             cur.execute("DELETE FROM h3_r8_area_report")
-
-            report_rows: list[tuple[int, bool, bool, int, int]] = []
-            leader_rows: list[tuple[int, int, int, int, datetime]] = []
-            led_cells = 0
-            for h3_8_index, flags in universe.items():
-                entries = by_cell.get(h3_8_index, [])
-                total_points = sum(e.points for e in entries)
-                distinct_earners = len(entries)
-                report_rows.append((
-                    h3_8_index, flags["has_devices"], flags["has_points"],
-                    total_points, distinct_earners,
-                ))
-                if entries:
-                    led_cells += 1
-                    ranked = _rank_cell(entries)
-                    for rank, entry in enumerate(ranked[:_MAX_LEADERS_PER_CELL], start=1):
-                        leader_rows.append((
-                            h3_8_index, rank, entry.account_id, entry.points, entry.first_point_at,
-                        ))
-
+            report_rows = [
+                (h3_8_index, flags["has_devices"], flags["has_points"])
+                for h3_8_index, flags in universe.items()
+            ]
             if report_rows:
                 cur.executemany(
                     """
-                    INSERT INTO h3_r8_area_report
-                        (h3_8_index, has_devices, has_points, total_points, distinct_earners)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO h3_r8_area_report (h3_8_index, has_devices, has_points)
+                    VALUES (%s, %s, %s)
                     """,
                     report_rows,
-                )
-            if leader_rows:
-                cur.executemany(
-                    """
-                    INSERT INTO h3_r8_area_leaders
-                        (h3_8_index, rank, account_id, points, first_point_at)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    leader_rows,
-                )
-
-            # ---- full replace: regional (whole-database) leaderboard ----
-            regional_ranked = _rank_cell(_aggregate_regional_points(by_cell))
-            regional_rows = [
-                (rank, entry.account_id, entry.points, entry.first_point_at)
-                for rank, entry in enumerate(regional_ranked[:MAX_REGIONAL_LEADERS], start=1)
-            ]
-            cur.execute("DELETE FROM regional_leaders")
-            if regional_rows:
-                cur.executemany(
-                    """
-                    INSERT INTO regional_leaders (rank, account_id, points, first_point_at)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    regional_rows,
                 )
 
             cell_count = len(report_rows)
             cur.execute(
                 """
-                INSERT INTO h3_r8_area_leader_runs
-                    (computed_at, window_start, window_end, cell_count, led_cells)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO h3_r8_area_leader_runs (computed_at, cell_count)
+                VALUES (%s, %s)
                 RETURNING id
                 """,
-                (run_at, window_start, window_end, cell_count, led_cells),
+                (run_at, cell_count),
             )
             (run_id,) = cur.fetchone()
         conn.commit()
 
-    log.info(
-        "area_leaders.recompute: run_id=%s cells=%d led_cells=%d regional_leaders=%d",
-        run_id, cell_count, led_cells, len(regional_rows),
-    )
+    log.info("area_leaders.refresh_universe: run_id=%s cells=%d", run_id, cell_count)
     return {
         "run_id": run_id,
         "computed_at": run_at,
-        "window_start": window_start,
-        "window_end": window_end,
         "cell_count": cell_count,
-        "led_cells": led_cells,
-        "regional_leader_count": len(regional_rows),
+        "window_days": window_days,
     }

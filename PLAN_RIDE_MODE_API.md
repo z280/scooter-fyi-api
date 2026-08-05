@@ -681,6 +681,8 @@ ships a plain `idx_user_points_h3_8 ON user_points (h3_8_index)`, which the new 
 `DROP INDEX IF EXISTS idx_user_points_h3_8` (idempotent, replay-safe) instead of leaving every
 `user_points` insert maintaining two indexes over the same leading column.
 
+> **Superseded (sql/061).** The nightly `recompute` described below was split: `src/area_leaders.py:refresh_universe` now runs WEEKLY and refreshes only the all-time cell universe, and the leaderboard itself is computed per request in `src/api_leaderboard.py`. The stored `h3_r8_area_leaders`/`regional_leaders` tables are gone. The window, the confirmed-only rule and the tie-break are unchanged — only where and when they are applied. See API.md's `/api/v1/leaderboard/map` section.
+
 **Recompute:** `src/area_leaders.py:recompute(window_days=28)` per §11.3 — universe =
 `DISTINCT h3_8_index FROM device_history` ∪ `device_state.current_h3_8_index` ∪
 `user_points.h3_8_index`; only `status='confirmed'` rows; tie-break

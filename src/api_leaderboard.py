@@ -1,48 +1,66 @@
-"""GET /api/v1/leaderboard/map — the rider-facing FEATURE_PLAN §11 H3 r8
-area-leader choropleth feed.
+"""Rider-facing territory control, computed at READ time.
 
-Reads the daily area-leader report (the recompute lane's
-``src/area_leaders.py:recompute``, table group ``h3_r8_area_report`` /
-``h3_r8_area_leaders`` / ``h3_r8_area_leader_runs``, sql/048) — but
-privacy is NOT baked into those stored rows. It is applied HERE, at read
-time, by a live join against ``accounts``, so a rider's visibility choice
-takes effect on their very next request instead of waiting for tomorrow's
-09:15 recompute. A stored top-3 rank is skipped (and the next stored rank
-falls through into its place) when:
+GET /api/v1/leaderboard/map       — per H3 r8 cell: who holds it, plus totals.
+GET /api/v1/leaderboard/regional  — the same window, ranked across the whole
+                                    database rather than split by cell.
+
+Both used to be served from tables a nightly job wrote (sql/048's
+``h3_r8_area_leaders``, sql/054's ``regional_leaders``). sql/061 dropped
+those tables and moved the work here. The reason is the one riders feel:
+territory could not change until the next 09:15 run, so nobody could ever
+watch themselves take a hexagon. Everything these endpoints report is a
+fact about the trailing `DEFAULT_WINDOW_DAYS` of ``user_points`` — a
+window is a read-time idea, and pinning it to a nightly run was what made
+it stale.
+
+It is also cheap, which is why it was worth doing. Both endpoints are one
+indexed range scan of the ledger (sql/061's
+``idx_user_points_confirmed_created``, partial on ``status='confirmed'``,
+carrying ``points`` and ``h3_8_index`` so neither read has to visit the
+heap). They differ only in how far they group: the map by
+``(h3_8_index, account_id)``, the regional board by ``account_id`` alone.
+That is exactly the relationship the old nightly job had internally —
+``_aggregate_regional_points(by_cell)`` — now expressed as two endpoints
+so a client can ask for one without paying for the other.
+
+THE UNIVERSE is the one thing still precomputed, and the one thing a
+read-time query genuinely cannot derive: ``h3_r8_area_report`` lists every
+r8 cell that has ever had an observed device, ALL-TIME. Those are the
+unclaimed cells the map draws as bare outlines, and "a device has been
+seen here" is not a fact about the trailing window. src/area_leaders.py
+refreshes it weekly. This endpoint UNIONS it with the cells that have
+points in the window, so:
+
+    * a cell that earned its first point since the last refresh still
+      renders, rather than waiting up to a week to appear; and
+    * there is no 503. The stored endpoints used to fail outright before
+      the first recompute; this one answers from the ledger alone on a
+      database whose universe has never been refreshed.
+
+PRIVACY is applied here, at read time, by a live join against
+``accounts`` — unchanged in rule, and now unchanged in freshness too,
+since there is no stored copy left to lag behind it. A stored rank is
+skipped (and the next eligible earner falls through into its place) when:
 
     * ``show_in_leaderboards`` is false — the rider opted out outright.
     * ``show_public_username`` is false — the same "hide the name" rule
-      ``GET /api/v1/devices/{vid}/photos`` already applies at read time:
-      ``CASE WHEN show_public_username THEN public_username ELSE NULL END``
-      (see src/api_device_photos.py). A leaderboard entry with a hidden
-      name is exactly the case that rule exists to prevent.
+      ``GET /api/v1/devices/{vid}/photos`` already applies at read time.
     * ``display_name IS NULL`` — sql/025's never-backfilled-username edge
-      case (an account created before the username machinery ran and not
-      yet backfilled). sql/044's ``display_name`` generated column reads
-      straight off ``username_adjective``/``username_emoji``, so a NULL
-      there propagates to a NULL ``display_name``, and a nameless leader
-      would render as a literal ``null`` on the choropleth.
-
-``leader`` is the highest surviving stored rank (1..3); ``runners_up`` is
-whatever eligible ranks remain (so ``leader`` + ``runners_up`` totals at
-most 3, and can be fewer, including zero eligible entries at all — a
-cell can report real ``total_points``/``distinct_earners`` from the
-ledger while showing ``leader: null`` because every earner there opted
-out).
+      case; a nameless leader would render as a literal ``null``.
 
 ``total_points``/``distinct_earners`` are NOT privacy-filtered: they are
 aggregate counts with no identity attached (a number reveals nobody), and
-sql/048's ``h3_r8_area_report`` stores them as report-level facts
-independent of any single account.
+they count EVERY earner in the cell, not only the eligible top 3.
 
-Colors (``ruling_color``/``ruling_border_color``/``ruling_alpha``) are
-also live-joined from ``accounts``. The pair is coherent by
+Colors are live-joined from the same row. The pair is coherent by
 ``accounts_ruling_colors_coherent`` (sql/044) — both NULL or both set —
-but ``ruling_alpha`` carries ``NOT NULL DEFAULT 0.60`` in the schema, so
-an account with no claimed color pair still has a non-null alpha in its
-row. This handler NULLs ``ruling_alpha`` in the payload whenever the
-color pair is NULL; forwarding the column default would leak a
-meaningless number as if it were a real fill opacity.
+but ``ruling_alpha`` carries ``NOT NULL DEFAULT 0.60``, so an account with
+no claimed pair still has a non-null alpha in its row. This handler NULLs
+``ruling_alpha`` whenever the color pair is NULL; forwarding the column
+default would leak a meaningless number as if it were a real fill opacity.
+(The frontend ignores the field entirely and paints every claimed hexagon
+at one constant opacity — but that is its decision, not a licence for this
+layer to send nonsense.)
 
 No ``royalty_title`` field: ``display_name`` already composes it
 (sql/044's generated column, restyled by sql/060: the title, a space,
@@ -50,27 +68,18 @@ then the capitalized adjective, a space, and the emoji — "Duke Swift
 🦦") — shipping the title again would be a second copy of the same fact
 that can only drift.
 
-ETAG — deliberately NOT run-keyed. ``/api/v1/h3/aggregates`` can key its
-weak ETag on the ingest cycle because that payload is a pure function of
-the cycle (src/api_h3.py says so explicitly). This one is not: it is a
-LIVE JOIN, so an account's ``show_in_leaderboards``/
-``show_public_username``/colors/re-rolled name can all change the
-rendered body between recomputes. An ETag keyed only on
-``h3_r8_area_leader_runs.computed_at`` would happily answer
-``If-None-Match`` with a 304 that resurrects an opted-out rider until the
-next 09:15 run — exactly the leak read-time filtering exists to prevent.
-So the weak ETag is keyed on BOTH ``computed_at`` AND a hash of the
-rendered ``cells`` payload:
-``W/"arealb:<computed_at epoch>:<sha256(cells)[:16]>"``. The hash is
-taken over a CANONICAL serialization
-(``json.dumps(cells, sort_keys=True, separators=(",", ":"))``) —
-anything process-dependent (e.g. incidental dict/set iteration order)
-would churn the tag across workers and silently defeat every 304. Both
-components are load-bearing: the content hash catches an eligibility/
-color/name change with ``computed_at`` unchanged, and the ``computed_at``
-component catches a fresh run whose cells happen to render identically
-(near-certain at launch volumes) — a cells-only tag would revalidate
-clients onto a stale ``window_start``/``window_end``.
+ETAGS are content-only — ``W/"arealb:<sha256(payload)[:16]>"`` — where the
+stored endpoints keyed on the run's ``computed_at`` plus a content hash.
+There is no run behind these payloads any more, and ``computed_at`` is now
+simply "when you asked", which moves every request: keying on it would
+make every tag unique and defeat the 304 entirely. The hash is taken over
+a CANONICAL serialization (``sort_keys=True``) so nothing
+process-dependent can churn the tag across workers.
+
+``Cache-Control: public, max-age=30`` on both, down from 600. That is the
+freshness the whole change exists to buy, and it bounds how stale a hit
+can be; the frontend already re-polls the map every 90 s, so this is what
+finally makes that poll mean something.
 """
 
 from __future__ import annotations
@@ -81,20 +90,33 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import h3
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Request, Response
 
 from .api_public import _if_none_match_hit
-from .area_leaders import DEFAULT_WINDOW_DAYS, MAX_REGIONAL_LEADERS
+from .area_leaders import (
+    DEFAULT_WINDOW_DAYS,
+    MAX_LEADERS_PER_CELL,
+    MAX_REGIONAL_LEADERS,
+)
 from .pg import connection
 
 router = APIRouter()
 
-_CACHE_HEADER = "public, max-age=600"
-# The live regional tally (see `leaderboard_regional_live`) is not tied to a
-# nightly run, so it gets its own much shorter freshness budget: long enough
-# that a burst of opens shares one aggregate, short enough that "live" is not
-# a lie. A rider who just earned points sees them within the minute.
-_LIVE_CACHE_HEADER = "public, max-age=30"
+# Short enough that "live" is not a lie, long enough that a burst of opens
+# shares one aggregate. A rider who just earned points sees them within the
+# minute.
+_CACHE_HEADER = "public, max-age=30"
+
+# The tie-break, in SQL. This is `area_leaders._rank_cell`'s rule spelled
+# out — points first, then whoever got there first holds the territory, then
+# account id to make it total. Kept as one string so the two endpoints below
+# cannot drift from each other, and tested against the Python reference
+# implementation so neither can drift from the recompute lane's definition.
+_TIE_BREAK = "points DESC, first_point_at ASC, account_id ASC"
+
+
+def _window_start(now: datetime) -> datetime:
+    return now - timedelta(days=DEFAULT_WINDOW_DAYS)
 
 
 def _is_eligible(display_name: str | None, show_in_leaderboards: bool, show_public_username: bool) -> bool:
@@ -126,52 +148,113 @@ def _leader_entry(
     }
 
 
-def _build_cells(report_rows, accounts_by_id: dict[int, tuple]) -> dict[str, dict[str, Any]]:
-    """`report_rows` are (h3_8_index, total_points, distinct_earners, rank,
-    account_id, points, first_point_at) — the LEFT JOIN's rank/account_id/
-    points/first_point_at are NULL for a report cell with no leader rows
-    at all. Rows MUST already be ordered by (h3_8_index, rank ASC) — the
-    handler's SQL does this; a fake cursor in tests must replicate the
-    ordering, since NULL ranks (no leaders) sort however Postgres likes
-    but are skipped here regardless of position.
+def _fetch_accounts(cur, account_ids: list[int]) -> dict[int, tuple]:
+    """account_id -> (display_name, show_in_leaderboards, show_public_username,
+    ruling_color, ruling_border_color, ruling_alpha). One query for the whole
+    payload's cast, not one per entry."""
+    if not account_ids:
+        return {}
+    cur.execute(
+        """
+        SELECT id, display_name, show_in_leaderboards, show_public_username,
+               ruling_color, ruling_border_color, ruling_alpha
+        FROM accounts
+        WHERE id = ANY(%s)
+        """,
+        (sorted(set(account_ids)),),
+    )
+    return {a[0]: tuple(a[1:]) for a in cur.fetchall()}
 
-    `accounts_by_id` maps account_id -> (display_name, show_in_leaderboards,
-    show_public_username, ruling_color, ruling_border_color, ruling_alpha).
+
+def _eligible_entry(account_id: int, points: int, accounts_by_id: dict[int, tuple]) -> dict[str, Any] | None:
+    """One ledger total -> a payload entry, or None when the account is
+    ineligible (or, defensively, missing: the FK guarantees it exists, but a
+    race should fall through rather than 500)."""
+    acct = accounts_by_id.get(account_id)
+    if acct is None:
+        return None
+    (display_name, show_in_leaderboards, show_public_username,
+     ruling_color, ruling_border_color, ruling_alpha) = acct
+    if not _is_eligible(display_name, show_in_leaderboards, show_public_username):
+        return None
+    return _leader_entry(display_name, points, ruling_color, ruling_border_color, ruling_alpha)
+
+
+def _build_cells(
+    totals_rows,
+    universe_cells,
+    accounts_by_id: dict[int, tuple],
+) -> dict[str, dict[str, Any]]:
+    """`totals_rows` are (h3_8_index, account_id, points, first_point_at),
+    already grouped per (cell, account) and ordered by
+    (h3_8_index, <tie-break>) — the handler's SQL does this, and a fake
+    cursor in tests must replicate the ordering, since the first eligible
+    row per cell is taken as its leader.
+
+    `universe_cells` are the all-time cell ids from `h3_r8_area_report`.
+    They are UNIONed with whatever appears in `totals_rows`, so a cell that
+    earned its first point since the last universe refresh still renders,
+    and a database with no refresh at all still returns the claimed cells.
     """
     cells: dict[str, dict[str, Any]] = {}
-    for h3_idx, total_points, distinct_earners, rank, account_id, points, _first_point_at in report_rows:
+
+    def cell_for(h3_idx: int) -> dict[str, Any]:
         key = h3.int_to_str(int(h3_idx))
         cell = cells.get(key)
         if cell is None:
-            cell = cells[key] = {
-                "total_points": int(total_points),
-                "distinct_earners": int(distinct_earners),
-                "_eligible": [],
-            }
-        if rank is None:
-            continue
-        acct = accounts_by_id.get(account_id)
-        if acct is None:
-            # Defensive: the FK guarantees the account exists, but a stale
-            # fixture/race should fall through rather than 500.
-            continue
-        (display_name, show_in_leaderboards, show_public_username,
-         ruling_color, ruling_border_color, ruling_alpha) = acct
-        if not _is_eligible(display_name, show_in_leaderboards, show_public_username):
-            continue
-        cell["_eligible"].append(_leader_entry(
-            display_name, points, ruling_color, ruling_border_color, ruling_alpha))
+            cell = cells[key] = {"total_points": 0, "distinct_earners": 0, "_eligible": []}
+        return cell
 
-    result: dict[str, dict[str, Any]] = {}
-    for key, cell in cells.items():
-        eligible = cell["_eligible"]
-        result[key] = {
+    for h3_idx in universe_cells:
+        cell_for(h3_idx)
+
+    for h3_idx, account_id, points, _first_point_at in totals_rows:
+        cell = cell_for(h3_idx)
+        # Totals count EVERY earner, eligible or not — they carry no
+        # identity, and hiding a rider must not silently shrink a cell's
+        # reported activity.
+        cell["total_points"] += int(points)
+        cell["distinct_earners"] += 1
+        if len(cell["_eligible"]) >= MAX_LEADERS_PER_CELL:
+            continue
+        entry = _eligible_entry(account_id, points, accounts_by_id)
+        if entry is not None:
+            cell["_eligible"].append(entry)
+
+    return {
+        key: {
             "total_points": cell["total_points"],
             "distinct_earners": cell["distinct_earners"],
-            "leader": eligible[0] if eligible else None,
-            "runners_up": eligible[1:],
+            "leader": cell["_eligible"][0] if cell["_eligible"] else None,
+            "runners_up": cell["_eligible"][1:],
         }
-    return result
+        for key, cell in cells.items()
+    }
+
+
+def _build_regional_leaders(
+    totals_rows, accounts_by_id: dict[int, tuple], limit: int = MAX_REGIONAL_LEADERS,
+) -> list[dict[str, Any]]:
+    """`totals_rows` are (account_id, points, first_point_at), already
+    ordered by the tie-break. An ineligible earner is DROPPED, and the
+    survivors are renumbered to a contiguous `rank` from 1 — so `rank` is
+    display position, not a stored position with holes in it.
+
+    `limit` is applied to ELIGIBLE entries, deliberately not in SQL: the
+    filtering happens after the aggregate, so a pre-truncated set would
+    return fewer than the published depth whenever a top earner had opted
+    out.
+    """
+    out: list[dict[str, Any]] = []
+    for account_id, points, _first_point_at in totals_rows:
+        if len(out) >= limit:
+            break
+        entry = _eligible_entry(account_id, points, accounts_by_id)
+        if entry is None:
+            continue
+        entry["rank"] = len(out) + 1
+        out.append(entry)
+    return out
 
 
 def _digest(payload: Any) -> str:
@@ -182,284 +265,94 @@ def _digest(payload: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-def _etag_for(computed_at, payload: Any) -> str:
-    return f'W/"arealb:{int(computed_at.timestamp())}:{_digest(payload)}"'
-
-
-def _build_regional_leaders(
-    leader_rows, accounts_by_id: dict[int, tuple], limit: int | None = None,
-) -> list[dict[str, Any]]:
-    """`leader_rows` are (rank, account_id, points, first_point_at) from
-    `regional_leaders`, already ordered by rank. Same eligibility rule as
-    the per-cell endpoint (`_is_eligible`/`_leader_entry`), but flat and
-    re-numbered: an ineligible stored entry is dropped rather than
-    replaced (there is no runner-up pool beyond the stored top
-    `MAX_REGIONAL_LEADERS` to fall through into), so the output list can
-    be shorter than what was stored, and its `rank` reflects display
-    position among eligible entries, not the original stored rank.
-
-    `limit` caps the number of ELIGIBLE entries returned, and is what lets
-    the live endpoint below feed in every earner in the window (its SQL
-    cannot pre-truncate, or an opted-out account near the top would shorten
-    the list) and still publish the same depth as the stored dashboard.
-    Left None for the stored rows, which the recompute already capped.
-    """
-    out: list[dict[str, Any]] = []
-    for _stored_rank, account_id, points, _first_point_at in leader_rows:
-        if limit is not None and len(out) >= limit:
-            break
-        acct = accounts_by_id.get(account_id)
-        if acct is None:
-            continue
-        (display_name, show_in_leaderboards, show_public_username,
-         ruling_color, ruling_border_color, ruling_alpha) = acct
-        if not _is_eligible(display_name, show_in_leaderboards, show_public_username):
-            continue
-        entry = _leader_entry(display_name, points, ruling_color, ruling_border_color, ruling_alpha)
-        entry["rank"] = len(out) + 1
-        out.append(entry)
-    return out
+def _respond(request: Request, response: Response, payload: dict[str, Any], body_key: str) -> Any:
+    """Shared ETag/304 + cache-header tail. The tag is keyed on the
+    payload's substance only — never on `computed_at`, which is "now" and
+    would make every tag unique."""
+    etag = f'W/"arealb:{_digest(payload[body_key])}"'
+    if _if_none_match_hit(request, etag):
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": _CACHE_HEADER})
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = _CACHE_HEADER
+    return payload
 
 
 @router.get("/api/v1/leaderboard/map")
 def leaderboard_map(request: Request, response: Response) -> Any:
-    """The choropleth + click-through detail feed in one fetch: full
-    eligible top-3 per cell, not just the leader (the RIDE_MODE_OVERHAUL
-    extension to §11.4's literal shape).
+    """The choropleth plus every cell's click-through detail in one fetch:
+    the full eligible top-`MAX_LEADERS_PER_CELL` per cell, not just the
+    leader, so a client never needs a second request to show a cell's
+    runners-up.
 
         const r = await fetch("/api/v1/leaderboard/map");
         const { cells } = await r.json();
     """
+    now = datetime.now(timezone.utc)
+    window_start = _window_start(now)
+
     with connection() as conn:
         with conn.cursor() as cur:
-            # REVIEW FIX: the metadata read below and the cells read further
-            # down are two separate statements. Under the default READ
-            # COMMITTED isolation, a recompute committing between them could
-            # make the two disagree — an old computed_at/ETag paired with new
-            # cells, or vice versa — so a client's cache validator would stop
-            # meaning anything. REPEATABLE READ (must be set before the first
-            # statement in the transaction) gives every statement in this
-            # read-only transaction ONE consistent snapshot.
-            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            cur.execute(
-                """
-                SELECT computed_at, window_start, window_end
-                FROM h3_r8_area_leader_runs
-                ORDER BY computed_at DESC, id DESC
-                LIMIT 1
-                """
-            )
-            run = cur.fetchone()
-            if not run:
-                raise HTTPException(503, detail="no leaderboard computed yet")
-            computed_at, window_start, window_end = run
+            cur.execute("SELECT h3_8_index FROM h3_r8_area_report")
+            universe_cells = [r[0] for r in cur.fetchall()]
 
             cur.execute(
-                """
-                SELECT r.h3_8_index, r.total_points, r.distinct_earners,
-                       l.rank, l.account_id, l.points, l.first_point_at
-                FROM h3_r8_area_report r
-                LEFT JOIN h3_r8_area_leaders l ON l.h3_8_index = r.h3_8_index
-                ORDER BY r.h3_8_index, l.rank
-                """
+                f"""
+                SELECT h3_8_index, account_id,
+                       SUM(points) AS points, MIN(created_at) AS first_point_at
+                FROM user_points
+                WHERE status = 'confirmed' AND created_at >= %s
+                GROUP BY h3_8_index, account_id
+                ORDER BY h3_8_index, {_TIE_BREAK}
+                """,
+                (window_start,),
             )
-            report_rows = cur.fetchall()
+            totals_rows = cur.fetchall()
+            accounts_by_id = _fetch_accounts(cur, [r[1] for r in totals_rows])
 
-            account_ids = sorted({row[4] for row in report_rows if row[4] is not None})
-            accounts_by_id: dict[int, tuple] = {}
-            if account_ids:
-                cur.execute(
-                    """
-                    SELECT id, display_name, show_in_leaderboards, show_public_username,
-                           ruling_color, ruling_border_color, ruling_alpha
-                    FROM accounts
-                    WHERE id = ANY(%s)
-                    """,
-                    (account_ids,),
-                )
-                accounts_by_id = {a[0]: tuple(a[1:]) for a in cur.fetchall()}
-
-    cells = _build_cells(report_rows, accounts_by_id)
-    etag = _etag_for(computed_at, cells)
-
-    if _if_none_match_hit(request, etag):
-        return Response(
-            status_code=304,
-            headers={"ETag": etag, "Cache-Control": _CACHE_HEADER},
-        )
-    response.headers["ETag"] = etag
-    response.headers["Cache-Control"] = _CACHE_HEADER
-
-    return {
-        "computed_at": computed_at.isoformat(),
+    payload = {
+        "computed_at": now.isoformat(),
         "window_start": window_start.isoformat(),
-        "window_end": window_end.isoformat(),
-        "cells": cells,
+        "window_end": now.isoformat(),
+        "cells": _build_cells(totals_rows, universe_cells, accounts_by_id),
     }
+    return _respond(request, response, payload, "cells")
 
 
 @router.get("/api/v1/leaderboard/regional")
 def leaderboard_regional(request: Request, response: Response) -> Any:
-    """The whole-database companion to GET /api/v1/leaderboard/map (sql/054
-    `regional_leaders`, src/area_leaders.py:recompute — same run, same
-    trailing-28-day window, just not split by r8 cell). Same read-time
-    privacy filtering as the per-cell endpoint; an ineligible stored entry
-    is dropped rather than backfilled from a runner-up pool, so the
-    returned list can be shorter than the stored top
-    `area_leaders.MAX_REGIONAL_LEADERS`.
+    """The whole-database companion to the map: the same window and the
+    same tie-break, ranked across every cell at once rather than split by
+    one. Top `MAX_REGIONAL_LEADERS` eligible accounts.
 
         const r = await fetch("/api/v1/leaderboard/regional");
         const { leaders } = await r.json();
     """
-    with connection() as conn:
-        with conn.cursor() as cur:
-            # Same snapshot-consistency reasoning as leaderboard_map: keep
-            # the run metadata and the leader rows on one transaction
-            # snapshot so a concurrent recompute can't split them.
-            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            cur.execute(
-                """
-                SELECT computed_at, window_start, window_end
-                FROM h3_r8_area_leader_runs
-                ORDER BY computed_at DESC, id DESC
-                LIMIT 1
-                """
-            )
-            run = cur.fetchone()
-            if not run:
-                raise HTTPException(503, detail="no leaderboard computed yet")
-            computed_at, window_start, window_end = run
-
-            cur.execute(
-                "SELECT rank, account_id, points, first_point_at "
-                "FROM regional_leaders ORDER BY rank"
-            )
-            leader_rows = cur.fetchall()
-
-            account_ids = sorted({row[1] for row in leader_rows})
-            accounts_by_id: dict[int, tuple] = {}
-            if account_ids:
-                cur.execute(
-                    """
-                    SELECT id, display_name, show_in_leaderboards, show_public_username,
-                           ruling_color, ruling_border_color, ruling_alpha
-                    FROM accounts
-                    WHERE id = ANY(%s)
-                    """,
-                    (account_ids,),
-                )
-                accounts_by_id = {a[0]: tuple(a[1:]) for a in cur.fetchall()}
-
-    leaders = _build_regional_leaders(leader_rows, accounts_by_id)
-    etag = _etag_for(computed_at, leaders)
-
-    if _if_none_match_hit(request, etag):
-        return Response(
-            status_code=304,
-            headers={"ETag": etag, "Cache-Control": _CACHE_HEADER},
-        )
-    response.headers["ETag"] = etag
-    response.headers["Cache-Control"] = _CACHE_HEADER
-
-    return {
-        "computed_at": computed_at.isoformat(),
-        "window_start": window_start.isoformat(),
-        "window_end": window_end.isoformat(),
-        "leaders": leaders,
-    }
-
-
-@router.get("/api/v1/leaderboard/regional/live")
-def leaderboard_regional_live(request: Request, response: Response) -> Any:
-    """The same whole-database ranking as GET /api/v1/leaderboard/regional,
-    aggregated FROM THE LEDGER AT REQUEST TIME instead of read out of
-    sql/054's `regional_leaders` table.
-
-    Why both exist: `regional_leaders` is written once a night by
-    src/area_leaders.py:recompute, so between runs it cannot show points
-    earned today. The rider-facing "Total Regional Points (live)" tally
-    wants exactly those — a QR scan or a finished ride should move the
-    board while the rider is still looking at it — so this endpoint pays
-    for a live `SUM(points) GROUP BY account_id` over the trailing window
-    (sql/059 indexes it) rather than reporting yesterday's snapshot.
-
-    Everything else is deliberately identical to the stored endpoint so
-    the two can be read interchangeably: the same trailing
-    `DEFAULT_WINDOW_DAYS` window, the same `confirmed`-only rule, the same
-    `points DESC, first_point_at ASC, account_id ASC` tie-break (expressed
-    here in SQL — it is the exact ordering `area_leaders._rank_cell`
-    applies in Python), the same read-time privacy filtering, the same
-    `MAX_REGIONAL_LEADERS` depth, and the same entry shape.
-
-    The window is measured from NOW, not from a run's `computed_at` (there
-    is no run behind this payload), and `computed_at` reports when the
-    aggregate was taken. The SQL is deliberately NOT capped to
-    `MAX_REGIONAL_LEADERS`: eligibility is applied after the fact, so a
-    pre-truncated set would return fewer than the published depth whenever
-    a top earner has opted out. It groups by account, so it returns one
-    row per account with confirmed points in the window — bounded by
-    active riders, not by ledger size.
-
-        const r = await fetch("/api/v1/leaderboard/regional/live");
-        const { leaders } = await r.json();
-    """
     now = datetime.now(timezone.utc)
-    window_start = now - timedelta(days=DEFAULT_WINDOW_DAYS)
+    window_start = _window_start(now)
 
     with connection() as conn:
         with conn.cursor() as cur:
+            # Deliberately NOT capped in SQL — see `_build_regional_leaders`.
+            # It groups by account, so it returns one row per account with
+            # confirmed points in the window: bounded by active riders, not
+            # by ledger size.
             cur.execute(
-                """
+                f"""
                 SELECT account_id, SUM(points) AS points, MIN(created_at) AS first_point_at
                 FROM user_points
                 WHERE status = 'confirmed' AND created_at >= %s
                 GROUP BY account_id
-                ORDER BY points DESC, first_point_at ASC, account_id ASC
+                ORDER BY {_TIE_BREAK}
                 """,
                 (window_start,),
             )
-            totals = cur.fetchall()
+            totals_rows = cur.fetchall()
+            accounts_by_id = _fetch_accounts(cur, [r[0] for r in totals_rows])
 
-            account_ids = sorted({row[0] for row in totals})
-            accounts_by_id: dict[int, tuple] = {}
-            if account_ids:
-                cur.execute(
-                    """
-                    SELECT id, display_name, show_in_leaderboards, show_public_username,
-                           ruling_color, ruling_border_color, ruling_alpha
-                    FROM accounts
-                    WHERE id = ANY(%s)
-                    """,
-                    (account_ids,),
-                )
-                accounts_by_id = {a[0]: tuple(a[1:]) for a in cur.fetchall()}
-
-    # `_build_regional_leaders` reads (rank, account_id, points,
-    # first_point_at) and ignores the stored rank — these rows arrive
-    # already in rank order from the SQL above, so a placeholder goes in
-    # its slot rather than a second ranking pass.
-    leaders = _build_regional_leaders(
-        [(None, account_id, points, first_point_at) for account_id, points, first_point_at in totals],
-        accounts_by_id,
-        limit=MAX_REGIONAL_LEADERS,
-    )
-
-    # Content-only ETag: there is no run id to key on, and `now` moves every
-    # request — keying on it would make every tag unique and defeat the 304
-    # entirely. A tally that has not changed revalidates for free; the
-    # 30-second Cache-Control bounds how stale a hit can be.
-    etag = f'W/"arealblive:{_digest(leaders)}"'
-    if _if_none_match_hit(request, etag):
-        return Response(
-            status_code=304,
-            headers={"ETag": etag, "Cache-Control": _LIVE_CACHE_HEADER},
-        )
-    response.headers["ETag"] = etag
-    response.headers["Cache-Control"] = _LIVE_CACHE_HEADER
-
-    return {
+    payload = {
         "computed_at": now.isoformat(),
         "window_start": window_start.isoformat(),
         "window_end": now.isoformat(),
-        "leaders": leaders,
+        "leaders": _build_regional_leaders(totals_rows, accounts_by_id),
     }
+    return _respond(request, response, payload, "leaders")

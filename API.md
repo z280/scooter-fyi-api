@@ -1001,11 +1001,24 @@ GET /api/v1/leaderboard/map
 }
 ```
 
-**Response 503:** no report has ever been computed yet (cold start),
-`{ "detail": "no leaderboard computed yet" }`.
+**There is no 503.** This endpoint is computed live from the points
+ledger; the stored version used to fail outright before the first nightly
+recompute, and this one answers from the ledger alone.
 
 #### Notes
 
+- **Computed at read time** (sql/061). `computed_at` is when you asked,
+  and `window_start`/`window_end` are the trailing 28 days ending then --
+  not a nightly run's window. Points earned a minute ago are in the
+  payload.
+- **The universe is the one precomputed part.** `h3_r8_area_report` lists
+  every r8 cell that has ever had an observed device, all-time -- those
+  are the unclaimed cells drawn as bare outlines, and "a device has been
+  seen here" is not a fact about the trailing window.
+  `src/area_leaders.py:refresh_universe` refreshes it **weekly**. The
+  endpoint unions it with whatever has points in the window, so a cell
+  that earned its first point since the last refresh still renders
+  immediately.
 - **Cell keys are canonical h3 strings** (`h3.int_to_str`), never raw
   64-bit integers -- same JS `MAX_SAFE_INTEGER` reason as
   [`/api/v1/h3/aggregates`](#get-apiv1h3aggregatesres8910).
@@ -1021,30 +1034,28 @@ GET /api/v1/leaderboard/map
   frontend decision. `ruling_alpha` is nulled alongside an unclaimed
   pair (it otherwise carries a non-null `0.60` schema default that would
   leak as a meaningless fill opacity).
-- **ETag is not run-keyed** -- this payload is a live join, not a pure
-  function of the last recompute. The weak ETag is
-  `W/"arealb:<computed_at epoch>:<sha256(cells)[:16]>"` over a canonical
-  (`sort_keys=True`) serialization, so any eligibility/color/name change
-  between runs busts a client's cached copy immediately, and a fresh run
-  with byte-identical cells still gets a new tag (its
-  `computed_at`/`window_*` changed). `Cache-Control: public,
-  max-age=600`, same as `/api/v1/h3/aggregates`.
+- **ETag is content-only** -- `W/"arealb:<sha256(cells)[:16]>"` over a
+  canonical (`sort_keys=True`) serialization. There is no run id to key
+  on any more, and `computed_at` moves every request, so keying on it
+  would make every tag unique and defeat the 304 entirely. Any
+  eligibility/color/name/points change busts a client's cached copy
+  immediately. `Cache-Control: public, max-age=30`, down from 600 --
+  that freshness is the point of the change.
 
 ---
 
 ### `GET /api/v1/leaderboard/regional`
 
-The whole-database companion to `/api/v1/leaderboard/map` (sql/054
-`regional_leaders`, `src/area_leaders.py`) -- added per an explicit
-product clarification: the per-cell report already answers "for each
-hexagon where points were earned, who leads it" (no additional spatial
-scoping needed there), and this endpoint answers the separate question
-"across the whole database, who is ranked highest." Same recompute run,
-same trailing-28-day window as the per-cell report -- not split by cell,
-top `MAX_REGIONAL_LEADERS` (25) accounts by summed confirmed points.
+The whole-database companion to `/api/v1/leaderboard/map` -- added per an
+explicit product clarification: the per-cell report already answers "for
+each hexagon where points were earned, who leads it" (no additional
+spatial scoping needed there), and this endpoint answers the separate
+question "across the whole database, who is ranked highest." Same
+trailing-28-day window as the per-cell report -- not split by cell, top
+`MAX_REGIONAL_LEADERS` (25) accounts by summed confirmed points.
 Same read-time privacy filtering as the per-cell endpoint
 (`show_in_leaderboards`, `show_public_username`, non-null
-`display_name`), except an ineligible stored entry is simply dropped
+`display_name`), except an ineligible entry is simply dropped
 rather than backfilled from a runner-up pool -- there is no larger stored
 pool beyond the top 25 to fall through into -- so the returned list can
 be shorter than 25, and surviving entries are renumbered to a contiguous
@@ -1070,71 +1081,18 @@ GET /api/v1/leaderboard/regional
 }
 ```
 
-**Response 503:** no report has ever been computed yet (cold start),
-`{ "detail": "no leaderboard computed yet" }`.
+**There is no 503** -- same reason as the map: this is computed from the
+ledger, not read out of a table a nightly job fills.
 
-`Cache-Control: public, max-age=600`; ETag is the same weak, content-hash
-scheme as `/api/v1/leaderboard/map` (`W/"arealb:<computed_at
-epoch>:<sha256(leaders)[:16]>"`), for the same live-join reason.
+Computed live (sql/061) over the same trailing 28 days, the same
+`confirmed`-only rule and the same tie-break as the map, just grouped by
+account instead of by `(cell, account)`. The depth cap is applied to
+**eligible** entries rather than in SQL: filtering happens after the
+aggregate, so a pre-truncated set would return fewer than 25 whenever a
+top earner had opted out.
 
----
-
-### `GET /api/v1/leaderboard/regional/live`
-
-The same whole-database ranking as
-[`/api/v1/leaderboard/regional`](#get-apiv1leaderboardregional), but
-aggregated **from the ledger at request time** instead of read out of
-sql/054's nightly `regional_leaders` table. `regional_leaders` is written
-once a night by `src/area_leaders.py:recompute`, so between runs it
-cannot show points earned today; this endpoint pays for a live
-`SUM(points) GROUP BY account_id` over the trailing 28 days (indexed by
-sql/059) so a QR scan or a finished ride moves the board while the rider
-is still looking at it. It backs the frontend Leaderboard panel's "Total
-Regional Points (live)" tally.
-
-Everything else is deliberately identical to the stored endpoint, so the
-two can be read interchangeably: same trailing-28-day window, same
-`status = 'confirmed'`-only rule, same `points DESC, first_point_at ASC,
-account_id ASC` tie-break (expressed in SQL here, in Python there), same
-read-time privacy filtering, same `MAX_REGIONAL_LEADERS` (25) depth, and
-the same entry shape.
-
-Two differences follow from having no recompute behind it:
-
-- The window is measured from **now**, and `computed_at` reports when the
-  aggregate was taken (`window_end` == `computed_at`).
-- **There is no 503.** The stored endpoint 503s before the first
-  recompute; this one reads `user_points` directly and answers
-  `leaders: []` on a database that has never been recomputed.
-
-The SQL is deliberately **not** capped to 25. Eligibility is applied
-after the aggregate, so a pre-truncated set would return fewer than the
-published depth whenever a top earner has opted out; the cap is applied
-to eligible entries instead.
-
-**Request:**
-```http
-GET /api/v1/leaderboard/regional/live
-```
-
-**Response 200:** identical shape to `/api/v1/leaderboard/regional`.
-```json
-{
-  "computed_at": "2026-07-29T18:42:11+00:00",
-  "window_start": "2026-07-01T18:42:11+00:00",
-  "window_end": "2026-07-29T18:42:11+00:00",
-  "leaders": [
-    { "rank": 1, "display_name": "Duke Swift 🦦", "points": 318,
-      "ruling_color": "#7c54cd", "ruling_border_color": "#382264", "ruling_alpha": 0.6 }
-  ]
-}
-```
-
-`Cache-Control: public, max-age=30` -- long enough that a burst of opens
-shares one aggregate, short enough that "live" is not a lie. The weak
-ETag is **content-only** (`W/"arealblive:<sha256(leaders)[:16]>"`): there
-is no run id to key on, and `computed_at` moves every request, so keying
-on it would make every tag unique and defeat the 304 entirely.
+`Cache-Control: public, max-age=30`; the weak ETag is content-only
+(`W/"arealb:<sha256(leaders)[:16]>"`), for the same reason as the map's.
 
 ---
 
@@ -1666,16 +1624,12 @@ as anyone else's.
 ### Public usernames
 
 Every account gets a generated `public_username`: a curated adjective plus
-an emoji-noun, presented as the **capitalized adjective, a space, then the
-emoji** — `Brave 🦉`. Both halves are validated against server-side lists
-— **never free text** — so usernames can be shown publicly without
-moderation. Usernames are unique.
-
-The two halves are stored (and sent to `PUT /api/v1/profile/username`) as
-the curated list values themselves — lowercase `brave`, and `🦉` — so the
-capital and the space are presentation only. Render `public_username` as
-the server gives it to you rather than re-composing it from the lexicon
-endpoints, and it stays consistent everywhere the name appears.
+an emoji-noun, presented as the capitalized adjective, a space, then the
+emoji -- e.g. `Brave 🦉` (sql/060; `src/accounts.py:format_public_username`
+is the one place Python knows that presentation, and it must match the
+generated column character for character). Both halves are validated against
+server-side lists — **never free text** — so usernames can be shown
+publicly without moderation. Usernames are unique.
 
 | Endpoint | Notes |
 |---|---|
@@ -2089,7 +2043,7 @@ deliberately withholds.
 | `GET /api/v1/private/devices/max-ranges?form_factor=&limit=` | Devices sorted by highest-ever observed range. `limit` 1–20000 (default 5000). |
 | `GET /api/v1/private/trips/daily?date=YYYY-MM-DD&limit=` | Daily trip/popularity rollup for one Denver-local date. `limit` 1–5000 (default 100). |
 | `GET /api/v1/private/area-leaders` | Full, unfiltered §11 area-leader report: every stored rank 1-3 per cell with real account ids, points, and `first_point_at` tie-break provenance -- no privacy filtering (that layer belongs only to the public `/api/v1/leaderboard/map`). |
-| `GET /api/v1/private/regional-leaders` | Full, unfiltered whole-database leaderboard (sql/054): every stored rank with real account ids, points, and `first_point_at` tie-break provenance -- admin sibling of the public `/api/v1/leaderboard/regional`. |
+| `GET /api/v1/private/regional-leaders` | Full, unfiltered whole-database leaderboard: every earner with real account ids, points, and `first_point_at` tie-break provenance -- admin sibling of the public `/api/v1/leaderboard/regional`. Live, like its public sibling. |
 | `GET /api/v1/private/analytics/daily?days=` | Per-day totals from the user-analytics rollup (`telemetry_daily`): events plus a max-per-event-name distinct-visitor/session figure. `days` 1–3650 (default 30). |
 | `GET /api/v1/private/analytics/events?name=&days=` | One event name's daily rollup rows, including `prop_summary` (top-k prop-value counts). |
 | `GET /api/v1/private/analytics/requests/daily?days=` | `request_metrics_daily` rows: per route/method/status-class request counts and p50/p95 latency. |
@@ -3480,9 +3434,8 @@ Explicit `Cache-Control` headers, per endpoint:
 | `/api/v1/meta/privacy` | `public, max-age=3600` | — |
 | `/api/v1/meta/pricing` | `public, max-age=3600` | — |
 | `/api/v1/points/schedule` | `public, max-age=3600` | — |
-| `/api/v1/leaderboard/map` | `public, max-age=600` | weak, keyed on `(computed_at epoch, sha256(canonical cells)[:16])` -- deliberately NOT run-only; see the endpoint's notes |
-| `/api/v1/leaderboard/regional` | `public, max-age=600` | weak, same content-hash scheme as `/api/v1/leaderboard/map` |
-| `/api/v1/leaderboard/regional/live` | `public, max-age=30` | weak, content-only (`sha256(leaders)[:16]`) -- no run id to key on, and `computed_at` moves every request |
+| `/api/v1/leaderboard/map` | `public, max-age=30` | weak, content-only (`sha256(canonical cells)[:16]`) -- computed live, so there is no run id to key on and `computed_at` moves every request |
+| `/api/v1/leaderboard/regional` | `public, max-age=30` | weak, content-only (`sha256(leaders)[:16]`) -- same reason |
 | `/api/v1/private/area-leaders` | none (admin) | -- |
 | `/api/v1/private/regional-leaders` | none (admin) | -- |
 
