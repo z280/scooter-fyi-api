@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime
@@ -15,7 +16,8 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from . import accounts, auth
+from . import accounts, auth, job_runs
+from .cli import COMMANDS
 from .pg import connection
 
 router = APIRouter(prefix="/admin")
@@ -228,41 +230,89 @@ def _validate_crontab(text: str) -> tuple[bool, str]:
             pass
 
 
+def _crontab_schedules(crontab_text: str) -> dict[str, str]:
+    """command name -> the cron expression that runs it, parsed out of the
+    active crontab. Lets the page put "last ran" next to "supposed to run",
+    which is the pair an operator actually needs: neither number means much
+    without the other.
+
+    Deliberately forgiving — this is a display aid, not a validator (that is
+    supercronic's job, via _validate_crontab). A line it cannot parse is
+    skipped rather than raising. When one command appears on several lines,
+    their expressions are joined, since that is genuinely what is scheduled.
+    """
+    out: dict[str, list[str]] = {}
+    for raw in crontab_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.search(r"python -m src\.cli\s+([A-Za-z0-9_]+)", line)
+        if not m:
+            continue
+        # The 5 leading time fields, before the command.
+        fields = line.split(None, 5)
+        if len(fields) < 6:
+            continue
+        out.setdefault(m.group(1), []).append(" ".join(fields[:5]))
+    return {cmd: " , ".join(exprs) for cmd, exprs in out.items()}
+
+
 @router.get("/scheduler", response_class=HTMLResponse)
 def scheduler_status(request: Request, user: dict = Depends(auth.require_admin)):
-    """Show the active crontab + recent cycle cadence for diagnosing drift."""
-    crontab_text, crontab_source = _read_active_crontab()
+    """Every scheduled operation: what it is supposed to do, when it last
+    did it, and what it reported.
 
-    # Recent cycles + observed gap (minutes between consecutive start_ts)
-    recent = []
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    start_ts,
-                    job_status,
-                    EXTRACT(EPOCH FROM start_ts -
-                        LAG(start_ts) OVER (ORDER BY start_ts ASC)) / 60.0
-                        AS gap_minutes
-                FROM observation_cycles
-                ORDER BY start_ts DESC
-                LIMIT 30
-                """,
-            )
-            for r in cur.fetchall():
-                recent.append({
-                    "start_ts": r[0],
-                    "job_status": r[1],
-                    "gap_minutes": round(float(r[2]), 2) if r[2] is not None else None,
-                })
+    This page used to show the crontab plus a cadence table for the ingest
+    cycle — which duplicated /admin/cycles (backed by observation_cycles,
+    and far more detailed) while every OTHER job in the crontab had no
+    operator-visible record at all. The cadence table is gone; the ingest
+    cycle keeps its own page, and this one covers the rest.
+    """
+    crontab_text, crontab_source = _read_active_crontab()
+    schedules = _crontab_schedules(crontab_text)
+
+    latest = {r["command"]: r for r in job_runs.latest_per_command()}
+
+    # Scheduled, or has ever run. Both halves earn their place: a command
+    # that is scheduled but has never fired is the interesting failure, and
+    # one that has run but is no longer in the crontab is a rename or a line
+    # someone deleted without meaning to.
+    #
+    # Deliberately NOT every entry in COMMANDS. Plenty of those are one-off
+    # manual tools — `migrate`, the backfills, the artifact fetchers — and
+    # listing them as "not scheduled / never" on a page about the schedule
+    # is noise that buries the rows above. One of them becomes visible the
+    # moment somebody actually runs it, which is when it is worth seeing.
+    commands = sorted(set(schedules) | set(latest))
+    rows = []
+    for cmd in commands:
+        if not job_runs.is_recorded(cmd):
+            continue
+        run = latest.get(cmd)
+        rows.append({
+            "command": cmd,
+            "schedule": schedules.get(cmd),
+            "known": cmd in COMMANDS,
+            "run": run,
+        })
+    # Scheduled-but-never-run first — that is the row an operator is looking
+    # for — then errors, then by recency.
+    def _sort_key(r):
+        run = r["run"]
+        never = r["schedule"] is not None and run is None
+        failed = bool(run and run["status"] == "error")
+        return (not never, not failed,
+                -(run["started_at"].timestamp() if run else 0))
+    rows.sort(key=_sort_key)
 
     return _render(
         "scheduler.html",
         user=user,
         crontab=crontab_text,
         crontab_source=crontab_source,
-        recent=recent,
+        rows=rows,
+        recent=job_runs.recent(50),
+        excluded=job_runs.EXCLUDED_COMMANDS,
     )
 
 
