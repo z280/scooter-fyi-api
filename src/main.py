@@ -192,6 +192,8 @@ def root():
             "/api/v1/meta/privacy",
             "/api/v1/meta/pricing",
             "/api/v1/leaderboard/map",
+            "/api/v1/leaderboard/regional",
+            "/api/v1/leaderboard/regional/live",
             "/legal/terms-of-service",
             "/legal/privacy-policy",
             "/admin",
