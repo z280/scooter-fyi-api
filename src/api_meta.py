@@ -258,7 +258,7 @@ _PRIVACY = {
                       "the salt is destroyed after 2 days, after which the "
                       "hash cannot be recomputed by anyone. Neither the IP "
                       "nor the user-agent is stored. Opt out any time via "
-                      "the Account drawer toggle (stored on your device).",
+                      "the About panel toggle (stored on your device).",
         },
         {
             "data": "request_metrics",
