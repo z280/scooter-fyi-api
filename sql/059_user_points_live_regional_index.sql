@@ -21,8 +21,20 @@
 -- Partial on `status = 'confirmed'` because that is the only status this
 -- report (and sql/048's) ever counts -- the same rule area_leaders.py
 -- applies -- so the 'pending_review' rows a future moderation workflow may
--- add never enter the index. account_id rides along as a second key so the
--- grouping can be satisfied from the index alone.
+-- add never enter the index.
+--
+-- `created_at` leads because the WHERE clause is the range; account_id is
+-- the second key (the GROUP BY); and `points` is INCLUDEd rather than left
+-- in the heap. INCLUDE is what makes the index actually cover this query:
+-- the aggregate is SUM(points), so an index carrying only (created_at,
+-- account_id) would still send Postgres to the heap for every row in the
+-- window just to read the value being summed. `points` is a 4-byte INTEGER
+-- and is never a search key here, so it costs one word per row and buys the
+-- heap fetches back. (An index-only scan additionally wants the visibility
+-- map to be current for the pages involved -- true in practice for this
+-- table, which is append-only and never updated after insert, so pages go
+-- all-visible on the first autovacuum and stay that way.)
 CREATE INDEX IF NOT EXISTS idx_user_points_confirmed_created
     ON user_points (created_at DESC, account_id)
+    INCLUDE (points)
     WHERE status = 'confirmed';
