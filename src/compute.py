@@ -418,6 +418,7 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
             "cycle_id": str(cycle_id),
             "snapshot_time": snapshot_time,
             "device_id": d.device_id,
+            "vehicle_type_id": d.vehicle_type_id,
             "form_factor": d.form_factor,
             "latitude": d.lat,
             "longitude": d.lon,
@@ -492,7 +493,8 @@ def write_to_postgres(result: ComputeResult) -> None:
                     " range_rank_all_by_type, range_rank_all_devices, "
                     " range_rank_h3_8_peers, range_rank_h3_9_peers, "
                     " range_rank_h3_10_peers, "
-                    " vehicle_use_type, vehicle_model_name) FROM STDIN"
+                    " vehicle_use_type, vehicle_model_name, "
+                    " vehicle_type_id) FROM STDIN"
                 ) as copy:
                     for r in result.raw_rows:
                         copy.write_row([
@@ -512,5 +514,6 @@ def write_to_postgres(result: ComputeResult) -> None:
                             r.get("range_rank_h3_9_peers"),
                             r.get("range_rank_h3_10_peers"),
                             r["vehicle_use_type"], r["vehicle_model_name"],
+                            r.get("vehicle_type_id"),
                         ])
         conn.commit()

@@ -5,7 +5,13 @@
 --   vehicle model, visually confirmed per vehicle_type_id (see
 --   src/ingest.py _KNOWN_VEHICLE_TYPES): "Astro" (kick scooter), "Cosmo"
 --   (throttle e-bike, no pedals), "Apollo" (two-person pedal e-bike,
---   seated, ~18mph). NULL for vehicle_type_ids we haven't visually
+--   seated, ~18mph), "Rover" (three-wheeled trike, seated).
+--
+--   NOTE: id=5 read "Cosmo" here between 2026-07-16 and 2026-07-29; it is
+--   a Rover. See sql/064 for the reclassification and sql/063 for the
+--   vehicle_type_id column that stops this from recurring.
+--
+--   NULL for vehicle_type_ids we haven't visually
 --   confirmed yet.
 --
 -- vehicle_use_type — "sitting" | "standing": whether a rider sits or

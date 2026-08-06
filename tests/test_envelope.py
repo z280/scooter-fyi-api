@@ -180,19 +180,50 @@ def test_astro_scooter_is_standing():
 
 
 def test_id5_confirmed_cosmo_is_overridden_to_bicycle():
-    """id=5 was field-confirmed 2026-07-16 to be a seated throttle e-bike,
-    no pedals (a Cosmo-class vehicle). Despite Veo's registry calling it
-    'scooter'/67000m, it's overridden to bicycle/sitting — otherwise those
-    units inflate the standing-scooter share that rides against the contract
-    fleet cap. (Was previously left unconfirmed → scooter; this is the
-    behavior change.)"""
+    """id=5 is a three-wheeled seated trike -- the Rover -- field-confirmed off
+    plate 1036661. Despite Veo's registry calling it 'scooter'/67000m, it's
+    overridden to bicycle/sitting — otherwise those units inflate the
+    standing-scooter share that rides against the contract fleet cap.
+
+    form_factor stays 'bicycle' rather than becoming a third value: that
+    column reproduces the 22 RFP metrics, whose vocabulary is the
+    bicycle/scooter binary, and the enforceable cap is on stand-up vehicles
+    (which a trike is not). The trike-ness is carried by the model name, so
+    that is what this asserts."""
     vt_map = {"5": ingest.VehicleType(form_factor="scooter",
                                       propulsion_type="electric", max_range_meters=67000)}
-    p = _payload({"bike_id": "cosmo5", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "5"})
+    p = _payload({"bike_id": "rover5", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "5"})
     d = ingest.tag_envelope(p, vt_map).devices[0]
     assert d.form_factor == "bicycle"
-    assert d.vehicle_model_name == "Cosmo"
+    assert d.vehicle_model_name == "Rover"
     assert d.vehicle_use_type == "sitting"
+    # The raw id must survive tagging — it is what sql/063 persists so a
+    # future reclassification never needs a plate list again.
+    assert d.vehicle_type_id == "5"
+
+
+def test_id5_is_not_labelled_cosmo():
+    """Anti-regression for the 2026-07-16 → 2026-07-29 mislabel. id=3 and
+    id=5 produce an otherwise identical derived trio (bicycle / sitting),
+    so the model name is the ONLY thing that tells them apart — if id=5
+    ever reads 'Cosmo' again, the two cohorts become indistinguishable in
+    stored data, which is exactly what made the original correction so
+    expensive."""
+    # Veo's registry as actually served: id=3 bicycle, id=5 (wrongly)
+    # scooter. id=5's override then lands it on bicycle too.
+    registry = {
+        "3": ingest.VehicleType(form_factor="bicycle", propulsion_type="electric"),
+        "5": ingest.VehicleType(form_factor="scooter", propulsion_type="electric"),
+    }
+    p3 = _payload({"bike_id": "c3", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "3"})
+    p5 = _payload({"bike_id": "t5", "lat": 39.74, "lon": -104.99, "vehicle_type_id": "5"})
+    d3 = ingest.tag_envelope(p3, registry).devices[0]
+    d5 = ingest.tag_envelope(p5, registry).devices[0]
+    assert d3.vehicle_model_name == "Cosmo"
+    assert d5.vehicle_model_name == "Rover"
+    assert d3.vehicle_model_name != d5.vehicle_model_name
+    # ...and they really are otherwise identical, which is the point.
+    assert (d3.form_factor, d3.vehicle_use_type) == (d5.form_factor, d5.vehicle_use_type)
 
 
 def test_unconfirmed_type_derives_use_type_from_form_factor():

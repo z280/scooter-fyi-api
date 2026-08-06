@@ -89,14 +89,36 @@ _NUMBER_RE = re.compile(r"[?&]number=([^&]+)")
 #                  pedals, seated.
 #   id=4 (Apollo): registry says "scooter" — WRONG. Two-person pedal
 #                  e-bike, seated, ~18mph. Overridden to bicycle.
-#   id=5 (Cosmo):  registry says "scooter"/67000m — WRONG. Field-confirmed
-#                  2026-07-16 to be a seated throttle e-bike, no pedals (a
-#                  Cosmo-class vehicle; distinct type_id, likely a hardware
-#                  revision). Overridden to bicycle so it stops inflating the
+#   id=5 (Rover):  registry says "scooter"/67000m — WRONG. A three-wheeled
+#                  seated trike -- Veo calls it the Rover -- field-confirmed
+#                  2026-07-29 off plate
+#                  1036661. Overridden to bicycle so it stops inflating the
 #                  standing-scooter share against the contract fleet cap. The
 #                  67000m "max range" is Veo's junk metadata (same phantom
 #                  entry as id=4) and is ignored — battery_percent is
 #                  rank-based off the real SoC LUT, not this value.
+#
+#                  This id was labelled "Cosmo" until 2026-07-29. The
+#                  2026-07-16 field note ("seated throttle e-bike, no
+#                  pedals") is consistent with a trike in every respect
+#                  except wheel count, which is what that observation
+#                  missed; it also never explained why Veo would issue a
+#                  separate type_id for a Cosmo. Being a trike does. The
+#                  corroborating signal is commercial: across the whole
+#                  live feed each vehicle_type_id maps 1:1 to exactly one
+#                  pricing_plan_id, and id=5 has its own (483) distinct
+#                  from the Cosmo's (225) — Veo sells it as its own
+#                  product, so it is not a Cosmo hardware revision.
+#
+#                  A trike is strictly neither "bicycle" nor "scooter", and
+#                  GBFS 2.2 would permit form_factor="other". We keep
+#                  "bicycle" deliberately: form_factor exists here to
+#                  reproduce the original 22 RFP metrics, whose vocabulary
+#                  IS that binary, and a third value would break the
+#                  total_bike + total_scooter == total_devices invariant
+#                  for a fleet-cap axis the trike doesn't even ride on (the
+#                  enforceable cap is on stand-up vehicles, and a trike is
+#                  seated). The trike-ness lives in app_name instead.
 #
 # id=0, id=2 (registered bicycle classes, zero live devices as of
 # 2026-07-05) are deliberately absent — nothing to correct. A vehicle_type_id
@@ -112,7 +134,7 @@ _KNOWN_VEHICLE_TYPES: dict[str, KnownVehicleType] = {
     "1": KnownVehicleType(app_name="Astro", use_type="standing"),
     "3": KnownVehicleType(app_name="Cosmo", use_type="sitting"),
     "4": KnownVehicleType(app_name="Apollo", use_type="sitting", form_factor="bicycle"),
-    "5": KnownVehicleType(app_name="Cosmo", use_type="sitting", form_factor="bicycle"),
+    "5": KnownVehicleType(app_name="Rover", use_type="sitting", form_factor="bicycle"),
 }
 
 

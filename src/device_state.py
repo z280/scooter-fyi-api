@@ -126,6 +126,7 @@ def update_for_cycle(
                         d.current_range_meters,  # max_observed_range_meters
                         seed_max_at,             # max_observed_range_at
                         d.vehicle_use_type, d.vehicle_model_name,
+                        d.vehicle_type_id,
                     ))
                     new_history_rows.append((
                         vid, d.vehicle_plate, str(cycle_id), snapshot_time,
@@ -160,6 +161,7 @@ def update_for_cycle(
                         str(cycle_id),
                         d.h3_8_index, d.h3_9_index, d.h3_10_index,
                         d.vehicle_use_type, d.vehicle_model_name,
+                        d.vehicle_type_id,
                         vid,
                     ))
                     new_history_rows.append((
@@ -188,6 +190,7 @@ def update_for_cycle(
                     failed_start_updates.append((
                         d.device_id, d.spatial_status, d.form_factor,
                         d.vehicle_use_type, d.vehicle_model_name,
+                        d.vehicle_type_id,
                         snapshot_time, str(cycle_id), vid,
                     ))
                 else:
@@ -209,8 +212,9 @@ def update_for_cycle(
                         last_observed_at, last_cycle_id,
                         current_h3_8_index, current_h3_9_index, current_h3_10_index,
                         max_observed_range_meters, max_observed_range_at,
-                        current_vehicle_use_type, current_vehicle_model_name
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        current_vehicle_use_type, current_vehicle_model_name,
+                        current_vehicle_type_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     new_state_rows,
                 )
@@ -257,7 +261,8 @@ def update_for_cycle(
                         current_h3_9_index = %s,
                         current_h3_10_index = %s,
                         current_vehicle_use_type = %s,
-                        current_vehicle_model_name = %s
+                        current_vehicle_model_name = %s,
+                        current_vehicle_type_id = %s
                     WHERE vehicle_identifier = %s
                     """,
                     moved_updates,
@@ -272,6 +277,7 @@ def update_for_cycle(
                         current_form_factor = %s,
                         current_vehicle_use_type = %s,
                         current_vehicle_model_name = %s,
+                        current_vehicle_type_id = %s,
                         number_failed_starts = number_failed_starts + 1,
                         last_observed_at = %s,
                         last_cycle_id = %s
