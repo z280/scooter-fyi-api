@@ -143,3 +143,16 @@
 # in the same transaction that writes the state it produced, so a firing
 # that overlaps a slow predecessor re-grades nothing.
 8,18,28,38,48,58 * * * * cd /app && python -m src.cli process_device_feature_reports
+
+# User-analytics daily rollup (sql/061 / src/analytics.py): recomputes
+# YESTERDAY's telemetry_daily + request_metrics_daily (Denver calendar day,
+# same convention as daily_trips). 9:20 keeps it clear of the 9:00
+# sla/trips pair and the 9:15 area-leader recompute — same morning rollup
+# family, its own slot. Idempotent delete-and-reinsert per day.
+20 9 * * * cd /app && python -m src.cli rollup_analytics
+
+# User-analytics retention (privacy policy / src/api_meta.py _PRIVACY):
+# raw telemetry_events 90d, raw request_metrics 30d, telemetry_salt 2d —
+# destroying the salt is what makes visitor_hash irreversible. Joins the
+# 3:30 retention family at its own :45 slot.
+45 3 * * * cd /app && python -m src.cli cleanup_telemetry

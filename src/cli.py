@@ -96,6 +96,7 @@ import logging
 import sys
 from datetime import datetime, timedelta, timezone
 
+from .analytics import cleanup_telemetry, rollup_analytics
 from .archive import run_archive
 from .area_leaders import refresh_universe as refresh_area_universe
 from .battery_model import (
@@ -793,6 +794,8 @@ COMMANDS = {
     # working until /admin/scheduler/edit catches up.
     "recompute_area_leaders": _cli_refresh_area_universe,
     "process_device_feature_reports": process_device_feature_reports,
+    "rollup_analytics":      rollup_analytics,
+    "cleanup_telemetry":     cleanup_telemetry,
     "migrate":               lambda: run_migrations(),
 }
 

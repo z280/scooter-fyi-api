@@ -68,3 +68,42 @@ def test_the_policy_and_the_payload_carry_the_same_date():
     assert match, "the policy lost its Last updated line"
     html_date = datetime.strptime(match.group(1).strip(), "%B %d, %Y").date()
     assert html_date.isoformat() == _PRIVACY["updated"]
+
+
+def test_telemetry_entries_are_documented():
+    """sql/061 stores usage events and request metrics; the payload must
+    name them and the retention the cleanup_telemetry cron enforces."""
+    events = _ENTRIES["telemetry_events"]
+    assert "90 days" in events["retention"]
+    for promise in ("No account id", "salt", "Opt out"):
+        assert promise in events["detail"], promise
+
+    metrics = _ENTRIES["request_metrics"]
+    assert "30 days" in metrics["retention"]
+    assert "route template" in metrics["detail"]
+
+    rollups = _ENTRIES["analytics_rollups"]
+    assert "indefinite" in rollups["retention"].lower()
+    assert "no identifiers" in rollups["detail"].lower()
+
+
+def test_payload_retention_matches_cleanup_code():
+    from src.analytics import (
+        REQUEST_METRICS_RETENTION_DAYS,
+        SALT_RETENTION_DAYS,
+        TELEMETRY_RAW_RETENTION_DAYS,
+    )
+
+    assert TELEMETRY_RAW_RETENTION_DAYS == 90
+    assert REQUEST_METRICS_RETENTION_DAYS == 30
+    assert SALT_RETENTION_DAYS == 2
+    assert "90 days" in _ENTRIES["telemetry_events"]["retention"]
+    assert "30 days" in _ENTRIES["request_metrics"]["retention"]
+    assert "2 days" in _ENTRIES["telemetry_events"]["detail"]
+
+
+def test_the_published_policy_covers_usage_analytics():
+    lower = _POLICY_HTML.lower()
+    assert "usage analytics" in lower
+    assert "90 days" in _POLICY_HTML
+    assert "global privacy control" in lower

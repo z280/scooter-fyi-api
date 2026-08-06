@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}analytics · veo-audit admin{% endblock %}
+{% block content %}
+<h1>User analytics</h1>
+<p>
+  Window:
+  {% for d in (7, 30, 90) %}
+    {% if d == days %}<strong>{{ d }}d</strong>{% else %}<a href="/admin/analytics?days={{ d }}">{{ d }}d</a>{% endif %}
+    {% if not loop.last %} · {% endif %}
+  {% endfor %}
+  <span style="opacity:.7">— raw-table windows: events 90d, request metrics 30d</span>
+</p>
+
+<h2>Daily actives</h2>
+<table>
+  <thead><tr><th>day (Denver)</th><th>visitors</th><th>sessions</th><th>events</th></tr></thead>
+  <tbody>
+    {% for r in daily %}
+      <tr><td><code>{{ r.day }}</code></td><td>{{ r.visitors }}</td><td>{{ r.sessions }}</td><td>{{ r.events }}</td></tr>
+    {% else %}
+      <tr><td colspan="4">no events yet</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Top events</h2>
+<table>
+  <thead><tr><th>event</th><th>count</th><th>distinct visitors</th></tr></thead>
+  <tbody>
+    {% for r in top_events %}
+      <tr><td><code>{{ r.name }}</code></td><td>{{ r.events }}</td><td>{{ r.visitors }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Feature usage</h2>
+<div style="display:flex; gap:24px; flex-wrap:wrap">
+  <div style="flex:1; min-width:220px">
+    <h3>Drawers opened</h3>
+    <table><tbody>
+      {% for r in drawers %}<tr><td><code>{{ r.value }}</code></td><td>{{ r.n }}</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+  <div style="flex:1; min-width:220px">
+    <h3>Mode switches</h3>
+    <table><tbody>
+      {% for r in modes %}<tr><td><code>{{ r.value }}</code></td><td>{{ r.n }}</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+  <div style="flex:1; min-width:220px">
+    <h3>Device-popup actions</h3>
+    <table><tbody>
+      {% for r in popup_actions %}<tr><td><code>{{ r.value }}</code></td><td>{{ r.n }}</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+  <div style="flex:1; min-width:220px">
+    <h3>Controls changed</h3>
+    <table><tbody>
+      {% for r in controls %}<tr><td><code>{{ r.value }}</code></td><td>{{ r.n }}</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+</div>
+
+<h2>Ride wizard funnel</h2>
+<table>
+  <thead><tr><th>step</th><th>count</th></tr></thead>
+  <tbody>
+    <tr><td>wizard opened</td><td>{{ ride_open }}</td></tr>
+    {% for r in ride_screens %}
+      <tr><td>screen {{ r.screen }}</td><td>{{ r.n }}</td></tr>
+    {% endfor %}
+    <tr><td><strong>completed</strong></td><td><strong>{{ ride_complete }}</strong>
+      {% if ride_open %} ({{ '%.0f' % (100.0 * ride_complete / ride_open) }}% of opens){% endif %}</td></tr>
+    <tr><td>abandoned</td><td>{{ ride_abandons }}</td></tr>
+  </tbody>
+</table>
+
+<h2>Auth funnel</h2>
+<table>
+  <thead><tr><th>method</th><th>stage</th><th>count</th></tr></thead>
+  <tbody>
+    {% for r in auth_funnel %}
+      <tr><td><code>{{ r.method }}</code></td><td>{{ r.name }}</td><td>{{ r.n }}</td></tr>
+    {% else %}
+      <tr><td colspan="3">no auth events yet</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Devices</h2>
+<table>
+  <thead><tr><th>class</th><th>OS</th><th>viewport</th><th>distinct visitors</th></tr></thead>
+  <tbody>
+    {% for r in devices %}
+      <tr><td>{{ r.device }}</td><td>{{ r.os }}</td><td>{{ r.viewport }}</td><td>{{ r.visitors }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Paths (kept simple)</h2>
+<div style="display:flex; gap:24px; flex-wrap:wrap">
+  <div style="flex:1; min-width:220px">
+    <h3>First mode chosen per session</h3>
+    <table><tbody>
+      {% for r in entry_modes %}<tr><td><code>{{ r.mode }}</code></td><td>{{ r.n }}</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+  <div style="flex:2; min-width:300px">
+    <h3>Drawer sets touched per session</h3>
+    <table><tbody>
+      {% for r in drawer_sets %}<tr><td><code>{{ r.drawers }}</code></td><td>{{ r.n }}</td></tr>{% endfor %}
+    </tbody></table>
+  </div>
+</div>
+
+<h2>API health (last {{ days }}d, raw request metrics)</h2>
+<table>
+  <thead><tr><th>route</th><th>requests</th><th>p95 ms</th><th>5xx</th></tr></thead>
+  <tbody>
+    {% for r in api_health %}
+      <tr><td><code>{{ r.route }}</code></td><td>{{ r.requests }}</td><td>{{ r.p95 }}</td><td>{{ r.errors }}</td></tr>
+    {% else %}
+      <tr><td colspan="4">no request metrics yet</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
