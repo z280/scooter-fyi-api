@@ -54,20 +54,36 @@ def test_all_four_profiles_are_configured():
     assert cfg.default_profile == "safe"
 
 
-def test_only_shade_is_reranked_and_asks_for_alternates():
-    """The other three must not pay for alternates or shade scoring.
+def test_only_the_reranked_profiles_ask_for_alternates():
+    """`safe` and `express` must not pay for alternates at all.
 
-    This is the guard for the whole point of §2C: shade is opt-in, so a rider
-    asking for `express` should never be steered toward tree cover.
+    Shade stays opt-in (§2C): a rider asking for `express` should never be
+    steered toward tree cover. `range` now also ranks its alternates, but on
+    climb rather than canopy -- Valhalla's `use_hills` is inert on this graph,
+    so the flattest route has to be chosen outside it.
     """
     cfg = load().valhalla
     for p in cfg.profiles:
         if p.key == "shade":
             assert p.rerank_by_shade is True
+            assert p.rerank_by_elevation is False
+            assert p.alternates >= 2
+        elif p.key == "range":
+            assert p.rerank_by_elevation is True
+            assert p.rerank_by_shade is False
             assert p.alternates >= 2
         else:
             assert p.rerank_by_shade is False
+            assert p.rerank_by_elevation is False
             assert p.alternates == 0
+
+
+def test_profiles_endpoint_exposes_elevation_ranking():
+    out = api_route.profiles()
+    by_key = {p["key"]: p for p in out["profiles"]}
+    assert by_key["range"]["elevation_ranked"] is True
+    assert by_key["shade"]["elevation_ranked"] is False
+    assert by_key["shade"]["shade_ranked"] is True
 
 
 def test_profile_costing_matches_intent():
@@ -288,3 +304,88 @@ def test_hours_missing_counts_interior_gaps_not_just_the_envelope():
     assert "COUNT(*)" in src
     # The old envelope-only approach must not come back.
     assert "MIN(observed_hour)" not in inspect.getsource(weather.ensure_coverage)
+
+
+# --- range profile: flattest alternate wins -----------------------------------
+#
+# Reported from production, 3158 W 8th Ave -> Knox Station: the battery saver
+# returned the HILLIEST of the four profiles (31.9 m climb) and an identical
+# shape to `express`, while a 14.2 m alternate existed that was 2 m shorter.
+# Valhalla's `use_hills` does not move the cost on this graph at any value.
+
+def test_range_profile_picks_the_flattest_alternate(monkeypatch):
+    hilly = _trip(length_km=2.0, elevation=[100, 130, 100])   # 30 m
+    flat = _trip(length_km=2.1, elevation=[100, 105, 100])     # 5 m
+
+    monkeypatch.setattr(
+        api_route.valhalla, "route",
+        lambda *a, **kw: {"trip": hilly, "alternates": [{"trip": flat}]})
+    monkeypatch.setattr(
+        api_route.valhalla, "to_geojson",
+        lambda pts: {"type": "LineString", "coordinates": []})
+
+    out = api_route.route(from_="39.74,-104.99", to="39.70,-104.95", profile="range")
+    assert out["properties"]["elevation_gain_meters"] == pytest.approx(5.0)
+    # The flatter route wins even though it is LONGER.
+    assert out["properties"]["distance_meters"] == pytest.approx(2100.0)
+
+
+def test_range_keeps_the_primary_when_it_is_already_flattest(monkeypatch):
+    """Re-ranking must be a no-op, not a reshuffle, when there is nothing to gain."""
+    flat = _trip(length_km=2.0, elevation=[100, 102, 100])
+    hilly = _trip(length_km=2.5, elevation=[100, 140, 100])
+    monkeypatch.setattr(
+        api_route.valhalla, "route",
+        lambda *a, **kw: {"trip": flat, "alternates": [{"trip": hilly}]})
+    monkeypatch.setattr(
+        api_route.valhalla, "to_geojson",
+        lambda pts: {"type": "LineString", "coordinates": []})
+
+    out = api_route.route(from_="39.74,-104.99", to="39.70,-104.95", profile="range")
+    assert out["properties"]["distance_meters"] == pytest.approx(2000.0)
+
+
+def test_unmeasured_elevation_never_wins_by_default(monkeypatch):
+    """A trip with no elevation samples is unmeasured, not flat.
+
+    Valhalla returns no `elevation` array when the graph was built without
+    elevation data. Treating that as 0 m of climb would hand every such route
+    the win and silently disable the whole feature.
+    """
+    known = _trip(length_km=2.0, elevation=[100, 120, 100])   # 20 m
+    unknown = _trip(length_km=9.0)                          # None
+    monkeypatch.setattr(
+        api_route.valhalla, "route",
+        lambda *a, **kw: {"trip": known, "alternates": [{"trip": unknown}]})
+    monkeypatch.setattr(
+        api_route.valhalla, "to_geojson",
+        lambda pts: {"type": "LineString", "coordinates": []})
+
+    out = api_route.route(from_="39.74,-104.99", to="39.70,-104.95", profile="range")
+    assert out["properties"]["distance_meters"] == pytest.approx(2000.0)
+
+
+def test_range_considers_the_default_profiles_route_too(monkeypatch):
+    """The rider must never get MORE climb than doing nothing would have.
+
+    `range` has its own costing (use_roads 0.3) and so its own route family;
+    ranking only within it can be worse on climb than the default's primary.
+    Same guard shade already carries.
+    """
+    calls = []
+
+    def fake_route(points, costing_options, **kw):
+        calls.append(dict(costing_options))
+        if costing_options.get("use_roads") == 0.3:      # range's own family
+            return {"trip": _trip(length_km=2.0, elevation=[100, 140, 100])}
+        return {"trip": _trip(length_km=3.0, elevation=[100, 108, 100])}
+
+    monkeypatch.setattr(api_route.valhalla, "route", fake_route)
+    monkeypatch.setattr(
+        api_route.valhalla, "to_geojson",
+        lambda pts: {"type": "LineString", "coordinates": []})
+
+    out = api_route.route(from_="39.74,-104.99", to="39.70,-104.95", profile="range")
+    assert len(calls) == 2, "expected the default profile to be routed as a baseline"
+    # The default's flatter route wins.
+    assert out["properties"]["elevation_gain_meters"] == pytest.approx(8.0)

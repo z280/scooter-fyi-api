@@ -305,6 +305,45 @@ def route(
             score, chosen = max(rated, key=lambda pair: pair[0])
         else:
             score = None
+    elif prof.rerank_by_elevation:
+        # Pick the flattest alternate, for the same reason shade is re-ranked
+        # above: Valhalla's own lever does not work here. `use_hills` is INERT
+        # on this graph -- swept 0.0 to 1.0 on five Denver pairs (up to 77 m of
+        # climb) it returns a byte-identical shape every time, while `use_roads`
+        # and `bicycle_type` change the route in the very same request. The
+        # graph does carry grades (23 of 52 edges on the reported pair are
+        # non-zero), so this is not missing data; the knob simply does not move
+        # the cost enough to reorder anything.
+        #
+        # Reported case, 3158 W 8th Ave -> Knox Station: the primary route
+        # climbed 31.9 m while the third alternate climbed 14.2 m over a route
+        # 2 m SHORTER. There was no tradeoff to make -- the flat line was right
+        # there, unranked.
+        #
+        # Free, unlike shade: elevation gain comes out of the route response
+        # already (`elevation_interval` is requested), so nothing extra is
+        # fetched and no thread pool is needed.
+        baseline = cfg.profile(cfg.default_profile)
+        if baseline is not None and baseline.key != prof.key:
+            # Same guard as shade's: this profile's costing generates its own
+            # route family, so ranking only within it can hand the rider MORE
+            # climb than the default would have. Whoever picks "Range
+            # Maximizer" must never do worse on climb than doing nothing.
+            try:
+                trips += valhalla.all_trips(
+                    _route_with_retry([origin, dest], baseline))
+            except valhalla.ValhallaError as exc:
+                log.warning("elevation baseline route failed, ranking alternates only: %s", exc)
+        considered = len(trips)
+        rated = [(valhalla.elevation_gain_meters(t), t) for t in trips]
+        # A trip whose gain is unknown keeps Valhalla's ranking rather than
+        # winning by default -- None is not flat, it is unmeasured.
+        measured = [(g, t) for g, t in rated if g is not None]
+        if measured:
+            _, chosen = min(measured, key=lambda pair: pair[0])
+        if explain:
+            chosen_shape = valhalla.trip_shape(chosen)
+            score = shade_score(chosen, prof.costing_options, chosen_shape)
     elif explain:
         # Neutrality diagnostic: score the non-shade profiles too, so the shade
         # bias of the graph itself can be measured.
@@ -358,7 +397,8 @@ def profiles() -> dict[str, Any]:
         "default": cfg.default_profile,
         "graph_bbox": cfg.bbox,
         "profiles": [
-            {"key": p.key, "label": p.label, "shade_ranked": p.rerank_by_shade}
+            {"key": p.key, "label": p.label, "shade_ranked": p.rerank_by_shade,
+             "elevation_ranked": p.rerank_by_elevation}
             for p in cfg.profiles
         ],
     }
