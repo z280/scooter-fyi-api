@@ -243,6 +243,9 @@ services:
         condition: service_completed_successfully
     environment:
       # Build from the local .pbf rather than reusing a stale tile tarball.
+      #
+      # NOTE: this flag alone does NOT get you a fresh graph -- see
+      # force_rebuild below. On its own it is necessary but not sufficient.
       use_tiles_ignore_pbf: "False"
       # SRTM for the Denver bbox is a single 1-degree cell; this is what makes
       # elevation_gain (and therefore the battery model's b2 term) possible.
@@ -250,7 +253,29 @@ services:
       build_admins: "True"
       build_time_zones: "False"
       build_tar: "True"
-      force_rebuild: "False"
+      # "True", and it has to be, because the upstream change-detection is
+      # broken: valhalla-scripted's `hash_exists()` hashes the FILE PATH, not
+      # the file contents --
+      #
+      #     hash=$(printf '%s' "${1}" | sha256sum | cut -f1 -d' ')
+      #
+      # where $1 is "/custom_files/denver_scooter_custom.pbf". Our pbf filename
+      # is constant, so the hash is constant, `new_hashes` is permanently False
+      # and `do_build` never fires while valhalla_tiles.tar exists. Verified on
+      # the live volume: the stored hash in file_hashes.txt is exactly
+      # sha256 of that path string.
+      #
+      # The practical effect was a graph frozen at its FIRST build while
+      # denver-map-prep republished the pbf nightly -- 10 days stale before
+      # anyone noticed, with no error anywhere. Recreating the container, which
+      # is what the docs and src/cli.py used to tell operators to do, is a
+      # no-op against this bug.
+      #
+      # Cost of "True" is a full rebuild on every container start. Measured on
+      # the Denver extract with elevation already downloaded: ~14s. That is a
+      # fair price for "the tiles always match the pbf on disk", and it is what
+      # makes a restart a real remedy instead of a placebo.
+      force_rebuild: "True"
       serve_tiles: "True"
       server_threads: "4"
     volumes:

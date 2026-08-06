@@ -544,15 +544,24 @@ def _cli_fetch_map_pbf() -> dict:
 def _cli_refresh_routing_graph() -> dict:
     """Re-sync the routing assets on a schedule and report whether they moved.
 
-    Valhalla's scripted entrypoint hashes the .pbf and rebuilds tiles when it
-    changes, so the rebuild is triggered by recreating the container once this
-    reports pbf_changed. Left as an operator/deploy step rather than giving this
-    container a Docker socket.
+    Valhalla does NOT rebuild on its own when the .pbf changes. Its scripted
+    entrypoint hashes the pbf's PATH rather than its contents, so a new file
+    under the same name is invisible to it (see docker-compose.yml's
+    force_rebuild comment for the upstream line). We pin force_rebuild=True to
+    compensate, which makes recreating the container an effective remedy --
+    it was a placebo before that.
+
+    So this job's job is to fetch and then say so loudly. It cannot do the
+    recreate itself: this container deliberately has no Docker socket, the same
+    limitation refresh_photon_index has.
     """
     result = sync_map_assets()
     if result.get("pbf_changed"):
-        log.warning("Routing .pbf changed — recreate the valhalla service to "
-                    "rebuild tiles: docker compose up -d --force-recreate valhalla")
+        log.warning("ROUTING GRAPH STALE: the .pbf changed, and the running "
+                    "valhalla is still serving tiles built from the previous "
+                    "one. Rebuild with: docker compose up -d --force-recreate "
+                    "valhalla  (effective only because force_rebuild=True is "
+                    "pinned in docker-compose.yml)")
     return result
 
 
