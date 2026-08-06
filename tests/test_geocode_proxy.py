@@ -498,3 +498,233 @@ def test_cached_rows_cannot_be_mutated_by_a_caller():
     got = cache.get(("q", None, None), 6)
     got[0]["label"] = "tampered"
     assert cache.get(("q", None, None), 6)[0]["label"] == "orig"
+
+
+# --- house-number queries ----------------------------------------------------
+#
+# Photon does no address interpolation, so most residential Denver house
+# numbers match nothing and the leftover hits are transit stops named after
+# intersections. These pin the behaviour that keeps that from becoming a
+# confident pick on the wrong side of town.
+
+@pytest.mark.parametrize("q,expected", [
+    ("1226 E 10th Ave", "1226"),
+    ("1226", "1226"),
+    ("221B Baker St", "221B"),
+    ("  1500 Champa  ", "1500"),
+    # NOT an address query: an ordinal street must not be read as a house
+    # number, or every "10th Avenue" search would be treated as a failed
+    # address lookup and filtered accordingly.
+    ("10th Avenue", None),
+    ("1st Ave Denver", None),
+    ("Union Station", None),
+    ("Cheesman Park", None),
+])
+def test_leading_housenumber(q, expected):
+    assert api_geocode.leading_housenumber(q) == expected
+
+
+def test_transit_stop_is_never_a_house_even_when_photon_says_so():
+    """Photon's `type` is address granularity, not object class.
+
+    A stop carrying a full street address is emitted as `type: house`; trusting
+    that labelled "E 10th Ave & Monaco Pkwy" a house.
+    """
+    props = {"type": "house", "name": "E 10th Ave & Monaco Pkwy",
+             "street": "East 10th Avenue", "city": "Denver",
+             "osm_key": "highway", "osm_value": "bus_stop"}
+    assert api_geocode.kind_for(props) == "poi"
+
+    rail = {"type": "house", "name": "RTD D, E & H Lines",
+            "osm_key": "railway", "osm_value": "light_rail"}
+    assert api_geocode.kind_for(rail) == "poi"
+
+
+def _stop():
+    return _feature({"type": "house", "name": "E 10th Ave & Monaco Pkwy",
+                     "street": "East 10th Avenue", "city": "Denver",
+                     "osm_key": "highway", "osm_value": "bus_stop"})
+
+
+def _street():
+    return _feature({"type": "street", "name": "East 10th Avenue",
+                     "city": "Denver", "osm_key": "highway",
+                     "osm_value": "residential"})
+
+
+def _exact():
+    return _feature({"type": "house", "housenumber": "1226",
+                     "street": "East 10th Avenue", "city": "Denver",
+                     "osm_key": "building", "osm_value": "house"})
+
+
+def test_exact_housenumber_is_promoted_over_a_better_scoring_neighbour():
+    ranked = api_geocode.rank_for_housenumber_query(
+        [_stop(), _street(), _exact()], "1226")
+    assert ranked[0]["properties"]["housenumber"] == "1226"
+    # Nothing is dropped once an exact match exists.
+    assert len(ranked) == 3
+
+
+def test_without_an_exact_match_furniture_is_dropped_and_the_street_kept():
+    ranked = api_geocode.rank_for_housenumber_query([_stop(), _street()], "1226")
+    assert [f["properties"].get("osm_value") for f in ranked] == ["residential"]
+
+
+def test_a_genuine_poi_survives_a_housenumber_query():
+    """Only on-street furniture is dropped, not every non-matching hit."""
+    cafe = _feature({"type": "other", "name": "Rosenberg's Bagels",
+                     "housenumber": "725", "street": "18th Street",
+                     "osm_key": "amenity", "osm_value": "bakery"})
+    ranked = api_geocode.rank_for_housenumber_query([_stop(), cafe], "1226")
+    assert [f["properties"]["name"] for f in ranked] == ["Rosenberg's Bagels"]
+
+
+def test_interpolated_address_returns_the_street_not_a_distant_stop(monkeypatch):
+    """The reported failure: 1226 E 10th Ave -> a stop ~5 miles east."""
+    _install(monkeypatch, _collection(_stop(), _street()))
+    resp = TestClient(_app()).get("/api/v1/geocode/search",
+                                  params={"q": "1226 E 10th Ave"})
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert all("Monaco" not in r["label"] for r in results), results
+    assert results and results[0]["kind"] == "street"
+
+
+def test_a_housenumber_query_overfetches_so_filtering_cannot_starve_it(monkeypatch):
+    calls, _ = _install(monkeypatch, _collection(_street()))
+    client = TestClient(_app())
+    client.get("/api/v1/geocode/search", params={"q": "1226 E 10th Ave", "limit": 6})
+    assert calls[-1][1]["limit"] > 6
+
+    # A non-address query is untouched: no filtering, so no over-fetch.
+    api_geocode._CACHE.clear()
+    client.get("/api/v1/geocode/search", params={"q": "Cheesman Park", "limit": 6})
+    assert calls[-1][1]["limit"] == 6
+
+
+def test_a_non_address_query_keeps_transit_stops(monkeypatch):
+    """Someone searching for the stop itself should still find it."""
+    _install(monkeypatch, _collection(_stop()))
+    resp = TestClient(_app()).get("/api/v1/geocode/search",
+                                  params={"q": "E 10th Ave & Monaco Pkwy"})
+    assert resp.status_code == 200
+    assert len(resp.json()["results"]) == 1
+
+
+# --- street fallback ---------------------------------------------------------
+
+@pytest.mark.parametrize("street,expected", [
+    ("E 10th Ave", "East 10th Avenue"),
+    ("E 1st Ave", "East 1st Avenue"),
+    ("W Colfax Ave", "West Colfax Avenue"),
+    ("N Broadway", "North Broadway"),
+    ("Champa St", "Champa Street"),
+    ("Chopper Cir", "Chopper Circle"),
+    # Position matters: a street type only expands at the end, a directional
+    # only at the front. Otherwise "St Anne Ave" becomes "Street Anne Avenue".
+    ("St Anne Ave", "St Anne Avenue"),
+    ("Blake Street", "Blake Street"),
+    ("Larimer", "Larimer"),
+])
+def test_expand_street_abbreviations(street, expected):
+    assert api_geocode.expand_street_abbreviations(street) == expected
+
+
+def _install_sequence(monkeypatch, payloads, upstream="http://photon-test:2322"):
+    """Like `_install`, but serves a different payload per upstream call."""
+    calls: list[tuple[str, dict, float]] = []
+    queue = list(payloads)
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append((url, dict(params or {}), timeout))
+        return _FakeResponse(queue.pop(0) if queue else _collection())
+
+    class _FakeCursor:
+        def execute(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+        def commit(self):
+            pass
+
+    @contextmanager
+    def fake_connection():
+        yield _FakeConn()
+
+    monkeypatch.setattr(api_geocode.httpx, "get", fake_get)
+    monkeypatch.setattr(api_geocode, "enforce", lambda cur, **kw: None)
+    monkeypatch.setattr(api_geocode, "connection", fake_connection)
+    monkeypatch.setattr(api_geocode, "geocode_settings", lambda: (upstream, True))
+    return calls
+
+
+def test_all_furniture_falls_back_to_the_expanded_street(monkeypatch):
+    """The live shape of the reported bug.
+
+    Photon's first page for "1226 E 10th Ave" is entirely transit stops, and
+    the street does not appear at any depth for the ABBREVIATED form — only
+    for the expanded one. So the fallback must re-query, expanded.
+    """
+    calls = _install_sequence(monkeypatch, [
+        _collection(_stop(), _stop()),   # page 1: nothing but furniture
+        _collection(_street()),          # the expanded street query
+    ])
+    resp = TestClient(_app()).get("/api/v1/geocode/search",
+                                  params={"q": "1226 E 10th Ave"})
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert [r["kind"] for r in results] == ["street"]
+    assert "Monaco" not in results[0]["label"]
+
+    assert len(calls) == 2, "expected a second, street-only query"
+    assert calls[0][1]["q"] == "1226 E 10th Ave"
+    assert calls[1][1]["q"] == "East 10th Avenue"
+
+
+def test_the_street_fallback_puts_routable_segments_first(monkeypatch):
+    """A long street leaves the graph; an un-routable row must not lead."""
+    far = _feature({"type": "street", "name": "East 10th Avenue",
+                    "osm_key": "highway", "osm_value": "residential"},
+                   lat=_OUT_LAT, lon=_OUT_LON)
+    near = _feature({"type": "street", "name": "East 10th Avenue",
+                     "city": "Denver", "osm_key": "highway",
+                     "osm_value": "residential"})
+    calls = _install_sequence(monkeypatch, [
+        _collection(_stop()),
+        _collection(far, near),   # photon ranks the un-routable one first
+    ])
+    resp = TestClient(_app()).get("/api/v1/geocode/search",
+                                  params={"q": "1226 E 10th Ave"})
+    results = resp.json()["results"]
+    assert results[0]["in_coverage"] is True
+    assert len(calls) == 2
+
+
+def test_identical_street_segments_collapse_to_one_row(monkeypatch):
+    """A named street is many OSM ways; four identical labels read as four
+    choices when it is really one."""
+    _install_sequence(monkeypatch, [
+        _collection(_stop()),
+        _collection(_street(), _street(), _street(), _street()),
+    ])
+    resp = TestClient(_app()).get("/api/v1/geocode/search",
+                                  params={"q": "1226 E 10th Ave"})
+    assert len(resp.json()["results"]) == 1
+
+
+def test_no_fallback_when_the_address_itself_resolved(monkeypatch):
+    calls = _install_sequence(monkeypatch, [_collection(_exact())])
+    resp = TestClient(_app()).get("/api/v1/geocode/search",
+                                  params={"q": "1226 E 10th Ave"})
+    assert resp.json()["results"][0]["kind"] == "house"
+    assert len(calls) == 1, "a resolved address must not trigger a second query"
