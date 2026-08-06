@@ -21,9 +21,27 @@ if [ ! -f "$CRONTAB" ]; then
     cp "$DEFAULT" "$CRONTAB"
 fi
 
+# Sets $pid rather than echoing it. THIS IS LOAD-BEARING, not style.
+#
+# The caller used to capture it with command substitution, and that hangs
+# forever: substitution reads the child's stdout until EOF, supercronic is
+# backgrounded but inherits that same pipe and never closes it, so the
+# substitution never returns. The script sat blocked one line ABOVE the watch
+# loop for the life of the container.
+#
+# It looked like it worked because supercronic logs to STDERR, which bypasses
+# the substitution and reaches `docker logs` normally: cron jobs ran and their
+# output appeared. The only symptoms were negative -- the reload never fired
+# and not one `[run-scheduler]` line was ever printed. Confirmed on the live
+# container: zero occurrences of "run-scheduler" across 6h of logs, and no
+# `sleep` child of the script's PID in repeated sampling.
+#
+# Consequence: /app/state/crontab was read exactly once per container start,
+# so /admin/scheduler/edit wrote a file nothing ever re-read and every crontab
+# change silently required a restart to take effect.
 run_supercronic() {
     supercronic -passthrough-logs "$CRONTAB" &
-    echo $!
+    pid=$!
 }
 
 mtime() {
@@ -31,7 +49,7 @@ mtime() {
 }
 
 last_mtime=$(mtime)
-pid=$(run_supercronic)
+run_supercronic
 echo "[run-scheduler] supercronic started (pid=$pid), watching $CRONTAB"
 
 # Forward signals from tini → supercronic so docker compose down is clean
@@ -48,7 +66,7 @@ while sleep "$POLL_INTERVAL"; do
         kill -TERM "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
         last_mtime="$current_mtime"
-        pid=$(run_supercronic)
+        run_supercronic
         echo "[run-scheduler] supercronic restarted (pid=$pid)"
     fi
 done
