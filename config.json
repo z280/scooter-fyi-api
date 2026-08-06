@@ -164,7 +164,9 @@
           "bicycle_type": "Hybrid",
           "use_roads": 0.3,
           "use_hills": 0.0
-        }
+        },
+        "alternates": 3,
+        "rerank_by_elevation": true
       },
       {
         "key": "shade",

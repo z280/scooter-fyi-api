@@ -87,11 +87,19 @@ class RouteProfile:
     production without rebuilding the image. ``rerank_by_shade`` turns on the
     alternates + canopy-scoring pass in api_route: Valhalla exposes no
     request-tunable shade lever, so shade is scored outside the graph.
+
+    ``rerank_by_elevation`` exists for the same reason, and is not redundant
+    with Valhalla's ``use_hills``: that knob is INERT on this graph. Measured
+    on the live tiles across its whole 0.0-1.0 range, on five Denver pairs with
+    up to 77 m of climb, it returns a byte-identical shape every time, while
+    ``use_roads`` and ``bicycle_type`` visibly change the route in the same
+    request. So hills, like shade, have to be ranked outside the graph.
     """
     key: str
     label: str
     costing_options: dict[str, Any]
     rerank_by_shade: bool = False
+    rerank_by_elevation: bool = False
     alternates: int = 0
 
 
@@ -253,6 +261,7 @@ def _valhalla(raw: dict[str, Any]) -> ValhallaConfig:
             label=p["label"],
             costing_options=dict(p.get("costing_options", {})),
             rerank_by_shade=bool(p.get("rerank_by_shade", False)),
+            rerank_by_elevation=bool(p.get("rerank_by_elevation", False)),
             alternates=int(p.get("alternates", 0)),
         )
         for p in raw.get("profiles", [])
