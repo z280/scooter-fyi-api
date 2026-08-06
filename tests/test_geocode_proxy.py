@@ -728,3 +728,66 @@ def test_no_fallback_when_the_address_itself_resolved(monkeypatch):
                                   params={"q": "1226 E 10th Ave"})
     assert resp.json()["results"][0]["kind"] == "house"
     assert len(calls) == 1, "a resolved address must not trigger a second query"
+
+
+# --- generic-suffix retry ----------------------------------------------------
+#
+# Photon ANDs its query terms, so a word a rider adds out of habit does not
+# rank a hit lower, it removes it. Measured live: "Knox" returns 5 hits
+# including the railway/station; "Knox Station" returns ZERO. The RTD W Line
+# platforms are named bare in OSM ("Knox", "Perry") while riders type the suffix.
+
+@pytest.mark.parametrize("q,expected", [
+    ("Knox Station", "Knox"),
+    ("Perry Station", "Perry"),
+    ("Knox station", "Knox"),
+    ("Alameda Stn", "Alameda"),
+    ("10th & Osage Stop", "10th & Osage"),
+    # Nothing to strip.
+    ("Union Station Plaza", None),
+    ("Cheesman Park", None),
+    ("Knox", None),
+    # Must not reduce a query to nothing: "Station" is a real thing to search.
+    ("Station", None),
+])
+def test_strip_generic_suffix(q, expected):
+    assert api_geocode.strip_generic_suffix(q) == expected
+
+
+def test_zero_results_retries_without_the_generic_suffix(monkeypatch):
+    station = _feature({"type": "other", "name": "Knox", "city": "Denver",
+                        "osm_key": "railway", "osm_value": "station"})
+    calls = _install_sequence(monkeypatch, [
+        _collection(),            # "Knox Station" -> nothing, as live photon does
+        _collection(station),     # "Knox" -> the platform
+    ])
+    resp = TestClient(_app()).get("/api/v1/geocode/search",
+                                  params={"q": "Knox Station"})
+    assert resp.status_code == 200
+    assert len(resp.json()["results"]) == 1
+    assert len(calls) == 2
+    assert calls[0][1]["q"] == "Knox Station"
+    assert calls[1][1]["q"] == "Knox"
+
+
+def test_a_query_that_already_works_is_never_rewritten(monkeypatch):
+    """The gate is an EMPTY result set, not the presence of the word.
+
+    "Union Station" is really named that in OSM; stripping its suffix would
+    trade a correct answer for a worse one.
+    """
+    hit = _feature({"type": "other", "name": "Union Station", "city": "Denver",
+                    "osm_key": "place", "osm_value": "neighbourhood"})
+    calls = _install_sequence(monkeypatch, [_collection(hit)])
+    resp = TestClient(_app()).get("/api/v1/geocode/search",
+                                  params={"q": "Union Station"})
+    assert resp.json()["results"][0]["label"].startswith("Union Station")
+    assert len(calls) == 1, "a query with hits must not be retried"
+
+
+def test_nothing_to_strip_means_no_second_query(monkeypatch):
+    calls = _install_sequence(monkeypatch, [_collection(), _collection()])
+    resp = TestClient(_app()).get("/api/v1/geocode/search",
+                                  params={"q": "Nowhere At All"})
+    assert resp.json()["results"] == []
+    assert len(calls) == 1

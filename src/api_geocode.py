@@ -267,6 +267,18 @@ _STREET_TYPES = {
     "hwy": "Highway", "sq": "Square", "trl": "Trail", "wy": "Way",
 }
 
+# Generic words a rider appends to a place that OSM names bare. Photon requires
+# EVERY query term to match, so one extra word does not merely rank a hit lower,
+# it removes it: measured on the live index, "Knox" returns 5 hits including the
+# railway/station, and "Knox Station" returns ZERO. Same for Perry. The RTD W
+# Line platforms are named "Knox", "Perry", "Sheridan" — no "Station" suffix —
+# while riders type the suffix, because that is what the station is called.
+#
+# Stripped only when a query returned NOTHING (see `query_photon`), so a query
+# that already works is never touched: "Union Station" keeps its suffix because
+# the OSM name really does contain it, and it never reaches this path.
+_GENERIC_PLACE_SUFFIXES = {"station", "stn", "stop", "platform"}
+
 # A leading house number in a free-text query: "1226 E 10th Ave" -> "1226".
 # Accepts a trailing letter ("221B") because OSM house numbers do. Anchored, so
 # "10th Avenue" is NOT read as house number 10 — a bare street query must not be
@@ -282,6 +294,20 @@ def is_on_street_furniture(osm_key: str, osm_value: str) -> bool:
     """Does this hit describe a thing standing ON a street, not an address?"""
     return osm_key in _ON_STREET_KEYS or (
         osm_key == "highway" and osm_value in _HIGHWAY_POI_VALUES)
+
+
+def strip_generic_suffix(q: str) -> str | None:
+    """"Knox Station" -> "Knox". None when there is nothing to strip.
+
+    Requires something to survive: "Station" on its own is a real query for a
+    place called Station and must not be reduced to nothing.
+    """
+    tokens = q.split()
+    if len(tokens) < 2:
+        return None
+    if tokens[-1].strip(".,").casefold() not in _GENERIC_PLACE_SUFFIXES:
+        return None
+    return " ".join(tokens[:-1])
 
 
 def expand_street_abbreviations(street: str) -> str:
@@ -580,8 +606,22 @@ def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
     """GET {upstream}/api and normalize, or raise the 503."""
     housenumber = leading_housenumber(q)
     if not housenumber:
-        return normalize_results(_fetch(upstream, q, _photon_params(q, lat, lon, limit)),
-                                 limit)
+        results = normalize_results(
+            _fetch(upstream, q, _photon_params(q, lat, lon, limit)), limit)
+        if results:
+            return results
+        # Nothing matched. Photon ANDs its terms, so one word a rider added out
+        # of habit can zero out a place that is indexed perfectly well —
+        # "Knox Station" finds nothing while "Knox" finds the railway/station.
+        # Retry once without that word. Gated on an empty result set, so a
+        # query that already works is never rewritten.
+        shorter = strip_generic_suffix(q)
+        if shorter:
+            log.info("geocode: %r matched nothing; retrying as %r", q, shorter)
+            return normalize_results(
+                _fetch(upstream, shorter, _photon_params(shorter, lat, lon, limit)),
+                limit)
+        return results
 
     # Over-fetch for an address query: `rank_for_housenumber_query` can drop
     # hits, and asking Photon for exactly `limit` would let that filtering
