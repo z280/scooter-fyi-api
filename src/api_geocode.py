@@ -7,7 +7,7 @@ reach it only through this endpoint, so the rate limit, the bbox filter and the
 result shape are all enforced in one place and the upstream stays swappable by
 config alone (`config.json` -> `"geocode": {"upstream": ..., "enabled": ...}`).
 
-Three things this proxy does that a raw Photon passthrough would not:
+Four things this proxy does that a raw Photon passthrough would not:
 
 * **Denver bbox filter.** Photon's `bbox` param takes `minLon,minLat,maxLon,
   maxLat` and is filled from the config `envelope.denver_core` bounds —
@@ -20,6 +20,11 @@ Three things this proxy does that a raw Photon passthrough would not:
 * **A normalized, small result shape** — `label`/`lat`/`lon`/`kind`/
   `in_coverage`. Photon's GeoJSON carries ~15 properties per hit and its
   classification vocabulary is an implementation detail of the index build.
+* **House-number-aware ranking** (`rank_for_housenumber_query`). Photon does no
+  address interpolation, so most residential Denver addresses match nothing and
+  the leftover hits are transit stops named after intersections. Left alone
+  that turns "no such indexed address" into a confident pick on the wrong side
+  of town; see that function for the full reasoning.
 
 Failure is a clean 503 `{"error": "geocoder_unavailable"}` on every path
 (timeout, connection refused, upstream error, disabled by config) — the client
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -232,29 +238,161 @@ _HIGHWAY_POI_VALUES = {
     "milestone", "speed_camera",
 }
 
+# osm_key values for things that SIT ON the street network rather than being an
+# address on it: transit stops, platforms, rail infrastructure. Denver's transit
+# stops are named after the intersection they serve ("E 10th Ave & Monaco Pkwy"),
+# so they score highly on any street-name query and are the single biggest
+# source of confidently-wrong address hits. See `demote_on_street_furniture`.
+_ON_STREET_KEYS = {"railway", "public_transport", "aeroway"}
+
+# Abbreviation expansion for the street fallback ONLY (`query_photon`).
+#
+# This is not cosmetic, it decides whether the fallback works at all. OSM names
+# streets in full ("East 1st Avenue") and names transit stops in abbreviated
+# form ("E 1st Ave & Garfield St"). Measured against the live index on the
+# denver_core bbox: "E 1st Ave" returns 16 hits, ALL of them bus stops, and the
+# street does not appear at any depth; "East 1st Avenue" returns 11 hits, ALL of
+# them street segments. Riders type the abbreviated form.
+#
+# Applied only after an address lookup has already failed, so a wrong expansion
+# costs a second-chance query rather than a good result.
+_DIRECTIONALS = {
+    "e": "East", "w": "West", "n": "North", "s": "South",
+    "ne": "Northeast", "nw": "Northwest", "se": "Southeast", "sw": "Southwest",
+}
+_STREET_TYPES = {
+    "ave": "Avenue", "av": "Avenue", "st": "Street", "blvd": "Boulevard",
+    "rd": "Road", "dr": "Drive", "ln": "Lane", "ct": "Court", "pl": "Place",
+    "pkwy": "Parkway", "pkw": "Parkway", "cir": "Circle", "ter": "Terrace",
+    "hwy": "Highway", "sq": "Square", "trl": "Trail", "wy": "Way",
+}
+
+# A leading house number in a free-text query: "1226 E 10th Ave" -> "1226".
+# Accepts a trailing letter ("221B") because OSM house numbers do. Anchored, so
+# "10th Avenue" is NOT read as house number 10 — a bare street query must not be
+# treated as an address lookup that then "fails" to find a number.
+_LEADING_HOUSENUMBER_RE = re.compile(r"^(\d+[a-zA-Z]?)\b")
+
 
 def _clean(value: Any) -> str:
     return " ".join(str(value).split()) if value not in (None, "") else ""
+
+
+def is_on_street_furniture(osm_key: str, osm_value: str) -> bool:
+    """Does this hit describe a thing standing ON a street, not an address?"""
+    return osm_key in _ON_STREET_KEYS or (
+        osm_key == "highway" and osm_value in _HIGHWAY_POI_VALUES)
+
+
+def expand_street_abbreviations(street: str) -> str:
+    """"E 10th Ave" -> "East 10th Avenue", for the street fallback.
+
+    Position-sensitive on purpose: a directional only expands at the front and
+    a street type only at the end. Expanding "st" anywhere would turn
+    "St Anne Ave" into "Street Anne Avenue"; expanding "e" anywhere would
+    maul any street whose name contains a bare letter.
+    """
+    tokens = street.split()
+    if not tokens:
+        return street
+    head = tokens[0].strip(".,").casefold()
+    if head in _DIRECTIONALS:
+        tokens[0] = _DIRECTIONALS[head]
+    tail = tokens[-1].strip(".,").casefold()
+    if len(tokens) > 1 and tail in _STREET_TYPES:
+        tokens[-1] = _STREET_TYPES[tail]
+    return " ".join(tokens)
+
+
+def leading_housenumber(q: str) -> str | None:
+    """The house number a query opens with, or None if it is not an address."""
+    match = _LEADING_HOUSENUMBER_RE.match(q.strip())
+    return match.group(1) if match else None
+
+
+def rank_for_housenumber_query(features: list[Any],
+                               housenumber: str) -> list[Any]:
+    """Reorder/trim Photon features for a query that named a house number.
+
+    Photon has no address interpolation: it indexes discrete objects only, so a
+    house number that exists in OSM *only* as an `addr:interpolation` range —
+    which is most of residential Denver — matches nothing. What comes back
+    instead is whatever else scored on the street name, and in Denver that is
+    reliably a transit stop, because the stops are NAMED after intersections.
+    "1226 E 10th Ave" returned "E 10th Ave & Monaco Pkwy", a stop roughly five
+    miles east of the block asked for.
+
+    That is worse than an empty result. The rider gets a plausible-looking pick,
+    the wizard reports `in_coverage: true` because the stop really is inside the
+    graph, and Screen 4 then routes them confidently to the wrong side of town.
+    A missing suggestion is recoverable; a wrong one is not noticed.
+
+    So:
+
+    * an exact house-number match is promoted to the top, since Photon ranks on
+      text score and can rank a same-street neighbour above the exact number;
+    * failing any exact match, on-street furniture is dropped and the named
+      street itself is what the rider is offered — "East 10th Avenue, Denver"
+      is honest and lands on the right street, which is the most this index can
+      truthfully say about an interpolated address.
+
+    Only furniture is dropped. A genuine POI keeps its place: someone typing
+    "1000 Chopper Cir" who gets "Altitude Athletics, 1000 Chopper Circle" has
+    been served well, and a cafe matching the street name is a fair guess.
+    """
+    wanted = housenumber.casefold()
+    exact, rest = [], []
+    for feat in features:
+        props = feat.get("properties") if isinstance(feat, dict) else None
+        props = props if isinstance(props, dict) else {}
+        if _clean(props.get("housenumber")).casefold() == wanted:
+            exact.append(feat)
+        else:
+            rest.append(feat)
+
+    if exact:
+        return exact + rest
+
+    kept = []
+    for feat in rest:
+        props = feat.get("properties") if isinstance(feat, dict) else None
+        props = props if isinstance(props, dict) else {}
+        if is_on_street_furniture(_clean(props.get("osm_key")).lower(),
+                                  _clean(props.get("osm_value")).lower()):
+            continue
+        kept.append(feat)
+    return kept
 
 
 def kind_for(props: dict[str, Any]) -> str:
     """Map one Photon feature's properties onto house|street|poi|locality.
 
     Ladder, most authoritative first:
+      0. on-street furniture (transit stops, platforms, rail) -> poi, ALWAYS;
       1. `type` / `layer`, when Photon supplies a value we recognise;
       2. `place=*` / `boundary=*` -> locality (`place=house` -> house);
       3. `highway=*` -> street, unless the value is a stop/crossing/etc.;
       4. `building=*` / `addr:*`, or an unnamed hit carrying a housenumber
          -> house (a POI has a name; a plain address does not);
       5. anything else -> poi.
+
+    Rung 0 outranks Photon's own `type` because that field is the *address
+    granularity* of a hit, not its object class: a bus stop that carries a full
+    street address is emitted as `type: house`, so trusting `type` first
+    labelled "E 10th Ave & Monaco Pkwy" (a stop on Monaco, miles from the 1226
+    block) as a house. Photon is authoritative about how precisely a result is
+    addressed; it is not authoritative about what the result IS.
     """
+    osm_key = _clean(props.get("osm_key")).lower()
+    osm_value = _clean(props.get("osm_value")).lower()
+
+    if is_on_street_furniture(osm_key, osm_value):
+        return "poi"
+
     declared = _clean(props.get("type") or props.get("layer")).lower()
     mapped = _LAYER_KIND.get(declared)
     if mapped:
         return mapped
-
-    osm_key = _clean(props.get("osm_key")).lower()
-    osm_value = _clean(props.get("osm_value")).lower()
 
     if osm_key in _LOCALITY_KEYS:
         return "house" if osm_value == "house" else "locality"
@@ -360,9 +498,8 @@ def _unavailable() -> HTTPException:
     return HTTPException(503, {"error": "geocoder_unavailable"})
 
 
-def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
-                 limit: int) -> list[dict[str, Any]]:
-    """GET {upstream}/api and normalize, or raise the 503."""
+def _photon_params(q: str, lat: float | None, lon: float | None,
+                   limit: int) -> dict[str, Any]:
     params: dict[str, Any] = {
         "q": q,
         "limit": limit,
@@ -377,7 +514,11 @@ def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
         # what any key-equal request would have received.
         params["lat"] = round(lat, 2)
         params["lon"] = round(lon, 2)
+    return params
 
+
+def _fetch(upstream: str, q: str, params: dict[str, Any]) -> Any:
+    """One GET against the sidecar, or the 503."""
     url = f"{upstream.rstrip('/')}/api"
     try:
         resp = httpx.get(url, params=params, timeout=SIDECAR_TIMEOUT_SECONDS)
@@ -394,12 +535,94 @@ def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
         raise _unavailable()
 
     try:
-        payload = resp.json()
+        return resp.json()
     except ValueError as exc:
         log.error("geocoder returned non-JSON for q=%r: %s", q, resp.text[:200])
         raise _unavailable() from exc
 
-    return normalize_results(payload, limit)
+
+def _features(payload: Any) -> list[Any]:
+    feats = payload.get("features") if isinstance(payload, dict) else None
+    return feats if isinstance(feats, list) else []
+
+
+def drop_on_street_furniture(features: list[Any]) -> list[Any]:
+    """Remove transit stops and the like, keeping everything else in order."""
+    kept = []
+    for feat in features:
+        props = feat.get("properties") if isinstance(feat, dict) else None
+        props = props if isinstance(props, dict) else {}
+        if is_on_street_furniture(_clean(props.get("osm_key")).lower(),
+                                  _clean(props.get("osm_value")).lower()):
+            continue
+        kept.append(feat)
+    return kept
+
+
+def dedupe_by_label(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse rows that would render identically.
+
+    A named street is many OSM ways, so the street fallback below otherwise
+    returns "East 10th Avenue, Denver" four times with four different
+    coordinates — which reads as four choices when it is really one.
+    """
+    seen, out = set(), []
+    for row in results:
+        if row["label"] in seen:
+            continue
+        seen.add(row["label"])
+        out.append(row)
+    return out
+
+
+def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
+                 limit: int) -> list[dict[str, Any]]:
+    """GET {upstream}/api and normalize, or raise the 503."""
+    housenumber = leading_housenumber(q)
+    if not housenumber:
+        return normalize_results(_fetch(upstream, q, _photon_params(q, lat, lon, limit)),
+                                 limit)
+
+    # Over-fetch for an address query: `rank_for_housenumber_query` can drop
+    # hits, and asking Photon for exactly `limit` would let that filtering
+    # starve the list the rider actually sees. Costs nothing — the sidecar is
+    # on the same compose network and the extra rows are trimmed below.
+    fetch_limit = min(limit + 4, MAX_LIMIT * 2)
+    payload = _fetch(upstream, q, _photon_params(q, lat, lon, fetch_limit))
+    ranked = rank_for_housenumber_query(_features(payload), housenumber)
+    results = normalize_results({"features": ranked}, limit)
+    if results:
+        return results
+
+    # Nothing survived: every hit was furniture. Measured against the live
+    # index this is the NORMAL outcome for an interpolated address — on the
+    # wide denver_core bbox the first page of "1226 E 10th Ave" is eight
+    # transit stops, and the street itself does not place at all.
+    #
+    # So ask again for the street alone, drop the furniture from THAT too (the
+    # stops are named "E 10th Ave & Monaco Pkwy", so a street query ranks them
+    # first as well), and dedupe what is left. The result is one honest
+    # "East 10th Avenue, Denver" of kind `street` — which the client can render
+    # differently from a house, and which is the most this index can truthfully
+    # say about an address that exists only as an interpolation range.
+    street_q = q[len(housenumber):].strip(" ,")
+    if not street_q or leading_housenumber(street_q) is not None:
+        return results
+    street_q = expand_street_abbreviations(street_q)
+
+    log.info("geocode: no indexed address for %r; falling back to the street "
+             "%r (photon has no address interpolation)", q, street_q)
+    street_payload = _fetch(upstream, street_q,
+                            _photon_params(street_q, lat, lon, MAX_LIMIT * 2))
+    kept = drop_on_street_furniture(_features(street_payload))
+    street_results = dedupe_by_label(
+        normalize_results({"features": kept}, MAX_LIMIT * 2))
+    # A long street leaves the graph: "East 10th Avenue" matches segments in
+    # Aurora as well as Denver. Put the routable ones first — an un-routable
+    # suggestion at the top of a fallback list is the least useful thing here.
+    # Stable, so Photon's own ranking still orders within each group.
+    street_results.sort(key=lambda row: not row["in_coverage"])
+    return street_results[:limit]
 
 
 # --- endpoint ----------------------------------------------------------------
