@@ -736,7 +736,7 @@ most one cycle length.
 | `dwell_percentile_hood` | int \| null | 0–100: where this device's dwell sits (≤-fraction, self included) among its **local peers** — all state-tracked devices in `gridDisk(r9 cell, 1)` (its res-9 hex + 6 neighbors, ~0.74 km² centered on the device), widening to `gridDisk(r9, 2)` and then the citywide distribution whenever a ring has <5 peers. `null` when the device isn't state-tracked or no ≥5-peer set exists even citywide. A device is a **dwell outlier** when percentile ≥90 AND dwell ≥3× `dwell_peer_median_hours` AND dwell ≥24 h (absolute floor so high-turnover blocks can't flag fresh scooters). |
 | `dwell_peer_median_hours` | float \| null | Median dwell (hours, 1 decimal) of the peer set used for `dwell_percentile_hood` — lets the UI explain verdicts: "idle 31 h — 5× its block's typical 6 h". Same null conditions. **Rounded for display only** — the `high_risk` outlier rule (≥3×), the `unknown` ratio rule (≥2×) and the `unknown` patience floor (`min(36 h, 16 ×)`) in `reliability_tier` all compare each device's dwell against the underlying unrounded median (`DwellPeerStats.peer_median_hours` in `src/quality.py`), so a value that looks exactly on a 2×/3×/16× boundary here may already be on the other side of it internally. |
 | `vehicle_use_type` | string \| null | `"sitting"` or `"standing"` — whether a rider sits or stands to operate the vehicle. Independent of `form_factor`: this is the accessibility-relevant distinction for compliance purposes, tracked as its own axis in case a future vehicle class doesn't follow the current pattern (every bicycle sits, every scooter stands, as of everything observed so far). Null for a `vehicle_type_id` we haven't classified in any way. See [Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6) for how this feeds the compliance snapshot. |
-| `vehicle_model_name` | string \| null | Veo's own in-app display name for the physical vehicle model — `"Astro"` (kick scooter), `"Cosmo"` (throttle e-bike, no pedals), or `"Apollo"` (two-person pedal e-bike, seated, ~18mph). Visually confirmed per `vehicle_type_id`, not read from any upstream field (Veo's GBFS feed doesn't expose model names). Null for a `vehicle_type_id` not yet confirmed — absence doesn't imply anything about the vehicle, just that nobody's looked yet. |
+| `vehicle_model_name` | string \| null | Veo's own in-app display name for the physical vehicle model — `"Astro"` (kick scooter), `"Cosmo"` (throttle e-bike, no pedals), `"Apollo"` (two-person pedal e-bike, seated, ~18mph), or `"Rover"` (three-wheeled seated cargo trike, in the feed since 2026-07, previously mislabelled `"Cosmo"` until 2026-07-29). Visually confirmed per `vehicle_type_id`, not read from any upstream field (Veo's GBFS feed doesn't expose model names). Null for a `vehicle_type_id` not yet confirmed — absence doesn't imply anything about the vehicle, just that nobody's looked yet. **This vocabulary is open-ended: Veo adds models, and this field gains values without an API version bump** (Rover is exactly that event). Clients MUST render devices whose model they don't recognize — treat an unknown name like `null` (generic pin, no model chip), never as a reason to drop the device from the map or from filters. |
 
 #### Public write endpoints
 
@@ -1309,7 +1309,7 @@ rather than a route.
 | `from` | yes | Origin as `lat,lon` (e.g. `39.7392,-104.9876`). |
 | `to` | yes | Destination as `lat,lon`. |
 | `profile` | no | `safe` \| `range` \| `shade` \| `express`. Defaults to `safe`. |
-| `vehicle_model` | no | `Astro` \| `Cosmo` \| `Apollo` — selects a model-specific battery curve. |
+| `vehicle_model` | no | `Astro` \| `Cosmo` \| `Apollo` \| `Rover` — selects a model-specific battery curve. A model with no fitted curve yet (or any unrecognized value) falls back to the fleet-wide estimate rather than erroring. |
 | `explain` | no | `true` adds a `diagnostics` block. |
 | `maneuvers` | no | `true` adds `properties.maneuvers` — turn-by-turn cues for the nav HUD. |
 
@@ -2803,8 +2803,9 @@ is `UNIQUE`, sql/052). Source of three point awards — see
 Every field is optional — submit only the panes you have answers for.
 `vehicle_model` is stamped **server-side** from
 `device_state.current_vehicle_model_name` for the ride's vehicle
-(`Astro`/`Cosmo`/`Apollo`, or `null` if unconfirmed) — never the client's
-own claim.
+(`Astro`/`Cosmo`/`Apollo`/`Rover`, or `null` if unconfirmed) — never the
+client's own claim. Only the first three have `model_bonus` keys today; a
+Rover ride's survey simply has none to send.
 
 `issues` is validated against a fixed 16-item vocabulary: `app_veo`,
 `acceleration`, `basket`, `battery`, `bell`, `brakes`, `connectivity`,

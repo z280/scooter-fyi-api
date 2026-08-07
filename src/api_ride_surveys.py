@@ -172,7 +172,7 @@ def _vehicle_state_for(
     """(current_vehicle_model_name, feature_status) from device_state for
     the ride's vehicle — (None, None) for a vehicle the feed never showed.
 
-    The model (sql/016) is Astro/Cosmo/Apollo capitalized per
+    The model (sql/016) is Astro/Cosmo/Apollo/Rover capitalized per
     src/ingest.py:_KNOWN_VEHICLE_TYPES, or None for an unconfirmed model —
     the same source src/api_tracked_rides.py's track-donation handler stamps
     onto track_donations.vehicle_model at donation time (A2); read fresh

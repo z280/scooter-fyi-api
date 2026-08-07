@@ -232,8 +232,10 @@ def route(
     to: str = Query(..., description="Destination as 'lat,lon'"),
     profile: str | None = Query(None, description="safe | range | shade | express"),
     vehicle_model: str | None = Query(
-        None, description="Optional vehicle model (Astro/Cosmo/Apollo) for a "
-                          "model-specific battery estimate"),
+        None, description="Optional vehicle model (Astro/Cosmo/Apollo/Rover) "
+                          "for a model-specific battery estimate; models "
+                          "without a fitted curve fall back to the fleet-wide "
+                          "estimate"),
     explain: bool = Query(False, description="Include diagnostics (shade score on every profile)"),
     # Annotated form deliberately: with `maneuvers: bool = Query(False)` the
     # default value is the Query MARKER object, which is truthy, so any

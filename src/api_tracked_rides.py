@@ -899,7 +899,7 @@ def end_tracked_ride(
 
 def _vehicle_model_for(cur, vehicle_identifier: str) -> str | None:
     """device_state.current_vehicle_model_name (sql/016) for the ride's
-    vehicle, at donation time — Astro/Cosmo/Apollo, capitalized
+    vehicle, at donation time — Astro/Cosmo/Apollo/Rover, capitalized
     (src/ingest.py:_KNOWN_VEHICLE_TYPES), or None for an unconfirmed
     model. Stamped once onto track_donations.vehicle_model so it survives
     the de-id sweep (the battery model needs it after account linkage is
