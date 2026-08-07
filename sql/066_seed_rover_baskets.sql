@@ -1,0 +1,54 @@
+-- Seed has_basket = TRUE for the Rover cohort.
+--
+-- WHY THIS IS ALLOWED TO CLAIM KNOWLEDGE NOBODY REPORTED ---------------------
+-- The crowdsourced-features rule is "NULL means nobody has looked" (sql/055),
+-- and this file deliberately writes an answer nobody reported. The
+-- distinction is catalog knowledge versus per-unit observation: the Rover is
+-- a three-wheeled cargo trike that ships with its basket as STANDARD
+-- equipment (the very fact that made sql/058 refuse to gate the basket
+-- question on the Cosmo). "Rovers have baskets" is a statement about the
+-- product, not about any unit — the same class of knowledge as the model
+-- name itself, which we also assert without a rider's confirmation.
+--
+-- Without this, every Rover — the one model where the basket is guaranteed —
+-- is invisible to the map's "show me devices with a basket" filter until
+-- riders confirm ~52 vehicles one by one, while the survey pipeline that
+-- feeds basket answers (sql/065) only asks Cosmo riders and never helps.
+--
+-- WHAT THE SEED IS, MECHANICALLY --------------------------------------------
+-- It is a stored consensus answer for the basket ALONE, exactly the shape a
+-- ride-survey basket report leaves behind (sql/065): has_basket set, the
+-- other three feature columns untouched (NULL = still unasked), and
+-- feature_status NOT advanced — the vehicle keeps soliciting a full
+-- confirmation, and the first modal report still pays the first-confirmation
+-- award. features_confirmed_at is stamped where it was NULL because that is
+-- what makes the seed an AUTHORITATIVE stored answer to the processor
+-- (src/device_features.py derives "is there a consensus to grade against?"
+-- from it): a rider who reports no basket — bent off, stolen — disagrees and
+-- opens a needs_review, one 3-vote away from correcting a wrong seed, rather
+-- than silently losing to it or silently overwriting it.
+--
+-- GUARDS, AND WHY EACH -------------------------------------------------------
+--   has_basket IS NULL   never overwrites a rider's answer, including a
+--                        reported "no basket" — a human who looked beats the
+--                        catalog. This is also what makes the file
+--                        idempotent, and what keeps the replayed migration
+--                        from re-seeding a basket a later review voted away
+--                        (the vote writes FALSE, not NULL).
+--   type id OR name      sql/064 seeded current_vehicle_type_id='5' for the
+--                        known cohort and ingest stamps it for every unit it
+--                        sees; the name check catches any row 064 relabelled
+--                        whose id column predates sql/063 and was never
+--                        re-observed.
+--
+-- KNOWN LIMITATION: a Rover that ENTERS the fleet after this migration runs
+-- starts at has_basket NULL like any new device, and gets its basket from a
+-- rider confirmation like any other feature. Seeding at ingest time would
+-- close that gap but would move catalog knowledge into the pipeline's code
+-- path; do that deliberately or not at all — this file only repairs the
+-- fleet that exists.
+UPDATE device_state
+   SET has_basket = TRUE,
+       features_confirmed_at = COALESCE(features_confirmed_at, NOW())
+ WHERE (current_vehicle_type_id = '5' OR current_vehicle_model_name = 'Rover')
+   AND has_basket IS NULL;

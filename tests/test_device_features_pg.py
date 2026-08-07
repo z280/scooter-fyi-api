@@ -677,3 +677,109 @@ def test_a_poor_basket_survey_disputes_a_fine_one(pg_conn):
     _survey_report(pg_conn, vid, basket=True, poor=("basket",), minutes=10)
     process_pending()
     assert _state(pg_conn, vid)["status"] == STATUS_NEEDS_REVIEW
+
+
+# ---------------------------------------------------------------------------
+# sql/066 — the Rover basket seed: catalog knowledge, rider-correctable.
+# ---------------------------------------------------------------------------
+
+_SEED_SQL = (SQL_DIR / "066_seed_rover_baskets.sql").read_text()
+
+
+def _rover(pg_conn, *, model="Rover", type_id="5", has_basket=None) -> str:
+    """A device_state row as the ingest cycle + sql/064 leave a Rover."""
+    vid = _vehicle(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE device_state
+               SET current_vehicle_model_name = %s,
+                   current_vehicle_type_id = %s,
+                   has_basket = %s
+             WHERE vehicle_identifier = %s
+            """,
+            (model, type_id, has_basket, vid),
+        )
+    pg_conn.commit()
+    return vid
+
+
+def _reseed(pg_conn) -> None:
+    """Re-run the (idempotent) migration against rows created after the
+    fixture's migration pass already ran."""
+    with pg_conn.cursor() as cur:
+        cur.execute(_SEED_SQL)
+    pg_conn.commit()
+
+
+def test_the_seed_gives_every_rover_a_basket_without_confirming_it(pg_conn):
+    vid = _rover(pg_conn)
+    _reseed(pg_conn)
+    s = _state(pg_conn, vid)
+    assert s["basket"] is True
+    assert s["status"] == STATUS_NEEDS_CONFIRMED
+    assert (s["bell"], s["cup"], s["phone"]) == (None, None, None)
+    assert s["confirmed_at"] is not None, (
+        "the stamp is what makes the seed an authoritative stored answer "
+        "the processor grades reports against"
+    )
+
+
+def test_the_seed_matches_on_the_relabelled_name_without_the_type_id(pg_conn):
+    """A row sql/064 relabelled whose id column predates sql/063."""
+    vid = _rover(pg_conn, type_id=None)
+    _reseed(pg_conn)
+    assert _state(pg_conn, vid)["basket"] is True
+
+
+def test_the_seed_never_overwrites_a_riders_answer(pg_conn):
+    vid = _rover(pg_conn, has_basket=False)
+    _reseed(pg_conn)
+    assert _state(pg_conn, vid)["basket"] is False
+
+
+def test_the_seed_touches_no_other_model(pg_conn):
+    vid = _rover(pg_conn, model="Cosmo", type_id="3")
+    _reseed(pg_conn)
+    s = _state(pg_conn, vid)
+    assert s["basket"] is None
+    assert s["confirmed_at"] is None
+
+
+def test_a_report_disputing_the_seed_opens_a_review_not_a_silent_win(pg_conn):
+    """The safety valve the seed relies on: catalog knowledge is one
+    3-vote review away from being corrected by riders who looked."""
+    vid = _rover(pg_conn)
+    _reseed(pg_conn)
+    _report(pg_conn, vid, bell=True, cup=False, phone=False, basket=False)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_NEEDS_REVIEW
+    assert s["basket"] is True, "flagging never overwrites the published answer"
+    for minute in (10, 20):
+        _report(pg_conn, vid, bell=True, cup=False, phone=False, basket=False,
+                minutes=minute, status=STATUS_NEEDS_REVIEW)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_UP_TO_DATE
+    assert s["basket"] is False, "three riders beat the catalog"
+
+
+def test_a_full_report_agreeing_with_the_seed_confirms_the_vehicle(pg_conn):
+    vid = _rover(pg_conn)
+    _reseed(pg_conn)
+    _report(pg_conn, vid, bell=False, cup=False, phone=False, basket=True)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_UP_TO_DATE
+    assert s["basket"] is True
+    assert (s["bell"], s["cup"], s["phone"]) == (False, False, False)
+
+
+def test_the_seed_is_idempotent_and_does_not_resurrect_a_voted_out_basket(pg_conn):
+    """A replayed migration must not re-seed a basket a review removed —
+    the vote writes FALSE, not NULL, and the seed only fills NULL."""
+    vid = _rover(pg_conn, has_basket=False)
+    _reseed(pg_conn)
+    _reseed(pg_conn)
+    assert _state(pg_conn, vid)["basket"] is False
