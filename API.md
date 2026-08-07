@@ -1904,9 +1904,24 @@ reporting the same scooter.
 
 | From | On | To |
 | --- | --- | --- |
-| `needs_features_confirmed` | the first valid report | `up_to_date` |
+| `needs_features_confirmed` | the first valid **full** report | `up_to_date` |
 | `up_to_date` | a later report that disagrees | `needs_review` |
 | `needs_review` | 3 valid reports since the flag, 2/3 majority | `up_to_date` |
+
+**Reports come from two places.** The Confirm Features modal
+(`POST /reports/device-features`, above) answers every question. The
+[end-ride survey](#post-apiv1tracked-ridesride_idsurvey)'s Cosmo basket
+question files a **basket-only** report — it abstains on the other three
+features, so it can agree, disagree, or fill in on the basket alone and
+can never flag a vehicle over a bell it said nothing about. A basket-only
+report on a never-reported vehicle publishes its basket answer but leaves
+the status `needs_features_confirmed` (that's the "full" in the first row):
+three of four questions are still unasked, and moving on would tell every
+client to stop asking them. Likewise a review resolved entirely by
+basket-only reports settles the *basket* and returns a never-fully-reported
+vehicle to `needs_features_confirmed` rather than claiming `up_to_date`. A
+review never erases answers the vote had no opinion on — three basket votes
+decide the basket, not the bell.
 
 **The first valid report is authoritative** — not one vote among many.
 Every later report is graded against it, and any disagreement (about
@@ -2802,6 +2817,18 @@ own claim.
 `astro_landscape_holder` (bool, Astro only). A key present for the wrong
 model — or when the model is unconfirmed — `422`s, same as an
 unrecognized key.
+
+**`cosmo_front_basket` also feeds the map's crowdsourced
+[device features](#post-apiv1reportsdevice-features).** The answer is
+filed as a basket-only feature report (no plate needed — the ride itself
+proves the rider was on that exact vehicle) and folded into the vehicle's
+consensus by the same ten-minute processor as a modal confirmation. It
+abstains on the three features the survey never asks about, so it can
+never conflict with the stored consensus except over an **opposite basket
+answer** (or basket condition — a survey listing `basket` among `issues`
+while confirming the basket exists reports it present-but-poor). It earns
+no `device_features_*` points — the `ride_survey` award already pays for
+this answer.
 
 `ride_route_id`, when set, must name a `POST /api/v1/ride-routes` row you
 own that is either unlinked or already linked to this ride; submitting

@@ -382,3 +382,78 @@ def test_fill_abstentions_is_a_no_op_when_there_is_nothing_to_fill():
     stored = _a(basket=True)
     assert fill_abstentions(stored, _a(basket=True)) is stored
     assert fill_abstentions(stored, _a(basket=None)) is stored
+
+
+# --- ride-survey basket reports (sql/065): abstaining on everything else -----
+
+def _survey(basket, poor=()):
+    """The exact answer shape src/api_ride_surveys.py files: the basket and
+    nothing else. Every other presence field is an abstention."""
+    return FeatureAnswers(
+        has_bell=None, has_cup_holder=None, has_phone_holder=None,
+        has_basket=basket, all_good_condition=not poor,
+        poor_condition=tuple(poor),
+    ).normalise()
+
+
+def test_a_survey_report_agrees_with_any_consensus_that_shares_its_basket():
+    """The whole point of abstentions generalising: a basket-only report
+    can never conflict over a bell it said nothing about."""
+    assert answers_agree(_survey(True), _a(bell=True, basket=True))
+    assert answers_agree(_survey(True), _a(bell=False, cup=False, phone=False, basket=True))
+
+
+def test_a_survey_report_disagrees_only_over_an_opposite_basket():
+    assert not answers_agree(_survey(True), _a(basket=False))
+    assert not answers_agree(_survey(False), _a(basket=True))
+
+
+def test_a_survey_report_never_disagrees_with_a_pre_058_consensus():
+    """Stored basket unknown, survey answers it: mutual set is empty, so
+    they agree — the fill path publishes the basket, not a review."""
+    assert answers_agree(_survey(True), _a(basket=None))
+    assert answers_agree(_survey(False), _a(basket=None))
+
+
+def test_a_broken_basket_claim_is_still_a_disagreement():
+    """Condition is part of the answer: a survey reporting a present-but-
+    poor basket disputes a consensus that says the basket is fine, the same
+    way the modal's condition checklist does."""
+    assert not answers_agree(_survey(True, poor=("basket",)), _a(basket=True))
+    assert answers_agree(_survey(True, poor=("basket",)), _a(basket=True, poor=("basket",)))
+
+
+def test_a_full_report_fills_a_survey_known_vehicle():
+    """The inverse of the pre-058 basket fill: stored knows only the basket,
+    a modal report agrees on it and contributes the other three."""
+    stored = _survey(True)
+    filled = fill_abstentions(stored, _a(bell=True, cup=False, phone=True, basket=True))
+    assert (filled.has_bell, filled.has_cup_holder, filled.has_phone_holder) == (
+        True, False, True
+    )
+    assert filled.has_basket is True
+
+
+def test_consensus_keeps_unasked_features_unknown_not_false():
+    """Three survey votes decide the basket and nothing else. bool()-ing
+    the unasked fields here would let a basket dispute overwrite a stored
+    bell answer with a 'no' nobody gave."""
+    verdict = consensus([_survey(True), _survey(True), _survey(False)])
+    assert verdict.has_basket is True
+    assert verdict.has_bell is None
+    assert verdict.has_cup_holder is None
+    assert verdict.has_phone_holder is None
+
+
+def test_only_a_report_answering_the_modal_questions_confirms():
+    assert _a().confirms() is True
+    assert _a(basket=None).confirms() is True, (
+        "a pre-058 modal report has always confirmed a vehicle and must "
+        "keep doing so"
+    )
+    assert _survey(True).confirms() is False
+
+
+def test_normalise_keeps_every_abstention_not_just_the_baskets():
+    s = _survey(True)
+    assert (s.has_bell, s.has_cup_holder, s.has_phone_holder) == (None, None, None)

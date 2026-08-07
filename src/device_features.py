@@ -32,6 +32,18 @@ is graded against it. That is deliberately optimistic, and `needs_review` is
 the mechanism that makes it safe: the cost of a wrong first report is one
 disagreement away from being corrected by a three-way vote.
 
+PARTIAL REPORTS (sql/065). A report may abstain on any feature — NULL means
+"this reporter was never asked", not "no". Two reporters abstain today: a
+client older than the basket question (sql/058, basket only) and the
+end-ride survey's Cosmo basket answer (everything BUT the basket). An
+abstained field never agrees, disagrees, or votes; what a partial report
+DID answer is published and graded exactly like anything else. The one
+transition it cannot make is confirming the vehicle: a first report (or a
+resolved review) only lands on `up_to_date` when the resulting consensus
+answers everything the confirm-features modal requires (CONFIRMATION_KEYS),
+so a survey-known vehicle keeps soliciting a full confirmation while its
+basket answer is already live on the map.
+
 WHY A CRON JOB AND NOT INLINE ---------------------------------------------
 A rider's POST writes one row to `device_feature_reports` and returns. It
 never reads other people's reports, never takes a lock on the vehicle, and
@@ -94,6 +106,20 @@ FEATURE_PRESENCE_COLUMNS = {
     "basket": "has_basket",
 }
 
+#: The features a report must have ANSWERED for it to CONFIRM a vehicle —
+#: i.e. for a first authoritative report to move `needs_features_confirmed`
+#: to `up_to_date`, and for a resolved review to land on `up_to_date` rather
+#: than back on `needs_features_confirmed`. These are the questions the
+#: confirm-features modal requires; `basket` is absent for the same sql/058
+#: rollout reason its report column is nullable — a pre-058 client's report
+#: has always confirmed a vehicle, and must go on doing so. The day
+#: has_basket becomes required, add it here and the two rules stay one rule.
+#:
+#: A report that abstains on any of these (today: a ride-survey basket
+#: report, sql/065) still publishes what it DID answer — it just cannot mark
+#: three unanswered questions as settled.
+CONFIRMATION_KEYS = ("bell", "cup_holder", "phone_holder")
+
 def canonical_poor(keys: Iterable[str]) -> tuple[str, ...]:
     """`keys` deduped and ordered by FEATURE_KEYS, dropping anything unknown.
 
@@ -138,18 +164,19 @@ class FeatureAnswers:
     broken cup holder on a scooter with no cup holder cannot exist
     downstream.
 
-    `has_basket` is the one field that may be `None`, and it is last in the
-    field order only because a defaulted field cannot precede an undefaulted
-    one. `None` is an ABSTENTION — a client that predates the question, not
-    a rider who said no — and `answers_agree`/`consensus` skip it rather
-    than reading it as `False`. Nothing enumerates which fields may abstain:
-    `answered()` reads it off the value, so the day `has_basket` becomes
-    required (see sql/058 — it is a rollout affordance, not a permanent
-    rule) the abstention branches simply stop being reachable.
+    Every presence field may be `None`. `None` is an ABSTENTION — a reporter
+    who was never asked, not a rider who said no — and `answers_agree`/
+    `consensus` skip it rather than reading it as `False`. Two reporters
+    abstain today: a client that predates the basket question (sql/058,
+    `has_basket` only), and a ride-survey basket report (sql/065), which
+    answers the basket ALONE and abstains on the other three. Nothing
+    enumerates which fields may abstain: `answered()` reads it off the
+    value. `has_basket` is last in the field order only because a defaulted
+    field cannot precede an undefaulted one.
     """
-    has_bell: bool
-    has_cup_holder: bool
-    has_phone_holder: bool
+    has_bell: bool | None
+    has_cup_holder: bool | None
+    has_phone_holder: bool | None
     all_good_condition: bool
     poor_condition: tuple[str, ...] = ()
     has_basket: bool | None = None
@@ -190,21 +217,35 @@ class FeatureAnswers:
            its blanket answer overridden here; this is the backstop that
            makes the round-trip lossless regardless.
 
-        `has_basket` passes through as-is, `None` included: normalising an
+        Abstentions pass through as-is, `None` included: normalising an
         abstention into `False` is precisely the lie the whole abstention
         mechanism exists to avoid.
         """
         cleaned = canonical_poor(
             k for k in self.poor_condition if self.present(k)
         )
+
+        def keep(v: bool | None) -> bool | None:
+            return None if v is None else bool(v)
+
         return FeatureAnswers(
-            has_bell=bool(self.has_bell),
-            has_cup_holder=bool(self.has_cup_holder),
-            has_phone_holder=bool(self.has_phone_holder),
-            has_basket=None if self.has_basket is None else bool(self.has_basket),
+            has_bell=keep(self.has_bell),
+            has_cup_holder=keep(self.has_cup_holder),
+            has_phone_holder=keep(self.has_phone_holder),
+            has_basket=keep(self.has_basket),
             all_good_condition=not cleaned,
             poor_condition=cleaned,
         )
+
+    def confirms(self) -> bool:
+        """Does this answer set settle everything a confirmation requires?
+
+        True for every modal report (its endpoint requires the three
+        CONFIRMATION_KEYS answers), false for a ride-survey basket report.
+        What it gates: a first report only moves a vehicle to `up_to_date`
+        when this is true, and a resolved review only lands on `up_to_date`
+        when its winner (after filling from the prior consensus) is."""
+        return all(self.answered(k) for k in CONFIRMATION_KEYS)
 
 
 def answers_agree(a: FeatureAnswers, b: FeatureAnswers) -> bool:
@@ -334,9 +375,13 @@ def consensus(reports: Sequence[FeatureAnswers]) -> FeatureAnswers:
         )
     )
     return FeatureAnswers(
-        has_bell=bool(presence["bell"]),
-        has_cup_holder=bool(presence["cup_holder"]),
-        has_phone_holder=bool(presence["phone_holder"]),
+        # Presence values pass through unrounded: a feature nobody who voted
+        # was asked about stays None — unknown, not absent. bool() here would
+        # let three basket-only survey votes overwrite a stored bell answer
+        # with a confident "no bell" nobody gave.
+        has_bell=presence["bell"],
+        has_cup_holder=presence["cup_holder"],
+        has_phone_holder=presence["phone_holder"],
         has_basket=presence["basket"],
         # Not voted on: `normalise()` derives it from the poor-condition
         # vote below (see rule 2 there). Passing the derived value in rather
@@ -360,17 +405,21 @@ def answers_from_row(row: Any, offset: int = 0) -> FeatureAnswers:
     hardcoded one — correct. A row that stops short of it (a pre-058 query
     that was never updated) reads as an abstention rather than raising,
     which is the same thing the column being NULL means.
+
+    Every presence column preserves NULL as None: since sql/065 all four may
+    legitimately be NULL (a ride-survey report answers only the basket), and
+    bool(None) would silently turn each abstention into a "no".
     """
+    def keep(v: Any) -> bool | None:
+        return None if v is None else bool(v)
+
     return FeatureAnswers(
-        has_bell=bool(row[offset]),
-        has_cup_holder=bool(row[offset + 1]),
-        has_phone_holder=bool(row[offset + 2]),
+        has_bell=keep(row[offset]),
+        has_cup_holder=keep(row[offset + 1]),
+        has_phone_holder=keep(row[offset + 2]),
         all_good_condition=bool(row[offset + 3]),
         poor_condition=tuple(row[offset + 4] or ()),
-        has_basket=(
-            None if len(row) <= offset + 5 or row[offset + 5] is None
-            else bool(row[offset + 5])
-        ),
+        has_basket=keep(row[offset + 5]) if len(row) > offset + 5 else None,
     ).normalise()
 
 
@@ -407,6 +456,9 @@ class ProcessStats:
     vehicles: int = 0
     reports: int = 0
     first_confirmations: int = 0
+    #: First reports that published answers WITHOUT confirming the vehicle —
+    #: a ride-survey basket answer on a never-reported device (sql/065).
+    partial_firsts: int = 0
     reconfirmations: int = 0
     flagged_for_review: int = 0
     reviews_resolved: int = 0
@@ -416,6 +468,7 @@ class ProcessStats:
             "vehicles": self.vehicles,
             "reports": self.reports,
             "first_confirmations": self.first_confirmations,
+            "partial_firsts": self.partial_firsts,
             "reconfirmations": self.reconfirmations,
             "flagged_for_review": self.flagged_for_review,
             "reviews_resolved": self.reviews_resolved,
@@ -533,16 +586,18 @@ def _process_vehicle(cur, vehicle: str, stats: ProcessStats) -> None:
     # good" is that list being empty. Reconstituting the flag from the list
     # is exactly what `normalise()` would do to it anyway, so a stored
     # consensus and a fresh report compare on equal terms.
-    # state[8] (has_basket) is NULL for every vehicle whose consensus predates
-    # sql/058, which reads as an abstention — so a rider who reports a basket
-    # on such a vehicle does not "disagree" with a stored answer that was
-    # never given, and the vehicle is reconfirmed rather than flipped into
-    # review. The basket itself stays unknown until a review resolves or a
-    # first report lands, which is the honest state.
+    # NULL feature columns read as abstentions, on every field. state[8]
+    # (has_basket) is NULL for every vehicle whose consensus predates
+    # sql/058, and state[1..3] are NULL for a vehicle whose only knowledge
+    # so far came from ride-survey basket reports (sql/065) — either way a
+    # rider who answers a question the stored consensus never had an answer
+    # for does not "disagree" with it, and the vehicle is reconfirmed (and
+    # filled) rather than flipped into review. Unanswered fields stay
+    # unknown until a report answers them, which is the honest state.
     stored = FeatureAnswers(
-        has_bell=bool(state[1]),
-        has_cup_holder=bool(state[2]),
-        has_phone_holder=bool(state[3]),
+        has_bell=None if state[1] is None else bool(state[1]),
+        has_cup_holder=None if state[2] is None else bool(state[2]),
+        has_phone_holder=None if state[3] is None else bool(state[3]),
         has_basket=None if state[8] is None else bool(state[8]),
         all_good_condition=not poor,
         poor_condition=poor,
@@ -552,11 +607,21 @@ def _process_vehicle(cur, vehicle: str, stats: ProcessStats) -> None:
         answers = answers_from_row(answer_cols)
 
         if stored is None:
-            # ---- First entry is authoritative.
-            _write_consensus(cur, vehicle, answers, count=1)
-            stored, status, count = answers, STATUS_UP_TO_DATE, 1
+            # ---- First entry is authoritative — for the questions it
+            # answered. A full modal report confirms the vehicle exactly as
+            # before. A partial report (a ride-survey basket answer) has its
+            # answers published and graded against just the same, but the
+            # vehicle STAYS needs_features_confirmed: three of four
+            # questions were never put to anyone, and moving to up_to_date
+            # would tell the map to stop asking them.
+            new_status = STATUS_UP_TO_DATE if answers.confirms() else status
+            _write_consensus(cur, vehicle, answers, count=1, status=new_status)
+            stored, status, count = answers, new_status, 1
             confirmed_at, review_since = reported_at, None
-            stats.first_confirmations += 1
+            if new_status == STATUS_UP_TO_DATE:
+                stats.first_confirmations += 1
+            else:
+                stats.partial_firsts += 1
             continue
 
         if status != STATUS_NEEDS_REVIEW:
@@ -567,11 +632,22 @@ def _process_vehicle(cur, vehicle: str, stats: ProcessStats) -> None:
                 if filled != stored:
                     # The reporter answered something the stored consensus
                     # never had an opinion about (a basket, on a vehicle
-                    # confirmed before sql/058). Publish it: agreeing about
-                    # the rest is exactly what makes this rider's first-ever
-                    # answer for that feature authoritative.
-                    _write_consensus(cur, vehicle, filled, count=count)
-                    stored = filled
+                    # confirmed before sql/058 — or bell/cup/phone, on a
+                    # vehicle known only through survey basket reports).
+                    # Publish it: agreeing about the mutually-answered rest
+                    # is exactly what makes this rider's first-ever answer
+                    # for that feature authoritative. Status only advances
+                    # to up_to_date once the filled consensus settles
+                    # everything a confirmation requires — this is the
+                    # moment a modal report lands on a survey-known vehicle
+                    # and finally confirms it.
+                    new_status = (
+                        STATUS_UP_TO_DATE if filled.confirms() else status
+                    )
+                    _write_consensus(
+                        cur, vehicle, filled, count=count, status=new_status,
+                    )
+                    stored, status = filled, new_status
                 else:
                     cur.execute(
                         "UPDATE device_state SET features_report_count = %s "
@@ -606,8 +682,23 @@ def _process_vehicle(cur, vehicle: str, stats: ProcessStats) -> None:
         if len(votes) < REVIEW_CONSENSUS_REPORTS:
             continue
         winner = consensus(votes[:REVIEW_CONSENSUS_REPORTS])
-        _write_consensus(cur, vehicle, winner, count=len(votes))
-        stored, status, count = winner, STATUS_UP_TO_DATE, len(votes)
+        # A field NO voter was asked about comes out of the vote as None.
+        # Fill it from the pre-review consensus rather than publishing the
+        # unknown: three ride-survey basket votes are a verdict about the
+        # basket, not a reason to forget a bell answer nobody disputed.
+        # (Nothing here can resurrect the DISPUTED field — a review only
+        # opens over a mutually-answered disagreement, so the disputed field
+        # was answered by at least the report that opened it, and it votes.)
+        winner = fill_abstentions(winner, stored)
+        # Same rule as the first-report branch: a winner that still leaves
+        # confirmation questions unanswered (a survey-known vehicle whose
+        # basket was disputed by other surveys) resolves the DISPUTE but not
+        # the vehicle — back to needs_features_confirmed, keep asking.
+        new_status = (
+            STATUS_UP_TO_DATE if winner.confirms() else STATUS_NEEDS_CONFIRMED
+        )
+        _write_consensus(cur, vehicle, winner, count=len(votes), status=new_status)
+        stored, status, count = winner, new_status, len(votes)
         confirmed_at, review_since = reported_at, None
         stats.reviews_resolved += 1
 
@@ -643,9 +734,15 @@ def _review_votes(
 
 
 def _write_consensus(
-    cur, vehicle: str, answers: FeatureAnswers, *, count: int
+    cur, vehicle: str, answers: FeatureAnswers, *, count: int,
+    status: str = STATUS_UP_TO_DATE,
 ) -> None:
-    """Publish `answers` as the vehicle's features and mark it up to date.
+    """Publish `answers` as the vehicle's features under `status`.
+
+    `status` defaults to up_to_date — the only value this ever wrote until a
+    partial report (a ride-survey basket answer, sql/065) could be the first
+    thing known about a vehicle: its answers publish, but the vehicle stays
+    needs_features_confirmed because confirmation questions remain unasked.
 
     This is the ONLY thing that writes the feature columns on device_state,
     so "what the map shows" has exactly one writer — the endpoint never
@@ -666,14 +763,15 @@ def _write_consensus(
          WHERE vehicle_identifier = %s
         """,
         (
+            # NULL on any field nobody who reported was asked about —
+            # "unknown", which is what the columns mean and is not the same
+            # as "not there".
             answers.has_bell,
             answers.has_cup_holder,
             answers.has_phone_holder,
-            # NULL when nobody who voted was asked — "unknown", which is what
-            # the column means and is not the same as "no basket".
             answers.has_basket,
             list(answers.poor_condition),
-            STATUS_UP_TO_DATE,
+            status,
             count,
             vehicle,
         ),

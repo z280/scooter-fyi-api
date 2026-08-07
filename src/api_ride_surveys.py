@@ -30,6 +30,20 @@ across multiple rides' surveys for repeat nav_route_feedback awards, and it
 is also why a de-identified or simply made-up id fails exactly the same way
 (a de-identified row's account_id is NULL, so the ownership predicate alone
 already excludes it — no separate "is this stale" check is needed).
+
+THE COSMO BASKET ANSWER IS ALSO A DEVICE-FEATURE REPORT (sql/065): a survey
+carrying model_bonus.cosmo_front_basket additionally writes one row to
+device_feature_reports — has_basket only, abstaining (NULL) on the three
+features the survey never asked about — for src/device_features.py's
+ten-minute processor to fold into the map's crowdsourced consensus. The
+ride itself is the proof of presence (this handler only accepts the key on
+a ride whose server-stamped vehicle_model is Cosmo), so the row carries
+plate_valid=true with no plate, and source='ride_survey' so the audit trail
+can tell it from a modal confirmation. It earns no device-feature points —
+the survey's own ride_survey award already pays for this answer, and paying
+twice for one tap would be a faucet. Abstentions mean the report can only
+ever agree, disagree, or fill in on the BASKET: it cannot flip a vehicle
+into needs_review over a bell it said nothing about.
 """
 
 from __future__ import annotations
@@ -152,22 +166,59 @@ def _validate_model_bonus(model_bonus: dict[str, Any], vehicle_model: str | None
                 })
 
 
-def _vehicle_model_for(cur, vehicle_identifier: str | None) -> str | None:
-    """device_state.current_vehicle_model_name (sql/016) for the ride's
-    vehicle — Astro/Cosmo/Apollo capitalized per
-    src/ingest.py:_KNOWN_VEHICLE_TYPES, or None for an unconfirmed model.
-    Same source src/api_tracked_rides.py's track-donation handler stamps
+def _vehicle_state_for(
+    cur, vehicle_identifier: str | None,
+) -> tuple[str | None, str | None]:
+    """(current_vehicle_model_name, feature_status) from device_state for
+    the ride's vehicle — (None, None) for a vehicle the feed never showed.
+
+    The model (sql/016) is Astro/Cosmo/Apollo capitalized per
+    src/ingest.py:_KNOWN_VEHICLE_TYPES, or None for an unconfirmed model —
+    the same source src/api_tracked_rides.py's track-donation handler stamps
     onto track_donations.vehicle_model at donation time (A2); read fresh
     here rather than off that row because a survey can be submitted before
-    the ride's track is ever donated."""
+    the ride's track is ever donated. feature_status rides along for the
+    basket report's status_at_report (sql/055's audit rule: record the
+    status that was live when the report landed, because the vehicle will
+    have moved on by the time anyone reads the ledger)."""
     if vehicle_identifier is None:
-        return None
+        return None, None
     cur.execute(
-        "SELECT current_vehicle_model_name FROM device_state WHERE vehicle_identifier = %s",
+        "SELECT current_vehicle_model_name, feature_status FROM device_state "
+        "WHERE vehicle_identifier = %s",
         (vehicle_identifier,),
     )
     row = cur.fetchone()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else (None, None)
+
+
+def _file_basket_feature_report(
+    cur, *, vehicle_identifier: str, account_id: int,
+    has_basket: bool, issues: list[str], feature_status: str | None,
+) -> None:
+    """One basket-only row into device_feature_reports (sql/065).
+
+    Abstains (NULL) on bell/cup_holder/phone_holder and the plate — the
+    survey never asked about any of them. Condition IS carried: a rider who
+    says the basket exists and lists `basket` among the ride's issues has
+    reported a present-but-poor basket, the same claim the modal's
+    poor_condition checklist makes. points_awarded stays 0 by design (the
+    ride_survey award already covers this answer)."""
+    poor = ["basket"] if (has_basket and "basket" in issues) else []
+    cur.execute(
+        """
+        INSERT INTO device_feature_reports (
+            vehicle_identifier, account_id, submitted_plate, plate_valid,
+            has_bell, has_cup_holder, has_phone_holder, has_basket,
+            all_good_condition, poor_condition, status_at_report, source
+        ) VALUES (%s, %s, NULL, TRUE, NULL, NULL, NULL, %s, %s, %s, %s,
+                  'ride_survey')
+        """,
+        (
+            vehicle_identifier, account_id, has_basket, not poor, poor,
+            feature_status or "needs_features_confirmed",
+        ),
+    )
 
 
 def _survey_response(
@@ -246,7 +297,7 @@ def submit_ride_survey(
             # vehicle_model is stamped SERVER-SIDE — never the client's own
             # claim — which is what makes model_bonus's keys trustworthy
             # enough to gate an award on later.
-            vehicle_model = _vehicle_model_for(cur, vehicle_identifier)
+            vehicle_model, feature_status = _vehicle_state_for(cur, vehicle_identifier)
             _validate_model_bonus(payload.model_bonus, vehicle_model)
 
             # ride_route_id linking. None is the normal case for a survey
@@ -314,6 +365,21 @@ def submit_ride_survey(
                  str(ride_route_id) if ride_route_id is not None else None),
             )
             survey_id, created_at = cur.fetchone()
+
+            # The basket answer doubles as a device-feature report (see the
+            # module docstring). Reachable only when _validate_model_bonus
+            # passed with the key present, which requires the server-stamped
+            # model to be Cosmo — so vehicle_identifier is real and in
+            # device_state. Same transaction as the survey row: the two are
+            # one statement by the rider and must not exist without each
+            # other.
+            if "cosmo_front_basket" in payload.model_bonus:
+                _file_basket_feature_report(
+                    cur, vehicle_identifier=vehicle_identifier,
+                    account_id=user.account_id,
+                    has_basket=bool(payload.model_bonus["cosmo_front_basket"]),
+                    issues=payload.issues, feature_status=feature_status,
+                )
 
             # --- Award wiring. Every gate is read HERE, off ride_options
             # and the survey payload, per the module docstring. ------------

@@ -44,8 +44,10 @@ class _FakeDB:
         self.tracked_rides: dict[str, dict[str, Any]] = {}
         self.ride_surveys: dict[str, dict[str, Any]] = {}   # keyed by tracked_ride_id
         self.device_state: dict[str, str | None] = {}       # vehicle_identifier -> model
+        self.feature_status: dict[str, str | None] = {}     # vehicle_identifier -> feature_status
         self.ride_routes: dict[str, dict[str, Any]] = {}    # keyed by ride_route_id
         self.user_points: list[dict[str, Any]] = []
+        self.device_feature_reports: list[dict[str, Any]] = []
         self.executed: list[tuple[str, tuple]] = []
         self._next_survey_id = 1
         self._next_points_id = 1
@@ -120,10 +122,23 @@ class _FakeCursor:
             self._result = [(1,)] if str(ride_id) in db.ride_surveys else []
             return
 
-        if s.startswith("SELECT current_vehicle_model_name FROM device_state"):
+        if s.startswith("SELECT current_vehicle_model_name, feature_status FROM device_state"):
             (vid,) = params
             if vid in db.device_state:
-                self._result = [(db.device_state[vid],)]
+                self._result = [(db.device_state[vid], db.feature_status.get(vid))]
+            return
+
+        if s.startswith("INSERT INTO device_feature_reports ("):
+            (vid, account_id, has_basket, all_good, poor, status) = params
+            db.device_feature_reports.append({
+                "vehicle_identifier": vid, "account_id": account_id,
+                "submitted_plate": None, "plate_valid": True,
+                "has_bell": None, "has_cup_holder": None,
+                "has_phone_holder": None, "has_basket": has_basket,
+                "all_good_condition": all_good, "poor_condition": poor,
+                "status_at_report": status, "source": "ride_survey",
+                "points_awarded": 0,
+            })
             return
 
         if s.startswith("SELECT tracked_ride_id FROM ride_routes WHERE id = %s AND account_id = %s"):
@@ -330,6 +345,106 @@ def test_a_boolean_bonus_key_rejects_a_non_boolean(client, db):
     ride_id = db.add_ride(uuid.uuid4(), vehicle_model="Cosmo")
     r = _post_survey(client, ride_id, model_bonus={"cosmo_front_basket": "yes"})
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# the basket answer doubles as a device-feature report (sql/065)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("answer", [True, False])
+def test_a_cosmo_basket_answer_files_a_basket_only_feature_report(client, db, answer):
+    """The report abstains (NULL) on everything the survey never asked:
+    the other three features and the plate. The ride is the proof of
+    presence, so plate_valid is true with no plate."""
+    ride_id = db.add_ride(uuid.uuid4(), vehicle_model="Cosmo")
+    r = _post_survey(client, ride_id, model_bonus={"cosmo_front_basket": answer})
+    assert r.status_code == 200, r.text
+    assert len(db.device_feature_reports) == 1
+    report = db.device_feature_reports[0]
+    assert report["vehicle_identifier"] == _VID
+    assert report["account_id"] == _USER.account_id
+    assert report["has_basket"] is answer
+    assert report["has_bell"] is None
+    assert report["has_cup_holder"] is None
+    assert report["has_phone_holder"] is None
+    assert report["submitted_plate"] is None
+    assert report["plate_valid"] is True
+    assert report["source"] == "ride_survey"
+
+
+def test_the_report_records_the_status_the_vehicle_carried(client, db):
+    ride_id = db.add_ride(uuid.uuid4(), vehicle_model="Cosmo")
+    db.feature_status[_VID] = "up_to_date"
+    r = _post_survey(client, ride_id, model_bonus={"cosmo_front_basket": True})
+    assert r.status_code == 200, r.text
+    assert db.device_feature_reports[0]["status_at_report"] == "up_to_date"
+
+
+def test_an_unknown_feature_status_defaults_to_needs_confirmed(client, db):
+    ride_id = db.add_ride(uuid.uuid4(), vehicle_model="Cosmo")
+    r = _post_survey(client, ride_id, model_bonus={"cosmo_front_basket": True})
+    assert r.status_code == 200, r.text
+    assert db.device_feature_reports[0]["status_at_report"] == "needs_features_confirmed"
+
+
+def test_a_basket_issue_on_a_present_basket_reports_poor_condition(client, db):
+    ride_id = db.add_ride(uuid.uuid4(), vehicle_model="Cosmo")
+    r = _post_survey(client, ride_id, issues=["basket"],
+                     model_bonus={"cosmo_front_basket": True})
+    assert r.status_code == 200, r.text
+    report = db.device_feature_reports[0]
+    assert report["poor_condition"] == ["basket"]
+    assert report["all_good_condition"] is False
+
+
+def test_a_basket_issue_without_a_basket_cannot_claim_poor_condition(client, db):
+    """A rider who says there is NO basket cannot coherently report a broken
+    one — the issue stays on the survey (it may describe a missing bracket)
+    but the feature report carries no condition claim."""
+    ride_id = db.add_ride(uuid.uuid4(), vehicle_model="Cosmo")
+    r = _post_survey(client, ride_id, issues=["basket"],
+                     model_bonus={"cosmo_front_basket": False})
+    assert r.status_code == 200, r.text
+    report = db.device_feature_reports[0]
+    assert report["poor_condition"] == []
+    assert report["all_good_condition"] is True
+
+
+def test_a_survey_without_the_basket_key_files_no_feature_report(client, db):
+    ride_id = db.add_ride(uuid.uuid4(), vehicle_model="Cosmo")
+    r = _post_survey(client, ride_id, would_ride_again=True, issues=["basket"])
+    assert r.status_code == 200, r.text
+    assert db.device_feature_reports == []
+
+
+def test_other_models_bonus_keys_file_no_feature_report(client, db):
+    ride_id = db.add_ride(uuid.uuid4(), vehicle_model="Apollo")
+    r = _post_survey(client, ride_id, model_bonus={"apollo_top_speed_mph": 20})
+    assert r.status_code == 200, r.text
+    assert db.device_feature_reports == []
+
+
+def test_the_basket_report_earns_no_device_feature_points(client, db):
+    """The ride_survey award already pays for this answer; the report row
+    stays at points_awarded 0 and no device_features_* ledger row exists."""
+    ride_id = db.add_ride(
+        uuid.uuid4(), vehicle_model="Cosmo",
+        ride_options={"end_survey": True},
+    )
+    r = _post_survey(client, ride_id, model_bonus={"cosmo_front_basket": True})
+    assert r.status_code == 200, r.text
+    assert _actions(r.json()) == {"ride_survey"}
+    assert db.device_feature_reports[0]["points_awarded"] == 0
+    for action in ("device_features_first", "device_features_review",
+                   "device_features_reconfirm"):
+        assert db.points_for(action) == []
+
+
+def test_a_rejected_survey_files_no_feature_report(client, db):
+    ride_id = db.add_ride(uuid.uuid4(), vehicle_model="Cosmo")
+    r = _post_survey(client, ride_id, issues=["not_a_real_issue"],
+                     model_bonus={"cosmo_front_basket": True})
+    assert r.status_code == 422
+    assert db.device_feature_reports == []
 
 
 # ---------------------------------------------------------------------------
