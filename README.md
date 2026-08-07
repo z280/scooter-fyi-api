@@ -310,7 +310,7 @@ because a sidecar round trip is expensive.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/v1/route?from=&to=&profile=&maneuvers=` | GeoJSON `Feature`: route geometry, distance/duration/elevation, battery estimate, and — with `maneuvers=true` — turn-by-turn cues whose shape indices are re-offset onto the returned LineString. 30/min per IP |
+| `GET /api/v1/route?from=&to=&profile=&maneuvers=` | GeoJSON `Feature`: route geometry, distance/duration/elevation, battery estimate, and — with `maneuvers=true` — turn-by-turn cues whose shape indices are re-offset onto the returned LineString. Directions are **beta**: every response carries a `beta_warning` string clients must show to riders. 30/min per IP |
 | `GET /api/v1/route/profiles` | The selectable routing profiles + `graph_bbox` (config-driven; treat as the live list). 60/min per IP |
 | `GET /api/v1/geocode/search?q=…&lat=…&lon=…&limit=…` | Up to 8 Denver-scoped hits as `{label, lat, lon, kind, in_coverage}`; `in_coverage` is routing-graph membership so clients can grey out un-routable picks. 20/min per IP; 503 `geocoder_unavailable` when the sidecar is down or disabled |
 

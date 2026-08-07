@@ -429,9 +429,9 @@ def _check_appendable(points: list[tuple[float, float]], idx: int) -> None:
             gap = distance_meters(*points[a], *points[b])
             raise HTTPException(422, {
                 "error": "waypoint_too_far",
-                "detail": f"this fix is {gap:.0f} m from the adjacent point on "
+                "detail": f"this fix is {gap:.0f} m from the adjacent waypoint on "
                           f"the ride's path, above the {MAX_LEG_METERS:.0f} m "
-                          "limit between consecutive points. The fix was not "
+                          "limit between consecutive waypoints. The fix was not "
                           "recorded; the ride is still active and the next one "
                           "will be accepted normally.",
             })

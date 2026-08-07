@@ -1282,6 +1282,15 @@ Days without any computed row are simply omitted from `rows` — don't expect de
 Bicycle routing over a Denver-clipped Valhalla graph, with an empirical
 battery-burn estimate attached. Public, no auth.
 
+> **⚠️ Navigation directions are in beta — and clients MUST say so.**
+> Routes and turn-by-turn cues can be inaccurate or unsafe. Every `/route`
+> and `/route/profiles` response carries a `beta_warning` string; render it
+> (or an equivalent warning) anywhere directions are shown to a rider, so
+> nobody follows a cue into traffic thinking it's authoritative. Riders
+> should use their own judgment and obey posted signs, signals, and traffic
+> laws. The field disappears from the payload when directions leave beta —
+> don't hardcode the text.
+
 **The routing graph is smaller than the map.** It covers
 `[-105.06, 39.65, -104.88, 39.79]` (west, south, east, north) — narrower
 than both the app's map bounds and the audit's `denver_core` envelope.
@@ -1320,7 +1329,8 @@ source:
     "shade_score": null,
     "battery_percent_estimate": 7.2,
     "battery_model": "regression",
-    "graph_bbox": [-105.06, 39.65, -104.88, 39.79]
+    "graph_bbox": [-105.06, 39.65, -104.88, 39.79],
+    "beta_warning": "Navigation directions are in beta and may be inaccurate or unsafe. Use your own judgment, watch the road, and obey posted signs, signals, and traffic laws."
   }
 }
 ```
@@ -1334,6 +1344,7 @@ source:
 | `battery_percent_estimate` | number \| null | Estimated battery burn for this route, in percentage points. **`null` whenever `battery_model` is `"unavailable"`.** |
 | `battery_model` | `"regression"` \| `"unavailable"` | Whether a fitted model produced the number. Only these two values. |
 | `graph_bbox` | `[w, s, e, n]` | Echoed on every response so clients can pre-filter without a second call. |
+| `beta_warning` | string | Present on **every** response while directions are in beta. Show it to the rider wherever directions are rendered — see the warning at the top of this section. |
 | `maneuvers` | array | **Only present when `maneuvers=true`.** Turn-by-turn cues; shape detailed below. |
 
 > **The battery estimate is currently always `null` in production.** The
@@ -1403,6 +1414,7 @@ Rate limited to 60 requests/minute per IP (429 with `Retry-After`).
 {
   "default": "safe",
   "graph_bbox": [-105.06, 39.65, -104.88, 39.79],
+  "beta_warning": "Navigation directions are in beta and may be inaccurate or unsafe. Use your own judgment, watch the road, and obey posted signs, signals, and traffic laws.",
   "profiles": [
     { "key": "safe",    "label": "Safe & Protected",    "shade_ranked": false },
     { "key": "range",   "label": "The Range Maximizer", "shade_ranked": false },
@@ -2105,7 +2117,7 @@ negotiable per client:
 | | Cap | Where it bites |
 |---|---|---|
 | **Points per ride** | **100**, total across every award for that ride | `PATCH .../end` credits less than the raw award when it would exceed this |
-| **Distance between consecutive points** | **3 000 m** | `POST .../waypoints` returns `422`; `PATCH .../end` drops the leg instead |
+| **Distance between consecutive waypoints** | **3 000 m** | `POST .../waypoints` returns `422`; `PATCH .../end` drops the leg instead |
 | **Total ride distance** | **80 000 m** | `POST .../waypoints` returns `422`; `POST /api/v1/rides` returns `422`; `PATCH .../end` clamps |
 
 Both bounds are inclusive: a leg of exactly 3 000 m and a ride of exactly
@@ -2131,7 +2143,7 @@ is one GPS fix:
   if you're still going.
 
 Note "its neighbour", not "the last fix you sent": waypoints may arrive out
-of order, so a late fix is checked against the points on **both** sides of
+of order, so a late fix is checked against the waypoints on **both** sides of
 where it lands in the path.
 
 ### What `/end` does instead of failing
@@ -2290,19 +2302,19 @@ set, the distance we measured before clamping it to the 80 km cap.
 
 **Ending a ride re-measures it.** The distance you see while a ride is
 still active covers start → last fix, because that is all we know yet;
-`PATCH .../end` recomputes over the same points *plus your reported end*.
+`PATCH .../end` recomputes over the same waypoints *plus your reported end*.
 That final leg matters more than it sounds: a phone that backgrounds,
 saves battery, or loses signal in a tunnel stops producing fixes long
 before you stop riding, and a ride with one early fix is otherwise
 recorded as a few metres. A ride that uploaded any waypoints keeps
-`"waypoints"` and has its `polyline` re-encoded over exactly the points
+`"waypoints"` and has its `polyline` re-encoded over exactly the waypoints
 the distance was measured over, so the two can never disagree.
 
 **The exception is a final leg over 3 km**, which is not measured — see
 [Ride limits](#ride-limits). Such a ride records only the track it can
 believe and reports `"waypoints_partial"`. If your users' rides are coming
 back partial, the fix is to upload fixes more often: the leg cap is about
-the gap between consecutive points, not about how far anyone rode.
+the gap between consecutive waypoints, not about how far anyone rode.
 
 ### Export geometry
 
@@ -2561,7 +2573,7 @@ opening sampling gap, and dropping the last is worse, because a phone that
 backgrounds, saves battery or loses signal in a tunnel stops producing
 fixes long before you stop riding — a ride with one early fix would
 otherwise be recorded as a few metres. `path_polyline` is re-encoded over
-exactly the points the final distance was measured over, so path and
+exactly the waypoints the final distance was measured over, so path and
 distance can never disagree.
 
 A ride that uploaded no waypoints keeps `path_polyline: null` rather than

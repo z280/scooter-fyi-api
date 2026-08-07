@@ -38,6 +38,18 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Rider-facing beta disclaimer, attached to every /route and /route/profiles
+# response. Turn-by-turn quality is not where it needs to be yet, and a rider
+# following a bad cue on the street pays for it in the real world — clients
+# must surface this text (or an equivalent warning) wherever directions are
+# shown, and its presence in the payload is what lets them do that without a
+# hardcoded string that outlives the beta.
+NAV_BETA_WARNING = (
+    "Navigation directions are in beta and may be inaccurate or unsafe. "
+    "Use your own judgment, watch the road, and obey posted signs, signals, "
+    "and traffic laws."
+)
+
 # Per-IP rate limits (API_REQUIREMENTS.md §5), as (limit, window_seconds).
 # 30/min on /route accommodates Screen 4's four parallel profile fetches plus
 # the <=1/min off-route re-route; /route/profiles is a config-only response and
@@ -365,6 +377,7 @@ def route(
         "battery_percent_estimate": battery.get("percent"),
         "battery_model": battery.get("source"),
         "graph_bbox": cfg.bbox,
+        "beta_warning": NAV_BETA_WARNING,
     }
     if maneuvers:
         # Opt-in: the nav HUD needs them, the route preview on Screen 4 does not,
@@ -396,6 +409,7 @@ def profiles() -> dict[str, Any]:
     return {
         "default": cfg.default_profile,
         "graph_bbox": cfg.bbox,
+        "beta_warning": NAV_BETA_WARNING,
         "profiles": [
             {"key": p.key, "label": p.label, "shade_ranked": p.rerank_by_shade,
              "elevation_ranked": p.rerank_by_elevation}

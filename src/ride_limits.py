@@ -1,7 +1,7 @@
 """OPERATOR-SET HARD INVARIANTS on what a ride can be.
 
     MAX_POINTS_PER_RIDE       no ride awards more than 100 points, total
-    MAX_LEG_METERS            no two consecutive points are >3 km apart
+    MAX_LEG_METERS            no two consecutive waypoints are >3 km apart
     MAX_RIDE_DISTANCE_METERS  no ride is longer than 80 km
 
 READ THIS BEFORE CHANGING ANY OF THE THREE NUMBERS BELOW.
