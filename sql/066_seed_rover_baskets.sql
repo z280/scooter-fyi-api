@@ -41,12 +41,10 @@
 --                        whose id column predates sql/063 and was never
 --                        re-observed.
 --
--- KNOWN LIMITATION: a Rover that ENTERS the fleet after this migration runs
--- starts at has_basket NULL like any new device, and gets its basket from a
--- rider confirmation like any other feature. Seeding at ingest time would
--- close that gap but would move catalog knowledge into the pipeline's code
--- path; do that deliberately or not at all — this file only repairs the
--- fleet that exists.
+-- NEW ROVERS: this file only repairs the fleet that exists when it runs. A
+-- Rover that enters the feed later is seeded by the ingest cycle instead —
+-- src/device_features.py:seed_catalog_features, called from
+-- update_for_cycle, re-runs this same guarded UPDATE every cycle.
 UPDATE device_state
    SET has_basket = TRUE,
        features_confirmed_at = COALESCE(features_confirmed_at, NOW())

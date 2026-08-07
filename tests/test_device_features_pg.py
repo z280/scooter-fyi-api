@@ -783,3 +783,40 @@ def test_the_seed_is_idempotent_and_does_not_resurrect_a_voted_out_basket(pg_con
     _reseed(pg_conn)
     _reseed(pg_conn)
     assert _state(pg_conn, vid)["basket"] is False
+
+
+# ---------------------------------------------------------------------------
+# seed_catalog_features — the per-cycle companion to sql/066, for Rovers
+# that enter the fleet after the migration ran.
+# ---------------------------------------------------------------------------
+
+def test_the_cycle_seed_gives_a_new_rover_its_basket(pg_conn):
+    vid = _rover(pg_conn)
+    with pg_conn.cursor() as cur:
+        assert device_features.seed_catalog_features(cur) == 1
+    pg_conn.commit()
+    s = _state(pg_conn, vid)
+    assert s["basket"] is True
+    assert s["status"] == STATUS_NEEDS_CONFIRMED
+    assert s["confirmed_at"] is not None
+
+
+def test_the_cycle_seed_repeats_harmlessly_and_respects_riders(pg_conn):
+    """Runs every two minutes, so it must be a no-op on an already-seeded
+    fleet and must never overwrite a rider's (or a review's) answer."""
+    seeded = _rover(pg_conn)
+    answered = _rover(pg_conn, has_basket=False)
+    with pg_conn.cursor() as cur:
+        assert device_features.seed_catalog_features(cur) == 1  # `seeded` only
+        assert device_features.seed_catalog_features(cur) == 0
+    pg_conn.commit()
+    assert _state(pg_conn, seeded)["basket"] is True
+    assert _state(pg_conn, answered)["basket"] is False
+
+
+def test_the_cycle_seed_leaves_other_models_alone(pg_conn):
+    vid = _rover(pg_conn, model="Astro", type_id="1")
+    with pg_conn.cursor() as cur:
+        device_features.seed_catalog_features(cur)
+    pg_conn.commit()
+    assert _state(pg_conn, vid)["basket"] is None

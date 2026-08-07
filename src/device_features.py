@@ -778,6 +778,55 @@ def _write_consensus(
     )
 
 
+# ---------------------------------------------------------------------------
+# Catalog knowledge
+# ---------------------------------------------------------------------------
+
+#: vehicle model -> the feature every unit of that model ships with as
+#: STANDARD equipment. This is knowledge about the PRODUCT, not any unit —
+#: the same class of fact as the model name itself — and it is the only
+#: place in the codebase allowed to assert a feature nobody reported.
+#: Currently one entry: the Rover's cargo basket (the very fact that made
+#: sql/058 refuse to gate the basket question on the Cosmo).
+_CATALOG_STANDARD_FEATURES: dict[str, str] = {
+    "Rover": "has_basket",
+}
+
+
+def seed_catalog_features(cur) -> int:
+    """Fill in catalog-standard features for devices nobody has reported.
+
+    The per-cycle companion to sql/066's one-shot backfill, with identical
+    semantics and guards: only fills a NULL (a rider's answer — including a
+    reported "no", and a review's verdict — always beats the catalog),
+    leaves feature_status alone (the vehicle keeps soliciting a full
+    confirmation), and stamps features_confirmed_at where it was NULL so the
+    seed is an authoritative stored answer a disagreeing report opens a
+    review against rather than silently overwriting. Runs inside the
+    ingest cycle's transaction (src/device_state.py:update_for_cycle), which
+    is what closes sql/066's known limitation: a Rover that enters the fleet
+    tomorrow is seeded the cycle it first appears.
+
+    Returns the number of rows seeded (0 on the typical cycle).
+    """
+    seeded = 0
+    for model, column in _CATALOG_STANDARD_FEATURES.items():
+        cur.execute(
+            f"""
+            UPDATE device_state
+               SET {column} = TRUE,
+                   features_confirmed_at = COALESCE(features_confirmed_at, NOW())
+             WHERE current_vehicle_model_name = %s
+               AND {column} IS NULL
+            """,
+            (model,),
+        )
+        seeded += cur.rowcount or 0
+    if seeded:
+        log.info("device features: seeded %d catalog-standard feature(s)", seeded)
+    return seeded
+
+
 def _stamp_processed(cur, report_ids: Iterable[int]) -> None:
     ids = list(report_ids)
     if not ids:
