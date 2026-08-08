@@ -34,8 +34,9 @@ disagreement away from being corrected by a three-way vote.
 
 PARTIAL REPORTS (sql/065). A report may abstain on any feature — NULL means
 "this reporter was never asked", not "no". Two reporters abstain today: a
-client older than the basket question (sql/058, basket only) and the
-end-ride survey's Cosmo basket answer (everything BUT the basket). An
+client older than the basket question (sql/058), which abstains on the
+basket only, and the end-ride survey's Cosmo basket answer (sql/065),
+which answers the basket ONLY and abstains on the other three. An
 abstained field never agrees, disagrees, or votes; what a partial report
 DID answer is published and graded exactly like anything else. The one
 transition it cannot make is confirming the vehicle: a first report (or a

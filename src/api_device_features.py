@@ -380,7 +380,7 @@ def feature_payload(
     poor_condition: Any, has_basket: Any = None,
 ) -> dict[str, Any] | None:
     """The `device_features` object for a map feature / detail response, or
-    None when nobody has confirmed this vehicle yet.
+    None when nobody has confirmed anything about this vehicle yet.
 
     Returning None rather than an all-false object is the point: false would
     claim we know a scooter has no bell, when the truth is that nobody has
@@ -388,13 +388,20 @@ def feature_payload(
     and this returning None is the same statement in the shape a client
     checks with one `if`.
 
-    A vehicle confirmed BEFORE sql/058 has a consensus for the first three
-    features and NULL for the basket. That is still a confirmed vehicle, so
-    it gets an object — with `basket: false`, the same answer this returned
-    before the question existed. The distinction between "no basket" and
-    "nobody has been asked yet" is deliberately not published per-feature:
-    the object is all-or-nothing by design, and one reconfirmation replaces
-    the guess with an answer.
+    The same honesty applies PER FEATURE inside the object: a field the
+    stored consensus has no answer for serializes as null — unknown — never
+    false. This used to be all-or-nothing (any object implied every field
+    was answered, and a pre-058 consensus's unknown basket rode along as
+    `false`), which was tolerable while the only possible gap was one
+    feature on vehicles confirmed before the basket question existed. It
+    stopped being tolerable when partial knowledge became a first-class
+    state: a ride-survey basket answer (sql/065) or the Rover catalog seed
+    (sql/066) knows ONLY the basket, and an all-or-nothing object would
+    publish confident "no bell / no cup holder / no phone holder" claims
+    for an entire model cohort nobody has looked at. Clients that check
+    `=== true` (the equipment filter's semantics) read null and false
+    identically, which is the correct reading for a filter: an unknown
+    feature doesn't match a "must have it" requirement.
 
     Shared with src/api_public.py's payload builder so the two cannot drift
     on the object's shape.
@@ -404,10 +411,14 @@ def feature_payload(
         and has_phone_holder is None and has_basket is None
     ):
         return None
+
+    def tri(v: Any) -> bool | None:
+        return None if v is None else bool(v)
+
     return {
-        "bell": bool(has_bell),
-        "cup_holder": bool(has_cup_holder),
-        "phone_holder": bool(has_phone_holder),
-        "basket": bool(has_basket),
+        "bell": tri(has_bell),
+        "cup_holder": tri(has_cup_holder),
+        "phone_holder": tri(has_phone_holder),
+        "basket": tri(has_basket),
         "poor_condition": sorted(poor_condition or []),
     }

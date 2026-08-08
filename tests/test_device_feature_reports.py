@@ -532,3 +532,39 @@ def test_the_dedupe_probe_matches_an_abstaining_report(monkeypatch):
         s for s in conn.cur.statements if "FROM device_feature_reports" in s
     )
     assert "has_basket IS NOT DISTINCT FROM" in probe
+
+
+# ---------------------------------------------------------------------------
+# feature_payload — the wire object, tri-state per feature
+# ---------------------------------------------------------------------------
+
+def test_feature_payload_is_none_only_when_nothing_is_known():
+    assert api_device_features.feature_payload(None, None, None, None, None) is None
+
+
+def test_feature_payload_keeps_unknown_features_null_not_false():
+    """A survey-known or catalog-seeded vehicle (sql/065/066) knows ONLY its
+    basket. The other three must serialize as null — unknown — because false
+    is a claim that somebody looked and saw nothing, and publishing it for a
+    whole model cohort would be a fleet-wide lie. Clients filtering on
+    `=== true` read null and false identically, which is the right answer
+    for an equipment filter."""
+    payload = api_device_features.feature_payload(None, None, None, [], True)
+    assert payload == {
+        "bell": None,
+        "cup_holder": None,
+        "phone_holder": None,
+        "basket": True,
+        "poor_condition": [],
+    }
+
+
+def test_feature_payload_still_reports_a_real_no_as_false():
+    payload = api_device_features.feature_payload(True, False, True, ["bell"], False)
+    assert payload == {
+        "bell": True,
+        "cup_holder": False,
+        "phone_holder": True,
+        "basket": False,
+        "poor_condition": ["bell"],
+    }
