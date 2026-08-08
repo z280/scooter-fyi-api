@@ -52,8 +52,10 @@ from .device_features import (
     STATUS_NEEDS_CONFIRMED,
     canonical_poor,
 )
+from .identity import hash_plate
 from .pg import connection
 from .points import credit_device_feature_points
+from .qr import extract_plate
 from .ratelimit import enforce
 
 log = logging.getLogger(__name__)
@@ -103,11 +105,23 @@ class DeviceFeatureReportIn(BaseModel):
     row stores NULL, and `src/device_features.py` excludes the field from
     that report's agreement check and from the consensus vote. Once no
     deployed client omits it, this can become required like the others.
+
+    THE QR ALTERNATIVE (sql/067). `qr_raw_value` is a scanned sticker
+    payload and stands in for the typed plate as proof-of-presence — so
+    with a scan attached, `submitted_plate` becomes optional, and so does
+    `vehicle_identifier` itself: the tools-drawer flow scans a scooter the
+    rider never tapped on the map, and the QR is the only identity it has.
+    A report must carry at least one of the two identities, and at least
+    one of the two proofs; either gap is a 422 here, not a guess later.
     """
-    vehicle_identifier: str = Field(..., pattern=_VEHICLE_IDENTIFIER_RE)
+    vehicle_identifier: str | None = Field(
+        default=None, pattern=_VEHICLE_IDENTIFIER_RE,
+    )
     #: The rotating GBFS bike_id the client had on screen. Audit only.
     device_id: str | None = Field(default=None, max_length=128)
-    submitted_plate: str = Field(..., min_length=1, max_length=64)
+    submitted_plate: str | None = Field(default=None, min_length=1, max_length=64)
+    #: Decoded QR payload, verbatim — same bounds as api_qr.py's QrScanIn.
+    qr_raw_value: str | None = Field(default=None, min_length=1, max_length=2000)
     has_bell: bool
     has_cup_holder: bool
     has_phone_holder: bool
@@ -119,6 +133,16 @@ class DeviceFeatureReportIn(BaseModel):
 
     @model_validator(mode="after")
     def _check_condition(self) -> "DeviceFeatureReportIn":
+        if self.vehicle_identifier is None and self.qr_raw_value is None:
+            raise ValueError(
+                "send vehicle_identifier, qr_raw_value, or both — a report "
+                "with neither has no scooter to attach to"
+            )
+        if self.submitted_plate is None and self.qr_raw_value is None:
+            raise ValueError(
+                "send submitted_plate or qr_raw_value — one of the two is "
+                "the proof you were standing at the scooter"
+            )
         unknown = [k for k in self.poor_condition if k not in FEATURE_KEYS]
         if unknown:
             raise ValueError(
@@ -189,13 +213,71 @@ def submit_device_feature_report(
     status after is not knowable until the processor runs, up to ten minutes
     later, and promising the rider a status we have not computed yet would
     be the one thing worse than a stale one.
+
+    THE QR RULE (sql/067). A scanned sticker is the plate with the typo
+    removed, so a scan that resolves to a known vehicle validates the
+    report outright (`plate_valid = true`) — and it also OUTVOTES the
+    client's claim about which vehicle this is: if the rider tapped one
+    scooter and scanned its neighbour, the answers describe the scooter
+    they were standing at, so the report attaches to the vehicle the QR
+    names, with the tapped one kept in `claimed_vehicle_identifier` for
+    audit. A scan that resolves to nothing falls back to the claimed
+    vehicle and the typed-plate rule (the sticker may be damaged, or Veo
+    may have changed the payload shape); with no claimed vehicle to fall
+    back to — the tools-drawer flow — that is a 404, because there is
+    nothing for the report to attach to. The response's
+    `vehicle_identifier` is always the vehicle the report actually
+    attached to, so the client can tell the rider when a re-target
+    happened.
     """
     ip = real_client_ip(request)
     ua = request.headers.get("user-agent")
-    typed = normalise_plate(payload.submitted_plate)
+    typed = normalise_plate(payload.submitted_plate or "")
+
+    # Resolve the scan before touching the database: both halves are pure.
+    # extract_plate's whole-payload fallback means qr_plate is only None for
+    # an effectively empty scan; an unrecognized payload shape simply hashes
+    # to an identifier no vehicle has, which the lookup below treats the
+    # same as any other non-match.
+    qr_plate = extract_plate(payload.qr_raw_value) if payload.qr_raw_value else None
+    qr_vid = hash_plate(qr_plate) if qr_plate else None
+
+    state_sql = """
+        SELECT vehicle_plate, feature_status, current_h3_10_index,
+               current_lat, current_lon
+          FROM device_state
+         WHERE vehicle_identifier = %s
+    """
 
     with connection() as conn:
         with conn.cursor() as cur:
+            # Which vehicle is this report about? The QR's answer wins when
+            # it resolves; the client's claim is the fallback. Decided first
+            # because everything downstream — the dedupe probe, the status
+            # that picks the award, the row itself — is keyed on the target.
+            state = None
+            target_vid = payload.vehicle_identifier
+            qr_matched: bool | None = None
+            claimed_vid_for_row: str | None = None
+            if payload.qr_raw_value is not None:
+                qr_matched = False
+                if qr_vid is not None:
+                    cur.execute(state_sql, (qr_vid,))
+                    state = cur.fetchone()
+                    if state is not None:
+                        qr_matched = True
+                        if (
+                            payload.vehicle_identifier is not None
+                            and payload.vehicle_identifier != qr_vid
+                        ):
+                            claimed_vid_for_row = payload.vehicle_identifier
+                        target_vid = qr_vid
+                if state is None and payload.vehicle_identifier is None:
+                    raise HTTPException(
+                        404,
+                        detail="scanned QR does not match any known scooter",
+                    )
+            assert target_vid is not None  # the model validator guarantees it
             # Dedupe BEFORE metering — a double-tapped Send is not evidence
             # and must not spend an anonymous reporter's 5/hour budget. Same
             # ordering and rationale as submit_device_report.
@@ -223,7 +305,7 @@ def submit_device_feature_report(
                  ORDER BY reported_at DESC LIMIT 1
                 """,
                 (
-                    payload.vehicle_identifier, reporter_val,
+                    target_vid, reporter_val,
                     payload.has_bell, payload.has_cup_holder,
                     payload.has_phone_holder, payload.poor_condition,
                     payload.has_basket,
@@ -238,6 +320,8 @@ def submit_device_feature_report(
                     "plate_valid": bool(dup[2]),
                     "points_awarded": int(dup[3]),
                     "feature_status": dup[4],
+                    "vehicle_identifier": target_vid,
+                    "qr_matched": qr_matched,
                 }
 
             if user is None:
@@ -250,16 +334,12 @@ def submit_device_feature_report(
                         limit=_LIMIT_FEATURES_AUTH_PER_ACCOUNT[0],
                         window_seconds=_LIMIT_FEATURES_AUTH_PER_ACCOUNT[1])
 
-            cur.execute(
-                """
-                SELECT vehicle_plate, feature_status, current_h3_10_index,
-                       current_lat, current_lon
-                  FROM device_state
-                 WHERE vehicle_identifier = %s
-                """,
-                (payload.vehicle_identifier,),
-            )
-            state = cur.fetchone()
+            # Already fetched when the QR resolved; otherwise look the
+            # target up now (the claimed vehicle, whether or not a
+            # non-resolving scan rode along).
+            if state is None:
+                cur.execute(state_sql, (target_vid,))
+                state = cur.fetchone()
             if state is None:
                 # Unlike the plate check, this IS a hard error: we have no
                 # record of the vehicle at all, so there is nothing for the
@@ -268,7 +348,12 @@ def submit_device_feature_report(
 
             stored_plate, status, h3_10, state_lat, state_lon = state
             status = status or STATUS_NEEDS_CONFIRMED
-            plate_valid = bool(stored_plate) and normalise_plate(stored_plate) == typed
+            # A resolved scan IS the plate check, passed by construction:
+            # the target was found by hashing the plate the sticker encodes.
+            plate_valid = qr_matched is True or (
+                bool(stored_plate) and bool(typed)
+                and normalise_plate(stored_plate) == typed
+            )
 
             # Location for the points row: the reporter's own fix when the
             # client sent one (they are standing at the scooter, so it is the
@@ -278,27 +363,63 @@ def submit_device_feature_report(
             if (lat is None or lng is None) and h3_10 is not None:
                 lat, lng = h3.cell_to_latlng(h3.int_to_str(int(h3_10)))
 
+            # submitted_plate stays NOT NULL and verbatim-as-typed; a
+            # QR-only report stores the plate the sticker encoded, which is
+            # what the rider "submitted" by pointing a camera at it.
+            plate_for_row = (
+                payload.submitted_plate.strip()
+                if payload.submitted_plate is not None
+                else (qr_plate or "")
+            )
             cur.execute(
                 """
                 INSERT INTO device_feature_reports (
                     vehicle_identifier, device_id, account_id, reporter_ip,
                     reporter_user_agent, submitted_plate, plate_valid,
                     has_bell, has_cup_holder, has_phone_holder, has_basket,
-                    all_good_condition, poor_condition, status_at_report
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    all_good_condition, poor_condition, status_at_report,
+                    qr_raw_value, claimed_vehicle_identifier
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s)
                 RETURNING id, reported_at
                 """,
                 (
-                    payload.vehicle_identifier, payload.device_id,
+                    target_vid, payload.device_id,
                     user.account_id if user else None, ip, ua,
-                    payload.submitted_plate.strip(), plate_valid,
+                    plate_for_row, plate_valid,
                     payload.has_bell, payload.has_cup_holder,
                     payload.has_phone_holder, payload.has_basket,
                     payload.all_good_condition,
                     payload.poor_condition, status,
+                    payload.qr_raw_value, claimed_vid_for_row,
                 ),
             )
             new_id, reported_at = cur.fetchone()
+
+            # A resolved scan also refreshes the per-device QR registry
+            # (sql/032) — same upsert api_qr.py performs, minus the RETURNING
+            # (nothing here reads the counters) and minus the sign-in
+            # requirement: the registry's account columns are nullable, and
+            # an anonymous scan of a real sticker is still a real sticker.
+            if qr_matched is True:
+                cur.execute(
+                    """
+                    INSERT INTO device_qr_codes (
+                        vehicle_identifier, qr_raw_value,
+                        first_scanned_by, last_scanned_by
+                    ) VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (vehicle_identifier) DO UPDATE SET
+                        qr_raw_value = EXCLUDED.qr_raw_value,
+                        last_scanned_by = EXCLUDED.last_scanned_by,
+                        last_scanned_at = NOW(),
+                        scan_count = device_qr_codes.scan_count + 1
+                    """,
+                    (
+                        target_vid, payload.qr_raw_value,
+                        user.account_id if user else None,
+                        user.account_id if user else None,
+                    ),
+                )
 
             # Points: authenticated AND right plate AND a resolvable
             # location. Anonymous reports and wrong-plate reports are stored
@@ -310,7 +431,7 @@ def submit_device_feature_report(
                 credited = credit_device_feature_points(
                     cur, account_id=user.account_id, feature_status=status,
                     lat=lat, lng=lng,
-                    vehicle_identifier=payload.vehicle_identifier,
+                    vehicle_identifier=target_vid,
                     report_id=int(new_id),
                 )
                 points_awarded = credited["points"] if credited else 0
@@ -324,9 +445,11 @@ def submit_device_feature_report(
 
     log.info(
         "device feature report id=%d vehicle=%s status=%s plate_valid=%s "
-        "auth=%s points=%d",
-        new_id, payload.vehicle_identifier, status, plate_valid,
+        "auth=%s points=%d qr=%s%s",
+        new_id, target_vid, status, plate_valid,
         user is not None, points_awarded,
+        "none" if qr_matched is None else ("matched" if qr_matched else "miss"),
+        f" claimed={claimed_vid_for_row}" if claimed_vid_for_row else "",
     )
     return {
         "id": int(new_id),
@@ -335,6 +458,12 @@ def submit_device_feature_report(
         "plate_valid": plate_valid,
         "points_awarded": points_awarded,
         "feature_status": status,
+        # The vehicle the report actually attached to — differs from the
+        # request's claim exactly when the QR re-targeted it. qr_matched is
+        # None (no scan) / True (resolved, validates the report) / False
+        # (scan sent but unresolvable; typed-plate rules applied).
+        "vehicle_identifier": target_vid,
+        "qr_matched": qr_matched,
     }
 
 
