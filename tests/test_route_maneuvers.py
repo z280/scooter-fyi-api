@@ -482,3 +482,28 @@ def test_the_limit_runs_even_when_the_request_is_malformed(monkeypatch):
                                params={"from": "nonsense", "to": "39.745,-104.99"})
     assert r.status_code == 400
     assert [c["bucket"] for c in calls] == ["route_ip"]
+
+
+# --- the directions-are-beta disclaimer --------------------------------------
+
+def test_every_route_response_carries_the_beta_warning(monkeypatch):
+    """`beta_warning` is contract, not decoration: clients are told to render
+    it wherever directions are shown and to never hardcode the copy, so its
+    presence (and its exact text staying server-controlled) must not be
+    removable by accident. When directions leave beta, this test is the
+    place that changes."""
+    _install(monkeypatch)
+    trip, _ = _multileg_trip()
+    _stub_valhalla(monkeypatch, trip)
+    body = TestClient(_app()).get(
+        "/api/v1/route",
+        params={"from": "39.74,-104.99", "to": "39.745,-104.99"}).json()
+    assert body["properties"]["beta_warning"] == api_route.NAV_BETA_WARNING
+    assert "beta" in body["properties"]["beta_warning"].lower()
+
+
+def test_route_profiles_carries_the_same_beta_warning(monkeypatch):
+    _install(monkeypatch)
+    r = TestClient(_app()).get("/api/v1/route/profiles")
+    assert r.status_code == 200
+    assert r.json()["beta_warning"] == api_route.NAV_BETA_WARNING

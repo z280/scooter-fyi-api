@@ -728,7 +728,7 @@ most one cycle length.
 | `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | **Opt-in via `?include=ranks`.** Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
 | `has_negative_report` | bool | `true` when ≥1 citizen-submitted report has been filed against this `vehicle_identifier` at this exact `h3_10_index` cell within the last 24h. Becomes `false` automatically when the scooter moves to a different h3_10 cell. Submit reports via `POST /api/v1/reports`. |
 | `feature_status` | string | How much to trust what we know about this vehicle's crowdsourced equipment: `"needs_features_confirmed"` (nobody has ever reported it — every device starts here), `"needs_review"` (two reports disagreed), or `"up_to_date"`. Always on the wire, never behind an `?include=` token: it is what a client's "☑️ Confirm Features" affordance reads to decide whether it is offering 12, 14 or 6 points, so opting in would mean showing the wrong number. See [`POST /api/v1/reports/device-features`](#post-apiv1reportsdevice-features). |
-| `device_features` | object \| null | `{ bell, cup_holder, phone_holder, basket, poor_condition[] }` — the current consensus. **`null` until someone confirms the vehicle**, which is not the same as all-`false`: `false` claims we know a scooter has no bell, `null` says nobody has looked. `poor_condition` lists which of the *present* features are not in good condition (always a subset of the `true` ones; empty means everything works). `basket` arrived later than the other three (sql/058); a vehicle confirmed before it reads `false` until someone reconfirms. |
+| `device_features` | object \| null | `{ bell, cup_holder, phone_holder, basket, poor_condition[] }` — the current consensus. **`null` until something is known about the vehicle**, and each field inside is itself **tri-state: `true` / `false` / `null`** — `false` claims a rider looked and saw nothing, `null` says nobody has answered that question yet. Partial objects are normal: a vehicle known only through a ride-survey basket answer (or the Rover catalog seed) carries `basket` with the other three `null`, and a vehicle confirmed before the basket question existed (sql/058) carries `basket: null`. Filter with `=== true` and the distinction never bites — an unknown feature doesn't satisfy a "must have it" filter, same as an absent one. `poor_condition` lists which of the *present* features are not in good condition (always a subset of the `true` ones; empty means everything works). |
 | `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, active negative reports, and peer-relative dwell outliers (a dwell-outlier per the rules under `dwell_percentile_hood` costs one extra tier, stacking with the absolute-dwell demerits). `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
 | `number_failed_starts` | int \| null | How many times the upstream `bike_id` rotated (someone started a rental) **without the scooter moving** since it arrived at its current location. Resets to 0 when the scooter moves. Null when the device isn't state-tracked (no plate in the upstream payload). |
 | `first_observed_at_location` | string \| null | UTC ISO 8601 timestamp of when we first observed the scooter at its current location. `now - first_observed_at_location` = dwell time. Resets when the scooter moves. Null when the device isn't state-tracked. |
@@ -736,7 +736,7 @@ most one cycle length.
 | `dwell_percentile_hood` | int \| null | 0–100: where this device's dwell sits (≤-fraction, self included) among its **local peers** — all state-tracked devices in `gridDisk(r9 cell, 1)` (its res-9 hex + 6 neighbors, ~0.74 km² centered on the device), widening to `gridDisk(r9, 2)` and then the citywide distribution whenever a ring has <5 peers. `null` when the device isn't state-tracked or no ≥5-peer set exists even citywide. A device is a **dwell outlier** when percentile ≥90 AND dwell ≥3× `dwell_peer_median_hours` AND dwell ≥24 h (absolute floor so high-turnover blocks can't flag fresh scooters). |
 | `dwell_peer_median_hours` | float \| null | Median dwell (hours, 1 decimal) of the peer set used for `dwell_percentile_hood` — lets the UI explain verdicts: "idle 31 h — 5× its block's typical 6 h". Same null conditions. **Rounded for display only** — the `high_risk` outlier rule (≥3×), the `unknown` ratio rule (≥2×) and the `unknown` patience floor (`min(36 h, 16 ×)`) in `reliability_tier` all compare each device's dwell against the underlying unrounded median (`DwellPeerStats.peer_median_hours` in `src/quality.py`), so a value that looks exactly on a 2×/3×/16× boundary here may already be on the other side of it internally. |
 | `vehicle_use_type` | string \| null | `"sitting"` or `"standing"` — whether a rider sits or stands to operate the vehicle. Independent of `form_factor`: this is the accessibility-relevant distinction for compliance purposes, tracked as its own axis in case a future vehicle class doesn't follow the current pattern (every bicycle sits, every scooter stands, as of everything observed so far). Null for a `vehicle_type_id` we haven't classified in any way. See [Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6) for how this feeds the compliance snapshot. |
-| `vehicle_model_name` | string \| null | Veo's own in-app display name for the physical vehicle model — `"Astro"` (kick scooter), `"Cosmo"` (throttle e-bike, no pedals), or `"Apollo"` (two-person pedal e-bike, seated, ~18mph). Visually confirmed per `vehicle_type_id`, not read from any upstream field (Veo's GBFS feed doesn't expose model names). Null for a `vehicle_type_id` not yet confirmed — absence doesn't imply anything about the vehicle, just that nobody's looked yet. |
+| `vehicle_model_name` | string \| null | Veo's own in-app display name for the physical vehicle model — `"Astro"` (kick scooter), `"Cosmo"` (throttle e-bike, no pedals), `"Apollo"` (two-person pedal e-bike, seated, ~18mph), or `"Rover"` (three-wheeled seated cargo trike, in the feed since 2026-07, previously mislabelled `"Cosmo"` until 2026-07-29). Visually confirmed per `vehicle_type_id`, not read from any upstream field (Veo's GBFS feed doesn't expose model names). Null for a `vehicle_type_id` not yet confirmed — absence doesn't imply anything about the vehicle, just that nobody's looked yet. **This vocabulary is open-ended: Veo adds models, and this field gains values without an API version bump** (Rover is exactly that event). Clients MUST render devices whose model they don't recognize — treat an unknown name like `null` (generic pin, no model chip), never as a reason to drop the device from the map or from filters. |
 
 #### Public write endpoints
 
@@ -1282,6 +1282,15 @@ Days without any computed row are simply omitted from `rows` — don't expect de
 Bicycle routing over a Denver-clipped Valhalla graph, with an empirical
 battery-burn estimate attached. Public, no auth.
 
+> **⚠️ Navigation directions are in beta — and clients MUST say so.**
+> Routes and turn-by-turn cues can be inaccurate or unsafe. Every `/route`
+> and `/route/profiles` response carries a `beta_warning` string; render it
+> (or an equivalent warning) anywhere directions are shown to a rider, so
+> nobody follows a cue into traffic thinking it's authoritative. Riders
+> should use their own judgment and obey posted signs, signals, and traffic
+> laws. The field disappears from the payload when directions leave beta —
+> don't hardcode the text.
+
 **The routing graph is smaller than the map.** It covers
 `[-105.06, 39.65, -104.88, 39.79]` (west, south, east, north) — narrower
 than both the app's map bounds and the audit's `denver_core` envelope.
@@ -1300,7 +1309,7 @@ rather than a route.
 | `from` | yes | Origin as `lat,lon` (e.g. `39.7392,-104.9876`). |
 | `to` | yes | Destination as `lat,lon`. |
 | `profile` | no | `safe` \| `range` \| `shade` \| `express`. Defaults to `safe`. |
-| `vehicle_model` | no | `Astro` \| `Cosmo` \| `Apollo` — selects a model-specific battery curve. |
+| `vehicle_model` | no | `Astro` \| `Cosmo` \| `Apollo` \| `Rover` — selects a model-specific battery curve. A model with no fitted curve yet (or any unrecognized value) falls back to the fleet-wide estimate rather than erroring. |
 | `explain` | no | `true` adds a `diagnostics` block. |
 | `maneuvers` | no | `true` adds `properties.maneuvers` — turn-by-turn cues for the nav HUD. |
 
@@ -1320,7 +1329,8 @@ source:
     "shade_score": null,
     "battery_percent_estimate": 7.2,
     "battery_model": "regression",
-    "graph_bbox": [-105.06, 39.65, -104.88, 39.79]
+    "graph_bbox": [-105.06, 39.65, -104.88, 39.79],
+    "beta_warning": "Navigation directions are in beta and may be inaccurate or unsafe. Use your own judgment, watch the road, and obey posted signs, signals, and traffic laws."
   }
 }
 ```
@@ -1334,6 +1344,7 @@ source:
 | `battery_percent_estimate` | number \| null | Estimated battery burn for this route, in percentage points. **`null` whenever `battery_model` is `"unavailable"`.** |
 | `battery_model` | `"regression"` \| `"unavailable"` | Whether a fitted model produced the number. Only these two values. |
 | `graph_bbox` | `[w, s, e, n]` | Echoed on every response so clients can pre-filter without a second call. |
+| `beta_warning` | string | Present on **every** response while directions are in beta. Show it to the rider wherever directions are rendered — see the warning at the top of this section. |
 | `maneuvers` | array | **Only present when `maneuvers=true`.** Turn-by-turn cues; shape detailed below. |
 
 > **The battery estimate is currently always `null` in production.** The
@@ -1403,6 +1414,7 @@ Rate limited to 60 requests/minute per IP (429 with `Retry-After`).
 {
   "default": "safe",
   "graph_bbox": [-105.06, 39.65, -104.88, 39.79],
+  "beta_warning": "Navigation directions are in beta and may be inaccurate or unsafe. Use your own judgment, watch the road, and obey posted signs, signals, and traffic laws.",
   "profiles": [
     { "key": "safe",    "label": "Safe & Protected",    "shade_ranked": false },
     { "key": "range",   "label": "The Range Maximizer", "shade_ranked": false },
@@ -1892,9 +1904,24 @@ reporting the same scooter.
 
 | From | On | To |
 | --- | --- | --- |
-| `needs_features_confirmed` | the first valid report | `up_to_date` |
+| `needs_features_confirmed` | the first valid **full** report | `up_to_date` |
 | `up_to_date` | a later report that disagrees | `needs_review` |
 | `needs_review` | 3 valid reports since the flag, 2/3 majority | `up_to_date` |
+
+**Reports come from two places.** The Confirm Features modal
+(`POST /reports/device-features`, above) answers every question. The
+[end-ride survey](#post-apiv1tracked-ridesride_idsurvey)'s Cosmo basket
+question files a **basket-only** report — it abstains on the other three
+features, so it can agree, disagree, or fill in on the basket alone and
+can never flag a vehicle over a bell it said nothing about. A basket-only
+report on a never-reported vehicle publishes its basket answer but leaves
+the status `needs_features_confirmed` (that's the "full" in the first row):
+three of four questions are still unasked, and moving on would tell every
+client to stop asking them. Likewise a review resolved entirely by
+basket-only reports settles the *basket* and returns a never-fully-reported
+vehicle to `needs_features_confirmed` rather than claiming `up_to_date`. A
+review never erases answers the vote had no opinion on — three basket votes
+decide the basket, not the bell.
 
 **The first valid report is authoritative** — not one vote among many.
 Every later report is graded against it, and any disagreement (about
@@ -2105,7 +2132,7 @@ negotiable per client:
 | | Cap | Where it bites |
 |---|---|---|
 | **Points per ride** | **100**, total across every award for that ride | `PATCH .../end` credits less than the raw award when it would exceed this |
-| **Distance between consecutive points** | **3 000 m** | `POST .../waypoints` returns `422`; `PATCH .../end` drops the leg instead |
+| **Distance between consecutive waypoints** | **3 000 m** | `POST .../waypoints` returns `422`; `PATCH .../end` drops the leg instead |
 | **Total ride distance** | **80 000 m** | `POST .../waypoints` returns `422`; `POST /api/v1/rides` returns `422`; `PATCH .../end` clamps |
 
 Both bounds are inclusive: a leg of exactly 3 000 m and a ride of exactly
@@ -2131,7 +2158,7 @@ is one GPS fix:
   if you're still going.
 
 Note "its neighbour", not "the last fix you sent": waypoints may arrive out
-of order, so a late fix is checked against the points on **both** sides of
+of order, so a late fix is checked against the waypoints on **both** sides of
 where it lands in the path.
 
 ### What `/end` does instead of failing
@@ -2290,19 +2317,19 @@ set, the distance we measured before clamping it to the 80 km cap.
 
 **Ending a ride re-measures it.** The distance you see while a ride is
 still active covers start → last fix, because that is all we know yet;
-`PATCH .../end` recomputes over the same points *plus your reported end*.
+`PATCH .../end` recomputes over the same waypoints *plus your reported end*.
 That final leg matters more than it sounds: a phone that backgrounds,
 saves battery, or loses signal in a tunnel stops producing fixes long
 before you stop riding, and a ride with one early fix is otherwise
 recorded as a few metres. A ride that uploaded any waypoints keeps
-`"waypoints"` and has its `polyline` re-encoded over exactly the points
+`"waypoints"` and has its `polyline` re-encoded over exactly the waypoints
 the distance was measured over, so the two can never disagree.
 
 **The exception is a final leg over 3 km**, which is not measured — see
 [Ride limits](#ride-limits). Such a ride records only the track it can
 believe and reports `"waypoints_partial"`. If your users' rides are coming
 back partial, the fix is to upload fixes more often: the leg cap is about
-the gap between consecutive points, not about how far anyone rode.
+the gap between consecutive waypoints, not about how far anyone rode.
 
 ### Export geometry
 
@@ -2561,7 +2588,7 @@ opening sampling gap, and dropping the last is worse, because a phone that
 backgrounds, saves battery or loses signal in a tunnel stops producing
 fixes long before you stop riding — a ride with one early fix would
 otherwise be recorded as a few metres. `path_polyline` is re-encoded over
-exactly the points the final distance was measured over, so path and
+exactly the waypoints the final distance was measured over, so path and
 distance can never disagree.
 
 A ride that uploaded no waypoints keeps `path_polyline: null` rather than
@@ -2776,8 +2803,9 @@ is `UNIQUE`, sql/052). Source of three point awards — see
 Every field is optional — submit only the panes you have answers for.
 `vehicle_model` is stamped **server-side** from
 `device_state.current_vehicle_model_name` for the ride's vehicle
-(`Astro`/`Cosmo`/`Apollo`, or `null` if unconfirmed) — never the client's
-own claim.
+(`Astro`/`Cosmo`/`Apollo`/`Rover`, or `null` if unconfirmed) — never the
+client's own claim. Only the first three have `model_bonus` keys today; a
+Rover ride's survey simply has none to send.
 
 `issues` is validated against a fixed 16-item vocabulary: `app_veo`,
 `acceleration`, `basket`, `battery`, `bell`, `brakes`, `connectivity`,
@@ -2790,6 +2818,18 @@ own claim.
 `astro_landscape_holder` (bool, Astro only). A key present for the wrong
 model — or when the model is unconfirmed — `422`s, same as an
 unrecognized key.
+
+**`cosmo_front_basket` also feeds the map's crowdsourced
+[device features](#post-apiv1reportsdevice-features).** The answer is
+filed as a basket-only feature report (no plate needed — the ride itself
+proves the rider was on that exact vehicle) and folded into the vehicle's
+consensus by the same ten-minute processor as a modal confirmation. It
+abstains on the three features the survey never asks about, so it can
+never conflict with the stored consensus except over an **opposite basket
+answer** (or basket condition — a survey listing `basket` among `issues`
+while confirming the basket exists reports it present-but-poor). It earns
+no `device_features_*` points — the `ride_survey` award already pays for
+this answer.
 
 `ride_route_id`, when set, must name a `POST /api/v1/ride-routes` row you
 own that is either unlinked or already linked to this ride; submitting

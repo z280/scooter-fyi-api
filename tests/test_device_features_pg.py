@@ -523,3 +523,300 @@ def test_a_bent_basket_survives_the_round_trip(pg_conn):
     state = _state(pg_conn, vid)
     assert state["basket"] is True
     assert state["poor"] == ["basket"]
+
+
+# ---------------------------------------------------------------------------
+# sql/065 — ride-survey basket reports: abstaining on everything but the
+# basket, folded by the same processor.
+# ---------------------------------------------------------------------------
+
+def _survey_report(pg_conn, vid, *, basket, poor=(), minutes=0,
+                   status=STATUS_NEEDS_CONFIRMED):
+    """The exact row src/api_ride_surveys.py files: basket only, no plate,
+    plate_valid true (the ride is the proof of presence)."""
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO device_feature_reports (
+                vehicle_identifier, reported_at, submitted_plate, plate_valid,
+                has_bell, has_cup_holder, has_phone_holder, has_basket,
+                all_good_condition, poor_condition, status_at_report, source
+            ) VALUES (%s, %s, NULL, TRUE, NULL, NULL, NULL, %s, %s, %s, %s,
+                      'ride_survey')
+            RETURNING id
+            """,
+            (vid, _BASE + timedelta(minutes=minutes), basket, not poor,
+             list(poor), status),
+        )
+        (report_id,) = cur.fetchone()
+    pg_conn.commit()
+    return report_id
+
+
+def test_a_survey_basket_answer_publishes_without_confirming_the_vehicle(pg_conn):
+    """First thing ever known about the vehicle is its basket: the answer
+    goes live, but three questions were never asked, so the map keeps
+    soliciting a full confirmation."""
+    vid = _vehicle(pg_conn)
+    _survey_report(pg_conn, vid, basket=True)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_NEEDS_CONFIRMED
+    assert s["basket"] is True
+    assert (s["bell"], s["cup"], s["phone"]) == (None, None, None)
+    assert s["confirmed_at"] is not None
+    assert s["count"] == 1
+
+
+def test_a_survey_answer_matching_the_consensus_is_a_reconfirmation(pg_conn):
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, bell=True, cup=False, phone=True, basket=True)
+    process_pending()
+    _survey_report(pg_conn, vid, basket=True, minutes=10)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_UP_TO_DATE
+    assert s["count"] == 2
+    assert (s["bell"], s["cup"], s["phone"]) == (True, False, True)
+
+
+def test_a_survey_answer_fills_a_basket_nobody_had_answered(pg_conn):
+    """A vehicle confirmed by a pre-058 client learns its basket from a
+    ride survey — same fill path a post-058 modal report takes."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=None)
+    process_pending()
+    _survey_report(pg_conn, vid, basket=True, minutes=10)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_UP_TO_DATE
+    assert s["basket"] is True
+    assert s["count"] == 2
+
+
+def test_an_opposite_survey_answer_opens_a_review(pg_conn):
+    """The one conflict a survey report CAN raise: the opposite basket."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=True)
+    process_pending()
+    _survey_report(pg_conn, vid, basket=False, minutes=10)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_NEEDS_REVIEW
+    # Flagging never overwrites the published answer.
+    assert s["basket"] is True
+
+
+def test_a_survey_report_cannot_conflict_over_features_it_never_answered(pg_conn):
+    """A consensus with NO basket answer plus a survey that answers only
+    the basket share no mutually-answered field that differs — whatever the
+    bell/cup/phone answers are, there is nothing to disagree about."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, bell=False, cup=False, phone=False, basket=None)
+    process_pending()
+    _survey_report(pg_conn, vid, basket=True, minutes=10)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_UP_TO_DATE
+    assert (s["bell"], s["cup"], s["phone"]) == (False, False, False)
+    assert s["basket"] is True
+
+
+def test_a_modal_report_confirms_a_survey_known_vehicle(pg_conn):
+    """The inverse fill: stored knows only the basket; a full modal report
+    agreeing on it contributes the other three AND confirms the vehicle."""
+    vid = _vehicle(pg_conn)
+    _survey_report(pg_conn, vid, basket=True)
+    process_pending()
+    _report(pg_conn, vid, bell=True, cup=True, phone=False, basket=True, minutes=10)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_UP_TO_DATE
+    assert (s["bell"], s["cup"], s["phone"]) == (True, True, False)
+    assert s["count"] == 2
+
+
+def test_a_survey_only_review_keeps_what_the_vote_could_not_see(pg_conn):
+    """Three basket-only votes settle the basket dispute without wiping the
+    stored bell/cup/phone answers — a verdict about the basket is not a
+    reason to forget everything else."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, bell=True, cup=False, phone=True, basket=True)
+    process_pending()
+    for minute in (10, 20, 30):
+        _survey_report(pg_conn, vid, basket=False, minutes=minute)
+        process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_UP_TO_DATE
+    assert s["basket"] is False
+    assert (s["bell"], s["cup"], s["phone"]) == (True, False, True)
+
+
+def test_a_review_on_a_survey_only_vehicle_resolves_back_to_needs_confirmed(pg_conn):
+    """Surveys disagreeing about a survey-known vehicle: the vote settles
+    the basket, but nothing has ever answered the modal's questions, so the
+    vehicle goes back to soliciting a confirmation rather than claiming
+    up_to_date."""
+    vid = _vehicle(pg_conn)
+    _survey_report(pg_conn, vid, basket=True)
+    process_pending()
+    for minute in (10, 20, 30):
+        _survey_report(pg_conn, vid, basket=False, minutes=minute)
+        process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_NEEDS_CONFIRMED
+    assert s["basket"] is False
+    assert (s["bell"], s["cup"], s["phone"]) == (None, None, None)
+
+
+def test_a_poor_basket_survey_disputes_a_fine_one(pg_conn):
+    """Condition is part of the answer, exactly as it is for modal reports."""
+    vid = _vehicle(pg_conn)
+    _report(pg_conn, vid, basket=True)
+    process_pending()
+    _survey_report(pg_conn, vid, basket=True, poor=("basket",), minutes=10)
+    process_pending()
+    assert _state(pg_conn, vid)["status"] == STATUS_NEEDS_REVIEW
+
+
+# ---------------------------------------------------------------------------
+# sql/066 — the Rover basket seed: catalog knowledge, rider-correctable.
+# ---------------------------------------------------------------------------
+
+_SEED_SQL = (SQL_DIR / "066_seed_rover_baskets.sql").read_text()
+
+
+def _rover(pg_conn, *, model="Rover", type_id="5", has_basket=None) -> str:
+    """A device_state row as the ingest cycle + sql/064 leave a Rover."""
+    vid = _vehicle(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE device_state
+               SET current_vehicle_model_name = %s,
+                   current_vehicle_type_id = %s,
+                   has_basket = %s
+             WHERE vehicle_identifier = %s
+            """,
+            (model, type_id, has_basket, vid),
+        )
+    pg_conn.commit()
+    return vid
+
+
+def _reseed(pg_conn) -> None:
+    """Re-run the (idempotent) migration against rows created after the
+    fixture's migration pass already ran."""
+    with pg_conn.cursor() as cur:
+        cur.execute(_SEED_SQL)
+    pg_conn.commit()
+
+
+def test_the_seed_gives_every_rover_a_basket_without_confirming_it(pg_conn):
+    vid = _rover(pg_conn)
+    _reseed(pg_conn)
+    s = _state(pg_conn, vid)
+    assert s["basket"] is True
+    assert s["status"] == STATUS_NEEDS_CONFIRMED
+    assert (s["bell"], s["cup"], s["phone"]) == (None, None, None)
+    assert s["confirmed_at"] is not None, (
+        "the stamp is what makes the seed an authoritative stored answer "
+        "the processor grades reports against"
+    )
+
+
+def test_the_seed_matches_on_the_relabelled_name_without_the_type_id(pg_conn):
+    """A row sql/064 relabelled whose id column predates sql/063."""
+    vid = _rover(pg_conn, type_id=None)
+    _reseed(pg_conn)
+    assert _state(pg_conn, vid)["basket"] is True
+
+
+def test_the_seed_never_overwrites_a_riders_answer(pg_conn):
+    vid = _rover(pg_conn, has_basket=False)
+    _reseed(pg_conn)
+    assert _state(pg_conn, vid)["basket"] is False
+
+
+def test_the_seed_touches_no_other_model(pg_conn):
+    vid = _rover(pg_conn, model="Cosmo", type_id="3")
+    _reseed(pg_conn)
+    s = _state(pg_conn, vid)
+    assert s["basket"] is None
+    assert s["confirmed_at"] is None
+
+
+def test_a_report_disputing_the_seed_opens_a_review_not_a_silent_win(pg_conn):
+    """The safety valve the seed relies on: catalog knowledge is one
+    3-vote review away from being corrected by riders who looked."""
+    vid = _rover(pg_conn)
+    _reseed(pg_conn)
+    _report(pg_conn, vid, bell=True, cup=False, phone=False, basket=False)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_NEEDS_REVIEW
+    assert s["basket"] is True, "flagging never overwrites the published answer"
+    for minute in (10, 20):
+        _report(pg_conn, vid, bell=True, cup=False, phone=False, basket=False,
+                minutes=minute, status=STATUS_NEEDS_REVIEW)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_UP_TO_DATE
+    assert s["basket"] is False, "three riders beat the catalog"
+
+
+def test_a_full_report_agreeing_with_the_seed_confirms_the_vehicle(pg_conn):
+    vid = _rover(pg_conn)
+    _reseed(pg_conn)
+    _report(pg_conn, vid, bell=False, cup=False, phone=False, basket=True)
+    process_pending()
+    s = _state(pg_conn, vid)
+    assert s["status"] == STATUS_UP_TO_DATE
+    assert s["basket"] is True
+    assert (s["bell"], s["cup"], s["phone"]) == (False, False, False)
+
+
+def test_the_seed_is_idempotent_and_does_not_resurrect_a_voted_out_basket(pg_conn):
+    """A replayed migration must not re-seed a basket a review removed —
+    the vote writes FALSE, not NULL, and the seed only fills NULL."""
+    vid = _rover(pg_conn, has_basket=False)
+    _reseed(pg_conn)
+    _reseed(pg_conn)
+    assert _state(pg_conn, vid)["basket"] is False
+
+
+# ---------------------------------------------------------------------------
+# seed_catalog_features — the per-cycle companion to sql/066, for Rovers
+# that enter the fleet after the migration ran.
+# ---------------------------------------------------------------------------
+
+def test_the_cycle_seed_gives_a_new_rover_its_basket(pg_conn):
+    vid = _rover(pg_conn)
+    with pg_conn.cursor() as cur:
+        assert device_features.seed_catalog_features(cur) == 1
+    pg_conn.commit()
+    s = _state(pg_conn, vid)
+    assert s["basket"] is True
+    assert s["status"] == STATUS_NEEDS_CONFIRMED
+    assert s["confirmed_at"] is not None
+
+
+def test_the_cycle_seed_repeats_harmlessly_and_respects_riders(pg_conn):
+    """Runs every two minutes, so it must be a no-op on an already-seeded
+    fleet and must never overwrite a rider's (or a review's) answer."""
+    seeded = _rover(pg_conn)
+    answered = _rover(pg_conn, has_basket=False)
+    with pg_conn.cursor() as cur:
+        assert device_features.seed_catalog_features(cur) == 1  # `seeded` only
+        assert device_features.seed_catalog_features(cur) == 0
+    pg_conn.commit()
+    assert _state(pg_conn, seeded)["basket"] is True
+    assert _state(pg_conn, answered)["basket"] is False
+
+
+def test_the_cycle_seed_leaves_other_models_alone(pg_conn):
+    vid = _rover(pg_conn, model="Astro", type_id="1")
+    with pg_conn.cursor() as cur:
+        device_features.seed_catalog_features(cur)
+    pg_conn.commit()
+    assert _state(pg_conn, vid)["basket"] is None

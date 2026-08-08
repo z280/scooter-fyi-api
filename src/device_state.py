@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
+from . import device_features
 from .config import load
 from .geo import distance_meters as _distance_meters
 from .ingest import TaggedDevice
@@ -349,6 +350,12 @@ def update_for_cycle(
                     """,
                     trip_event_rows,
                 )
+
+            # Catalog-standard equipment for devices that just gained (or
+            # just arrived with) a model that ships with it — e.g. every
+            # Rover's cargo basket. After the model-name writes above so a
+            # device NEW this cycle is seeded this cycle, not next.
+            device_features.seed_catalog_features(cur)
 
         conn.commit()
 

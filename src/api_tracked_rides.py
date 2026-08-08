@@ -571,9 +571,9 @@ def _check_appendable(points: list[tuple[float, float]], idx: int) -> None:
             gap = distance_meters(*points[a], *points[b])
             raise HTTPException(422, {
                 "error": "waypoint_too_far",
-                "detail": f"this fix is {gap:.0f} m from the adjacent point on "
+                "detail": f"this fix is {gap:.0f} m from the adjacent waypoint on "
                           f"the ride's path, above the {MAX_LEG_METERS:.0f} m "
-                          "limit between consecutive points. The fix was not "
+                          "limit between consecutive waypoints. The fix was not "
                           "recorded; the ride is still active and the next one "
                           "will be accepted normally.",
             })
@@ -899,7 +899,7 @@ def end_tracked_ride(
 
 def _vehicle_model_for(cur, vehicle_identifier: str) -> str | None:
     """device_state.current_vehicle_model_name (sql/016) for the ride's
-    vehicle, at donation time — Astro/Cosmo/Apollo, capitalized
+    vehicle, at donation time — Astro/Cosmo/Apollo/Rover, capitalized
     (src/ingest.py:_KNOWN_VEHICLE_TYPES), or None for an unconfirmed
     model. Stamped once onto track_donations.vehicle_model so it survives
     the de-id sweep (the battery model needs it after account linkage is
