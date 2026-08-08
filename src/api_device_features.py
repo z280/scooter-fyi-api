@@ -365,11 +365,17 @@ def submit_device_feature_report(
 
             # submitted_plate stays NOT NULL and verbatim-as-typed; a
             # QR-only report stores the plate the sticker encoded, which is
-            # what the rider "submitted" by pointing a camera at it.
+            # what the rider "submitted" by pointing a camera at it — but
+            # only when the scan actually RESOLVED. extract_plate falls back
+            # to the whole trimmed payload for unrecognized shapes, and an
+            # unresolved scan's "plate" is therefore likely a full URL;
+            # qr_raw_value already stores that verbatim, so copying it here
+            # would just make this column noisier. Empty string instead:
+            # nothing plate-shaped was submitted.
             plate_for_row = (
                 payload.submitted_plate.strip()
                 if payload.submitted_plate is not None
-                else (qr_plate or "")
+                else (qr_plate or "") if qr_matched is True else ""
             )
             cur.execute(
                 """
@@ -410,7 +416,15 @@ def submit_device_feature_report(
                     ) VALUES (%s, %s, %s, %s)
                     ON CONFLICT (vehicle_identifier) DO UPDATE SET
                         qr_raw_value = EXCLUDED.qr_raw_value,
-                        last_scanned_by = EXCLUDED.last_scanned_by,
+                        -- COALESCE, unlike api_qr.py's plain assignment:
+                        -- that endpoint requires a session, this one
+                        -- doesn't, and an anonymous scan overwriting a
+                        -- real account id with NULL would erase
+                        -- attribution rather than add to it.
+                        last_scanned_by = COALESCE(
+                            EXCLUDED.last_scanned_by,
+                            device_qr_codes.last_scanned_by
+                        ),
                         last_scanned_at = NOW(),
                         scan_count = device_qr_codes.scan_count + 1
                     """,

@@ -207,6 +207,27 @@ def test_unresolvable_qr_falls_back_to_the_claimed_vehicle(monkeypatch):
     assert not any("INSERT INTO device_qr_codes" in s for s in conn.cur.statements)
 
 
+def test_unresolvable_qr_never_pollutes_submitted_plate(monkeypatch):
+    """extract_plate falls back to the whole payload for unrecognized
+    shapes, so an unresolved scan's 'plate' is likely a full URL. The row
+    stores an empty submitted_plate instead — qr_raw_value already has the
+    payload verbatim."""
+    client, conn = _client(monkeypatch, [None, None, _STATE, (7, _TS)])
+    r = client.post(
+        "/api/v1/reports/device-features",
+        json={**_BODY, "qr_raw_value": "https://example.com/not-a-veo-shape"},
+    )
+    assert r.status_code == 200
+    assert r.json()["plate_valid"] is False
+    idx = next(
+        i for i, s in enumerate(conn.cur.statements)
+        if "INSERT INTO device_feature_reports" in s
+    )
+    params = conn.cur.params[idx]
+    assert "" in params
+    assert "https://example.com/not-a-veo-shape" not in params[:6]
+
+
 def test_unresolvable_qr_with_no_claim_is_a_404(monkeypatch):
     """The tools-drawer flow has no claimed vehicle: an unresolvable scan
     leaves nothing for the report to attach to."""
