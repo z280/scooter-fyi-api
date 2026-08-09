@@ -1860,8 +1860,32 @@ false, "points_awarded": 0`. Nothing downstream ever reads it: the
 consensus job skips invalid rows entirely. Matching ignores whitespace,
 punctuation and case, so `#1025543` and `1025543` both match.
 
+**Or scan the QR instead (sql/067).** `qr_raw_value` — the decoded payload
+of the sticker on the deck, verbatim — stands in for the typed plate as
+proof-of-presence, and with it both `submitted_plate` **and**
+`vehicle_identifier` become optional (a report still needs at least one
+identity and at least one proof; either gap is a `422`). The server
+extracts the plate from the payload, hashes it, and:
+
+* **resolved to a known vehicle** → the report attaches to *that* vehicle
+  — even when it differs from the `vehicle_identifier` you sent, because
+  the answers describe the scooter the rider actually scanned, not the dot
+  they tapped. `plate_valid` is `true` by construction, the original claim
+  is kept server-side for audit, and the response's `vehicle_identifier`
+  tells you where the report landed so you can say so to the rider.
+* **resolved to nothing** (damaged sticker, unrecognized payload shape) →
+  falls back to your `vehicle_identifier` and the typed-plate rule; with
+  no `vehicle_identifier` to fall back to, `404`.
+
+The raw payload is logged on the report row either way, and a resolved
+scan also refreshes the per-device QR registry.
+
 → `{ "id": 17, "reported_at": "...", "deduped": false, "plate_valid": true,
-     "points_awarded": 14, "feature_status": "needs_review" }`
+     "points_awarded": 14, "feature_status": "needs_review",
+     "vehicle_identifier": "8c4a1f0d2e9b7a35", "qr_matched": null }`
+
+`qr_matched` is `null` when no scan was sent, `true` when it resolved (and
+validated the report), `false` when a scan was sent but didn't resolve.
 
 `feature_status` in the response is the status the vehicle carried **when
 the report landed** — which is what chose the award. The status *after*

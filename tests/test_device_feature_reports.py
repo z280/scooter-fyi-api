@@ -284,6 +284,8 @@ def test_a_duplicate_submission_is_a_no_op(monkeypatch):
         "plate_valid": True,
         "points_awarded": POINTS_DEVICE_FEATURES_FIRST,
         "feature_status": "needs_features_confirmed",
+        "vehicle_identifier": _VID,
+        "qr_matched": None,
     }
     assert not any("INSERT INTO" in s for s in conn.cur.statements)
 
