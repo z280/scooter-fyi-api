@@ -177,3 +177,21 @@ def test_days_is_clamped_to_the_two_week_window(monkeypatch):
     r = client.get("/api/v1/devices/history/hourly")
     assert r.status_code == 200
     assert r.json() == {"days": 14, "hours": []}
+
+
+def test_a_json_string_models_column_still_returns_an_object(monkeypatch):
+    """Some driver configs deliver JSONB as a JSON string; the response
+    shape promises an object either way."""
+    client = _client(
+        monkeypatch,
+        [(
+            _hour(14), 500, 420, 30, 50,
+            '{"Astro": {"available": 420, "reserved": 30, "out_of_service": 50}}',
+        )],
+        [],
+    )
+    r = client.get("/api/v1/devices/history/hourly")
+    assert r.status_code == 200
+    assert r.json()["hours"][0]["models"] == {
+        "Astro": {"available": 420, "reserved": 30, "out_of_service": 50},
+    }

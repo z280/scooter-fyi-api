@@ -20,6 +20,7 @@ zeros that would chart a fleet collapse that never happened.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -39,13 +40,13 @@ def device_history_hourly(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT ON (date_trunc('hour', snapshot_time))
-                       date_trunc('hour', snapshot_time) AS hour,
+                SELECT DISTINCT ON ((date_trunc('hour', snapshot_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'))
+                       (date_trunc('hour', snapshot_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS hour,
                        total, available, reserved, out_of_service,
                        models
                 FROM device_status_snapshots
                 WHERE snapshot_time >= NOW() - make_interval(days => %s)
-                ORDER BY date_trunc('hour', snapshot_time),
+                ORDER BY (date_trunc('hour', snapshot_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),
                          snapshot_time DESC
                 """,
                 (days,),
@@ -57,7 +58,13 @@ def device_history_hourly(
                     "available": int(available),
                     "reserved": int(reserved),
                     "out_of_service": int(oos),
-                    "models": models or {},
+                    # JSONB usually arrives as a dict, but some driver
+                    # configs deliver it as a JSON string — the response
+                    # shape promises an object either way.
+                    "models": (
+                        json.loads(models) if isinstance(models, str)
+                        else models
+                    ) or {},
                 }
                 for hour, total, available, reserved, oos, models
                 in cur.fetchall()
@@ -67,13 +74,13 @@ def device_history_hourly(
             # core metrics' per-cycle totals (see the module docstring).
             cur.execute(
                 """
-                SELECT DISTINCT ON (date_trunc('hour', snapshot_time))
-                       date_trunc('hour', snapshot_time) AS hour,
+                SELECT DISTINCT ON ((date_trunc('hour', snapshot_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'))
+                       (date_trunc('hour', snapshot_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS hour,
                        total_devices_denver
                 FROM snapshot_metadata_core
                 WHERE snapshot_time >= NOW() - make_interval(days => %s)
                       AND total_devices_denver IS NOT NULL
-                ORDER BY date_trunc('hour', snapshot_time),
+                ORDER BY (date_trunc('hour', snapshot_time AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),
                          snapshot_time DESC
                 """,
                 (days,),

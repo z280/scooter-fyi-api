@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import re
 import uuid
 from dataclasses import dataclass
@@ -498,6 +499,13 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
 # ---------------------------------------------------------------------------
 # Postgres writes (one transaction)
 # ---------------------------------------------------------------------------
+
+# Snapshot-retention pacing (see the prune below): monotonic so a wall-clock
+# jump can't stall it; 0.0 makes the first cycle after boot prune.
+_PRUNE_EVERY_SECONDS = 3600.0
+_last_prune_monotonic = 0.0
+
+
 def write_to_postgres(result: ComputeResult) -> None:
     core = result.core_row
     with connection() as conn:
@@ -532,12 +540,20 @@ def write_to_postgres(result: ComputeResult) -> None:
                     result.status_row,
                 )
                 # Retention: the chart needs 14 days; keep 30 (sql/069).
-                cur.execute(
-                    """
-                    DELETE FROM device_status_snapshots
-                    WHERE snapshot_time < NOW() - INTERVAL '30 days'
-                    """
-                )
+                # Pruned at most hourly, not per ~90s cycle — an
+                # unconditional DELETE every cycle is steady write
+                # amplification and vacuum pressure for no benefit; hourly
+                # deletes at most one hour of rows past the horizon.
+                global _last_prune_monotonic
+                now = time.monotonic()
+                if now - _last_prune_monotonic >= _PRUNE_EVERY_SECONDS:
+                    cur.execute(
+                        """
+                        DELETE FROM device_status_snapshots
+                        WHERE snapshot_time < NOW() - INTERVAL '30 days'
+                        """
+                    )
+                    _last_prune_monotonic = now
 
             if result.regional_rows:
                 cur.executemany(
