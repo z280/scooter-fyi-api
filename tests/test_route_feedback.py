@@ -165,15 +165,22 @@ def test_out_of_range_answers_are_422s(monkeypatch):
         {"nav_nps": -1},
         {"nav_nps": 11},
         {"distance_m": -1},
-        # JSON 1e400 parses to inf; storing 'Infinity' in Postgres helps
-        # nobody, so non-finite floats are rejected outright.
-        {"distance_m": 1e400},
-        {"duration_s": 1e400},
     ):
         r = client.post(
             "/api/v1/route-feedback", json={"route_profile": "safe", **bad},
         )
         assert r.status_code == 422, bad
+    # Non-finite floats arrive as the JSON *text* 1e400 (the client-side
+    # serializer would refuse an inf, which is exactly why the raw string
+    # is the honest simulation): the server parses it to inf and must 422
+    # rather than store 'Infinity' in Postgres.
+    for field in ("distance_m", "duration_s"):
+        r = client.post(
+            "/api/v1/route-feedback",
+            content=f'{{"route_profile": "safe", "{field}": 1e400}}',
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 422, field
 
 
 def test_blank_profile_is_a_422_and_a_padded_one_is_canonicalized(monkeypatch):
