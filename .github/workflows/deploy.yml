@@ -3,6 +3,11 @@ name: Build and deploy
 on:
   push:
     branches: [main]
+  # Also on PRs, so `test` below gates a merge rather than reporting after the
+  # fact. build-push/deploy stay main-only via their own `if:` conditions —
+  # a PR gets the tests, not a deploy.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
@@ -10,7 +15,53 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Postgres so the *_pg suites actually run. Without VEO_TEST_PG_DSN they
+    # self-skip -- 182 of them -- and skipping is indistinguishable from
+    # passing in a summary line. Several real migration faults have only ever
+    # been caught with this set.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      VEO_CONFIG: ${{ github.workspace }}/config.json
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+      VEHICLE_IDENTIFIER_SALT: ci-fixed-salt
+      VEO_TEST_PG_DSN: postgresql://test:test@127.0.0.1:5432/test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"          # matches the Dockerfile base
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      # Applies every sql/ file in order against a clean database. This is the
+      # only place migrations are exercised end-to-end: the deploy has no
+      # migration step, and production only ever applies them forward.
+      - name: Apply migrations
+        run: python -m src.cli migrate
+      - name: Test
+        run: python -m pytest tests/ -q
+
   build-push:
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -45,7 +96,7 @@ jobs:
   deploy:
     needs: build-push
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     # The script below does `docker login ghcr.io` with GITHUB_TOKEN and pulls
     # the private image onto the VPS. Don't inherit whatever the repo/org
     # default happens to be — ask for packages:read explicitly.
