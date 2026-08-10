@@ -49,39 +49,53 @@ def test_burn_in_percent_is_not_proportional_to_burn_in_metres():
 # --- anchor filter -----------------------------------------------------------
 
 def test_anchor_filter_thresholds_match_the_spec():
-    assert battery_model.MIN_DURATION_S == 10 * 60
-    assert battery_model.MAX_DURATION_S == 30 * 60
-    assert battery_model.MIN_DISTANCE_METERS == pytest.approx(1609.34)
-    assert battery_model.MIN_IMPLIED_MPH == 8.0
+    """Re-derived 2026-08-10 against 24,954 real reservation episodes when the
+    anchor moved off observation gaps — see THE ANCHOR in the module docstring.
+    The previous values (10-30 min, 1 mile, 8 mph) were calibrated for
+    gap-anchored trips: against rentals the distance floor kept 33% and the
+    speed floor kept 8%."""
+    # One reserved sample bracketed by two available ones at the 2-min cadence.
+    assert battery_model.MIN_DURATION_S == 240
+    assert battery_model.MAX_DURATION_S == 60 * 60
+    assert battery_model.MIN_DISTANCE_METERS == pytest.approx(400.0)
+    assert battery_model.MIN_IMPLIED_MPH == 3.0
 
 
-def test_straight_line_prefilter_is_below_the_routed_anchor():
-    """The cheap pre-filter must not pre-empt the real 1-mile test.
+def test_no_straight_line_prefilter_survives():
+    """A displacement pre-filter cannot be reintroduced: 6% of episodes are
+    loops that end within 400 m of their origin while covering over 800 m of
+    real riding, and those are exactly the observations it would discard."""
+    assert not hasattr(battery_model, "MIN_STRAIGHT_LINE_METERS")
+    assert "straight" not in battery_model._RENTAL_EPISODES_SQL.lower()
 
-    Straight-line distance always understates the routed path, so filtering at
-    1 mile before routing would silently drop qualifying trips.
-    """
-    assert battery_model.MIN_STRAIGHT_LINE_METERS < battery_model.MIN_DISTANCE_METERS
 
-
-def test_trips_are_derived_from_observation_gaps_not_trip_tables():
+def test_trips_are_derived_from_reservation_episodes_not_trip_tables():
     """Guards the finding that forced this design.
 
     device_history.departed_at equals the next stop's snapshot_time at p50, p90
-    and mean (measured over 1.37M stops), so it yields no duration and zero
-    stops in the 10-30 min band. The extraction SQL must read the telemetry
-    stream, not a trip table.
+    and mean (measured over 1.37M stops), so it yields no duration at all. The
+    extraction SQL must read the telemetry stream, not a trip table.
     """
-    sql = battery_model._PAIRS_SQL
+    sql = battery_model._RENTAL_EPISODES_SQL
     assert "raw_telemetry_points" in sql
     assert "device_history" not in sql
     assert "trip_events" not in sql
-    # The gap between consecutive observations IS the duration.
-    assert "LEAD(snapshot_time)" in sql
+    # The reservation flag is the anchor, not the gap between observations.
+    assert "is_reserved" in sql
+    assert "LEAD(snapshot_time)" not in sql
+
+
+def test_extraction_samples_randomly_not_most_recent_first():
+    """~25k episodes a day against a limit in the low thousands. Ordering by
+    time would mine the same hours every run — a systematic time-of-day, and
+    therefore temperature, bias in a model that regresses on temperature."""
+    sql = battery_model._RENTAL_EPISODES_SQL
+    assert "ORDER BY RANDOM()" in sql
+    assert "ORDER BY o.snapshot_time DESC" not in sql
 
 
 def test_implied_speed_uses_routed_distance():
-    # 2 miles in 12 minutes = 10 mph, which clears the 8 mph floor.
+    # 2 miles in 12 minutes = 10 mph, comfortably over the floor.
     mph = battery_model._implied_mph(2 * 1609.34, 12 * 60)
     assert mph == pytest.approx(10.0, abs=0.01)
     assert mph > battery_model.MIN_IMPLIED_MPH
@@ -291,7 +305,11 @@ def test_same_vehicle_repeated_is_not_a_batch():
 
 
 def test_disabled_vehicles_are_excluded_in_sql():
-    assert "NOT is_disabled" in battery_model._PAIRS_SQL
+    """Filtered on the bracketing sample, NOT in the base scan: removing rows
+    mid-run would split one reservation episode into several."""
+    sql = battery_model._RENTAL_EPISODES_SQL
+    assert "NOT pre.disabled" in sql
+    assert "is_disabled" in sql
 
 
 # --- temperature bounding ----------------------------------------------------
@@ -401,4 +419,60 @@ def test_temperature_is_checked_before_routing(monkeypatch):
     on every subsequent run."""
     import inspect
     src = inspect.getsource(battery_model._route_and_store)
-    assert src.index("_temperature_at") < src.index("valhalla.route")
+    assert src.index("_temperature_at") < src.index("_route_summary")
+
+
+def test_episode_scan_reaches_back_past_the_window_start():
+    """An episode already under way at window_start has its bracketing `pre`
+    sample — the kerb, and the battery at rest — BEFORE the window. Scanning
+    only the window drops it, and unlike the window-END case that is not
+    self-healing: the next run starts later still, so it is lost for good, and
+    lost systematically at whatever hour the job runs."""
+    sql = battery_model._RENTAL_EPISODES_SQL
+    # The base scan — the `obs` CTE — must widen, and must NOT be clipped to
+    # the reporting window. Asserted against that CTE alone, because
+    # window_start legitimately appears further down.
+    obs_cte = sql.split("marked AS")[0]
+    assert "snapshot_time >= %(scan_start)s" in obs_cte
+    assert "%(window_start)s" not in obs_cte
+    # ...while the reporting window still decides which episodes belong to a
+    # run, applied to the episode rather than to the scan.
+    assert "post.snapshot_time >= %(window_start)s" in sql
+    # One MAX_DURATION_S is the tight bound: no qualifying episode is longer.
+    assert battery_model.EPISODE_BRACKET_LOOKBACK_S == battery_model.MAX_DURATION_S
+
+
+def test_extract_passes_a_scan_start_earlier_than_the_window(monkeypatch):
+    """Guards the wiring, not just the SQL text: a lookback constant that never
+    reaches the query is the same bug with extra steps."""
+    seen = {}
+
+    class _Cur:
+        description = []
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, sql, params=None):
+            if isinstance(params, dict) and "scan_start" in params:
+                seen.update(params)
+        def fetchall(self): return []
+        def fetchone(self): return None
+
+    class _Conn:
+        def cursor(self): return _Cur()
+        def commit(self): pass
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _conn():
+        yield _Conn()
+
+    monkeypatch.setattr(battery_model, "connection", _conn)
+    monkeypatch.setattr(battery_model.weather, "ensure_coverage", lambda *a: None)
+    battery_model.extract_trips(hours=26, limit=10)
+
+    assert seen, "the episode query never ran"
+    lookback = (seen["window_start"] - seen["scan_start"]).total_seconds()
+    assert lookback == battery_model.EPISODE_BRACKET_LOOKBACK_S
+    assert seen["scan_start"] < seen["window_start"] < seen["window_end"]

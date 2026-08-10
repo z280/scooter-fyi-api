@@ -462,12 +462,13 @@ def test_resolve_soc_is_none_when_end_is_unknown():
 
 # ---------------------------------------------------------------------------
 # extract_trips' donated-ride skip (the OTHER direction of the double-count
-# guard) -- static assertion on _PAIRS_SQL, same idiom as the pre-existing
-# test_disabled_vehicles_are_excluded_in_sql.
+# guard) -- static assertion on _RENTAL_EPISODES_SQL, same idiom as the
+# pre-existing test_disabled_vehicles_are_excluded_in_sql.
 # ---------------------------------------------------------------------------
 
-def test_pairs_sql_skips_gaps_overlapping_a_donated_observation():
-    sql = battery_model._PAIRS_SQL
+def test_episode_sql_skips_episodes_overlapping_a_donated_observation():
+    sql = battery_model._RENTAL_EPISODES_SQL
     assert "d.source = 'donated_ride'" in sql
-    assert "d.departed_at < o.t2" in sql
-    assert "d.arrived_at > o.snapshot_time" in sql
+    # The episode's own bracketing samples are the interval to compare against.
+    assert "d.departed_at < post.snapshot_time" in sql
+    assert "d.arrived_at  > pre.snapshot_time" in sql

@@ -11,15 +11,63 @@ data (see sql/024_battery_model.sql for the long form):
   lookup table in data/range_soc_lut.json. ``current_range_meters`` is a
   nonlinear vendor re-encoding of an integer percent and is identical across all
   three vehicle models, so regressing on metres would fit the vendor curve.
-* A trip is an OBSERVATION GAP in the telemetry stream, not a row in any of the
-  trip tables. A rented vehicle drops out of GBFS free_bike_status, so a ride
-  shows up as two consecutive observations 10-30 minutes apart with a position
-  jump between them. Neither ``trip_events`` (no duration at all) nor
-  ``device_history`` works: measured over 1.37M stops, device_history's
-  ``departed_at`` equals the next stop's ``snapshot_time`` at p50, p90 and mean,
-  because it records the detecting cycle rather than the departure.
-* Distance and elevation are Valhalla's routed values;
+* A trip is a RESERVATION EPISODE — a run of consecutive observations with
+  ``is_reserved`` true, bracketed by the last available sample before it and
+  the first available sample after. See THE ANCHOR below; this replaced an
+  observation-gap model on 2026-08-10 and is the reason this pipeline produces
+  anything at all. Neither ``trip_events`` (no duration) nor ``device_history``
+  works: measured over 1.37M stops, device_history's ``departed_at`` equals the
+  next stop's ``snapshot_time`` at p50, p90 and mean, because it records the
+  detecting cycle rather than the departure.
+* Distance and elevation are Valhalla's routed values, routed THROUGH the
+  in-ride waypoints rather than origin-to-destination;
   ``trip_events.distance_meters`` is a documented flat-earth approximation.
+
+THE ANCHOR (2026-08-10)
+-----------------------
+This module used to define a trip as an OBSERVATION GAP: "a rented vehicle
+drops out of GBFS free_bike_status, so a ride shows up as two consecutive
+observations 10-30 minutes apart with a position jump between them."
+
+Veo does not drop rented vehicles. It keeps them listed for the whole rental,
+sampled every 2 minutes, broadcasting their live moving position, with
+``is_reserved`` true (see src/ride_watch.py's own measurement, and the
+correction note in API_REQUIREMENTS.md). A real rental therefore produces NO
+observation gap at all, and the old anchor was mining feed outages that
+happened to coincide with movement.
+
+Worse, the 10-30 minute window was calibrated for the pre-2026-07-07
+**10-minute** ingest cadence, where it meant 1-3 missed observations. At the
+2-minute cadence it demanded a vehicle be missing for 5-15 consecutive cycles.
+The module's own note recorded the resulting yield without questioning it:
+11.7M consecutive pairs -> 17,401 in-window -> 1,146 that moved -> 243 usable.
+``battery_trip_observations`` held 31 rows in total and
+``battery_model_coefficients`` was empty; /api/v1/route reported
+``battery_model: "unavailable"`` from the day it shipped.
+
+Anchored on reservation episodes instead, over the same fleet on 2026-08-09:
+**29,754 episodes with both battery endpoints, 24,954 usable** after the SoC
+filters. Burn is p10=2, p50=8, p90=25 percentage points and only 11.9% of
+episodes burn less than one SoC step — so the quantization worry that justified
+the old 10-minute floor does not apply to a rental-anchored trip.
+
+WHY THE WAYPOINTS MATTER
+------------------------
+Because the vehicle stays in the feed while it is ridden, Veo hands us a
+position every 2 minutes for the whole rental. Routing origin-to-destination
+throws that away, and it is not a small loss: measured over 250 episodes, the
+waypoint route is 1.32x the direct route at p50 and 3.87x at p90, and 6% of
+episodes are loops that return within 400 m of where they started while
+actually covering more than 800 m. Under a direct route those arrive in the
+regression as a large burn over almost no distance, which is precisely the
+shape that wrecks an intercept. Waypoint routing succeeds on 98% of episodes;
+the direct two-point route is kept as the fallback for the rest.
+
+DO NOT use mid-ride ``current_range_meters`` as a battery reading. It is a
+load-compensated range ESTIMATE, not a fuel gauge: 30.2% of in-ride steps show
+range going UP, 20.2% of them by over a kilometre. Only the bracketing
+available samples are usable, and those need no settling delay (median
+under-read against the 10th post-release sample is 0 m at every offset).
 
 The fit is an ordinary least squares solve via ``numpy.linalg.lstsq`` — four
 terms does not justify a scikit-learn dependency, in the spirit of
@@ -40,17 +88,48 @@ from .quality import compute_battery_percent
 log = logging.getLogger(__name__)
 
 # --- Anchor filter ----------------------------------------------------------
-# Trips shorter than 10 min or longer than 30 min are dropped: the short end is
-# dominated by the ~1-percentage-point SoC quantization floor, the long end by
-# vehicles that were parked mid-"trip" or that we simply lost sight of.
-MIN_DURATION_S = 10 * 60
-MAX_DURATION_S = 30 * 60
-# Routed distance floor. Below ~1 mile a typical trip burns less than one SoC
-# step, so the observation carries no signal.
-MIN_DISTANCE_METERS = 1609.34
-# Implied average speed floor: below this the rider was meandering or the
-# vehicle was moved by an operator van, neither of which is a rider trip.
-MIN_IMPLIED_MPH = 8.0
+#
+# Every bound here was re-derived against 24,954 real reservation episodes
+# (2026-08-09) when the anchor changed — see THE ANCHOR in the module
+# docstring. The old values were calibrated for gap-anchored trips and are
+# actively wrong for rentals: the old 1-mile distance floor kept 33% of
+# episodes and the old 8 mph floor kept 8%.
+#
+# The span is measured between the two BRACKETING available samples, not
+# between the first and last reserved sample: that is the interval over which
+# the battery delta was actually observed, so it is the interval the burn
+# belongs to. It runs up to one cycle long at each end (the flag sets ~1 cycle
+# after the rider unlocks and clears ~1 cycle after they park), which is why
+# the speed floor below is well under a plausible riding speed.
+#
+# 240 s is structural, not a judgement: one reserved sample bracketed by two
+# available samples at the 2-minute cadence spans exactly that.
+MIN_DURATION_S = 240
+# p90 of the observed span is 1680 s. An hour is generous for a real rental
+# and excludes a reservation someone opened and abandoned.
+MAX_DURATION_S = 60 * 60
+# Routed distance floor, applied to the WAYPOINT route — i.e. to distance
+# actually ridden, not to displacement. The old 1-mile floor existed because a
+# shorter gap-anchored trip "burns less than one SoC step"; measured burn on
+# rental episodes is p10=2 / p50=8 percentage points, and _accept_pair already
+# drops the zero-burn cases outright, so that reasoning does not transfer.
+MIN_DISTANCE_METERS = 400.0
+# Implied average speed floor over the span. Routed-distance-over-span sits at
+# roughly p10=4 / p50=10 mph once the bracketing cycles are included, so this
+# is deliberately low: its only job is to reject a vehicle that was reserved
+# for a long time and barely moved. Operator vans, which the old 8 mph floor
+# was partly aimed at, do not reserve at all — and _rebalance_keys still backs
+# this up.
+MIN_IMPLIED_MPH = 3.0
+# How far back the episode scan reaches BEYOND the reporting window, so that an
+# episode already under way at window_start still has its bracketing `pre`
+# sample in scope. See the window-edge note above _RENTAL_EPISODES_SQL. One
+# MAX_DURATION_S is the tight bound: no qualifying episode is longer.
+EPISODE_BRACKET_LOOKBACK_S = MAX_DURATION_S
+# Cap on how many in-ride samples are fed to Valhalla as via-points. At
+# MAX_DURATION_S and a 2-minute cadence an episode cannot exceed 30, so this
+# only ever bites if the cadence changes.
+MAX_ROUTE_WAYPOINTS = 40
 # A positive jump of this size or more is a battery swap, not a ride.
 # Inherited from scripts/analyze_range_signal.py, which established it against
 # the R2 archive.
@@ -69,101 +148,157 @@ def _implied_mph(distance_meters: float, duration_seconds: float) -> float:
 
 # --- Extraction --------------------------------------------------------------
 #
-# A trip is an OBSERVATION GAP, not a device_history row.
+# A trip is a RESERVATION EPISODE. See THE ANCHOR in the module docstring for
+# why, and for what the observation-gap model it replaced actually mined.
 #
-# GBFS free_bike_status lists only available vehicles, so a rented scooter drops
-# out of the feed for the duration of the ride and reappears at the destination.
-# Two consecutive observations of the same vehicle separated by 10-30 minutes,
-# with a position jump across the gap, therefore bracket a trip — and the gap
-# itself is the duration.
+# The shape below is one query in two dialects (Postgres over the hot
+# raw_telemetry_points buffer, DuckDB over an R2 archive file) producing the
+# same candidate dict, so everything downstream — _accept_pair,
+# _rebalance_keys, _route_and_store — is shared:
 #
-# device_history looked like the natural source (it has departed_at) but is not
-# usable: measured over 1.37M stops, departed_at equals the NEXT stop's
-# snapshot_time at p50, p90 AND mean, because it records the cycle that detected
-# the move rather than the moment of departure. Zero stops fall in the 10-30
-# minute band. The observation-gap model is what scripts/analyze_range_signal.py
-# already used, and it is the one that survives contact with the data.
+#   grouped   a running count of reservation STARTS per vehicle, which labels
+#             every sample with the episode it belongs to. Episode k's rows are
+#             the reserved run k followed by the available rows up to the next
+#             reservation, so...
+#   pre       ...the last available row of episode k-1 is the vehicle at the
+#             kerb immediately before rental k: its origin, and its battery at
+#             rest. Relabelled to k for the join.
+#   post      the first available row of episode k is the drop point and the
+#             battery at rest afterwards.
+#   ride      the reserved run itself — the in-ride track, which becomes the
+#             via-points for routing.
 #
-# Measured on a 2-day archive file: 11.7M consecutive pairs -> 17,401 with a
-# 10-30 min gap -> 1,146 that also moved -> 243 usable after the distance and
-# SoC filters. Roughly 120 usable observations per day.
+# BOTH window edges cut episodes, and they cut them differently:
+#
+#   window END    an episode still reserved at the edge has no `post` row and
+#                 is dropped by the join. The next run picks it up once it
+#                 closes. Self-healing, nothing to do.
+#   window START  an episode already under way at the edge has its `pre`
+#                 sample — the kerb it left from, and its battery at rest —
+#                 BEFORE the window, so the join drops it too. That one is NOT
+#                 self-healing: the next run's window starts even later, so the
+#                 episode is lost for good, and it is lost systematically at
+#                 whatever hour the job happens to run.
+#
+# Hence EPISODE_BRACKET_LOOKBACK_S: the scan reaches back beyond the reporting
+# window far enough to guarantee a bracketing `pre` for any episode starting
+# just inside it. Over-inclusion is free — re-mining an episode the previous
+# run already stored hits the (vehicle_identifier, departed_at) NOT EXISTS
+# below, and the ON CONFLICT at insert time behind that.
+#
+# The archive backfill has the same asymmetry at file boundaries and CANNOT fix
+# it this way, because a file is all there is; an episode straddling two
+# archive files is simply lost. At ~28k episodes a day against 18 files that is
+# a rounding error, and it is called out in
+# _rental_episodes_from_archive_file's docstring rather than papered over.
+#
+# NO STRAIGHT-LINE PRE-FILTER. The gap model used one to avoid paying for a
+# Valhalla call on a pair that had not moved. It cannot be used here: 6% of
+# episodes are loops that end within 400 m of their origin while covering more
+# than 800 m of real riding, and those are exactly the observations a
+# displacement filter would throw away.
 
-# Flat-earth metres between the two ends of a pair. Postgres here has no
-# PostGIS; this is the same approximation device_state.py already uses for its
-# movement threshold, and it only gates which pairs are worth routing — the
-# distance that reaches the regression is Valhalla's.
-_STRAIGHT_LINE_M = """
-        sqrt(
-            pow((o.lat2 - o.latitude) * 111320.0, 2) +
-            pow((o.lon2 - o.longitude) * 111320.0 * cos(radians(o.latitude)), 2)
-        )
-"""
-
-# Cheap pre-filter before paying for a Valhalla call. Deliberately well below
-# the 1-mile anchor: straight-line distance always understates the routed path,
-# so filtering at 1 mile here would silently drop qualifying trips. The real
-# 1-mile test is applied to the routed distance.
-MIN_STRAIGHT_LINE_METERS = 800.0
-
-_PAIRS_SQL = f"""
+_RENTAL_EPISODES_SQL = """
 WITH obs AS (
-    SELECT
-        vehicle_identifier, vehicle_model_name, snapshot_time,
-        latitude, longitude, current_range_meters,
-        LEAD(snapshot_time)        OVER w AS t2,
-        LEAD(latitude)             OVER w AS lat2,
-        LEAD(longitude)            OVER w AS lon2,
-        LEAD(current_range_meters) OVER w AS range2
+    SELECT vehicle_identifier, vehicle_model_name, snapshot_time,
+           latitude, longitude, current_range_meters,
+           COALESCE(is_reserved, FALSE) AS reserved,
+           COALESCE(is_disabled, FALSE) AS disabled
     FROM raw_telemetry_points
     WHERE spatial_status = 'denver_core'
-      -- A disabled vehicle that vanishes and reappears elsewhere was moved by
-      -- an operator van, not ridden. Its battery drain is real but has a
-      -- different cause, so it must not train a rider-facing model.
-      AND NOT is_disabled
-      AND snapshot_time >= %(window_start)s
+      AND vehicle_identifier IS NOT NULL
+      -- scan_start = window_start - EPISODE_BRACKET_LOOKBACK_S; the reporting
+      -- window itself is applied to the episode below, not to the scan.
+      AND snapshot_time >= %(scan_start)s
       AND snapshot_time <  %(window_end)s
+),
+marked AS (
+    SELECT *, COALESCE(LAG(reserved) OVER w, FALSE) AS prev_reserved
+    FROM obs
     WINDOW w AS (PARTITION BY vehicle_identifier ORDER BY snapshot_time)
+),
+grouped AS (
+    SELECT *,
+           SUM(CASE WHEN reserved AND NOT prev_reserved THEN 1 ELSE 0 END)
+               OVER (PARTITION BY vehicle_identifier ORDER BY snapshot_time
+                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS episode
+    FROM marked
+),
+ranked AS (
+    SELECT *,
+           ROW_NUMBER() OVER (PARTITION BY vehicle_identifier, episode, reserved
+                              ORDER BY snapshot_time) AS rn,
+           COUNT(*) OVER (PARTITION BY vehicle_identifier, episode, reserved) AS n
+    FROM grouped
+),
+pre AS (
+    SELECT vehicle_identifier, episode + 1 AS episode, vehicle_model_name,
+           snapshot_time, latitude, longitude, current_range_meters, disabled
+    FROM ranked WHERE NOT reserved AND rn = n
+),
+post AS (
+    SELECT vehicle_identifier, episode, snapshot_time, latitude, longitude,
+           current_range_meters
+    FROM ranked WHERE NOT reserved AND rn = 1
+),
+ride AS (
+    SELECT vehicle_identifier, episode, COUNT(*) AS waypoint_count,
+           ARRAY_AGG(ARRAY[latitude, longitude] ORDER BY snapshot_time) AS waypoints
+    FROM ranked WHERE reserved
+    GROUP BY vehicle_identifier, episode
 )
 SELECT
-    o.vehicle_identifier,
-    o.vehicle_model_name,
-    o.snapshot_time AS departed_at,
-    o.t2            AS arrived_at,
-    EXTRACT(EPOCH FROM (o.t2 - o.snapshot_time)) AS duration_seconds,
-    o.latitude, o.longitude, o.lat2, o.lon2,
-    o.current_range_meters AS range_start,
-    o.range2               AS range_end,
-    {_STRAIGHT_LINE_M}     AS straight_line_m
-FROM obs o
-WHERE o.t2 IS NOT NULL
-  AND o.range2 IS NOT NULL
-  AND o.current_range_meters IS NOT NULL
-  AND EXTRACT(EPOCH FROM (o.t2 - o.snapshot_time)) BETWEEN %(min_s)s AND %(max_s)s
-  AND {_STRAIGHT_LINE_M} > %(min_straight_m)s
+    pre.vehicle_identifier,
+    pre.vehicle_model_name,
+    pre.snapshot_time  AS departed_at,
+    post.snapshot_time AS arrived_at,
+    EXTRACT(EPOCH FROM (post.snapshot_time - pre.snapshot_time)) AS duration_seconds,
+    pre.latitude, pre.longitude,
+    post.latitude  AS lat2,
+    post.longitude AS lon2,
+    pre.current_range_meters  AS range_start,
+    post.current_range_meters AS range_end,
+    ride.waypoint_count,
+    ride.waypoints
+FROM pre
+JOIN post USING (vehicle_identifier, episode)
+JOIN ride USING (vehicle_identifier, episode)
+WHERE pre.current_range_meters IS NOT NULL
+  AND post.current_range_meters IS NOT NULL
+  -- Disabled is out-of-service, and a van moving a broken vehicle is not a
+  -- ride. Filtered on the bracketing sample rather than in `obs`, because
+  -- dropping rows mid-run would split one episode into several.
+  AND NOT pre.disabled
+  -- The episode belongs to this run if it ENDED inside the reporting window.
+  -- Anything wholly inside the lookback was already mined by the previous run
+  -- and is filtered by the NOT EXISTS below; this just avoids paying to route
+  -- it again.
+  AND post.snapshot_time >= %(window_start)s
+  AND EXTRACT(EPOCH FROM (post.snapshot_time - pre.snapshot_time))
+        BETWEEN %(min_s)s AND %(max_s)s
   AND NOT EXISTS (
       SELECT 1 FROM battery_trip_observations b
-      WHERE b.vehicle_identifier = o.vehicle_identifier
-        AND b.departed_at = o.snapshot_time
+      WHERE b.vehicle_identifier = pre.vehicle_identifier
+        AND b.departed_at = pre.snapshot_time
   )
-  -- Double-count guard, the other direction (sql/051 / PLAN_RIDE_MODE_API.md
-  -- phase A2 "Battery ingestion"): a donated ride's observation window can
-  -- straddle this candidate pair without sharing its exact departed_at (the
-  -- donation's departed_at is the RIDE's started_at; this candidate's is a
-  -- raw_telemetry_points snapshot_time), so the exact-match NOT EXISTS above
-  -- would miss it. ingest_donated_observation() (this module) handles the
-  -- inverse direction -- deleting an already-mined feed row when a donation
-  -- lands for the same trip -- so this is the one remaining direction: a
-  -- donation that lands BEFORE the nightly extraction run must stop
-  -- extraction from mining the same trip a second time as a separate,
-  -- lower-quality observation.
+  -- Double-count guard (sql/051 / PLAN_RIDE_MODE_API.md phase A2 "Battery
+  -- ingestion"): a donated ride's window can straddle this episode without
+  -- sharing its exact departed_at, so the exact-match NOT EXISTS above would
+  -- miss it. ingest_donated_observation() handles the inverse direction.
   AND NOT EXISTS (
       SELECT 1 FROM battery_trip_observations d
-      WHERE d.vehicle_identifier = o.vehicle_identifier
+      WHERE d.vehicle_identifier = pre.vehicle_identifier
         AND d.source = 'donated_ride'
-        AND d.departed_at < o.t2
-        AND d.arrived_at > o.snapshot_time
+        AND d.departed_at < post.snapshot_time
+        AND d.arrived_at  > pre.snapshot_time
   )
-ORDER BY o.snapshot_time DESC
+-- RANDOM, not most-recent-first. There are ~25k qualifying episodes a day
+-- against a limit in the low thousands, and ORDER BY snapshot_time DESC would
+-- mean every run mines the same few hours of the day — a systematic
+-- time-of-day, and therefore temperature, bias in a model that has a
+-- temperature term. Successive runs accumulate coverage instead; re-runs stay
+-- idempotent through the (vehicle_identifier, departed_at) constraint.
+ORDER BY RANDOM()
 LIMIT %(limit)s
 """
 
@@ -284,22 +419,28 @@ def _route_and_store(conn, cand: dict, stats: dict) -> bool:
         stats["rejected_no_temperature"] += 1
         return False
 
-    try:
-        body = valhalla.route(
-            [(float(cand["latitude"]), float(cand["longitude"])),
-             (float(cand["lat2"]), float(cand["lon2"]))],
-            costing_options={"bicycle_type": "Hybrid"},
-        )
-    except valhalla.ValhallaError:
+    # Route THROUGH the in-ride track, not origin-to-destination — see WHY THE
+    # WAYPOINTS MATTER in the module docstring. The direct route is the
+    # fallback for the ~2% of episodes whose via-points Valhalla cannot thread
+    # (a sample snapped somewhere unreachable, usually), and is what a source
+    # without an in-ride track gets.
+    origin = (float(cand["latitude"]), float(cand["longitude"]))
+    destination = (float(cand["lat2"]), float(cand["lon2"]))
+    waypoints = [(float(a), float(b))
+                 for a, b in (cand.get("waypoints") or [])][:MAX_ROUTE_WAYPOINTS]
+
+    summary = None
+    if waypoints:
+        summary = _route_summary([origin, *waypoints, destination])
+        if summary is None:
+            stats["waypoint_route_failed"] = stats.get("waypoint_route_failed", 0) + 1
+    routed_via_waypoints = summary is not None
+    if summary is None:
+        summary = _route_summary([origin, destination])
+    if summary is None:
         stats["no_route"] += 1
         return False
 
-    trips = valhalla.all_trips(body)
-    if not trips:
-        stats["no_route"] += 1
-        return False
-
-    summary = valhalla.trip_summary(trips[0])
     distance = summary["distance_meters"]
     if distance is None or distance < MIN_DISTANCE_METERS:
         stats["rejected_distance"] += 1
@@ -310,6 +451,9 @@ def _route_and_store(conn, cand: dict, stats: dict) -> bool:
         stats["rejected_speed"] += 1
         return False
 
+    if routed_via_waypoints:
+        stats["routed_via_waypoints"] = stats.get("routed_via_waypoints", 0) + 1
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -317,30 +461,58 @@ def _route_and_store(conn, cand: dict, stats: dict) -> bool:
                 vehicle_identifier, vehicle_model_name, departed_at, arrived_at,
                 duration_seconds, from_lat, from_lon, to_lat, to_lon,
                 route_distance_meters, elevation_gain_meters, temperature_c,
-                soc_start_percent, soc_end_percent, burn_percent, implied_mph
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                soc_start_percent, soc_end_percent, burn_percent, implied_mph,
+                source, waypoint_count
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (vehicle_identifier, departed_at) DO NOTHING
             """,
             (cand["vehicle_identifier"], cand["vehicle_model_name"],
              cand["departed_at"], cand["arrived_at"], float(cand["duration_seconds"]),
              cand["latitude"], cand["longitude"], cand["lat2"], cand["lon2"],
              distance, summary["elevation_gain_meters"], temp,
-             cand["soc_start"], cand["soc_end"], cand["burn"], mph),
+             cand["soc_start"], cand["soc_end"], cand["burn"], mph,
+             "gbfs_rental",
+             # NULL, not 0, when the direct route was used: "we had no track"
+             # and "the track was one point" are different provenance, and
+             # sql/070's own comment leans on the distinction.
+             len(waypoints) if routed_via_waypoints else None),
         )
     return True
 
 
+def _route_summary(points: list[tuple[float, float]]) -> dict | None:
+    """Valhalla summary for one ordered list of points, or None if it will
+    not route. Split out so _route_and_store can try the waypoint route and
+    fall back to the direct one without duplicating the error handling."""
+    try:
+        body = valhalla.route(points, costing_options={"bicycle_type": "Hybrid"})
+    except valhalla.ValhallaError:
+        return None
+    trips = valhalla.all_trips(body)
+    if not trips:
+        return None
+    return valhalla.trip_summary(trips[0])
+
+
 def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
-    """Mine the hot telemetry buffer for trips and persist the good ones.
+    """Mine the hot telemetry buffer for reservation episodes and persist the
+    good ones.
 
-    Runs against ``raw_telemetry_points``, which the archive job flushes to R2
-    and truncates every 24 hours — hence the default 26-hour window, which
-    overlaps the flush boundary so nothing is missed between runs. Re-runs are
-    idempotent via the (vehicle_identifier, departed_at) unique constraint.
+    Runs against ``raw_telemetry_points``, which ``archive_if_due`` flushes to
+    R2 and TRUNCATES — so the buffer only ever holds the hours since the last
+    archive, and the window here is sized to overlap that boundary rather than
+    to be complete. (config's ``archive_hours`` is 24, but the archive objects
+    in R2 land every 48 h; the window is deliberately not derived from either.)
+    Completeness is not the constraint anyway: there are far more qualifying
+    episodes per day than ``limit`` takes. Re-runs are idempotent via the
+    (vehicle_identifier, departed_at) unique constraint.
 
-    The observations table accumulates: a single run yields ~120 trips, and the
-    model becomes trainable after a couple of weeks of daily runs. See
-    ``backfill_trips_from_archive`` to seed it from history instead of waiting.
+    ``limit`` is a real cap, not a formality: there are ~25k qualifying
+    episodes a day. The query samples RANDOMLY rather than most-recent-first
+    precisely because of it — see the ORDER BY note in _RENTAL_EPISODES_SQL.
+    Successive daily runs accumulate coverage across the whole day instead of
+    re-mining the same few hours. See ``backfill_trips_from_archive`` to seed
+    from history rather than waiting.
     """
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(hours=hours)
@@ -354,16 +526,18 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
         "rejected_soc": 0, "rejected_distance": 0, "rejected_speed": 0,
         "rejected_swap": 0, "rejected_rebalance": 0,
         "rejected_no_temperature": 0, "no_route": 0,
+        "routed_via_waypoints": 0, "waypoint_route_failed": 0,
     }
 
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(_PAIRS_SQL, {
+            cur.execute(_RENTAL_EPISODES_SQL, {
                 "window_start": window_start,
+                "scan_start": window_start - timedelta(
+                    seconds=EPISODE_BRACKET_LOOKBACK_S),
                 "window_end": now,
                 "min_s": MIN_DURATION_S,
                 "max_s": MAX_DURATION_S,
-                "min_straight_m": MIN_STRAIGHT_LINE_METERS,
                 "limit": limit,
             })
             cols = [d[0] for d in cur.description]
@@ -371,7 +545,7 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
 
         stats["candidates"] = len(candidates)
         rebalanced = _rebalance_keys(candidates)
-        log.info("battery extraction: %d candidate pairs in the last %dh "
+        log.info("battery extraction: %d candidate episodes in the last %dh "
                  "(%d rebalance groups excluded)", len(candidates), hours, len(rebalanced))
 
         for cand in candidates:
@@ -438,36 +612,89 @@ def _archive_keys(client, bucket: str) -> list[str]:
     return sorted(keys)
 
 
-def _pairs_from_archive_file(con, url: str) -> list[dict]:
-    """Same observation-gap model as _PAIRS_SQL, over one archive file.
+def _rental_episodes_from_archive_file(con, url: str) -> list[dict]:
+    """The same reservation-episode model as _RENTAL_EPISODES_SQL, in DuckDB
+    over one archive file. Kept structurally identical to its Postgres twin so
+    the two can be read side by side; the differences are dialect only
+    (list_transform for the waypoint array, date_diff for the span) plus the
+    two NOT EXISTS de-dupe clauses, which cannot run here because the
+    observations table lives in Postgres — backfill relies on the
+    (vehicle_identifier, departed_at) ON CONFLICT at insert time instead.
 
-    Timestamps are returned as text: DuckDB needs pytz to hand a TIMESTAMPTZ
-    back to Python and the worker image does not ship it.
+    An episode that straddles two archive files is lost: each file is scanned
+    alone, so the episode has its `pre` sample in one file and its `post` in
+    the next and no join can see both. The Postgres path solves the equivalent
+    problem with EPISODE_BRACKET_LOOKBACK_S; there is no equivalent here, and
+    at ~28k episodes a day across 18 files it is a rounding error rather than
+    something worth stitching files together for.
+
+    Timestamps come back as text: DuckDB needs pytz to hand a TIMESTAMPTZ to
+    Python and the worker image does not ship it.
     """
     sql = f"""
     WITH obs AS (
         SELECT vehicle_identifier, vehicle_model_name, snapshot_time,
                latitude, longitude, current_range_meters,
-               LEAD(snapshot_time)        OVER w AS t2,
-               LEAD(latitude)             OVER w AS lat2,
-               LEAD(longitude)            OVER w AS lon2,
-               LEAD(current_range_meters) OVER w AS range2
+               coalesce(is_reserved, FALSE) AS reserved,
+               coalesce(is_disabled, FALSE) AS disabled
         FROM read_parquet('{url}')
-        WHERE spatial_status = 'denver_core' AND NOT is_disabled
+        WHERE spatial_status = 'denver_core' AND vehicle_identifier IS NOT NULL
+    ),
+    marked AS (
+        SELECT *, coalesce(lag(reserved) OVER w, FALSE) AS prev_reserved
+        FROM obs
         WINDOW w AS (PARTITION BY vehicle_identifier ORDER BY snapshot_time)
+    ),
+    grouped AS (
+        SELECT *,
+               sum(CASE WHEN reserved AND NOT prev_reserved THEN 1 ELSE 0 END)
+                   OVER (PARTITION BY vehicle_identifier ORDER BY snapshot_time
+                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS episode
+        FROM marked
+    ),
+    ranked AS (
+        SELECT *,
+               row_number() OVER (PARTITION BY vehicle_identifier, episode, reserved
+                                  ORDER BY snapshot_time) AS rn,
+               count(*) OVER (PARTITION BY vehicle_identifier, episode, reserved) AS n
+        FROM grouped
+    ),
+    pre AS (
+        SELECT vehicle_identifier, episode + 1 AS episode, vehicle_model_name,
+               snapshot_time, latitude, longitude, current_range_meters, disabled
+        FROM ranked WHERE NOT reserved AND rn = n
+    ),
+    post AS (
+        SELECT vehicle_identifier, episode, snapshot_time, latitude, longitude,
+               current_range_meters
+        FROM ranked WHERE NOT reserved AND rn = 1
+    ),
+    ride AS (
+        SELECT vehicle_identifier, episode, count(*) AS waypoint_count,
+               list(struct_pack(la := latitude, lo := longitude)
+                    ORDER BY snapshot_time) AS waypoints
+        FROM ranked WHERE reserved
+        GROUP BY vehicle_identifier, episode
     )
-    SELECT vehicle_identifier, vehicle_model_name,
-           snapshot_time::VARCHAR AS departed_at,
-           t2::VARCHAR            AS arrived_at,
-           date_diff('second', snapshot_time, t2) AS duration_seconds,
-           latitude, longitude, lat2, lon2,
-           current_range_meters AS range_start, range2 AS range_end
-    FROM obs
-    WHERE t2 IS NOT NULL AND range2 IS NOT NULL AND current_range_meters IS NOT NULL
-      AND date_diff('second', snapshot_time, t2) BETWEEN {MIN_DURATION_S} AND {MAX_DURATION_S}
-      AND sqrt(pow((lat2 - latitude) * 111320.0, 2) +
-               pow((lon2 - longitude) * 111320.0 * cos(radians(latitude)), 2))
-          > {MIN_STRAIGHT_LINE_METERS}
+    SELECT pre.vehicle_identifier, pre.vehicle_model_name,
+           pre.snapshot_time::VARCHAR  AS departed_at,
+           post.snapshot_time::VARCHAR AS arrived_at,
+           date_diff('second', pre.snapshot_time, post.snapshot_time) AS duration_seconds,
+           pre.latitude, pre.longitude,
+           post.latitude  AS lat2,
+           post.longitude AS lon2,
+           pre.current_range_meters  AS range_start,
+           post.current_range_meters AS range_end,
+           ride.waypoint_count,
+           list_transform(ride.waypoints, x -> [x.la, x.lo]) AS waypoints
+    FROM pre
+    JOIN post USING (vehicle_identifier, episode)
+    JOIN ride USING (vehicle_identifier, episode)
+    WHERE pre.current_range_meters IS NOT NULL
+      AND post.current_range_meters IS NOT NULL
+      AND NOT pre.disabled
+      AND date_diff('second', pre.snapshot_time, post.snapshot_time)
+            BETWEEN {MIN_DURATION_S} AND {MAX_DURATION_S}
     """
     cur = con.execute(sql)
     cols = [d[0] for d in cur.description]
@@ -506,6 +733,7 @@ def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
         "rejected_soc": 0, "rejected_distance": 0, "rejected_speed": 0,
         "rejected_swap": 0, "rejected_rebalance": 0,
         "rejected_no_temperature": 0, "no_route": 0,
+        "routed_via_waypoints": 0, "waypoint_route_failed": 0,
     }
 
     con = duckdb.connect(":memory:")
@@ -527,7 +755,7 @@ def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
             for key in keys:
                 url = f"s3://{creds['bucket']}/{key}"
                 log.info("backfill: %s", key)
-                candidates = _pairs_from_archive_file(con, url)
+                candidates = _rental_episodes_from_archive_file(con, url)
                 stats["files"] += 1
                 stats["candidates"] += len(candidates)
 
@@ -859,7 +1087,7 @@ def route_adherence(gps_points: list[tuple[float, float]],
 # `source = 'donated_ride'` (sql/051) is what tells the two sources apart,
 # and is what the double-count guards on both sides of this boundary key
 # off of: the DELETE below (mined -> donated direction) and the extra
-# NOT EXISTS clause added to _PAIRS_SQL above (donated -> mined direction).
+# NOT EXISTS clause added to _RENTAL_EPISODES_SQL above (donated -> mined direction).
 
 # Cap on the number of via-points handed to a single Valhalla /route
 # request for the elevation re-derivation below. A donated track can carry
