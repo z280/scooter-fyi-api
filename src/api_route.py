@@ -129,6 +129,61 @@ def _parse_point(raw: str, field: str) -> tuple[float, float]:
     return lat, lon
 
 
+# Valhalla `edge.use` values that mean "a street a car also drives on", i.e.
+# somewhere with traffic, buildings and — the point at night — street lighting.
+# Everything else (cycleway, footway, path, track) is off-street: pleasant by
+# day, and the thing a rider asked to avoid after dark.
+#
+# `driveway` and `parking_aisle` are deliberately NOT here. They are motor-
+# vehicle surfaces but they are not through-streets, and counting them would
+# score a car park as well-lit road.
+_STREET_USES = frozenset({
+    "road", "ramp", "turn_channel", "living_street", "alley",
+})
+
+
+def street_share(trip: dict[str, Any], costing_options: dict[str, Any],
+                 shape: list[tuple[float, float]] | None = None) -> float | None:
+    """Fraction of a trip's length ridden on streets rather than off-street path.
+
+    THIS IS A PROXY FOR LIGHTING, and an explicit one. The honest signal would
+    be OSM's `lit=*`, but its coverage across the Denver clip is 3.2% of ways
+    overall and 4.2% on cycleways/trails — far too sparse to rank on; a route
+    scored against it would mostly be comparing unknowns. Street share is what
+    the available data supports: a lit corridor is overwhelmingly a street, and
+    the unlit stretch a rider wants to avoid at night is overwhelmingly an
+    isolated trail. Swap this for a real lighting join the day the data exists
+    (see `_canopy` for the shape that takes).
+
+    Returns None when the trip can't be snapped back onto the graph. Callers
+    treat that as "unknown" rather than "no streets", so a failed trace never
+    silently reorders routes — the same rule shade_score follows.
+    """
+    if shape is None:
+        shape = valhalla.trip_shape(trip)
+    if len(shape) < 2:
+        return None
+    try:
+        edges = valhalla.trace_attributes(
+            shape, costing_options, attributes=("edge.length", "edge.use"))
+    except valhalla.ValhallaError as exc:
+        log.warning("night scoring failed to trace route: %s", exc)
+        return None
+
+    total = 0.0
+    on_street = 0.0
+    for edge in edges:
+        length = edge.get("length") or 0.0
+        if length <= 0:
+            continue
+        total += length
+        if (edge.get("use") or "").lower() in _STREET_USES:
+            on_street += length
+    if total <= 0:
+        return None
+    return round(on_street / total, 4)
+
+
 def shade_score(trip: dict[str, Any], costing_options: dict[str, Any],
                 shape: list[tuple[float, float]] | None = None) -> float | None:
     """Length-weighted mean canopy coverage over the edges a trip traverses.
@@ -293,6 +348,7 @@ def route(
 
     chosen = trips[0]
     score = None
+    night_share = None
     considered = len(trips)
 
     chosen_shape = None
@@ -319,6 +375,31 @@ def route(
             score, chosen = max(rated, key=lambda pair: pair[0])
         else:
             score = None
+    elif prof.rerank_by_street_share:
+        # Same shape as shade above, and for the same reason: Valhalla has no
+        # request-tunable "keep me on lit streets" lever, so the choice is made
+        # on the response. See street_share for why street share stands in for
+        # lighting.
+        baseline = cfg.profile(cfg.default_profile)
+        if baseline is not None and baseline.key != prof.key:
+            # A rider asking for the night profile must never end up on MORE
+            # off-street path than the default would have given them. Same
+            # guard shade and range carry.
+            try:
+                trips += valhalla.all_trips(
+                    _route_with_retry([origin, dest], baseline))
+            except valhalla.ValhallaError as exc:
+                log.warning("night baseline route failed, ranking alternates only: %s", exc)
+        considered = len(trips)
+        shapes = [valhalla.trip_shape(t) for t in trips]
+        rated = [(street_share(t, prof.costing_options, sh), t)
+                 for t, sh in zip(trips, shapes)]
+        measured = [(sc, t) for sc, t in rated if sc is not None]
+        if measured:
+            night_share, chosen = max(measured, key=lambda pair: pair[0])
+        if explain:
+            chosen_shape = valhalla.trip_shape(chosen)
+            score = shade_score(chosen, prof.costing_options, chosen_shape)
     elif prof.rerank_by_elevation:
         # Pick the flattest alternate, for the same reason shade is re-ranked
         # above: Valhalla's own lever does not work here. `use_hills` is INERT
@@ -376,6 +457,7 @@ def route(
         "label": prof.label,
         **summary,
         "shade_score": score,
+        "street_share": night_share,
         "battery_percent_estimate": battery.get("percent"),
         "battery_model": battery.get("source"),
         "graph_bbox": cfg.bbox,
@@ -414,7 +496,8 @@ def profiles() -> dict[str, Any]:
         "beta_warning": NAV_BETA_WARNING,
         "profiles": [
             {"key": p.key, "label": p.label, "shade_ranked": p.rerank_by_shade,
-             "elevation_ranked": p.rerank_by_elevation}
+             "elevation_ranked": p.rerank_by_elevation,
+             "street_ranked": p.rerank_by_street_share}
             for p in cfg.profiles
         ],
     }

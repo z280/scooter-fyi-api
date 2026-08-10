@@ -88,6 +88,11 @@ class RouteProfile:
     alternates + canopy-scoring pass in api_route: Valhalla exposes no
     request-tunable shade lever, so shade is scored outside the graph.
 
+    ``rerank_by_street_share`` is the night profile's lever, and stands in for
+    lighting: OSM's ``lit=*`` covers 3.2% of ways in the Denver clip and 4.2%
+    of cycleways, too sparse to rank on, so the profile prefers streets over
+    isolated off-street path. See ``api_route.street_share``.
+
     ``rerank_by_elevation`` exists for the same reason, and is not redundant
     with Valhalla's ``use_hills``: that knob is INERT on this graph. Measured
     on the live tiles across its whole 0.0-1.0 range, on five Denver pairs with
@@ -100,6 +105,7 @@ class RouteProfile:
     costing_options: dict[str, Any]
     rerank_by_shade: bool = False
     rerank_by_elevation: bool = False
+    rerank_by_street_share: bool = False
     alternates: int = 0
 
 
@@ -262,6 +268,7 @@ def _valhalla(raw: dict[str, Any]) -> ValhallaConfig:
             costing_options=dict(p.get("costing_options", {})),
             rerank_by_shade=bool(p.get("rerank_by_shade", False)),
             rerank_by_elevation=bool(p.get("rerank_by_elevation", False)),
+            rerank_by_street_share=bool(p.get("rerank_by_street_share", False)),
             alternates=int(p.get("alternates", 0)),
         )
         for p in raw.get("profiles", [])

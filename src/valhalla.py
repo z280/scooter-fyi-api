@@ -108,9 +108,15 @@ def route(points: list[tuple[float, float]],
     return _post("/route", payload)
 
 
+#: What `trace_attributes` asks for when the caller doesn't say. Way id and
+#: length are what shade scoring needs; everything else is wasted payload.
+DEFAULT_TRACE_ATTRIBUTES = ("edge.way_id", "edge.length")
+
+
 def trace_attributes(shape: list[tuple[float, float]],
                      costing_options: dict[str, Any],
-                     shape_match: str = "walk_or_snap") -> list[dict[str, Any]]:
+                     shape_match: str = "walk_or_snap",
+                     attributes: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
     """Snap ``shape`` onto the graph and return its edges.
 
     ``walk_or_snap`` tries the cheap exact edge walk first and falls back to map
@@ -120,7 +126,9 @@ def trace_attributes(shape: list[tuple[float, float]],
     ("edge_walk algorithm failed to find exact route match"). ``map_snap`` is
     the right choice for raw GPS breadcrumbs.
 
-    Only way id and length are requested; everything else is wasted payload.
+    Only way id and length are requested by default; ``attributes`` overrides
+    that for a caller needing more (the night profile wants ``edge.use`` to tell
+    a street from an off-street path).
     """
     payload = {
         "shape": [{"lat": lat, "lon": lon} for lat, lon in shape],
@@ -129,7 +137,7 @@ def trace_attributes(shape: list[tuple[float, float]],
         "shape_match": shape_match,
         "directions_options": {"units": "kilometers"},
         "filters": {
-            "attributes": ["edge.way_id", "edge.length"],
+            "attributes": list(attributes or DEFAULT_TRACE_ATTRIBUTES),
             "action": "include",
         },
     }

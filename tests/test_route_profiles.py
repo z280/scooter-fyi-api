@@ -48,9 +48,9 @@ def _clear_canopy_cache():
 
 # --- profiles ---------------------------------------------------------------
 
-def test_all_four_profiles_are_configured():
+def test_every_profile_is_configured():
     cfg = load().valhalla
-    assert {p.key for p in cfg.profiles} == {"safe", "range", "shade", "express"}
+    assert {p.key for p in cfg.profiles} == {"safe", "range", "shade", "express", "night"}
     assert cfg.default_profile == "safe"
 
 
@@ -72,9 +72,15 @@ def test_only_the_reranked_profiles_ask_for_alternates():
             assert p.rerank_by_elevation is True
             assert p.rerank_by_shade is False
             assert p.alternates >= 2
+        elif p.key == "night":
+            assert p.rerank_by_street_share is True
+            assert p.rerank_by_shade is False
+            assert p.rerank_by_elevation is False
+            assert p.alternates >= 2
         else:
             assert p.rerank_by_shade is False
             assert p.rerank_by_elevation is False
+            assert p.rerank_by_street_share is False
             assert p.alternates == 0
 
 
@@ -389,3 +395,99 @@ def test_range_considers_the_default_profiles_route_too(monkeypatch):
     assert len(calls) == 2, "expected the default profile to be routed as a baseline"
     # The default's flatter route wins.
     assert out["properties"]["elevation_gain_meters"] == pytest.approx(8.0)
+
+
+# --- night profile ------------------------------------------------------------
+#
+# Reported 2026-08-10: "platte river trail is scary after dark". The honest
+# signal would be OSM `lit=*`, but coverage across the Denver clip is 3.2% of
+# ways and 4.2% of cycleways -- too sparse to rank on. So the profile ranks on
+# street share, an explicit proxy: a lit corridor is overwhelmingly a street,
+# and the unlit stretch a rider avoids at night is overwhelmingly an isolated
+# trail.
+
+def _edges(*pairs):
+    """(length_km, use) -> trace_attributes rows."""
+    return [{"length": L, "use": u} for L, u in pairs]
+
+
+def test_street_share_is_length_weighted(monkeypatch):
+    monkeypatch.setattr(api_route.valhalla, "trace_attributes",
+                        lambda *a, **kw: _edges((3.0, "road"), (1.0, "cycleway")))
+    monkeypatch.setattr(api_route.valhalla, "trip_shape",
+                        lambda t: [(1.0, 1.0), (2.0, 2.0)])
+    assert api_route.street_share(_trip(), {}) == pytest.approx(0.75)
+
+
+def test_parking_aisles_do_not_count_as_street():
+    """A car park is motor-vehicle surface but it is not a lit through-street,
+    and counting it would score a parking lot as the safe night option."""
+    assert "parking_aisle" not in api_route._STREET_USES
+    assert "driveway" not in api_route._STREET_USES
+    assert "road" in api_route._STREET_USES
+
+
+def test_street_share_is_none_when_the_trace_fails(monkeypatch):
+    """Unknown must never read as "no streets" -- same rule as shade."""
+    def boom(*a, **kw):
+        raise api_route.valhalla.ValhallaError("no match")
+    monkeypatch.setattr(api_route.valhalla, "trace_attributes", boom)
+    monkeypatch.setattr(api_route.valhalla, "trip_shape",
+                        lambda t: [(1.0, 1.0), (2.0, 2.0)])
+    assert api_route.street_share(_trip(), {}) is None
+
+
+def test_night_profile_picks_the_most_street_based_alternate(monkeypatch):
+    trail = _trip(length_km=2.0)
+    street = _trip(length_km=2.4)
+    monkeypatch.setattr(
+        api_route.valhalla, "route",
+        lambda *a, **kw: {"trip": trail, "alternates": [{"trip": street}]})
+    monkeypatch.setattr(
+        api_route.valhalla, "trip_shape",
+        lambda t: [(1.0, 1.0), (2.0, 2.0)] if t is trail else [(3.0, 3.0), (4.0, 4.0)])
+    monkeypatch.setattr(
+        api_route.valhalla, "to_geojson",
+        lambda pts: {"type": "LineString", "coordinates": []})
+
+    def fake_trace(shape, costing_options, **kw):
+        if shape[0][0] == 1.0:                       # the trail route
+            return _edges((0.2, "road"), (1.8, "cycleway"))
+        return _edges((2.2, "road"), (0.2, "footway"))
+
+    monkeypatch.setattr(api_route.valhalla, "trace_attributes", fake_trace)
+    out = api_route.route(from_="39.74,-104.99", to="39.70,-104.95", profile="night")
+    # The longer, street-based alternate wins.
+    assert out["properties"]["distance_meters"] == pytest.approx(2400.0)
+    assert out["properties"]["street_share"] == pytest.approx(0.9167, abs=1e-3)
+
+
+def test_night_falls_back_to_valhalla_ranking_when_nothing_traces(monkeypatch):
+    first = _trip(length_km=2.0)
+    second = _trip(length_km=5.0)
+    monkeypatch.setattr(
+        api_route.valhalla, "route",
+        lambda *a, **kw: {"trip": first, "alternates": [{"trip": second}]})
+    monkeypatch.setattr(
+        api_route.valhalla, "to_geojson",
+        lambda pts: {"type": "LineString", "coordinates": []})
+
+    def boom(*a, **kw):
+        raise api_route.valhalla.ValhallaError("no match")
+
+    monkeypatch.setattr(api_route.valhalla, "trace_attributes", boom)
+    out = api_route.route(from_="39.74,-104.99", to="39.70,-104.95", profile="night")
+    assert out["properties"]["street_share"] is None
+    assert out["properties"]["distance_meters"] == pytest.approx(2000.0)
+
+
+def test_night_is_configured_and_advertised():
+    cfg = load().valhalla
+    night = cfg.profile("night")
+    assert night is not None and night.rerank_by_street_share is True
+    assert night.alternates >= 2
+    # and it must not double up on another profile's ranking
+    assert night.rerank_by_shade is False and night.rerank_by_elevation is False
+    by_key = {p["key"]: p for p in api_route.profiles()["profiles"]}
+    assert by_key["night"]["street_ranked"] is True
+    assert by_key["safe"]["street_ranked"] is False
