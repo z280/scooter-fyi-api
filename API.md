@@ -2891,6 +2891,33 @@ Award gates (amounts in [Points](#points)):
   `ride_route_id` doesn't resolve to a route you own, or is already
   linked to a different ride.
 
+### `POST /api/v1/route-feedback`
+
+The navigation half of the survey, for rides the survey can't reach: a "My
+own Device" or guest ride is private — no `tracked_rides` row, no ride id —
+but the rider still chose a route and rode it, and their opinion of the
+routing is exactly as real. Same navigation vocabulary as the survey, with
+the route described inline (there is no `ride_routes` row to link):
+
+```json
+{ "route_profile": "shade", "distance_m": 3200.5, "duration_s": 840,
+  "nav_route_rating": 8, "nav_deviated": true,
+  "nav_deviated_needs_improvement": true, "nav_nps": 9,
+  "nav_qualitative": "Great until the staircase." }
+```
+
+`route_profile` is required; everything else is optional, but at least one
+actual answer (rating, deviation, NPS, or non-empty qualitative text) must
+be present — a bare profile name is a `422`. The deviation follow-up is
+silently dropped unless `nav_deviated` is `true`, mirroring the pane that
+only asks it after a Yes.
+
+Anonymous is allowed (5/hour per IP; 20/hour with a bearer token) and
+**nothing is awarded either way** — private rides are never
+points-eligible, and this endpoint requires no proof a ride happened.
+
+→ `{ "id": 17, "created_at": "..." }`
+
 ## Ride routes
 
 Screen 4's chosen route (one of `safe`/`range`/`shade`/`express`, from
