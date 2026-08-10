@@ -179,6 +179,16 @@
         "rerank_by_shade": true
       },
       {
+        "key": "night",
+        "label": "Night Owl",
+        "costing_options": {
+          "bicycle_type": "Hybrid",
+          "use_roads": 0.7
+        },
+        "alternates": 3,
+        "rerank_by_street_share": true
+      },
+      {
         "key": "express",
         "label": "Commuter Express",
         "costing_options": {

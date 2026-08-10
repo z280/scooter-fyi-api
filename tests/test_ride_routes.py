@@ -228,10 +228,11 @@ def test_unknown_profile_is_400():
         "/api/v1/ride-routes", json=_payload(profile="teleport"))
     assert r.status_code == 400
     assert r.json()["detail"]["error"] == "unknown_profile"
-    assert set(r.json()["detail"]["profiles"]) == {"safe", "range", "shade", "express"}
+    assert set(r.json()["detail"]["profiles"]) == {"safe", "range", "shade",
+                                                   "express", "night"}
 
 
-@pytest.mark.parametrize("profile", ["safe", "range", "shade", "express"])
+@pytest.mark.parametrize("profile", ["safe", "range", "shade", "express", "night"])
 def test_every_configured_profile_is_accepted(monkeypatch, profile):
     c, conn = _client(monkeypatch, fetchones=[(uuid.uuid4(),)])
     assert _post(c, profile=profile).status_code == 200
