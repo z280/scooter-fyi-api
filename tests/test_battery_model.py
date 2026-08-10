@@ -476,3 +476,65 @@ def test_extract_passes_a_scan_start_earlier_than_the_window(monkeypatch):
     lookback = (seen["window_start"] - seen["scan_start"]).total_seconds()
     assert lookback == battery_model.EPISODE_BRACKET_LOOKBACK_S
     assert seen["scan_start"] < seen["window_start"] < seen["window_end"]
+
+
+# --- archive era guard (sql/070 follow-up) ----------------------------------
+
+class _FakePaginator:
+    def __init__(self, keys): self.keys = keys
+    def paginate(self, **kw):
+        yield {"Contents": [{"Key": k} for k in self.keys]}
+
+
+class _FakeS3:
+    def __init__(self, keys): self.keys = keys
+    def get_paginator(self, _): return _FakePaginator(self.keys)
+
+
+_ARCHIVE_KEYS = [
+    "raw/2026/06/30/raw_20260630T220217Z.parquet",   # 10-min era
+    "raw/2026/07/03/raw_20260703T080001Z.parquet",   # 10-min era
+    "raw/2026/07/06/raw_20260706T080000Z.parquet",   # 10-min era
+    "raw/2026/07/08/raw_20260708T080001Z.parquet",   # straddles the cutover
+    "raw/2026/07/10/raw_20260710T080001Z.parquet",   # first wholly 2-min file
+    "raw/2026/08/08/raw_20260808T080002Z.parquet",
+]
+
+
+def test_pre_cutover_archives_are_excluded():
+    """10-minute-cadence files parse fine and yield thousands of rows, which is
+    what makes them dangerous. At that cadence a median 6-minute rental gives
+    ONE via-point or none, so the waypoint route collapses to the direct route
+    (understating distance ~32%) while the bracketing samples sit 10 minutes
+    apart (inflating the span). Real burn, understated distance, inflated
+    duration — all pushing beta_1, the coefficient the model exists for."""
+    keys = battery_model._archive_keys(_FakeS3(_ARCHIVE_KEYS), "bucket")
+    assert keys == [
+        "raw/2026/07/10/raw_20260710T080001Z.parquet",
+        "raw/2026/08/08/raw_20260808T080002Z.parquet",
+    ]
+
+
+def test_the_cutover_file_itself_is_excluded():
+    """A file's date is when it was WRITTEN, i.e. the END of the span it
+    covers, so the file dated on the cutover still holds pre-cutover samples."""
+    assert "raw/2026/07/08/raw_20260708T080001Z.parquet" not in \
+        battery_model._archive_keys(_FakeS3(_ARCHIVE_KEYS), "bucket")
+
+
+def test_unparseable_archive_keys_are_skipped_not_crashed_on():
+    keys = battery_model._archive_keys(
+        _FakeS3(["raw/not/a/date/x.parquet", "raw/2026/08/08/ok.parquet",
+                 "raw/2026/08/notes.txt"]), "bucket")
+    assert keys == ["raw/2026/08/08/ok.parquet"]
+
+
+def test_backfill_samples_each_file_rather_than_taking_all_of_it():
+    """~56k episodes a file across 14 files is ~780k Valhalla calls to fit four
+    coefficients. Sampling per file also keeps the draw spread across every
+    hour of the archive, which matters for the temperature term."""
+    import inspect
+    src = inspect.getsource(battery_model._rental_episodes_from_archive_file)
+    assert "ORDER BY random()" in src
+    assert "LIMIT {limit}" in src
+    assert battery_model.BACKFILL_EPISODES_PER_FILE <= 5000
