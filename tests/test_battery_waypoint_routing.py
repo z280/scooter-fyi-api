@@ -95,8 +95,19 @@ def _stats():
 
 
 def _stored(conn):
-    """The parameter tuple of the single INSERT, or None."""
-    return conn.inserts[0][1] if conn.inserts else None
+    """The single INSERT as {column: value}, or None.
+
+    Keyed by column name parsed out of the statement rather than by position:
+    these assertions used negative indices until sql/071 appended a column and
+    silently shifted every one of them.
+    """
+    if not conn.inserts:
+        return None
+    sql, params = conn.inserts[0]
+    cols = sql.split("(", 1)[1].split(")", 1)[0]
+    names = [c.strip() for c in cols.split(",")]
+    assert len(names) == len(params), f"{len(names)} columns vs {len(params)} params"
+    return dict(zip(names, params))
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +124,7 @@ def test_waypoints_are_routed_through_not_around(routes):
                         (39.749001, -105.002239),
                         (39.729218, -105.027692)]
     assert len(calls) == 1       # the direct route was never asked for
-    assert _stored(conn)[9] == 4200.0
+    assert _stored(conn)["route_distance_meters"] == 4200.0
     assert stats["routed_via_waypoints"] == 1
 
 
@@ -125,7 +136,7 @@ def test_direct_route_is_the_fallback_when_the_waypoint_route_fails(routes):
 
     assert battery_model._route_and_store(conn, _cand(), stats) is True
     assert [len(c) for c in calls] == [5, 2]
-    assert _stored(conn)[9] == 1800.0
+    assert _stored(conn)["route_distance_meters"] == 1800.0
     assert stats["waypoint_route_failed"] == 1
     assert stats.get("routed_via_waypoints", 0) == 0
 
@@ -139,7 +150,7 @@ def test_waypoint_count_is_null_when_the_direct_route_was_used(routes):
     plan[2] = 1800.0
     conn = _FakeConn()
     battery_model._route_and_store(conn, _cand(), _stats())
-    assert _stored(conn)[-1] is None
+    assert _stored(conn)["waypoint_count"] is None
 
 
 def test_waypoint_count_records_how_many_via_points_were_used(routes):
@@ -147,7 +158,7 @@ def test_waypoint_count_records_how_many_via_points_were_used(routes):
     plan[5] = 4200.0
     conn = _FakeConn()
     battery_model._route_and_store(conn, _cand(), _stats())
-    assert _stored(conn)[-1] == 3
+    assert _stored(conn)["waypoint_count"] == 3
 
 
 def test_a_candidate_with_no_track_routes_directly(routes):
@@ -158,7 +169,7 @@ def test_a_candidate_with_no_track_routes_directly(routes):
     assert battery_model._route_and_store(conn, _cand(waypoints=[]), stats) is True
     assert [len(c) for c in calls] == [2]
     assert stats.get("waypoint_route_failed", 0) == 0   # nothing to fail
-    assert _stored(conn)[-1] is None
+    assert _stored(conn)["waypoint_count"] is None
 
 
 def test_both_routes_failing_is_a_no_route(routes):
@@ -180,7 +191,7 @@ def test_rows_are_tagged_gbfs_rental(routes):
     plan[5] = 4200.0
     conn = _FakeConn()
     battery_model._route_and_store(conn, _cand(), _stats())
-    assert _stored(conn)[-2] == "gbfs_rental"
+    assert _stored(conn)["source"] == "gbfs_rental"
 
 
 def test_distance_floor_applies_to_the_waypoint_route(routes):
@@ -193,7 +204,7 @@ def test_distance_floor_applies_to_the_waypoint_route(routes):
 
     assert battery_model._route_and_store(conn, _cand(), stats) is True
     assert stats["rejected_distance"] == 0
-    assert _stored(conn)[9] == 3000.0
+    assert _stored(conn)["route_distance_meters"] == 3000.0
 
 
 def test_speed_floor_uses_the_waypoint_distance(routes):
@@ -211,4 +222,4 @@ def test_waypoints_are_capped(routes):
     many = [[39.7 + i / 10000.0, -105.0] for i in range(n + 25)]
     battery_model._route_and_store(conn, _cand(waypoints=many), _stats())
     assert len(calls[0]) == n + 2
-    assert _stored(conn)[-1] == n
+    assert _stored(conn)["waypoint_count"] == n

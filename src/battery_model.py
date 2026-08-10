@@ -237,10 +237,53 @@ pre AS (
            snapshot_time, latitude, longitude, current_range_meters, disabled
     FROM ranked WHERE NOT reserved AND rn = n
 ),
+-- THE END-OF-RIDE BATTERY READING IS NOT THE FIRST ONE (2026-08-10).
+-- `post` is the DROP POINT — where and when the vehicle became available —
+-- and that is what arrived_at / lat2 / lon2 must come from. But its
+-- current_range_meters has not settled: a battery just off load reads low and
+-- recovers over the next few minutes. Measured on 1,854 episodes across 6
+-- days, holding distance/elevation/temperature fixed and varying only which
+-- post-release sample supplies soc_end:
+--
+--   post   ~min   mean burn   intercept   pp/km    R2
+--      1      2      12.102       8.930   0.800   0.207   <- was production
+--      2      4       9.189       5.357   1.016   0.354   <- settled
+--      3      6       8.742       4.641   0.996   0.344
+--      6     12       8.267       4.146   1.058   0.275
+--      8     16       7.925       4.112   1.031   0.222
+--
+-- One extra cycle moves the intercept 8.93 -> 5.36 pp, lifts the distance
+-- coefficient 27% (0.800 -> 1.016 pp/km — the term the model exists for), and
+-- lifts R2 by 71%. Waiting longer buys almost nothing and then makes it WORSE:
+-- R2 peaks at post[2] and declines after, because a longer wait lets
+-- self-discharge and charging bleed into a reading that is supposed to
+-- describe one ride.
+--
+-- A previous check concluded no settling delay was needed. It compared
+-- MEDIANS, which are 0 at every offset — most readings are already settled and
+-- the effect lives in a large minority, so the median was simply the wrong
+-- statistic.
+--
+-- post[2] exists for 96.1% of episodes (the run of available samples is
+-- partitioned by episode, so it can never be a LATER rental's reading —
+-- a re-reservation starts a new episode). The remaining 3.9% fall back to
+-- post[1] and are marked by soc_end_offset_cycles = 0.
 post AS (
+    -- The settled reading arrives as a LEAD over the episode's available
+    -- samples, NOT as a second scan of `ranked` joined back on. The join
+    -- form is correct and unusably slow: it took this query from 8 s to
+    -- over 500 s on the live buffer, because `ranked` is a 843k-row CTE and
+    -- Postgres re-scans it per probe. One pass, one window.
     SELECT vehicle_identifier, episode, snapshot_time, latitude, longitude,
-           current_range_meters
-    FROM ranked WHERE NOT reserved AND rn = 1
+           current_range_meters, settled_range
+    FROM (
+        SELECT vehicle_identifier, episode, snapshot_time, latitude, longitude,
+               current_range_meters, rn,
+               LEAD(current_range_meters) OVER (
+                   PARTITION BY vehicle_identifier, episode
+                   ORDER BY snapshot_time) AS settled_range
+        FROM ranked WHERE NOT reserved
+    ) available WHERE rn = 1
 ),
 ride AS (
     SELECT vehicle_identifier, episode, COUNT(*) AS waypoint_count,
@@ -258,7 +301,9 @@ SELECT
     post.latitude  AS lat2,
     post.longitude AS lon2,
     pre.current_range_meters  AS range_start,
-    post.current_range_meters AS range_end,
+    COALESCE(post.settled_range, post.current_range_meters) AS range_end,
+    CASE WHEN post.settled_range IS NOT NULL THEN 1 ELSE 0 END
+        AS soc_end_offset_cycles,
     ride.waypoint_count,
     ride.waypoints
 FROM pre
@@ -463,8 +508,8 @@ def _route_and_store(conn, cand: dict, stats: dict) -> bool:
                 duration_seconds, from_lat, from_lon, to_lat, to_lon,
                 route_distance_meters, elevation_gain_meters, temperature_c,
                 soc_start_percent, soc_end_percent, burn_percent, implied_mph,
-                source, waypoint_count
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                source, waypoint_count, soc_end_offset_cycles
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (vehicle_identifier, departed_at) DO NOTHING
             """,
             (cand["vehicle_identifier"], cand["vehicle_model_name"],
@@ -476,7 +521,8 @@ def _route_and_store(conn, cand: dict, stats: dict) -> bool:
              # NULL, not 0, when the direct route was used: "we had no track"
              # and "the track was one point" are different provenance, and
              # sql/070's own comment leans on the distinction.
-             len(waypoints) if routed_via_waypoints else None),
+             len(waypoints) if routed_via_waypoints else None,
+             cand.get("soc_end_offset_cycles")),
         )
     return True
 
@@ -763,10 +809,19 @@ def _rental_episodes_from_archive_file(con, url: str, day: str,
                snapshot_time, latitude, longitude, current_range_meters, disabled
         FROM ranked WHERE NOT reserved AND rn = n
     ),
+    -- See THE END-OF-RIDE BATTERY READING note on the Postgres twin, incl.
+    -- why the settled reading is a LEAD and not a second scan joined back on.
     post AS (
         SELECT vehicle_identifier, episode, snapshot_time, latitude, longitude,
-               current_range_meters
-        FROM ranked WHERE NOT reserved AND rn = 1
+               current_range_meters, settled_range
+        FROM (
+            SELECT vehicle_identifier, episode, snapshot_time, latitude, longitude,
+                   current_range_meters, rn,
+                   lead(current_range_meters) OVER (
+                       PARTITION BY vehicle_identifier, episode
+                       ORDER BY snapshot_time) AS settled_range
+            FROM ranked WHERE NOT reserved
+        ) available WHERE rn = 1
     ),
     ride AS (
         SELECT vehicle_identifier, episode, count(*) AS waypoint_count,
@@ -783,14 +838,16 @@ def _rental_episodes_from_archive_file(con, url: str, day: str,
            post.latitude  AS lat2,
            post.longitude AS lon2,
            pre.current_range_meters  AS range_start,
-           post.current_range_meters AS range_end,
+           coalesce(post.settled_range, post.current_range_meters) AS range_end,
+           CASE WHEN post.settled_range IS NOT NULL THEN 1 ELSE 0 END
+               AS soc_end_offset_cycles,
            ride.waypoint_count,
            list_transform(ride.waypoints, x -> [x.la, x.lo]) AS waypoints
     FROM pre
     JOIN post USING (vehicle_identifier, episode)
     JOIN ride USING (vehicle_identifier, episode)
     WHERE pre.current_range_meters IS NOT NULL
-      AND post.current_range_meters IS NOT NULL
+      AND coalesce(post.settled_range, post.current_range_meters) IS NOT NULL
       AND NOT pre.disabled
       -- The episode belongs to this day if it ENDED in it, so an episode
       -- pulled in by the lookback is not also claimed by the previous day.

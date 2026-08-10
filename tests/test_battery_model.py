@@ -588,3 +588,49 @@ def test_archive_file_days_handles_an_empty_file():
         def fetchone(self): return (None, None)
 
     assert battery_model._archive_file_days(_Con(), "s3://b/k.parquet") == []
+
+
+# --- settled end-of-ride battery reading (sql/071) --------------------------
+
+def test_end_of_ride_battery_comes_from_the_settled_sample():
+    """A pack just off load reads low and recovers. Measured on 1,854
+    episodes over 6 days with distance/elevation/temperature held fixed, one
+    extra cycle moves the intercept 8.93 -> 5.36 pp, the distance coefficient
+    0.800 -> 1.016 pp/km, and R2 0.207 -> 0.354."""
+    for sql in (battery_model._RENTAL_EPISODES_SQL,
+                inspect_archive_sql()):
+        assert "settled_range" in sql
+        assert "LEAD(current_range_meters)" in sql.replace("lead(", "LEAD(")
+        # ...falling back to the first sample when there is no second one.
+        assert "settled_range, post.current_range_meters)" in sql
+
+
+def test_the_drop_point_still_comes_from_the_first_sample():
+    """Only the BATTERY moves to the settled sample. arrived_at and the
+    end coordinates are the drop point — where the ride actually finished —
+    and taking those two cycles late would misplace it."""
+    sql = battery_model._RENTAL_EPISODES_SQL
+    assert "post.snapshot_time AS arrived_at" in sql
+    assert "post.latitude  AS lat2" in sql
+    assert "post.longitude AS lon2" in sql
+    # post_settled contributes the range and nothing else.
+    # The settled value is a LEAD of the RANGE only — nothing else follows it.
+    assert "LEAD(current_range_meters)" in sql
+    assert "LEAD(latitude)" not in sql and "LEAD(snapshot_time)" not in sql
+
+
+def test_fallback_rows_are_marked_not_silently_mixed_in():
+    """~3.9% of episodes have no second sample and read ~3 pp high. NULL
+    (pre-sql/071) / 0 (fallback) / 1 (settled) must stay distinguishable."""
+    sql = battery_model._RENTAL_EPISODES_SQL
+    assert "soc_end_offset_cycles" in sql
+    assert "THEN 1 ELSE 0 END" in sql
+    import inspect
+    store = inspect.getsource(battery_model._route_and_store)
+    assert 'cand.get("soc_end_offset_cycles")' in store
+
+
+def inspect_archive_sql():
+    """The DuckDB twin's SQL, for the shared assertions above."""
+    import inspect
+    return inspect.getsource(battery_model._rental_episodes_from_archive_file)
