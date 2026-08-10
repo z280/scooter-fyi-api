@@ -2438,9 +2438,17 @@ it isn't.
 
 How it works: you declare a ride start against a specific vehicle. The
 server adds that device to a watch list and compares it against **every
-GBFS ingest cycle for 3 hours**, detecting when it leaves the feed (a ride
-began) and when it reappears (it ended, and where). You separately report
-your own end. The two accounts of the ride are then comparable.
+GBFS ingest cycle for 3 hours**, detecting when it is checked out (a ride
+began) and when it becomes available again (it ended, and where). You
+separately report your own end. The two accounts of the ride are then
+comparable.
+
+"Checked out" means the vehicle either drops out of the feed *or* stays
+listed with `is_reserved` true — Veo does the latter, keeping a rented
+vehicle in the feed and broadcasting its live position for the whole
+rental. The field names still say `gbfs_left_feed_at` / `gbfs_reappeared_at`
+(they are on the wire and in the schema); read them as "checked out at" and
+"available again at". Nothing about the response shape changes.
 
 ### The redaction rule — read this before designing a summary screen
 
