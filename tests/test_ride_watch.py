@@ -17,12 +17,18 @@ _RIDE_B = uuid.uuid4()
 
 
 def _device(vehicle_identifier: str, lat: float = 39.74, lon: float = -104.98,
-            current_range_meters: int | None = 5000) -> TaggedDevice:
+            current_range_meters: int | None = 5000,
+            is_reserved: bool | None = None,
+            is_disabled: bool | None = None) -> TaggedDevice:
+    """is_reserved defaults to None — "upstream said nothing", which reads
+    as available, i.e. the presence-only behaviour every pre-existing test
+    in this file was written against."""
     return TaggedDevice(
         device_id="bike-1", vehicle_type_id="1", form_factor="scooter",
         lat=lat, lon=lon, spatial_status="denver_core",
         vehicle_identifier=vehicle_identifier,
         current_range_meters=current_range_meters,
+        is_reserved=is_reserved, is_disabled=is_disabled,
     )
 
 
@@ -83,6 +89,97 @@ def test_mixed_batch_partitions_correctly():
     )
     assert newly_left == [(1, _RIDE_A)]
     assert [t[:2] for t in newly_reappeared] == [(2, _RIDE_B)]
+
+
+# ---------- the reservation signal (regression: 0/19 rides ever resolved) ----
+#
+# See src/ride_watch.py's "WHAT CHECKED OUT ACTUALLY LOOKS LIKE": Veo keeps
+# a rented vehicle IN free_bike_status, moving, with is_reserved true, so
+# presence-only detection never fired for a single real ride.
+
+def test_watching_device_present_but_reserved_is_newly_left():
+    """The regression these tests exist for. Before 2026-08-10 this was
+    "unchanged" and the watch sat open until it expired."""
+    dev = _device("aaaa000000000000", is_reserved=True)
+    watch_rows = [(1, _RIDE_A, "aaaa000000000000", "watching")]
+    newly_left, newly_reappeared = ride_watch._classify(
+        watch_rows, observed={dev.vehicle_identifier: dev})
+    assert newly_left == [(1, _RIDE_A)]
+    assert newly_reappeared == []
+
+
+def test_left_feed_device_present_but_still_reserved_is_unchanged():
+    """Mid-rental: listed, moving, still reserved. Not an end signal —
+    resolving here would stamp gbfs_end_* somewhere along the route."""
+    dev = _device("aaaa000000000000", is_reserved=True)
+    watch_rows = [(1, _RIDE_A, "aaaa000000000000", "left_feed")]
+    newly_left, newly_reappeared = ride_watch._classify(
+        watch_rows, observed={dev.vehicle_identifier: dev})
+    assert newly_left == []
+    assert newly_reappeared == []
+
+
+def test_left_feed_device_unreserved_again_is_newly_reappeared():
+    """The end of the arc: is_reserved back to false at the new kerb."""
+    dev = _device("aaaa000000000000", lat=39.7402, lon=-104.986, is_reserved=False)
+    watch_rows = [(1, _RIDE_A, "aaaa000000000000", "left_feed")]
+    newly_left, newly_reappeared = ride_watch._classify(
+        watch_rows, observed={dev.vehicle_identifier: dev})
+    assert newly_left == []
+    assert [t[:2] for t in newly_reappeared] == [(1, _RIDE_A)]
+    assert newly_reappeared[0][2] is dev
+
+
+def test_full_rental_arc_reserved_then_released():
+    """Walk one watch through the three cycles that matter, feeding
+    _classify the states a real rental produces in order."""
+    parked = _device("aaaa000000000000", lat=39.7365, lon=-104.9918, is_reserved=False)
+    riding = _device("aaaa000000000000", lat=39.7400, lon=-104.9806, is_reserved=True)
+    dropped = _device("aaaa000000000000", lat=39.7402, lon=-104.9860, is_reserved=False)
+
+    left, back = ride_watch._classify(
+        [(1, _RIDE_A, "aaaa000000000000", "watching")], {"aaaa000000000000": parked})
+    assert (left, back) == ([], [])          # still on the kerb
+
+    left, back = ride_watch._classify(
+        [(1, _RIDE_A, "aaaa000000000000", "watching")], {"aaaa000000000000": riding})
+    assert left == [(1, _RIDE_A)]            # -> left_feed
+
+    left, back = ride_watch._classify(
+        [(1, _RIDE_A, "aaaa000000000000", "left_feed")], {"aaaa000000000000": riding})
+    assert (left, back) == ([], [])          # mid-ride, no end signal yet
+
+    left, back = ride_watch._classify(
+        [(1, _RIDE_A, "aaaa000000000000", "left_feed")], {"aaaa000000000000": dropped})
+    assert [t[:2] for t in back] == [(1, _RIDE_A)]   # -> resolved, at the drop point
+    assert (back[0][2].lat, back[0][2].lon) == (39.7402, -104.9860)
+
+
+def test_absence_still_counts_as_checked_out():
+    """Operators that DO drop rented vehicles (and genuine feed dropouts)
+    must keep working — this is the pre-existing contract, asserted here
+    against the helper directly so it can't be lost in a later refactor."""
+    assert ride_watch._is_checked_out(None) is True
+
+
+def test_missing_reservation_flag_reads_as_available():
+    """src/ingest.py normalises a non-bool is_reserved to None. None must
+    NOT mean checked out, or a feed that stops publishing the flag would
+    pin every watch open forever."""
+    assert ride_watch._is_checked_out(_device("aaaa000000000000", is_reserved=None)) is False
+
+
+def test_disabled_but_unreserved_is_not_checked_out():
+    """is_disabled is out-of-service, not in-use — see _is_checked_out's
+    docstring. Reading it as checked out would flip every maintenance-
+    flagged vehicle mid-watch."""
+    dev = _device("aaaa000000000000", is_reserved=False, is_disabled=True)
+    assert ride_watch._is_checked_out(dev) is False
+
+
+def test_disabled_and_reserved_is_checked_out():
+    dev = _device("aaaa000000000000", is_reserved=True, is_disabled=True)
+    assert ride_watch._is_checked_out(dev) is True
 
 
 # ---------- update_watches_for_cycle (DB orchestration, fake cursor) ---------

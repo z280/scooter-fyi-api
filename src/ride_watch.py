@@ -11,16 +11,40 @@ expected to be tiny relative to the fleet. That's the "targeted indexed
 query, not a full table scan" the performance requirement asks for.
 
 Two transitions only:
-  watching  -> left_feed  vehicle_identifier ABSENT from this cycle's
-                           payload (GBFS omits vehicles while checked out).
-  left_feed -> resolved   vehicle_identifier PRESENT again. Records the
+  watching  -> left_feed  vehicle_identifier CHECKED OUT this cycle —
+                           see _is_checked_out below.
+  left_feed -> resolved   vehicle_identifier AVAILABLE again. Records the
                            observed lat/lon/battery on tracked_rides as
                            the GBFS-side end signal, independent of any
                            user report (sql/027_tracked_rides.sql).
 
-"Removed from the feed at its present location" is read as simply
-"absent from this cycle's device list" — GBFS gives no location for an
-absent device to compare against, so there's nothing else to check.
+WHAT "CHECKED OUT" ACTUALLY LOOKS LIKE. This module shipped reading it as
+"absent from this cycle's device list", on the assumption every operator
+drops a rented vehicle from free_bike_status. **Veo does not.** Measured
+against production telemetry on 2026-08-10: a rented Veo vehicle stays in
+the feed for the whole rental, at 2-minute granularity, broadcasting its
+live moving position, with `is_reserved` flipping true for the duration.
+Over a 100-minute window, consecutive samples of `is_reserved` vehicles
+moved 320 m on average (68% of steps > 50 m — scooter pace), against 1.2 m
+for the rest of the fleet (0.2% of steps > 50 m — GPS jitter). The whole
+arc is visible on one vehicle: parked, `is_reserved` true at 08:34,
+~1 km of travel, `is_reserved` false again at 08:58 at the new kerb.
+
+Presence alone therefore never fired: 19 of 19 tracked rides had
+`gbfs_left_feed_at` NULL, all 17 donations settled `gbfs_end:
+pending_feed`, and every one aged out to `ineligible`/`end_mismatch` for
+0 points. Both signals are honoured now — absence still counts (operators
+that DO drop rented vehicles, and genuine feed dropouts), and so does the
+reservation flag.
+
+`is_reserved` is None when upstream omits it or sends a non-bool
+(src/ingest.py already normalises that), and None reads as available —
+i.e. exactly the pre-2026-08-10 presence-only behaviour, so a feed that
+stops publishing the flag degrades to the old model rather than pinning
+every watch open.
+
+"Removed from the feed at its present location" is read as "absent from
+this cycle's device list, or present but flagged checked out".
 Reappearance is recorded unconditionally (no "must differ from start
 location" gate) — anti-abuse filtering on that data belongs to the points
 system, not this detection layer.
@@ -72,6 +96,27 @@ class WatchUpdateStats:
     finalized_validations: int = 0
 
 
+def _is_checked_out(device: TaggedDevice | None) -> bool:
+    """True when this cycle says the vehicle is in someone's hands — the
+    module docstring's "WHAT CHECKED OUT ACTUALLY LOOKS LIKE" measurement.
+
+    Two operator conventions, both accepted, because we can't require the
+    upstream feed to pick one:
+      * the vehicle drops out of free_bike_status entirely (the GBFS-spec
+        reading, and what this module assumed exclusively until
+        2026-08-10), and
+      * the vehicle stays listed with `is_reserved` true (what Veo
+        actually does — the only signal available on that feed).
+
+    `is_disabled` is deliberately NOT read as checked out: it marks a
+    vehicle taken out of service, not one being ridden, and the same
+    measurement window shows disabled-but-unreserved vehicles sitting
+    still (1.1 m per step). A disabled vehicle mid-rental is already
+    covered by `is_reserved` being true alongside it.
+    """
+    return device is None or device.is_reserved is True
+
+
 def _classify(
     watch_rows: list[tuple[int, uuid.UUID, str, str]],  # (watch_id, tracked_ride_id, vehicle_identifier, status)
     observed: dict[str, TaggedDevice],
@@ -81,9 +126,15 @@ def _classify(
     newly_reappeared: list[tuple[int, uuid.UUID, TaggedDevice]] = []
     for watch_id, tracked_ride_id, vehicle_identifier, status in watch_rows:
         device = observed.get(vehicle_identifier)
-        if status == "watching" and device is None:
+        checked_out = _is_checked_out(device)
+        if status == "watching" and checked_out:
             newly_left.append((watch_id, tracked_ride_id))
-        elif status == "left_feed" and device is not None:
+        elif status == "left_feed" and not checked_out:
+            # `device` is necessarily non-None here: _is_checked_out is
+            # True for every absent vehicle, so "not checked out" implies
+            # "observed this cycle" — and the resolve branch below needs
+            # the observation to stamp gbfs_end_lat/lon/battery from.
+            assert device is not None
             newly_reappeared.append((watch_id, tracked_ride_id, device))
     return newly_left, newly_reappeared
 
