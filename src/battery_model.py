@@ -602,17 +602,68 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
 ARCHIVE_DUCKDB_MEMORY = "1GB"
 
 
+# Archive files written before the 2026-07-07 cadence cutover are UNUSABLE for
+# a reservation-anchored fit, and quietly so — they parse fine and produce
+# thousands of rows. Measured per file (episodes/day, median via-points, median
+# span, share with <=1 via-point):
+#
+#   raw_20260703  600 s cadence   13,464/day   1.0 wp   1201 s   64% thin
+#   raw_20260706  600 s cadence   18,970/day   1.0 wp   1201 s   60% thin
+#   raw_20260808  120 s cadence   28,284/day   4.0 wp    600 s   14% thin
+#
+# Three problems compound, all in the same direction. At a 600 s cadence a
+# median 6-minute rental yields ONE reserved sample or none, so half the
+# rentals are invisible and the ones that survive skew long. With one
+# via-point the waypoint route degenerates to the direct route, which
+# understates ridden distance by ~32% at p50 (see WHY THE WAYPOINTS MATTER).
+# And the bracketing samples are 10 minutes apart, so the span carries up to
+# 20 minutes of not-riding.
+#
+# The burn is real, but it gets attributed to an understated distance over an
+# inflated span — which inflates beta_1, the distance coefficient, the one
+# term the whole model exists to estimate. Excluded by date, not by a
+# positional file count, so the boundary survives new archives being written.
+ARCHIVE_CADENCE_CUTOVER = date(2026, 7, 8)
+
+
 def _archive_keys(client, bucket: str) -> list[str]:
+    """Archive keys from the 2-minute-cadence era only, oldest first.
+
+    Keys are ``raw/YYYY/MM/DD/raw_YYYYMMDDThhmmssZ.parquet`` and the date is
+    when the file was WRITTEN, i.e. the end of the span it covers — so a file
+    dated on the cutover still contains pre-cutover samples. The first file
+    written strictly after the cutover (2026-07-10, covering 07-08 onward) is
+    the first that is wholly 2-minute data.
+    """
     keys = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix="raw/"):
         for obj in page.get("Contents", []):
-            if obj["Key"].endswith(".parquet"):
-                keys.append(obj["Key"])
+            if not obj["Key"].endswith(".parquet"):
+                continue
+            try:
+                written = date(*(int(x) for x in obj["Key"].split("/")[1:4]))
+            except (ValueError, TypeError):
+                log.warning("archive key with an unparseable date, skipped: %s",
+                            obj["Key"])
+                continue
+            if written <= ARCHIVE_CADENCE_CUTOVER:
+                continue
+            keys.append(obj["Key"])
     return sorted(keys)
 
 
-def _rental_episodes_from_archive_file(con, url: str) -> list[dict]:
+# Episodes to take from any one archive file. A file holds ~56k qualifying
+# episodes and there are 14 usable files, so routing all of them would mean
+# ~780k Valhalla calls and ~780k rows to fit four coefficients on — hours of
+# load for no statistical gain. Sampling per file rather than taking the first
+# N keeps the draw spread across every hour of every day in the archive, which
+# matters because the model has a temperature term.
+BACKFILL_EPISODES_PER_FILE = 1500
+
+
+def _rental_episodes_from_archive_file(con, url: str,
+                                       limit: int = BACKFILL_EPISODES_PER_FILE) -> list[dict]:
     """The same reservation-episode model as _RENTAL_EPISODES_SQL, in DuckDB
     over one archive file. Kept structurally identical to its Postgres twin so
     the two can be read side by side; the differences are dialect only
@@ -695,6 +746,10 @@ def _rental_episodes_from_archive_file(con, url: str) -> list[dict]:
       AND NOT pre.disabled
       AND date_diff('second', pre.snapshot_time, post.snapshot_time)
             BETWEEN {MIN_DURATION_S} AND {MAX_DURATION_S}
+    -- Random, for the same reason the Postgres path is random: taking the
+    -- head of a time-ordered file would sample one part of the day.
+    ORDER BY random()
+    LIMIT {limit}
     """
     cur = con.execute(sql)
     cols = [d[0] for d in cur.description]
@@ -756,6 +811,14 @@ def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
                 url = f"s3://{creds['bucket']}/{key}"
                 log.info("backfill: %s", key)
                 candidates = _rental_episodes_from_archive_file(con, url)
+                # _rebalance_keys below now runs over a SAMPLE of the file, so
+                # it is a weaker backstop than on the live path: a van's
+                # drop-offs are less likely to all survive the draw and reach
+                # REBALANCE_MIN_GROUP. Acceptable, because under the
+                # reservation anchor a rebalancing van never enters the
+                # candidate set at all -- vans do not reserve, which is
+                # exactly what the 4-10 vehicle simultaneous-movement batches
+                # with is_reserved false showed.
                 stats["files"] += 1
                 stats["candidates"] += len(candidates)
 
