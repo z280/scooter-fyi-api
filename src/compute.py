@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 import re
 import uuid
 from dataclasses import dataclass
@@ -25,6 +27,9 @@ class ComputeResult:
     core_row: dict
     regional_rows: list[dict]
     raw_rows: list[dict]
+    #: One compact fleet-availability row per cycle (sql/069) — the durable
+    #: history the raw table's 48h flush would otherwise erase.
+    status_row: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +370,41 @@ def _regional_breakdown_sql() -> str:
     """
 
 
+def fleet_status_counts(
+    devices,
+    corrected_status: dict[str, str],
+) -> dict:
+    """Fleet availability snapshot (sql/069). Denver-core only, on the
+    polygon-corrected status, so the counts share total_devices_denver's
+    scope. Disabled wins over reserved (GBFS); absent booleans read as
+    available, the same reading the live map takes. `models` carries the
+    SAME three status counts per model (keys are the feed's own display
+    names — server truth, no client mapping), so any metric can be broken
+    down by model; the fleet-level counts are their sums."""
+    fleet = {"available": 0, "reserved": 0, "out_of_service": 0}
+    models: dict[str, dict[str, int]] = {}
+    for d in devices:
+        if corrected_status.get(d.device_id, d.spatial_status) != "denver_core":
+            continue
+        if d.is_disabled is True:
+            status = "out_of_service"
+        elif d.is_reserved is True:
+            status = "reserved"
+        else:
+            status = "available"
+        fleet[status] += 1
+        name = (d.vehicle_model_name or "Unknown").strip() or "Unknown"
+        per_model = models.setdefault(
+            name, {"available": 0, "reserved": 0, "out_of_service": 0}
+        )
+        per_model[status] += 1
+    return {
+        "total": sum(fleet.values()),
+        **fleet,
+        "models": models,
+    }
+
+
 def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetime) -> ComputeResult:
     """Spatial-join phase. Returns the rows ready to write to Postgres."""
     with session() as con:
@@ -440,12 +480,32 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
         for d in ingest.devices
     ]
 
-    return ComputeResult(core_row=core_row, regional_rows=regional_rows, raw_rows=raw_rows)
+    counts = fleet_status_counts(ingest.devices, corrected_status)
+    status_row = {
+        "cycle_id": str(cycle_id),
+        "snapshot_time": snapshot_time,
+        **{k: v for k, v in counts.items() if k != "models"},
+        "models": json.dumps(counts["models"]),
+    }
+
+    return ComputeResult(
+        core_row=core_row,
+        regional_rows=regional_rows,
+        raw_rows=raw_rows,
+        status_row=status_row,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Postgres writes (one transaction)
 # ---------------------------------------------------------------------------
+
+# Snapshot-retention pacing (see the prune below): monotonic so a wall-clock
+# jump can't stall it; 0.0 makes the first cycle after boot prune.
+_PRUNE_EVERY_SECONDS = 3600.0
+_last_prune_monotonic = 0.0
+
+
 def write_to_postgres(result: ComputeResult) -> None:
     core = result.core_row
     with connection() as conn:
@@ -463,6 +523,37 @@ def write_to_postgres(result: ComputeResult) -> None:
                 """,
                 core,
             )
+
+            if result.status_row:
+                cur.execute(
+                    """
+                    INSERT INTO device_status_snapshots (
+                        cycle_id, snapshot_time, total, available,
+                        reserved, out_of_service, models
+                    ) VALUES (
+                        %(cycle_id)s, %(snapshot_time)s, %(total)s,
+                        %(available)s, %(reserved)s, %(out_of_service)s,
+                        %(models)s::jsonb
+                    )
+                    ON CONFLICT (cycle_id) DO NOTHING
+                    """,
+                    result.status_row,
+                )
+                # Retention: the chart needs 14 days; keep 30 (sql/069).
+                # Pruned at most hourly, not per ~90s cycle — an
+                # unconditional DELETE every cycle is steady write
+                # amplification and vacuum pressure for no benefit; hourly
+                # deletes at most one hour of rows past the horizon.
+                global _last_prune_monotonic
+                now = time.monotonic()
+                if now - _last_prune_monotonic >= _PRUNE_EVERY_SECONDS:
+                    cur.execute(
+                        """
+                        DELETE FROM device_status_snapshots
+                        WHERE snapshot_time < NOW() - INTERVAL '30 days'
+                        """
+                    )
+                    _last_prune_monotonic = now
 
             if result.regional_rows:
                 cur.executemany(

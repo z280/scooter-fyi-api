@@ -561,6 +561,38 @@ L.control.layers({}, overlays, { collapsed: false }).addTo(map);
 
 ---
 
+### `GET /api/v1/devices/history/hourly`
+
+Fleet size over time — the Tools drawer's "Devices over time" chart. Public
+(the same aggregate count the map footer already publishes, just over
+time); `?days=1..14`, default 14. Each hour is the **last** cycle observed
+in that hour:
+
+```json
+{ "days": 14, "hours": [
+  { "hour": "2026-08-10T14:00:00+00:00", "total": 500, "available": 420,
+    "reserved": 30, "out_of_service": 50,
+    "models": {
+      "Astro": { "available": 200, "reserved": 15, "out_of_service": 25 },
+      "Rover": { "available": 220, "reserved": 15, "out_of_service": 25 } } },
+  ...
+] }
+```
+
+Counts are Denver-core devices on the polygon-corrected status, matching
+`total_devices_denver`'s scope. `out_of_service` = `is_disabled` (disabled
+wins over reserved, per GBFS); absent booleans read as available.
+`models` carries the same three status counts **per model**, keyed by the
+feed's own display names — a new model simply appears, every metric can be
+broken down by model, and the top-level counts are exactly the per-model
+sums (a model's total is the three counts summed).
+
+Hours predating sql/069 (or an ingest outage) backfill from
+`snapshot_metadata_core`'s totals with the breakdowns `null` — an honest
+"we know how many, not what state", never zeros.
+
+---
+
 ### `GET /api/v1/devices/current`
 
 GeoJSON FeatureCollection of every device's current position from the
