@@ -854,7 +854,14 @@ def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
 
 def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
     """Fit the model and append the coefficients. Returns the fit summary."""
-    import numpy as np  # available via pyarrow; imported lazily to keep API boot light
+    # numpy is a DIRECT requirement (requirements.txt), not a pyarrow
+    # transitive one. It was written here as "available via pyarrow", which
+    # has not been true since pyarrow 16 made numpy optional; with
+    # pyarrow==18.1.0 pinned, nothing pulled numpy in and this function
+    # raised ModuleNotFoundError every time the weekly job fired. Still
+    # imported lazily, which is the part that was worth keeping: it keeps
+    # numpy off the API boot path, where only serving needs to be fast.
+    import numpy as np
 
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(days=days)
