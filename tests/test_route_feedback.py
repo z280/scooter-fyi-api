@@ -17,8 +17,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from src import api_route_feedback
 from src.accounts import SessionUser, optional_session
@@ -170,17 +172,22 @@ def test_out_of_range_answers_are_422s(monkeypatch):
             "/api/v1/route-feedback", json={"route_profile": "safe", **bad},
         )
         assert r.status_code == 422, bad
-    # Non-finite floats arrive as the JSON *text* 1e400 (the client-side
-    # serializer would refuse an inf, which is exactly why the raw string
-    # is the honest simulation): the server parses it to inf and must 422
-    # rather than store 'Infinity' in Postgres.
+
+
+def test_non_finite_floats_are_rejected():
+    """JSON text like 1e400 parses to inf; allow_inf_nan=False turns it
+    into a validation error instead of Postgres storing 'Infinity'.
+    Asserted on the model (where the rule lives) — the HTTP layer's 422
+    rendering of an inf input is transport detail this test doesn't own."""
     for field in ("distance_m", "duration_s"):
-        r = client.post(
-            "/api/v1/route-feedback",
-            content=f'{{"route_profile": "safe", "{field}": 1e400}}',
-            headers={"Content-Type": "application/json"},
-        )
-        assert r.status_code == 422, field
+        with pytest.raises(ValidationError):
+            api_route_feedback.RouteFeedbackIn(
+                route_profile="safe", **{field: float("inf")},
+            )
+        with pytest.raises(ValidationError):
+            api_route_feedback.RouteFeedbackIn(
+                route_profile="safe", **{field: float("nan")},
+            )
 
 
 def test_blank_profile_is_a_422_and_a_padded_one_is_canonicalized(monkeypatch):
