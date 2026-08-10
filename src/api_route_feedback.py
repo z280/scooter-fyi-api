@@ -53,8 +53,10 @@ class RouteFeedbackIn(BaseModel):
     #: a route and the rider submitting, and feedback about a renamed
     #: profile is still evidence.
     route_profile: str = Field(..., min_length=1, max_length=64)
-    distance_m: float | None = Field(default=None, ge=0)
-    duration_s: float | None = Field(default=None, ge=0)
+    # allow_inf_nan=False: JSON like 1e400 parses to inf, and a bare lower
+    # bound would wave it through into Postgres as 'Infinity'.
+    distance_m: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    duration_s: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     nav_route_rating: int | None = Field(default=None, ge=1, le=10)
     nav_deviated: bool | None = None
     nav_deviated_needs_improvement: bool | None = None
@@ -63,6 +65,13 @@ class RouteFeedbackIn(BaseModel):
 
     @model_validator(mode="after")
     def _check_substance(self) -> "RouteFeedbackIn":
+        # Canonicalize the profile the same way nav_qualitative is below:
+        # min_length=1 alone lets "   " through, and a whitespace-only
+        # profile is a row no analysis can tie to any real profile key.
+        profile = self.route_profile.strip()
+        if not profile:
+            raise ValueError("route_profile must not be blank")
+        self.route_profile = profile
         # A row carrying only a profile name says nothing — require at
         # least one actual answer, so the table can't fill with empty
         # submissions from a client bug (or a bored script).

@@ -165,8 +165,34 @@ def test_out_of_range_answers_are_422s(monkeypatch):
         {"nav_nps": -1},
         {"nav_nps": 11},
         {"distance_m": -1},
+        # JSON 1e400 parses to inf; storing 'Infinity' in Postgres helps
+        # nobody, so non-finite floats are rejected outright.
+        {"distance_m": 1e400},
+        {"duration_s": 1e400},
     ):
         r = client.post(
             "/api/v1/route-feedback", json={"route_profile": "safe", **bad},
         )
         assert r.status_code == 422, bad
+
+
+def test_blank_profile_is_a_422_and_a_padded_one_is_canonicalized(monkeypatch):
+    """min_length alone would wave '   ' through — a row no analysis could
+    tie to a real profile key."""
+    client, conn = _client(monkeypatch)
+    r = client.post(
+        "/api/v1/route-feedback",
+        json={"route_profile": "   ", "nav_nps": 5},
+    )
+    assert r.status_code == 422
+    r = client.post(
+        "/api/v1/route-feedback",
+        json={"route_profile": "  shade  ", "nav_nps": 5},
+    )
+    assert r.status_code == 200
+    idx = next(
+        i for i, s in enumerate(conn.cur.statements)
+        if "INSERT INTO route_feedback" in s
+    )
+    assert "shade" in conn.cur.params[idx]
+    assert "  shade  " not in conn.cur.params[idx]
