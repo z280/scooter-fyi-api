@@ -11,6 +11,11 @@ python-multipart==0.0.12
 sentry-sdk[fastapi]==2.18.0
 boto3==1.35.65
 pyarrow==18.1.0
+# Ordinary least squares in src/battery_model.py:train(). A DIRECT dependency:
+# battery_model used to claim numpy was "available via pyarrow", but pyarrow
+# made numpy optional in 16.0 and does not install it at 18.1.0, so
+# train_battery_model raised ModuleNotFoundError on every weekly run.
+numpy==2.2.6
 h3==4.1.2
 pillow==11.0.0
 # Unpacking the Photon geocoding index (photon-index-<date>.tar.zst) in
