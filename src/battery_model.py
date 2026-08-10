@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -587,9 +588,29 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
 # daily job to accumulate. Opt-in and run by hand, because it is the one job
 # here that needs more memory than the scheduler's default limit.
 #
-# MEMORY: measured at 1,243 MiB peak RSS for a single 11.9M-row archive file.
-# The scheduler container is capped at 1024m, so this WILL be OOM-killed
-# (exit 137) at the default limit. Raise it for the duration:
+# MEMORY: archive files are NOT uniform. They span whatever elapsed since the
+# previous archive, which is usually 2 days (~12M rows, ~170 MB) but was 7 days
+# for raw_20260727 (43M rows, 633 MB) and a month for the oldest. Scanning a
+# whole file, the window functions scale with the file, so a fixed memory
+# ceiling is a cliff that a large file walks off:
+#
+#     duckdb.OutOfMemoryException: failed to pin block of size 79.2 MiB
+#     (881.1 MiB/953.6 MiB used)
+#
+# observed on 2026-08-10 after six normal files had succeeded. So the scan is
+# CHUNKED BY DAY (_archive_file_days below): one day is ~6M rows whatever the
+# file's total span, which bounds memory by cadence rather than by how long the
+# archive job happened to sleep. Raising the limit alone would only move the
+# cliff to the next oversized file.
+#
+# Each file is also downloaded to local disk ONCE and chunked from there.
+# Chunking straight off s3:// re-reads the whole object per chunk over httpfs —
+# measured at 224-256 s per day-chunk against raw_20260727, against seconds for
+# the same query on a local copy. 113 GB free against a 633 MB worst case, and
+# the copy is removed as soon as the file is done.
+#
+# Still worth raising the container for the duration, since peak RSS was
+# measured at 1,243 MiB and the container default is 1024m:
 #
 #     docker update --memory 2g --memory-swap 2g scheduler
 #     docker compose exec scheduler python -m src.cli backfill_battery_trips
@@ -600,6 +621,9 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
 # any plausible limit.
 
 ARCHIVE_DUCKDB_MEMORY = "1GB"
+# Where an archive file is staged while its day-chunks are scanned. One file at
+# a time; see the MEMORY note above.
+ARCHIVE_SCRATCH_DIR = "/tmp/battery_backfill"
 
 
 # Archive files written before the 2026-07-07 cadence cutover are UNUSABLE for
@@ -662,7 +686,24 @@ def _archive_keys(client, bucket: str) -> list[str]:
 BACKFILL_EPISODES_PER_FILE = 1500
 
 
-def _rental_episodes_from_archive_file(con, url: str,
+def _archive_file_days(con, url: str) -> list[str]:
+    """The UTC dates a file covers, oldest first.
+
+    Reads only min/max snapshot_time, which parquet answers from footer
+    statistics rather than by scanning. Used to chunk the scan — see the
+    MEMORY note above.
+    """
+    lo, hi = con.execute(
+        f"SELECT min(snapshot_time)::VARCHAR, max(snapshot_time)::VARCHAR "
+        f"FROM read_parquet('{url}')").fetchone()
+    if lo is None or hi is None:
+        return []
+    start, end = date.fromisoformat(lo[:10]), date.fromisoformat(hi[:10])
+    return [(start + timedelta(days=i)).isoformat()
+            for i in range((end - start).days + 1)]
+
+
+def _rental_episodes_from_archive_file(con, url: str, day: str,
                                        limit: int = BACKFILL_EPISODES_PER_FILE) -> list[dict]:
     """The same reservation-episode model as _RENTAL_EPISODES_SQL, in DuckDB
     over one archive file. Kept structurally identical to its Postgres twin so
@@ -690,6 +731,13 @@ def _rental_episodes_from_archive_file(con, url: str,
                coalesce(is_disabled, FALSE) AS disabled
         FROM read_parquet('{url}')
         WHERE spatial_status = 'denver_core' AND vehicle_identifier IS NOT NULL
+          -- One day at a time, reaching back far enough for the bracketing
+          -- `pre` sample of an episode that starts just after midnight —
+          -- the same asymmetry, and the same remedy, as the live path's
+          -- EPISODE_BRACKET_LOOKBACK_S.
+          AND snapshot_time >= TIMESTAMP '{day} 00:00:00+00'
+                               - INTERVAL {EPISODE_BRACKET_LOOKBACK_S} SECOND
+          AND snapshot_time <  TIMESTAMP '{day} 00:00:00+00' + INTERVAL 1 DAY
     ),
     marked AS (
         SELECT *, coalesce(lag(reserved) OVER w, FALSE) AS prev_reserved
@@ -744,6 +792,9 @@ def _rental_episodes_from_archive_file(con, url: str,
     WHERE pre.current_range_meters IS NOT NULL
       AND post.current_range_meters IS NOT NULL
       AND NOT pre.disabled
+      -- The episode belongs to this day if it ENDED in it, so an episode
+      -- pulled in by the lookback is not also claimed by the previous day.
+      AND post.snapshot_time >= TIMESTAMP '{day} 00:00:00+00'
       AND date_diff('second', pre.snapshot_time, post.snapshot_time)
             BETWEEN {MIN_DURATION_S} AND {MAX_DURATION_S}
     -- Random, for the same reason the Postgres path is random: taking the
@@ -808,9 +859,18 @@ def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
     try:
         with connection() as conn:
             for key in keys:
-                url = f"s3://{creds['bucket']}/{key}"
                 log.info("backfill: %s", key)
-                candidates = _rental_episodes_from_archive_file(con, url)
+                local_path = os.path.join(ARCHIVE_SCRATCH_DIR, os.path.basename(key))
+                os.makedirs(ARCHIVE_SCRATCH_DIR, exist_ok=True)
+                s3.download_file(creds["bucket"], key, local_path)
+                days_in_file = _archive_file_days(con, local_path)
+                # Spread the file's quota across the days it covers, so a
+                # 7-day file does not contribute 7x a 2-day file's weight.
+                per_day = max(1, BACKFILL_EPISODES_PER_FILE // max(len(days_in_file), 1))
+                candidates = []
+                for day in days_in_file:
+                    candidates.extend(
+                        _rental_episodes_from_archive_file(con, local_path, day, per_day))
                 # _rebalance_keys below now runs over a SAMPLE of the file, so
                 # it is a weaker backstop than on the live path: a van's
                 # drop-offs are less likely to all survive the draw and reach
@@ -842,6 +902,13 @@ def backfill_trips_from_archive(max_files: int | None = None) -> dict[str, Any]:
                     if _route_and_store(conn, enriched, stats):
                         stats["accepted"] += 1
                 conn.commit()
+                # The local copy is this file's alone; drop it before pulling
+                # the next one so peak disk stays one file, not eighteen.
+                try:
+                    os.remove(local_path)
+                except OSError:
+                    log.warning("backfill: could not remove scratch copy %s",
+                                local_path)
                 log.info("backfill: %s done -> %r", key, stats)
     finally:
         con.close()
