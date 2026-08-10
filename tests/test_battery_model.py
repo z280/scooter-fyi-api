@@ -538,3 +538,53 @@ def test_backfill_samples_each_file_rather_than_taking_all_of_it():
     assert "ORDER BY random()" in src
     assert "LIMIT {limit}" in src
     assert battery_model.BACKFILL_EPISODES_PER_FILE <= 5000
+
+
+# --- archive chunking (the 2026-08-10 backfill OOM) -------------------------
+
+def test_archive_scan_is_chunked_by_day():
+    """Archive files are not uniform: usually ~12M rows for a 2-day span, but
+    43M for raw_20260727's 7 days. Scanning a whole file made memory scale
+    with however long the archive job happened to sleep, and the backfill died
+    on that file with `failed to pin block of size 79.2 MiB` after six normal
+    ones had succeeded. One day is ~6M rows whatever the file's span."""
+    import inspect
+    src = inspect.getsource(battery_model._rental_episodes_from_archive_file)
+    assert "{day} 00:00:00+00' + INTERVAL 1 DAY" in src
+    assert "day: str" in inspect.signature(
+        battery_model._rental_episodes_from_archive_file).__str__().replace(
+            "day: 'str'", "day: str")
+
+
+def test_day_chunks_reach_back_for_the_bracketing_sample():
+    """A day boundary cuts an episode exactly the way a window boundary does
+    on the live path — the `pre` sample of a ride starting at 00:01 sits in
+    the previous day. Same remedy, so the two paths do not disagree."""
+    import inspect
+    src = inspect.getsource(battery_model._rental_episodes_from_archive_file)
+    assert "EPISODE_BRACKET_LOOKBACK_S" in src
+    # ...and the episode is claimed by the day it ENDED in, so the lookback
+    # does not make two days both claim it.
+    assert "post.snapshot_time >= TIMESTAMP '{day}" in src
+
+
+def test_archive_file_days_enumerates_the_span(monkeypatch):
+    class _Con:
+        def execute(self, sql):
+            assert "min(snapshot_time)" in sql
+            return self
+        def fetchone(self):
+            return ("2026-07-20 08:00:01+00", "2026-07-27 07:58:01+00")
+
+    days = battery_model._archive_file_days(_Con(), "s3://b/k.parquet")
+    assert days[0] == "2026-07-20"
+    assert days[-1] == "2026-07-27"
+    assert len(days) == 8
+
+
+def test_archive_file_days_handles_an_empty_file():
+    class _Con:
+        def execute(self, sql): return self
+        def fetchone(self): return (None, None)
+
+    assert battery_model._archive_file_days(_Con(), "s3://b/k.parquet") == []
