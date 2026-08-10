@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -25,6 +26,9 @@ class ComputeResult:
     core_row: dict
     regional_rows: list[dict]
     raw_rows: list[dict]
+    #: One compact fleet-availability row per cycle (sql/069) — the durable
+    #: history the raw table's 48h flush would otherwise erase.
+    status_row: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +369,37 @@ def _regional_breakdown_sql() -> str:
     """
 
 
+def fleet_status_counts(
+    devices,
+    corrected_status: dict[str, str],
+) -> dict:
+    """Fleet availability snapshot (sql/069). Denver-core only, on the
+    polygon-corrected status, so the counts share total_devices_denver's
+    scope. Disabled wins over reserved (GBFS); absent booleans read as
+    available, the same reading the live map takes. models_available keys
+    are the feed's own display names — server truth, no client mapping."""
+    available = reserved = out_of_service = 0
+    models_available: dict[str, int] = {}
+    for d in devices:
+        if corrected_status.get(d.device_id, d.spatial_status) != "denver_core":
+            continue
+        if d.is_disabled is True:
+            out_of_service += 1
+        elif d.is_reserved is True:
+            reserved += 1
+        else:
+            available += 1
+            name = (d.vehicle_model_name or "Unknown").strip() or "Unknown"
+            models_available[name] = models_available.get(name, 0) + 1
+    return {
+        "total": available + reserved + out_of_service,
+        "available": available,
+        "reserved": reserved,
+        "out_of_service": out_of_service,
+        "models_available": models_available,
+    }
+
+
 def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetime) -> ComputeResult:
     """Spatial-join phase. Returns the rows ready to write to Postgres."""
     with session() as con:
@@ -440,7 +475,20 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
         for d in ingest.devices
     ]
 
-    return ComputeResult(core_row=core_row, regional_rows=regional_rows, raw_rows=raw_rows)
+    counts = fleet_status_counts(ingest.devices, corrected_status)
+    status_row = {
+        "cycle_id": str(cycle_id),
+        "snapshot_time": snapshot_time,
+        **{k: v for k, v in counts.items() if k != "models_available"},
+        "models_available": json.dumps(counts["models_available"]),
+    }
+
+    return ComputeResult(
+        core_row=core_row,
+        regional_rows=regional_rows,
+        raw_rows=raw_rows,
+        status_row=status_row,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +511,29 @@ def write_to_postgres(result: ComputeResult) -> None:
                 """,
                 core,
             )
+
+            if result.status_row:
+                cur.execute(
+                    """
+                    INSERT INTO device_status_snapshots (
+                        cycle_id, snapshot_time, total, available,
+                        reserved, out_of_service, models_available
+                    ) VALUES (
+                        %(cycle_id)s, %(snapshot_time)s, %(total)s,
+                        %(available)s, %(reserved)s, %(out_of_service)s,
+                        %(models_available)s::jsonb
+                    )
+                    ON CONFLICT (cycle_id) DO NOTHING
+                    """,
+                    result.status_row,
+                )
+                # Retention: the chart needs 14 days; keep 30 (sql/069).
+                cur.execute(
+                    """
+                    DELETE FROM device_status_snapshots
+                    WHERE snapshot_time < NOW() - INTERVAL '30 days'
+                    """
+                )
 
             if result.regional_rows:
                 cur.executemany(

@@ -37,6 +37,7 @@ from .api_ride_routes import router as ride_routes_router
 from .api_ride_screenshots import router as ride_screenshots_router
 from .api_ride_surveys import router as ride_surveys_router
 from .api_route_feedback import router as route_feedback_router
+from .api_device_history import router as device_history_router
 from .api_private import router as private_router
 from .api_profile import router as profile_router
 from .api_public import router as public_router
@@ -135,6 +136,7 @@ app.include_router(qr_router)
 app.include_router(ride_screenshots_router)
 app.include_router(ride_surveys_router)
 app.include_router(route_feedback_router)
+app.include_router(device_history_router)
 app.include_router(ride_routes_router)
 app.include_router(meta_router)
 app.include_router(legal_router)
