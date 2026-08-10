@@ -121,6 +121,11 @@ MIN_DISTANCE_METERS = 400.0
 # was partly aimed at, do not reserve at all — and _rebalance_keys still backs
 # this up.
 MIN_IMPLIED_MPH = 3.0
+# How far back the episode scan reaches BEYOND the reporting window, so that an
+# episode already under way at window_start still has its bracketing `pre`
+# sample in scope. See the window-edge note above _RENTAL_EPISODES_SQL. One
+# MAX_DURATION_S is the tight bound: no qualifying episode is longer.
+EPISODE_BRACKET_LOOKBACK_S = MAX_DURATION_S
 # Cap on how many in-ride samples are fed to Valhalla as via-points. At
 # MAX_DURATION_S and a 2-minute cadence an episode cannot exceed 30, so this
 # only ever bites if the cadence changes.
@@ -163,8 +168,29 @@ def _implied_mph(distance_meters: float, duration_seconds: float) -> float:
 #   ride      the reserved run itself — the in-ride track, which becomes the
 #             via-points for routing.
 #
-# An episode whose reserved run is still open at the window edge has no `post`
-# row and is dropped by the join; the next run picks it up once it closes.
+# BOTH window edges cut episodes, and they cut them differently:
+#
+#   window END    an episode still reserved at the edge has no `post` row and
+#                 is dropped by the join. The next run picks it up once it
+#                 closes. Self-healing, nothing to do.
+#   window START  an episode already under way at the edge has its `pre`
+#                 sample — the kerb it left from, and its battery at rest —
+#                 BEFORE the window, so the join drops it too. That one is NOT
+#                 self-healing: the next run's window starts even later, so the
+#                 episode is lost for good, and it is lost systematically at
+#                 whatever hour the job happens to run.
+#
+# Hence EPISODE_BRACKET_LOOKBACK_S: the scan reaches back beyond the reporting
+# window far enough to guarantee a bracketing `pre` for any episode starting
+# just inside it. Over-inclusion is free — re-mining an episode the previous
+# run already stored hits the (vehicle_identifier, departed_at) NOT EXISTS
+# below, and the ON CONFLICT at insert time behind that.
+#
+# The archive backfill has the same asymmetry at file boundaries and CANNOT fix
+# it this way, because a file is all there is; an episode straddling two
+# archive files is simply lost. At ~28k episodes a day against 18 files that is
+# a rounding error, and it is called out in
+# _rental_episodes_from_archive_file's docstring rather than papered over.
 #
 # NO STRAIGHT-LINE PRE-FILTER. The gap model used one to avoid paying for a
 # Valhalla call on a pair that had not moved. It cannot be used here: 6% of
@@ -181,7 +207,9 @@ WITH obs AS (
     FROM raw_telemetry_points
     WHERE spatial_status = 'denver_core'
       AND vehicle_identifier IS NOT NULL
-      AND snapshot_time >= %(window_start)s
+      -- scan_start = window_start - EPISODE_BRACKET_LOOKBACK_S; the reporting
+      -- window itself is applied to the episode below, not to the scan.
+      AND snapshot_time >= %(scan_start)s
       AND snapshot_time <  %(window_end)s
 ),
 marked AS (
@@ -241,6 +269,11 @@ WHERE pre.current_range_meters IS NOT NULL
   -- ride. Filtered on the bracketing sample rather than in `obs`, because
   -- dropping rows mid-run would split one episode into several.
   AND NOT pre.disabled
+  -- The episode belongs to this run if it ENDED inside the reporting window.
+  -- Anything wholly inside the lookback was already mined by the previous run
+  -- and is filtered by the NOT EXISTS below; this just avoids paying to route
+  -- it again.
+  AND post.snapshot_time >= %(window_start)s
   AND EXTRACT(EPOCH FROM (post.snapshot_time - pre.snapshot_time))
         BETWEEN %(min_s)s AND %(max_s)s
   AND NOT EXISTS (
@@ -500,6 +533,8 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(_RENTAL_EPISODES_SQL, {
                 "window_start": window_start,
+                "scan_start": window_start - timedelta(
+                    seconds=EPISODE_BRACKET_LOOKBACK_S),
                 "window_end": now,
                 "min_s": MIN_DURATION_S,
                 "max_s": MAX_DURATION_S,
@@ -585,6 +620,13 @@ def _rental_episodes_from_archive_file(con, url: str) -> list[dict]:
     two NOT EXISTS de-dupe clauses, which cannot run here because the
     observations table lives in Postgres — backfill relies on the
     (vehicle_identifier, departed_at) ON CONFLICT at insert time instead.
+
+    An episode that straddles two archive files is lost: each file is scanned
+    alone, so the episode has its `pre` sample in one file and its `post` in
+    the next and no join can see both. The Postgres path solves the equivalent
+    problem with EPISODE_BRACKET_LOOKBACK_S; there is no equivalent here, and
+    at ~28k episodes a day across 18 files it is a rounding error rather than
+    something worth stitching files together for.
 
     Timestamps come back as text: DuckDB needs pytz to hand a TIMESTAMPTZ to
     Python and the worker image does not ship it.

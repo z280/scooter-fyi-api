@@ -420,3 +420,59 @@ def test_temperature_is_checked_before_routing(monkeypatch):
     import inspect
     src = inspect.getsource(battery_model._route_and_store)
     assert src.index("_temperature_at") < src.index("_route_summary")
+
+
+def test_episode_scan_reaches_back_past_the_window_start():
+    """An episode already under way at window_start has its bracketing `pre`
+    sample — the kerb, and the battery at rest — BEFORE the window. Scanning
+    only the window drops it, and unlike the window-END case that is not
+    self-healing: the next run starts later still, so it is lost for good, and
+    lost systematically at whatever hour the job runs."""
+    sql = battery_model._RENTAL_EPISODES_SQL
+    # The base scan — the `obs` CTE — must widen, and must NOT be clipped to
+    # the reporting window. Asserted against that CTE alone, because
+    # window_start legitimately appears further down.
+    obs_cte = sql.split("marked AS")[0]
+    assert "snapshot_time >= %(scan_start)s" in obs_cte
+    assert "%(window_start)s" not in obs_cte
+    # ...while the reporting window still decides which episodes belong to a
+    # run, applied to the episode rather than to the scan.
+    assert "post.snapshot_time >= %(window_start)s" in sql
+    # One MAX_DURATION_S is the tight bound: no qualifying episode is longer.
+    assert battery_model.EPISODE_BRACKET_LOOKBACK_S == battery_model.MAX_DURATION_S
+
+
+def test_extract_passes_a_scan_start_earlier_than_the_window(monkeypatch):
+    """Guards the wiring, not just the SQL text: a lookback constant that never
+    reaches the query is the same bug with extra steps."""
+    seen = {}
+
+    class _Cur:
+        description = []
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, sql, params=None):
+            if isinstance(params, dict) and "scan_start" in params:
+                seen.update(params)
+        def fetchall(self): return []
+        def fetchone(self): return None
+
+    class _Conn:
+        def cursor(self): return _Cur()
+        def commit(self): pass
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _conn():
+        yield _Conn()
+
+    monkeypatch.setattr(battery_model, "connection", _conn)
+    monkeypatch.setattr(battery_model.weather, "ensure_coverage", lambda *a: None)
+    battery_model.extract_trips(hours=26, limit=10)
+
+    assert seen, "the episode query never ran"
+    lookback = (seen["window_start"] - seen["scan_start"]).total_seconds()
+    assert lookback == battery_model.EPISODE_BRACKET_LOOKBACK_S
+    assert seen["scan_start"] < seen["window_start"] < seen["window_end"]
