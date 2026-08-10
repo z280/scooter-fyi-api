@@ -5,8 +5,8 @@ Defended:
   * disabled wins over reserved; absent booleans read as available (the
     live map's own reading); non-denver_core devices are out of scope,
     and the polygon-CORRECTED status decides, not the ingest-time tag;
-  * models_available keys are the feed's display names, counted only for
-    AVAILABLE devices;
+  * `models` keys are the feed's display names, each carrying the same
+    three status counts so every metric breaks down by model;
   * the endpoint samples the LAST cycle per hour, backfills totals-only
     hours from snapshot_metadata_core with null breakdowns (never zeros —
     a zero would chart a fleet collapse that never happened), and returns
@@ -58,7 +58,10 @@ def test_fleet_status_counts_semantics():
         "available": 3,
         "reserved": 1,
         "out_of_service": 1,
-        "models_available": {"Astro": 2, "Rover": 1},
+        "models": {
+            "Astro": {"available": 2, "reserved": 1, "out_of_service": 1},
+            "Rover": {"available": 1, "reserved": 0, "out_of_service": 0},
+        },
     }
 
 
@@ -69,12 +72,16 @@ def test_corrected_status_outranks_the_ingest_tag():
         {"promoted": "denver_core", "demoted": "other_outlier"},
     )
     assert counts["total"] == 1
-    assert counts["models_available"] == {"Astro": 1}
+    assert counts["models"] == {
+        "Astro": {"available": 1, "reserved": 0, "out_of_service": 0},
+    }
 
 
 def test_blank_model_counts_as_unknown():
     counts = fleet_status_counts([device("a", model="  ")], {})
-    assert counts["models_available"] == {"Unknown": 1}
+    assert counts["models"] == {
+        "Unknown": {"available": 1, "reserved": 0, "out_of_service": 0},
+    }
 
 
 # --- the endpoint -----------------------------------------------------------
@@ -130,7 +137,11 @@ def test_hourly_merges_snapshots_with_core_total_backfill(monkeypatch):
     client = _client(
         monkeypatch,
         # Snapshot rows cover 14:00 only.
-        [(_hour(14), 500, 420, 30, 50, {"Astro": 200, "Rover": 220})],
+        [(
+            _hour(14), 500, 420, 30, 50,
+            {"Astro": {"available": 200, "reserved": 20, "out_of_service": 30},
+             "Rover": {"available": 220, "reserved": 10, "out_of_service": 20}},
+        )],
         # Core totals cover 13:00 and 14:00 — 14:00 must NOT override the
         # richer snapshot row; 13:00 backfills with null breakdowns.
         [(_hour(13), 480), (_hour(14), 501)],
@@ -145,14 +156,17 @@ def test_hourly_merges_snapshots_with_core_total_backfill(monkeypatch):
     backfilled, rich = hours
     assert backfilled["total"] == 480
     assert backfilled["available"] is None
-    assert backfilled["models_available"] is None
+    assert backfilled["models"] is None
     assert rich == {
         "hour": _hour(14).isoformat(),
         "total": 500,
         "available": 420,
         "reserved": 30,
         "out_of_service": 50,
-        "models_available": {"Astro": 200, "Rover": 220},
+        "models": {
+            "Astro": {"available": 200, "reserved": 20, "out_of_service": 30},
+            "Rover": {"available": 220, "reserved": 10, "out_of_service": 20},
+        },
     }
 
 

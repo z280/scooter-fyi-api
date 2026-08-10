@@ -8,7 +8,9 @@ plates, no positions.
 
 Each hour is the LAST cycle observed in that hour (a sample on the hour,
 not an average — with ~90s cycles the difference is noise, and a sample
-keeps the model breakdown coherent instead of averaging JSON). Hours the
+keeps the model breakdown coherent instead of averaging JSON). `models`
+carries per-model available/reserved/out_of_service counts, so every
+metric can be broken down by model client-side. Hours the
 new snapshot table doesn't cover — history from before sql/069 deployed,
 or an ingest outage — fall back to snapshot_metadata_core's per-cycle
 total (recorded since day one), with the status/model breakdowns null for
@@ -40,7 +42,7 @@ def device_history_hourly(
                 SELECT DISTINCT ON (date_trunc('hour', snapshot_time))
                        date_trunc('hour', snapshot_time) AS hour,
                        total, available, reserved, out_of_service,
-                       models_available
+                       models
                 FROM device_status_snapshots
                 WHERE snapshot_time >= NOW() - make_interval(days => %s)
                 ORDER BY date_trunc('hour', snapshot_time),
@@ -55,7 +57,7 @@ def device_history_hourly(
                     "available": int(available),
                     "reserved": int(reserved),
                     "out_of_service": int(oos),
-                    "models_available": models or {},
+                    "models": models or {},
                 }
                 for hour, total, available, reserved, oos, models
                 in cur.fetchall()
@@ -84,7 +86,7 @@ def device_history_hourly(
                         "available": None,
                         "reserved": None,
                         "out_of_service": None,
-                        "models_available": None,
+                        "models": None,
                     }
 
     return {

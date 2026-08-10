@@ -572,7 +572,9 @@ in that hour:
 { "days": 14, "hours": [
   { "hour": "2026-08-10T14:00:00+00:00", "total": 500, "available": 420,
     "reserved": 30, "out_of_service": 50,
-    "models_available": { "Astro": 200, "Cosmo": 90, "Rover": 130 } },
+    "models": {
+      "Astro": { "available": 200, "reserved": 15, "out_of_service": 25 },
+      "Rover": { "available": 220, "reserved": 15, "out_of_service": 25 } } },
   ...
 ] }
 ```
@@ -580,8 +582,10 @@ in that hour:
 Counts are Denver-core devices on the polygon-corrected status, matching
 `total_devices_denver`'s scope. `out_of_service` = `is_disabled` (disabled
 wins over reserved, per GBFS); absent booleans read as available.
-`models_available` counts **available** devices only, keyed by the feed's
-own display names — a new model simply appears.
+`models` carries the same three status counts **per model**, keyed by the
+feed's own display names — a new model simply appears, every metric can be
+broken down by model, and the top-level counts are exactly the per-model
+sums (a model's total is the three counts summed).
 
 Hours predating sql/069 (or an ingest outage) backfill from
 `snapshot_metadata_core`'s totals with the breakdowns `null` — an honest

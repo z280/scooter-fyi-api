@@ -376,27 +376,31 @@ def fleet_status_counts(
     """Fleet availability snapshot (sql/069). Denver-core only, on the
     polygon-corrected status, so the counts share total_devices_denver's
     scope. Disabled wins over reserved (GBFS); absent booleans read as
-    available, the same reading the live map takes. models_available keys
-    are the feed's own display names — server truth, no client mapping."""
-    available = reserved = out_of_service = 0
-    models_available: dict[str, int] = {}
+    available, the same reading the live map takes. `models` carries the
+    SAME three status counts per model (keys are the feed's own display
+    names — server truth, no client mapping), so any metric can be broken
+    down by model; the fleet-level counts are their sums."""
+    fleet = {"available": 0, "reserved": 0, "out_of_service": 0}
+    models: dict[str, dict[str, int]] = {}
     for d in devices:
         if corrected_status.get(d.device_id, d.spatial_status) != "denver_core":
             continue
         if d.is_disabled is True:
-            out_of_service += 1
+            status = "out_of_service"
         elif d.is_reserved is True:
-            reserved += 1
+            status = "reserved"
         else:
-            available += 1
-            name = (d.vehicle_model_name or "Unknown").strip() or "Unknown"
-            models_available[name] = models_available.get(name, 0) + 1
+            status = "available"
+        fleet[status] += 1
+        name = (d.vehicle_model_name or "Unknown").strip() or "Unknown"
+        per_model = models.setdefault(
+            name, {"available": 0, "reserved": 0, "out_of_service": 0}
+        )
+        per_model[status] += 1
     return {
-        "total": available + reserved + out_of_service,
-        "available": available,
-        "reserved": reserved,
-        "out_of_service": out_of_service,
-        "models_available": models_available,
+        "total": sum(fleet.values()),
+        **fleet,
+        "models": models,
     }
 
 
@@ -479,8 +483,8 @@ def run_cycle(cycle_id: uuid.UUID, ingest: IngestPayload, snapshot_time: datetim
     status_row = {
         "cycle_id": str(cycle_id),
         "snapshot_time": snapshot_time,
-        **{k: v for k, v in counts.items() if k != "models_available"},
-        "models_available": json.dumps(counts["models_available"]),
+        **{k: v for k, v in counts.items() if k != "models"},
+        "models": json.dumps(counts["models"]),
     }
 
     return ComputeResult(
@@ -517,11 +521,11 @@ def write_to_postgres(result: ComputeResult) -> None:
                     """
                     INSERT INTO device_status_snapshots (
                         cycle_id, snapshot_time, total, available,
-                        reserved, out_of_service, models_available
+                        reserved, out_of_service, models
                     ) VALUES (
                         %(cycle_id)s, %(snapshot_time)s, %(total)s,
                         %(available)s, %(reserved)s, %(out_of_service)s,
-                        %(models_available)s::jsonb
+                        %(models)s::jsonb
                     )
                     ON CONFLICT (cycle_id) DO NOTHING
                     """,

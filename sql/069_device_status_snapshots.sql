@@ -19,9 +19,13 @@
 -- Feeds that omit the booleans (both are nullable at ingest) count the
 -- device as available — the same reading the live map takes.
 --
--- models_available keys are the feed's own display names ("Astro",
--- "Rover", …) — server truth, no client-side mapping to drift, and a new
--- model simply appears.
+-- models carries the SAME three status counts per model —
+--   {"Astro": {"available": 200, "reserved": 10, "out_of_service": 5}, …}
+-- — so every metric can be broken down by model, and the top-level
+-- columns are exactly the per-model sums. Keys are the feed's own display
+-- names — server truth, no client-side mapping to drift, and a new model
+-- simply appears. A model's total is derivable (the three counts summed),
+-- so it is not stored.
 --
 -- Retention: the writer prunes rows older than 30 days each cycle (the
 -- chart needs 14; double covers clock skew and future ranges) — cheap
@@ -34,7 +38,7 @@ CREATE TABLE IF NOT EXISTS device_status_snapshots (
     available          INTEGER NOT NULL,
     reserved           INTEGER NOT NULL,
     out_of_service     INTEGER NOT NULL,
-    models_available   JSONB NOT NULL DEFAULT '{}'::jsonb
+    models             JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_device_status_snapshots_time
