@@ -135,6 +135,36 @@ def _hours_missing(start: date, end: date) -> int:
     return 0 if missing <= 1 else missing
 
 
+def _best_effort(fetch, source: str, *args, **kwargs) -> int:
+    """Run one upstream fetch, swallowing transport failures. Returns rows written.
+
+    Warming this cache is NOT the caller's job — it is a convenience ahead of
+    the authoritative per-trip lookup, and every consumer already treats a hole
+    as an ordinary outcome: `battery_model._temperature_at` returns None and the
+    trip lands in the counted `rejected_no_temperature` bucket, exactly as it
+    does for an hour Open-Meteo has never published.
+
+    So an outage here must cost temperature values, not the run. On 2026-08-09 a
+    transient `503` from the forecast endpoint aborted the whole of
+    `extract_battery_trips` 497 ms in — no trips extracted that day, for a
+    third-party blip in one regressor of four. Rows are upsert-keyed by hour, so
+    the next run supersedes whatever this one missed.
+
+    Deliberately narrow: only httpx transport/status errors are swallowed. A
+    malformed payload or a database failure in `_upsert` is our bug, and still
+    raises — the same distinction `src/job_runs.py` draws between bookkeeping
+    that must never fail a job and work that must.
+    """
+    try:
+        return fetch(*args, **kwargs)
+    except httpx.HTTPError as exc:
+        log.warning(
+            "Temperature %s fetch failed (%s) — continuing with whatever the "
+            "cache already holds; affected trips will be counted as "
+            "rejected_no_temperature rather than failing the run", source, exc)
+        return 0
+
+
 def ensure_coverage(start: date, end: date) -> int:
     """Make sure [start, end] is cached, choosing the right source per range.
 
@@ -149,12 +179,13 @@ def ensure_coverage(start: date, end: date) -> int:
     if start < archive_cutoff:
         archive_end = min(end, archive_cutoff - timedelta(days=1))
         if _hours_missing(start, archive_end):
-            written += backfill_hourly(start, archive_end)
+            written += _best_effort(backfill_hourly, "archive", start, archive_end)
 
     # Recent tail: forecast endpoint. Always refetched — it is one cheap request
     # and it lets a provisional value be corrected as the model settles.
     if end >= archive_cutoff:
-        written += backfill_recent_hourly(
+        written += _best_effort(
+            backfill_recent_hourly, "forecast",
             past_days=max((today - max(start, archive_cutoff)).days + 1, 1))
 
     if written == 0:
