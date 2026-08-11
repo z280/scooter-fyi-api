@@ -143,12 +143,31 @@ def test_battery_swap_is_rejected_not_counted_as_negative_burn():
     assert st["rejected_soc"] == 0
 
 
-def test_zero_delta_is_counted_but_not_stored():
-    """Quantization, not a real observation — storing it would drag the
-    intercept toward zero burn, but it still has to be visible."""
+def test_zero_delta_is_kept_and_still_counted():
+    """These used to be discarded as quantization. They are genuine sub-step
+    burns: pooled over 3,987 episodes from 6 days, the zero share falls away
+    with distance (21.7% under 1 km, 1.9% over 8 km) rather than being spread
+    evenly across it, which is what a stale reading would look like. Dropping
+    them truncates the response from below and cost ~1.05 pp of intercept.
+
+    Still counted, because the share is the pipeline's health metric — a HIGH
+    share means trips are burning less than one SoC step and the fit is mostly
+    quantization noise."""
     st = _stats()
-    assert battery_model._accept_pair(_pair(50, 50), st) is None
+    accepted = battery_model._accept_pair(_pair(50, 50), st)
+    assert accepted is not None
+    assert accepted["burn"] == 0
     assert st["zero_delta"] == 1
+
+
+def test_zero_delta_fraction_does_not_double_count():
+    """`accepted` now contains the zeros, so the denominator is `accepted`
+    alone. Adding zero_delta on top — correct while they were discarded —
+    would count them twice and understate the share."""
+    import inspect
+    src = inspect.getsource(battery_model.extract_trips)
+    assert 'stats["zero_delta"] / stats["accepted"]' in src
+    assert 'stats["accepted"] + stats["zero_delta"]' not in src
 
 
 def test_implausibly_large_burn_is_rejected():
