@@ -336,8 +336,38 @@ def leading_housenumber(q: str) -> str | None:
     return match.group(1) if match else None
 
 
+def street_of_query(q: str) -> str | None:
+    """The street a house-numbered query names: "1226 E 10th Ave" -> "E 10th Ave".
+
+    None when the query does not open with a house number, since there is then
+    no house-number/street pair to check against each other.
+    """
+    match = _LEADING_HOUSENUMBER_RE.match(q.strip())
+    if not match:
+        return None
+    rest = q.strip()[match.end():].strip(" ,")
+    return rest or None
+
+
+def streets_match(query_street: str | None, feature_street: str | None) -> bool:
+    """Do these name the same street, allowing for abbreviation?
+
+    Both sides are expanded ("E 10th Ave" -> "East 10th Avenue") before
+    comparison, because the query is whatever the rider typed and Photon's
+    `street` is whatever OSM holds. Unknown on either side is NOT a match: a
+    feature that cannot say which street it is on has not earned promotion
+    over one that can.
+    """
+    if not query_street or not feature_street:
+        return False
+    a = expand_street_abbreviations(query_street.strip()).casefold()
+    b = expand_street_abbreviations(feature_street.strip()).casefold()
+    return a == b
+
+
 def rank_for_housenumber_query(features: list[Any],
-                               housenumber: str) -> list[Any]:
+                               housenumber: str,
+                               street: str | None = None) -> list[Any]:
     """Reorder/trim Photon features for a query that named a house number.
 
     Photon has no address interpolation: it indexes discrete objects only, so a
@@ -355,8 +385,16 @@ def rank_for_housenumber_query(features: list[Any],
 
     So:
 
-    * an exact house-number match is promoted to the top, since Photon ranks on
-      text score and can rank a same-street neighbour above the exact number;
+    * an exact house-number match is promoted to the top ONLY IF IT IS ON THE
+      STREET THE RIDER NAMED. Photon ranks on text score, so a same-street
+      neighbour can outrank the exact number and needs promoting — but the
+      number alone is not enough. Denver repeats house numbers across its
+      numbered avenues, so "1226 East 10th Avenue" matched "1226 East 22nd
+      Avenue" on the number and was promoted to the top: the right number,
+      twelve blocks north, returned with total confidence. That is the exact
+      failure this function was written to prevent, reintroduced through the
+      promotion rule itself. A number match on the wrong street is now worth
+      LESS than no match, and falls through to the street-level answer below;
     * failing any exact match, on-street furniture is dropped and the named
       street itself is what the rider is offered — "East 10th Avenue, Denver"
       is honest and lands on the right street, which is the most this index can
@@ -371,7 +409,13 @@ def rank_for_housenumber_query(features: list[Any],
     for feat in features:
         props = feat.get("properties") if isinstance(feat, dict) else None
         props = props if isinstance(props, dict) else {}
-        if _clean(props.get("housenumber")).casefold() == wanted:
+        number_matches = _clean(props.get("housenumber")).casefold() == wanted
+        # When the rider named a street, the number must be ON it. When they
+        # did not, the number is all we have to go on and stands alone.
+        on_named_street = (
+            streets_match(street, _clean(props.get("street")) or None)
+            if street else True)
+        if number_matches and on_named_street:
             exact.append(feat)
         else:
             rest.append(feat)
@@ -629,7 +673,8 @@ def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
     # on the same compose network and the extra rows are trimmed below.
     fetch_limit = min(limit + 4, MAX_LIMIT * 2)
     payload = _fetch(upstream, q, _photon_params(q, lat, lon, fetch_limit))
-    ranked = rank_for_housenumber_query(_features(payload), housenumber)
+    ranked = rank_for_housenumber_query(
+        _features(payload), housenumber, street_of_query(q))
     results = normalize_results({"features": ranked}, limit)
     if results:
         return results
