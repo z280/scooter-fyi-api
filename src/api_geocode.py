@@ -336,8 +336,38 @@ def leading_housenumber(q: str) -> str | None:
     return match.group(1) if match else None
 
 
+def street_of_query(q: str) -> str | None:
+    """The street a house-numbered query names: "1226 E 10th Ave" -> "E 10th Ave".
+
+    None when the query does not open with a house number, since there is then
+    no house-number/street pair to check against each other.
+    """
+    match = _LEADING_HOUSENUMBER_RE.match(q.strip())
+    if not match:
+        return None
+    rest = q.strip()[match.end():].strip(" ,")
+    return rest or None
+
+
+def streets_match(query_street: str | None, feature_street: str | None) -> bool:
+    """Do these name the same street, allowing for abbreviation?
+
+    Both sides are expanded ("E 10th Ave" -> "East 10th Avenue") before
+    comparison, because the query is whatever the rider typed and Photon's
+    `street` is whatever OSM holds. Unknown on either side is NOT a match: a
+    feature that cannot say which street it is on has not earned promotion
+    over one that can.
+    """
+    if not query_street or not feature_street:
+        return False
+    a = expand_street_abbreviations(query_street.strip()).casefold()
+    b = expand_street_abbreviations(feature_street.strip()).casefold()
+    return a == b
+
+
 def rank_for_housenumber_query(features: list[Any],
-                               housenumber: str) -> list[Any]:
+                               housenumber: str,
+                               street: str | None = None) -> list[Any]:
     """Reorder/trim Photon features for a query that named a house number.
 
     Photon has no address interpolation: it indexes discrete objects only, so a
@@ -355,8 +385,16 @@ def rank_for_housenumber_query(features: list[Any],
 
     So:
 
-    * an exact house-number match is promoted to the top, since Photon ranks on
-      text score and can rank a same-street neighbour above the exact number;
+    * an exact house-number match is promoted to the top ONLY IF IT IS ON THE
+      STREET THE RIDER NAMED. Photon ranks on text score, so a same-street
+      neighbour can outrank the exact number and needs promoting — but the
+      number alone is not enough. Denver repeats house numbers across its
+      numbered avenues, so "1226 East 10th Avenue" matched "1226 East 22nd
+      Avenue" on the number and was promoted to the top: the right number,
+      twelve blocks north, returned with total confidence. That is the exact
+      failure this function was written to prevent, reintroduced through the
+      promotion rule itself. A number match on the wrong street is now worth
+      LESS than no match, and falls through to the street-level answer below;
     * failing any exact match, on-street furniture is dropped and the named
       street itself is what the rider is offered — "East 10th Avenue, Denver"
       is honest and lands on the right street, which is the most this index can
@@ -371,7 +409,13 @@ def rank_for_housenumber_query(features: list[Any],
     for feat in features:
         props = feat.get("properties") if isinstance(feat, dict) else None
         props = props if isinstance(props, dict) else {}
-        if _clean(props.get("housenumber")).casefold() == wanted:
+        number_matches = _clean(props.get("housenumber")).casefold() == wanted
+        # When the rider named a street, the number must be ON it. When they
+        # did not, the number is all we have to go on and stands alone.
+        on_named_street = (
+            streets_match(street, _clean(props.get("street")) or None)
+            if street else True)
+        if number_matches and on_named_street:
             exact.append(feat)
         else:
             rest.append(feat)
@@ -475,11 +519,25 @@ def label_for(props: dict[str, Any], kind: str) -> str:
     return ", ".join(parts)
 
 
-def normalize_results(payload: Any, limit: int) -> list[dict[str, Any]]:
+def normalize_results(payload: Any, limit: int,
+                      requested_housenumber: str | None = None) -> list[dict[str, Any]]:
     """Photon GeoJSON -> the endpoint's `results` list.
 
     Skips anything unusable (no coordinates, nothing to label) rather than
     surfacing a blank row: the client renders this list directly.
+
+    SAYING WHAT WAS NOT MATCHED. Photon cannot interpolate, so a numbered
+    query routinely lands on the street rather than the address, and the label
+    alone cannot be told apart from a successful match: ask for
+    "1226 E 10th Ave", get "East 10th Avenue, Denver", and nothing distinguishes
+    "we found it and shortened the label" from "we dropped your number and
+    picked a point somewhere along five miles of avenue". Those have very
+    different consequences for a rider.
+
+    So every result of a numbered query carries `requested_housenumber` and
+    `matched_housenumber`, and a street-level answer says in its own label
+    that the number is missing. The structured pair is the contract; the label
+    suffix is a sensible default for any client that just renders the string.
     """
     features = payload.get("features") if isinstance(payload, dict) else None
     graph = load().valhalla
@@ -504,11 +562,24 @@ def normalize_results(payload: Any, limit: int) -> list[dict[str, Any]]:
         label = label_for(props, kind)
         if not label:
             continue
+        matched_number = bool(
+            requested_housenumber
+            and _clean(props.get("housenumber")).casefold()
+            == requested_housenumber.casefold())
+        if requested_housenumber and not matched_number:
+            # Only worth saying on a street: a POI or locality was never
+            # claiming to be the address in the first place.
+            if kind == "street":
+                label = f"{label} (no number {requested_housenumber} in map data)"
         out.append({
             "label": label,
             "lat": lat,
             "lon": lon,
             "kind": kind,
+            # Echoed so a client can render "1226" struck through, greyed, or
+            # as a warning without re-parsing the query it just sent.
+            "requested_housenumber": requested_housenumber,
+            "matched_housenumber": matched_number if requested_housenumber else None,
             # Computed from the rounded values actually returned, so the flag
             # can never disagree with the coordinate the client routes on.
             "in_coverage": bool(graph.contains(lat, lon)),
@@ -629,8 +700,9 @@ def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
     # on the same compose network and the extra rows are trimmed below.
     fetch_limit = min(limit + 4, MAX_LIMIT * 2)
     payload = _fetch(upstream, q, _photon_params(q, lat, lon, fetch_limit))
-    ranked = rank_for_housenumber_query(_features(payload), housenumber)
-    results = normalize_results({"features": ranked}, limit)
+    ranked = rank_for_housenumber_query(
+        _features(payload), housenumber, street_of_query(q))
+    results = normalize_results({"features": ranked}, limit, housenumber)
     if results:
         return results
 
@@ -655,8 +727,10 @@ def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
     street_payload = _fetch(upstream, street_q,
                             _photon_params(street_q, lat, lon, MAX_LIMIT * 2))
     kept = drop_on_street_furniture(_features(street_payload))
+    # The housenumber rides along: this is THE path that answers a numbered
+    # query with a bare street, so it is where saying so matters most.
     street_results = dedupe_by_label(
-        normalize_results({"features": kept}, MAX_LIMIT * 2))
+        normalize_results({"features": kept}, MAX_LIMIT * 2, housenumber))
     # A long street leaves the graph: "East 10th Avenue" matches segments in
     # Aurora as well as Denver. Put the routable ones first — an un-routable
     # suggestion at the top of a fallback list is the least useful thing here.
