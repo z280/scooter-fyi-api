@@ -519,11 +519,25 @@ def label_for(props: dict[str, Any], kind: str) -> str:
     return ", ".join(parts)
 
 
-def normalize_results(payload: Any, limit: int) -> list[dict[str, Any]]:
+def normalize_results(payload: Any, limit: int,
+                      requested_housenumber: str | None = None) -> list[dict[str, Any]]:
     """Photon GeoJSON -> the endpoint's `results` list.
 
     Skips anything unusable (no coordinates, nothing to label) rather than
     surfacing a blank row: the client renders this list directly.
+
+    SAYING WHAT WAS NOT MATCHED. Photon cannot interpolate, so a numbered
+    query routinely lands on the street rather than the address, and the label
+    alone cannot be told apart from a successful match: ask for
+    "1226 E 10th Ave", get "East 10th Avenue, Denver", and nothing distinguishes
+    "we found it and shortened the label" from "we dropped your number and
+    picked a point somewhere along five miles of avenue". Those have very
+    different consequences for a rider.
+
+    So every result of a numbered query carries `requested_housenumber` and
+    `matched_housenumber`, and a street-level answer says in its own label
+    that the number is missing. The structured pair is the contract; the label
+    suffix is a sensible default for any client that just renders the string.
     """
     features = payload.get("features") if isinstance(payload, dict) else None
     graph = load().valhalla
@@ -548,11 +562,24 @@ def normalize_results(payload: Any, limit: int) -> list[dict[str, Any]]:
         label = label_for(props, kind)
         if not label:
             continue
+        matched_number = bool(
+            requested_housenumber
+            and _clean(props.get("housenumber")).casefold()
+            == requested_housenumber.casefold())
+        if requested_housenumber and not matched_number:
+            # Only worth saying on a street: a POI or locality was never
+            # claiming to be the address in the first place.
+            if kind == "street":
+                label = f"{label} (no number {requested_housenumber} in map data)"
         out.append({
             "label": label,
             "lat": lat,
             "lon": lon,
             "kind": kind,
+            # Echoed so a client can render "1226" struck through, greyed, or
+            # as a warning without re-parsing the query it just sent.
+            "requested_housenumber": requested_housenumber,
+            "matched_housenumber": matched_number if requested_housenumber else None,
             # Computed from the rounded values actually returned, so the flag
             # can never disagree with the coordinate the client routes on.
             "in_coverage": bool(graph.contains(lat, lon)),
@@ -675,7 +702,7 @@ def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
     payload = _fetch(upstream, q, _photon_params(q, lat, lon, fetch_limit))
     ranked = rank_for_housenumber_query(
         _features(payload), housenumber, street_of_query(q))
-    results = normalize_results({"features": ranked}, limit)
+    results = normalize_results({"features": ranked}, limit, housenumber)
     if results:
         return results
 
@@ -700,8 +727,10 @@ def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
     street_payload = _fetch(upstream, street_q,
                             _photon_params(street_q, lat, lon, MAX_LIMIT * 2))
     kept = drop_on_street_furniture(_features(street_payload))
+    # The housenumber rides along: this is THE path that answers a numbered
+    # query with a bare street, so it is where saying so matters most.
     street_results = dedupe_by_label(
-        normalize_results({"features": kept}, MAX_LIMIT * 2))
+        normalize_results({"features": kept}, MAX_LIMIT * 2, housenumber))
     # A long street leaves the graph: "East 10th Avenue" matches segments in
     # Aurora as well as Denver. Put the routable ones first — an un-routable
     # suggestion at the top of a fallback list is the least useful thing here.

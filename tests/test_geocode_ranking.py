@@ -67,3 +67,58 @@ def test_street_is_parsed_off_the_query():
     assert ag.street_of_query("1226 E 10th Ave") == "E 10th Ave"
     assert ag.street_of_query("1226  East 10th Avenue") == "East 10th Avenue"
     assert ag.street_of_query("Union Station") is None
+
+
+# --- the result must say what it did NOT match ------------------------------
+
+def _payload(*feats):
+    return {"features": [
+        {"geometry": {"type": "Point", "coordinates": [-104.97, 39.73]},
+         "properties": p} for p in feats]}
+
+
+def test_a_street_answer_to_a_numbered_query_says_the_number_is_missing():
+    """Asking for "1226 E 10th Ave" and being handed "East 10th Avenue" is
+    indistinguishable, from the label alone, between "found it, shortened the
+    label" and "dropped your number and picked a point somewhere along five
+    miles of avenue". Those have very different consequences."""
+    out = ag.normalize_results(
+        _payload({"name": "", "street": "East 10th Avenue", "city": "Denver",
+                  "osm_key": "highway", "osm_value": "residential"}),
+        limit=5, requested_housenumber="1226")
+    assert out, "the street result should still be offered"
+    assert "1226" in out[0]["label"]
+    assert out[0]["matched_housenumber"] is False
+    assert out[0]["requested_housenumber"] == "1226"
+
+
+def test_a_matched_number_is_not_second_guessed():
+    """A real hit needs no caveat and must not grow one."""
+    out = ag.normalize_results(
+        _payload({"name": "", "housenumber": "1500", "street": "Champa Street",
+                  "city": "Denver", "osm_key": "place", "osm_value": "house"}),
+        limit=5, requested_housenumber="1500")
+    assert out[0]["matched_housenumber"] is True
+    assert "no number" not in out[0]["label"]
+    assert "1500" in out[0]["label"]
+
+
+def test_a_query_with_no_number_gets_no_caveat_fields():
+    """Someone searching "Union Station" never asked about a house number."""
+    out = ag.normalize_results(
+        _payload({"name": "Union Station", "city": "Denver",
+                  "osm_key": "building", "osm_value": "train_station"}), limit=5)
+    assert out[0]["requested_housenumber"] is None
+    assert out[0]["matched_housenumber"] is None
+    assert "no number" not in out[0]["label"]
+
+
+def test_a_poi_is_not_caveated_for_a_number_it_never_claimed():
+    """Only a STREET pretends to be the address. A cafe on the same road was
+    always offered as itself."""
+    out = ag.normalize_results(
+        _payload({"name": "Corner Cafe", "street": "East 10th Avenue",
+                  "city": "Denver", "osm_key": "amenity", "osm_value": "cafe"}),
+        limit=5, requested_housenumber="1226")
+    assert "no number" not in out[0]["label"]
+    assert out[0]["matched_housenumber"] is False

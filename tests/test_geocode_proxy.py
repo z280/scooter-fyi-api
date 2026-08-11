@@ -188,6 +188,10 @@ def test_normalizes_to_the_documented_shape(monkeypatch):
         "label": "1701 Champa Street, Denver",
         "lat": _IN_LAT, "lon": _IN_LON,
         "kind": "house", "in_coverage": True,
+        # A numbered query always reports whether the number was actually
+        # matched, so a client can tell a real address from a street the
+        # rider's number was quietly dropped from.
+        "requested_housenumber": "1701", "matched_housenumber": True,
     }]}
 
 
