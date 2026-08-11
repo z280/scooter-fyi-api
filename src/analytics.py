@@ -2,8 +2,9 @@
 
 Two cron entry points, both registered in src/cli.py COMMANDS:
 
-  rollup_analytics   — recompute YESTERDAY's telemetry_daily and
-                       request_metrics_daily rows (Denver calendar day,
+  rollup_analytics   — recompute YESTERDAY's telemetry_daily,
+                       request_metrics_daily and campaigns_daily rows
+                       (Denver calendar day,
                        matching the daily_trips convention). Idempotent:
                        delete-and-reinsert for the day, so a re-run or a
                        backfill call with an explicit day is safe.
@@ -127,17 +128,46 @@ def rollup_analytics(day: date | None = None) -> dict:
                 (target, target),
             )
             request_rows = cur.rowcount
+
+            # --- campaigns_daily -------------------------------------
+            # Per-campaign acquisition rollup (sql/074): only tagged
+            # traffic ('other' included — it is tagged-but-unattributed),
+            # kept indefinitely like the other aggregates.
+            cur.execute("DELETE FROM campaigns_daily WHERE day = %s", (target,))
+            cur.execute(
+                """
+                INSERT INTO campaigns_daily
+                    (day, city_id, campaign, events, visitors, sessions,
+                     page_loads, ride_completes, auth_successes)
+                SELECT %s, city_id, campaign,
+                       COUNT(*),
+                       COUNT(DISTINCT visitor_hash),
+                       COUNT(DISTINCT session_id),
+                       COUNT(*) FILTER (WHERE name = 'page_load'),
+                       COUNT(*) FILTER (WHERE name = 'ride_complete'),
+                       COUNT(*) FILTER (WHERE name = 'auth_success')
+                FROM telemetry_events
+                WHERE (received_at AT TIME ZONE 'America/Denver')::date = %s
+                      AND campaign <> 'none'
+                GROUP BY city_id, campaign
+                """,
+                (target, target),
+            )
+            campaign_rows = cur.rowcount
         conn.commit()
     log.info(
-        "rollup_analytics: day=%s telemetry_daily=%d request_metrics_daily=%d",
+        "rollup_analytics: day=%s telemetry_daily=%d request_metrics_daily=%d"
+        " campaigns_daily=%d",
         target,
         events_rows,
         request_rows,
+        campaign_rows,
     )
     return {
         "day": str(target),
         "telemetry_daily": events_rows,
         "request_metrics_daily": request_rows,
+        "campaigns_daily": campaign_rows,
     }
 
 

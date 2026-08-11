@@ -79,7 +79,10 @@ logs</td><td>Rate limiting, abuse prevention, debugging</td></tr>
 <tr><td>Usage analytics</td><td>First-party, cookieless usage events from
 the web app: which panel or mode was opened, which wizard screen was
 reached, coarse device class (mobile/tablet/desktop), operating-system
-family, viewport size bucket, and referrer domain. Event names come from
+family, viewport size bucket, referrer domain, and — if you arrived via a
+link we published with a campaign tag (utm_campaign) — that campaign
+code, matched against our own fixed list of campaigns and never stored as
+free text. Event names come from
 a fixed allowlist — no free text, no search queries, no coordinates, no
 ride content, and no preference values are ever included. No account id
 is attached, only a signed-in yes/no flag. Distinct visitors are counted

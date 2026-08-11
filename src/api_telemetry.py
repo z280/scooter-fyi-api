@@ -18,6 +18,11 @@ in sql/061_telemetry.sql:
   * No bearer-token resolution happens here; the client self-reports a
     boolean `auth` flag. Reading real account state would re-link identity
     to the pipeline, which is exactly what this design refuses to do.
+  * The `cmp` page field (utm_campaign code from a link we published) is
+    resolved against the campaigns registry before storage — unknown or
+    malformed values collapse to 'other', absent to 'none' — so the
+    stored campaign dimension is a bounded vocabulary, never free text
+    (src/campaigns.py, sql/074_campaigns.sql).
 
 Limits are enforced in code, not DDL, per house convention (sql/043):
 they are product limits and will move.
@@ -33,6 +38,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request, Response
 
+from . import campaigns
 from .client_ip import real_client_ip
 from .pg import connection
 from .ratelimit import enforce
@@ -166,6 +172,7 @@ async def ingest_events(request: Request) -> Response:
     viewport = _vocab(page.get("vp"), _VIEWPORTS)
     referrer_host = _referrer_host(page.get("ref"))
     is_authenticated = page.get("auth") is True
+    campaign_raw = page.get("cmp")
 
     ip = real_client_ip(request) or "?"
     user_agent = request.headers.get("user-agent", "")
@@ -205,13 +212,17 @@ async def ingest_events(request: Request) -> Response:
                 window_seconds=_RATE_WINDOW_S,
             )
             visitor = _visitor_hash(cur, ip, user_agent)
+            # Client-sent utm_campaign code, collapsed to the bounded
+            # vocabulary ('none' / 'other' / a live code) — see
+            # src/campaigns.py for the privacy rationale.
+            campaign = campaigns.resolve(cur, campaign_raw)
             cur.executemany(
                 """
                 INSERT INTO telemetry_events
                     (received_at, name, session_id, visitor_hash,
                      device_class, os_family, viewport, referrer_host,
-                     is_authenticated, props)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     is_authenticated, props, campaign)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [
                     (
@@ -225,6 +236,7 @@ async def ingest_events(request: Request) -> Response:
                         referrer_host,
                         is_authenticated,
                         json.dumps(props),
+                        campaign,
                     )
                     for (name, sid, received_at, props) in rows
                 ],

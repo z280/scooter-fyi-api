@@ -257,7 +257,12 @@ _PRIVACY = {
                       "counting uses sha256(daily salt + IP + user-agent); "
                       "the salt is destroyed after 2 days, after which the "
                       "hash cannot be recomputed by anyone. Neither the IP "
-                      "nor the user-agent is stored. Opt out any time via "
+                      "nor the user-agent is stored. If you arrive via a "
+                      "link we published tagged with a campaign code "
+                      "(utm_campaign), that code is stored with events — "
+                      "matched against our own fixed list of campaigns, "
+                      "never free text, and identifying only the link, not "
+                      "you. Opt out any time via "
                       "the About panel toggle (stored on your device).",
         },
         {
