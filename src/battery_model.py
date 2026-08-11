@@ -393,11 +393,37 @@ def _accept_pair(candidate: dict, stats: dict) -> dict | None:
         stats["rejected_swap"] += 1
         return None
     if burn == 0:
-        # Counted, never stored. The SoC grid is ~1 percentage point, so a short
-        # trip can burn less than one step; keeping those would drag the
-        # intercept toward zero burn.
+        # KEPT (2026-08-10), still counted for the health metric. These used to
+        # be discarded, on the reasoning that "the SoC grid is ~1 percentage
+        # point, so a short trip can burn less than one step; keeping those
+        # would drag the intercept toward zero burn". That describes the
+        # correct behaviour as though it were the failure mode: dropping them
+        # truncates the response variable from below, which biases the
+        # intercept UP.
+        #
+        # Measured over 3,987 episodes pooled from 6 days, identical filters
+        # otherwise:
+        #
+        #             n      mean burn   intercept   pp/km     R2
+        #   excluded  3538       9.444       6.189   1.149   0.3220
+        #   included  3987       8.381       5.136   1.178   0.3258
+        #
+        # ~1.05 pp of intercept, for free.
+        #
+        # They are GENUINE sub-step burns, not stale or failed readings. The
+        # discriminating test is whether the zero share falls away with
+        # distance (genuine) or is spread evenly across it (measurement
+        # failure). It falls, monotonically:
+        #
+        #     400-1k m  21.7%   1-2k  15.5%   2-4k  10.5%
+        #     4-8k       6.3%   8k+    1.9%
+        #
+        # Recording them as 0 does understate slightly — a censored reading
+        # means the true burn is somewhere in [0, 1) — but that is ~0.5 pp on
+        # 11% of rows, about 0.06 pp overall, against the 1.05 pp of upward
+        # bias it removes. A Tobit fit would model the censoring properly and
+        # is not worth the dependency for a four-term regression.
         stats["zero_delta"] += 1
-        return None
     if burn < 0 or burn > MAX_BURN_PCT:
         stats["rejected_soc"] += 1
         return None
@@ -559,13 +585,16 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
             if _route_and_store(conn, enriched, stats):
                 stats["accepted"] += 1
 
-        # The zero-delta share is the health metric for this pipeline: with a
-        # ~1 percentage point SoC grid, a high share means trips are burning
-        # less than one step and any fit would be quantization noise. Zeros are
-        # never stored, so record the ratio here or it is unrecoverable later.
-        scored = stats["accepted"] + stats["zero_delta"]
+        # The zero-delta share is still the health metric for this pipeline:
+        # with a ~1 percentage point SoC grid, a HIGH share means trips are
+        # burning less than one step and the fit is mostly quantization noise.
+        # Zeros are now stored (see _accept_pair), so `accepted` already
+        # contains them and the denominator is `accepted` alone — adding
+        # zero_delta on top, as this did while they were discarded, would
+        # count them twice.
         stats["zero_delta_fraction"] = (
-            round(stats["zero_delta"] / scored, 4) if scored else None)
+            round(stats["zero_delta"] / stats["accepted"], 4)
+            if stats["accepted"] else None)
         with conn.cursor() as cur:
             cur.execute(
                 """
