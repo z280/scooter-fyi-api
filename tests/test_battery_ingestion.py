@@ -470,5 +470,5 @@ def test_episode_sql_skips_episodes_overlapping_a_donated_observation():
     sql = battery_model._RENTAL_EPISODES_SQL
     assert "d.source = 'donated_ride'" in sql
     # The episode's own bracketing samples are the interval to compare against.
-    assert "d.departed_at < post.snapshot_time" in sql
+    assert "d.departed_at < post_agg.arrived_at" in sql
     assert "d.arrived_at  > pre.snapshot_time" in sql
