@@ -104,6 +104,11 @@ def _end_select(*, ride_options: dict | None = None, gbfs_reappeared: bool = Fal
 # ---------------------------------------------------------------------------
 
 class _FakeCursor:
+    # Column names, so code that addresses results by name (rather than by
+    # a position that shifts whenever a column is added) works against the
+    # fake too. Populated lazily from whatever the test's row tuple holds.
+    description = None
+
     def __init__(self, fetchones, fetchalls=()):
         self._ones = list(fetchones)
         self._alls = list(fetchalls)

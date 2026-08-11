@@ -113,6 +113,8 @@ class StateUpdateStats:
     rentals_started: int = 0
     rentals_held: int = 0
     rentals_ended: int = 0
+    # sql/072: of this cycle's rentals_ended, how many took the rider nowhere.
+    rentals_no_go: int = 0
 
 
 def update_for_cycle(
@@ -164,6 +166,7 @@ def update_for_cycle(
             trip_event_rows: list[tuple] = []
             rental_start_updates: list[tuple] = []   # sql/069
             rental_hold_updates: list[tuple] = []
+            rental_outcome_updates: list[tuple] = []  # sql/072
 
             for d in eligible:
                 vid = d.vehicle_identifier
@@ -262,6 +265,18 @@ def update_for_cycle(
                     real_move = distance > threshold
                     if real_move:
                         stats.moved += 1
+                    # sql/072: a completed rental's outcome, recorded where it
+                    # is already known. `released` means this MOVED closes a
+                    # rental rather than an ordinary relocation, and `distance`
+                    # is origin-to-drop-point because sql/069 froze the origin
+                    # for its duration. A rental that ends within the
+                    # stationary threshold of where the rider unlocked it did
+                    # not take them anywhere.
+                    if released:
+                        rental_outcome_updates.append(
+                            (0 if real_move else 1, vid))
+                        if not real_move:
+                            stats.rentals_no_go += 1
                     close_history_ids.append(vid)
                     moved_updates.append((
                         d.vehicle_plate, d.device_id, d.lat, d.lon,
@@ -405,6 +420,20 @@ def update_for_cycle(
                     rental_start_updates,
                 )
 
+            # sql/072. Separate from moved_updates because a release lands in
+            # the MOVED branch whether or not the vehicle actually went
+            # anywhere, and only the counters distinguish the two.
+            if rental_outcome_updates:
+                cur.executemany(
+                    """
+                    UPDATE device_state SET
+                        rentals_observed = rentals_observed + 1,
+                        rentals_no_go    = rentals_no_go + %s
+                    WHERE vehicle_identifier = %s
+                    """,
+                    rental_outcome_updates,
+                )
+
             # IN_RENTAL, every later cycle — liveness only.
             if rental_hold_updates:
                 cur.executemany(
@@ -510,9 +539,10 @@ def update_for_cycle(
 
     log.info(
         "device_state cycle=%s: new=%d moved=%d failed_starts=%d stationary=%d "
-        "skipped=%d rentals(started=%d held=%d ended=%d)",
+        "skipped=%d rentals(started=%d held=%d ended=%d no_go=%d)",
         cycle_id, stats.new_devices, stats.moved, stats.failed_starts,
         stats.stationary, stats.skipped_no_identifier,
         stats.rentals_started, stats.rentals_held, stats.rentals_ended,
+        stats.rentals_no_go,
     )
     return stats
