@@ -456,7 +456,7 @@ def test_episode_scan_reaches_back_past_the_window_start():
     assert "%(window_start)s" not in obs_cte
     # ...while the reporting window still decides which episodes belong to a
     # run, applied to the episode rather than to the scan.
-    assert "post.snapshot_time >= %(window_start)s" in sql
+    assert "post_agg.arrived_at >= %(window_start)s" in sql
     # One MAX_DURATION_S is the tight bound: no qualifying episode is longer.
     assert battery_model.EPISODE_BRACKET_LOOKBACK_S == battery_model.MAX_DURATION_S
 
@@ -584,7 +584,7 @@ def test_day_chunks_reach_back_for_the_bracketing_sample():
     assert "EPISODE_BRACKET_LOOKBACK_S" in src
     # ...and the episode is claimed by the day it ENDED in, so the lookback
     # does not make two days both claim it.
-    assert "post.snapshot_time >= TIMESTAMP '{day}" in src
+    assert "post_agg.arrived_at >= TIMESTAMP '{day}" in src
 
 
 def test_archive_file_days_enumerates_the_span(monkeypatch):
@@ -607,3 +607,99 @@ def test_archive_file_days_handles_an_empty_file():
         def fetchone(self): return (None, None)
 
     assert battery_model._archive_file_days(_Con(), "s3://b/k.parquet") == []
+
+
+# --- measurement corrections (sql/071) --------------------------------------
+
+def _both_dialects():
+    import inspect
+    return (battery_model._RENTAL_EPISODES_SQL,
+            inspect.getsource(battery_model._rental_episodes_from_archive_file))
+
+
+def test_end_of_ride_battery_uses_the_latest_clean_settled_sample():
+    """The reported range sags under load and recovers at rest, so the first
+    post-ride sample is not a battery reading, it is a battery reading plus
+    whatever sag has not yet come back. Swap-free over 1,662 episodes, mean
+    burn by offset runs 9.15 / 8.38 / 8.17 / 8.08 / 8.07 / 8.06 — it plateaus
+    at 4-5, so the search stops at SETTLE_MAX_CYCLES.
+
+    The LATEST clean sample within the window, not the Nth: a vehicle
+    re-rented after four minutes still contributes its post[2] reading rather
+    than being dropped for never sitting still long enough."""
+    for sql in _both_dialects():
+        assert "settled_range" in sql
+        # LATEST clean sample, not the Nth: ORDER BY k DESC then take the first.
+        assert "ORDER BY k DESC" in sql
+        assert "k <= " in sql
+    assert battery_model.SETTLE_MAX_CYCLES == 5
+
+
+def test_a_swap_truncates_the_settling_window():
+    """A jump of SWAP_STEP_METERS between post-ride samples is a new battery,
+    not recovery. Readings from there on describe a different pack — and this
+    is exactly what made an earlier analysis appear to show R2 declining with
+    offset, which sent the previous attempt to the wrong cycle."""
+    for sql in _both_dialects():
+        assert "swapped" in sql
+        assert "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW" in sql
+        assert "swapped = 0" in sql
+    assert battery_model.SWAP_STEP_METERS == 3000
+
+
+def test_the_drop_point_is_still_the_first_sample():
+    """Only the BATTERY settles. arrived_at and the end coordinates are where
+    the ride finished; taking those several cycles late would misplace it."""
+    sql = battery_model._RENTAL_EPISODES_SQL
+    # arrived_at / lat2 / lon2 come from the FIRST sample of the run...
+    assert "MIN(snapshot_time) AS arrived_at" in sql
+    assert "(ARRAY_AGG(latitude  ORDER BY k))[1] AS lat2" in sql
+    assert "(ARRAY_AGG(longitude ORDER BY k))[1] AS lon2" in sql
+    # ...while the battery comes from the LAST clean one. Different samples,
+    # deliberately: the ride ended where it ended, whatever the pack says
+    # several minutes later.
+    assert "ORDER BY k DESC" in sql
+
+
+def test_pre_ride_staleness_is_recorded():
+    """99.4% of parked 2-minute steps show no change — the reading is frozen,
+    so a long-parked vehicle reads optimistically and the difference lands in
+    the next ride's burn (burn/km 1.81 under 15 min parked vs 2.73 over 12 h,
+    at the same distances)."""
+    for sql in _both_dialects():
+        assert "parked_seconds_before" in sql
+        assert "prev_park" in sql
+
+
+def test_staleness_is_modelled_then_predicted_at_zero():
+    """Fitting it keeps every observation training the distance coefficient;
+    predicting at zero answers what the route costs on a vehicle whose reading
+    is current, rather than quoting the fleet's average staleness back."""
+    import inspect
+    train_src = inspect.getsource(battery_model.train)
+    assert "beta_parked" in train_src
+    assert "beta_parked_seconds" in train_src
+
+    est_src = inspect.getsource(battery_model.estimate_burn_percent)
+    assert "beta_parked_seconds" not in est_src.split("percent = (")[1].split(")")[0]
+    assert "staleness_pp_per_hour_parked" in est_src
+
+
+def test_train_excludes_rows_measured_the_old_way():
+    """Pre-sql/071 rows used the unsettled reading and have no staleness. They
+    are a different quantity; mixing them in would push their ~1 pp of sag into
+    the intercept and leave beta_parked_seconds fitting a half-NULL column."""
+    import inspect
+    src = inspect.getsource(battery_model.train)
+    assert "soc_end_offset_cycles IS NOT NULL" in src
+    assert "parked_seconds_before IS NOT NULL" in src
+
+
+def test_model_offsets_index_past_the_new_term():
+    """The per-model dummies sit after [1, distance, elevation, temperature,
+    parked] — off-by-one here silently assigns Apollo's offset to the
+    staleness term."""
+    import inspect
+    src = inspect.getsource(battery_model.train)
+    assert "beta[5 + i]" in src
+    assert "beta[4 + i]" not in src

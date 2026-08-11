@@ -88,6 +88,70 @@ from .quality import compute_battery_percent
 
 log = logging.getLogger(__name__)
 
+# --- Reading the battery ----------------------------------------------------
+#
+# THE REPORTED RANGE IS NOT A FUEL GAUGE. Two measured behaviours dominate any
+# burn computed from it, and both are artifacts rather than consumption.
+#
+# 1. IT SAGS UNDER LOAD. Comparing the last parked reading with the first
+#    reading taken once the vehicle is reserved, over 27,113 episodes:
+#
+#        displacement so far      n      mean SoC drop
+#        under 25 m (unmoved)  19138          0.17 pp
+#        25-100 m               3733          8.38 pp
+#        100-400 m              3934          9.89 pp
+#        over 400 m              308         10.67 pp
+#
+#    A vehicle that has woken but not moved shows essentially NO change, so
+#    there is no wake-up correction. One that has travelled 25-100 m reads
+#    8.4 pp lower. Nothing consumes 8% of a pack in 100 m; that is the reported
+#    range collapsing under load. It recovers at rest, which is why the
+#    end-of-ride reading has to settle before it means anything.
+#
+# 2. IT GOES STALE WHILE PARKED. 99.4% of parked 2-minute steps show no change
+#    at all - the value is frozen, not tracked. The longer a vehicle sits, the
+#    more optimistic it reads relative to what it reports once woken, and the
+#    difference lands in the next ride's burn:
+#
+#        parked before     n    mean burn   mean dist   burn/km
+#        0-15 min        421      6.17 pp      3400 m      1.81
+#        15-60 min       445      7.66 pp      3529 m      2.17
+#        60-240 min      517      8.84 pp      3642 m      2.43
+#        240-720 min     244     10.25 pp      4173 m      2.46
+#        720+ min        169     10.83 pp      3964 m      2.73
+#
+#    Same distances, 51% more burn per km. parked_seconds_before is therefore
+#    recorded on every observation and carried into the fit as a TERM rather
+#    than filtered out: modelling it lets every observation train the distance
+#    coefficient while predictions are made at parked = 0, i.e. for a vehicle
+#    whose reading is fresh. (Field corroboration: Veo's own app shows vehicles
+#    at 3-4% but refuses to start them - their at-rest number is optimistic
+#    too, by about the sag measured above.)
+#
+# Together these accounted for nearly all of what used to be an 8.93 pp
+# intercept. Swap-free, settled, and controlling for staleness, it is ~1.4 pp.
+
+# How many cycles after the vehicle becomes available to look for a settled
+# reading. Measured swap-free over 1,662 episodes, mean burn by offset:
+#
+#     post   1      2      3      4      5      6      8     10
+#     burn   9.15   8.38   8.17   8.08   8.07   8.06   8.04   8.05
+#
+# It plateaus at 4-5 and R2 peaks there (0.3938 at post[5]). Waiting longer
+# neither helps nor hurts the number, but it shrinks coverage and selects for
+# vehicles nobody re-rented, so the search stops at 5. The LATEST clean sample
+# within the window is used, not the 5th - a vehicle re-rented after four
+# minutes still contributes its post[2] reading rather than being dropped.
+SETTLE_MAX_CYCLES = 5
+# A jump this large between consecutive post-ride samples is a battery swap or
+# a charge, not recovery. Readings from it onward describe a different pack, so
+# the settled reading is taken from before it. Swaps are 0.12% of steps but
+# huge when they happen, and they are what made an earlier settling analysis
+# appear to show R2 DECLINING with offset - which sent a previous attempt at
+# this fix to the wrong cycle.
+SWAP_STEP_METERS = 3000
+
+
 # --- Anchor filter ----------------------------------------------------------
 #
 # Every bound here was re-derived against 24,954 real reservation episodes
@@ -237,10 +301,48 @@ pre AS (
            snapshot_time, latitude, longitude, current_range_meters, disabled
     FROM ranked WHERE NOT reserved AND rn = n
 ),
-post AS (
-    SELECT vehicle_identifier, episode, snapshot_time, latitude, longitude,
-           current_range_meters
-    FROM ranked WHERE NOT reserved AND rn = 1
+-- The available run after the reservation, with the step between consecutive
+-- readings and a sticky "a swap has happened at or before this sample" flag.
+-- Two window levels because a window cannot nest.
+post_steps AS (
+    SELECT vehicle_identifier, episode, rn AS k, snapshot_time, latitude, longitude,
+           current_range_meters,
+           current_range_meters - LAG(current_range_meters) OVER (
+               PARTITION BY vehicle_identifier, episode ORDER BY snapshot_time) AS step
+    FROM ranked WHERE NOT reserved
+),
+post_flagged AS (
+    SELECT *, MAX(CASE WHEN step > %(swap_m)s THEN 1 ELSE 0 END) OVER (
+                  PARTITION BY vehicle_identifier, episode ORDER BY k
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS swapped
+    FROM post_steps
+),
+-- ONE grouped pass gives everything the run has to offer: the drop point
+-- (first sample), the settled battery (latest clean sample inside the window),
+-- and the run's own length, which is the NEXT episode's pre-ride staleness.
+-- Deliberately not three CTEs joined back together - `ranked` is an 843k-row
+-- CTE that Postgres re-scans per probe, which took this query from 8 s to over
+-- 500 s twice while this was being written.
+post_agg AS (
+    SELECT vehicle_identifier, episode,
+           MIN(snapshot_time) AS arrived_at,
+           (ARRAY_AGG(latitude  ORDER BY k))[1] AS lat2,
+           (ARRAY_AGG(longitude ORDER BY k))[1] AS lon2,
+           (ARRAY_AGG(current_range_meters ORDER BY k DESC)
+                FILTER (WHERE current_range_meters IS NOT NULL
+                          AND swapped = 0 AND k <= %(settle_max)s))[1] AS settled_range,
+           (ARRAY_AGG(k ORDER BY k DESC)
+                FILTER (WHERE current_range_meters IS NOT NULL
+                          AND swapped = 0 AND k <= %(settle_max)s))[1] AS settled_k,
+           EXTRACT(EPOCH FROM (MAX(snapshot_time) - MIN(snapshot_time))) AS run_seconds
+    FROM post_flagged GROUP BY vehicle_identifier, episode
+),
+-- How stale the pre-ride reading was: the length of the run the vehicle sat
+-- through before THIS rental. Reads off post_agg, so it costs no extra scan.
+prev_park AS (
+    SELECT vehicle_identifier, episode + 1 AS episode,
+           run_seconds AS parked_seconds_before
+    FROM post_agg
 ),
 ride AS (
     SELECT vehicle_identifier, episode, COUNT(*) AS waypoint_count,
@@ -252,20 +354,23 @@ SELECT
     pre.vehicle_identifier,
     pre.vehicle_model_name,
     pre.snapshot_time  AS departed_at,
-    post.snapshot_time AS arrived_at,
-    EXTRACT(EPOCH FROM (post.snapshot_time - pre.snapshot_time)) AS duration_seconds,
+    post_agg.arrived_at,
+    EXTRACT(EPOCH FROM (post_agg.arrived_at - pre.snapshot_time)) AS duration_seconds,
     pre.latitude, pre.longitude,
-    post.latitude  AS lat2,
-    post.longitude AS lon2,
-    pre.current_range_meters  AS range_start,
-    post.current_range_meters AS range_end,
+    post_agg.lat2,
+    post_agg.lon2,
+    pre.current_range_meters AS range_start,
+    post_agg.settled_range   AS range_end,
+    post_agg.settled_k       AS soc_end_offset_cycles,
+    prev_park.parked_seconds_before,
     ride.waypoint_count,
     ride.waypoints
 FROM pre
-JOIN post USING (vehicle_identifier, episode)
+JOIN post_agg USING (vehicle_identifier, episode)
+LEFT JOIN prev_park USING (vehicle_identifier, episode)
 JOIN ride USING (vehicle_identifier, episode)
 WHERE pre.current_range_meters IS NOT NULL
-  AND post.current_range_meters IS NOT NULL
+  AND post_agg.settled_range IS NOT NULL
   -- Disabled is out-of-service, and a van moving a broken vehicle is not a
   -- ride. Filtered on the bracketing sample rather than in `obs`, because
   -- dropping rows mid-run would split one episode into several.
@@ -274,8 +379,8 @@ WHERE pre.current_range_meters IS NOT NULL
   -- Anything wholly inside the lookback was already mined by the previous run
   -- and is filtered by the NOT EXISTS below; this just avoids paying to route
   -- it again.
-  AND post.snapshot_time >= %(window_start)s
-  AND EXTRACT(EPOCH FROM (post.snapshot_time - pre.snapshot_time))
+  AND post_agg.arrived_at >= %(window_start)s
+  AND EXTRACT(EPOCH FROM (post_agg.arrived_at - pre.snapshot_time))
         BETWEEN %(min_s)s AND %(max_s)s
   AND NOT EXISTS (
       SELECT 1 FROM battery_trip_observations b
@@ -290,7 +395,7 @@ WHERE pre.current_range_meters IS NOT NULL
       SELECT 1 FROM battery_trip_observations d
       WHERE d.vehicle_identifier = pre.vehicle_identifier
         AND d.source = 'donated_ride'
-        AND d.departed_at < post.snapshot_time
+        AND d.departed_at < post_agg.arrived_at
         AND d.arrived_at  > pre.snapshot_time
   )
 -- RANDOM, not most-recent-first. There are ~25k qualifying episodes a day
@@ -489,8 +594,9 @@ def _route_and_store(conn, cand: dict, stats: dict) -> bool:
                 duration_seconds, from_lat, from_lon, to_lat, to_lon,
                 route_distance_meters, elevation_gain_meters, temperature_c,
                 soc_start_percent, soc_end_percent, burn_percent, implied_mph,
-                source, waypoint_count
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                source, waypoint_count, soc_end_offset_cycles,
+                parked_seconds_before
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (vehicle_identifier, departed_at) DO NOTHING
             """,
             (cand["vehicle_identifier"], cand["vehicle_model_name"],
@@ -502,7 +608,9 @@ def _route_and_store(conn, cand: dict, stats: dict) -> bool:
              # NULL, not 0, when the direct route was used: "we had no track"
              # and "the track was one point" are different provenance, and
              # sql/070's own comment leans on the distinction.
-             len(waypoints) if routed_via_waypoints else None),
+             len(waypoints) if routed_via_waypoints else None,
+             cand.get("soc_end_offset_cycles"),
+             cand.get("parked_seconds_before")),
         )
     return True
 
@@ -565,6 +673,8 @@ def extract_trips(hours: int = 26, limit: int = 2000) -> dict[str, Any]:
                 "window_end": now,
                 "min_s": MIN_DURATION_S,
                 "max_s": MAX_DURATION_S,
+                "swap_m": SWAP_STEP_METERS,
+                "settle_max": SETTLE_MAX_CYCLES,
                 "limit": limit,
             })
             cols = [d[0] for d in cur.description]
@@ -792,10 +902,39 @@ def _rental_episodes_from_archive_file(con, url: str, day: str,
                snapshot_time, latitude, longitude, current_range_meters, disabled
         FROM ranked WHERE NOT reserved AND rn = n
     ),
-    post AS (
-        SELECT vehicle_identifier, episode, snapshot_time, latitude, longitude,
-               current_range_meters
-        FROM ranked WHERE NOT reserved AND rn = 1
+    -- Structurally identical to the Postgres twin; see its comments for why
+    -- this is one grouped pass and not three CTEs joined together.
+    post_steps AS (
+        SELECT vehicle_identifier, episode, rn AS k, snapshot_time, latitude, longitude,
+               current_range_meters,
+               current_range_meters - lag(current_range_meters) OVER (
+                   PARTITION BY vehicle_identifier, episode ORDER BY snapshot_time) AS step
+        FROM ranked WHERE NOT reserved
+    ),
+    post_flagged AS (
+        SELECT *, max(CASE WHEN step > {SWAP_STEP_METERS} THEN 1 ELSE 0 END) OVER (
+                      PARTITION BY vehicle_identifier, episode ORDER BY k
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS swapped
+        FROM post_steps
+    ),
+    post_agg AS (
+        SELECT vehicle_identifier, episode,
+               min(snapshot_time) AS arrived_at,
+               (array_agg(latitude  ORDER BY k))[1] AS lat2,
+               (array_agg(longitude ORDER BY k))[1] AS lon2,
+               (array_agg(current_range_meters ORDER BY k DESC)
+                    FILTER (WHERE current_range_meters IS NOT NULL
+                              AND swapped = 0 AND k <= {SETTLE_MAX_CYCLES}))[1] AS settled_range,
+               (array_agg(k ORDER BY k DESC)
+                    FILTER (WHERE current_range_meters IS NOT NULL
+                              AND swapped = 0 AND k <= {SETTLE_MAX_CYCLES}))[1] AS settled_k,
+               date_diff('second', min(snapshot_time), max(snapshot_time)) AS run_seconds
+        FROM post_flagged GROUP BY vehicle_identifier, episode
+    ),
+    prev_park AS (
+        SELECT vehicle_identifier, episode + 1 AS episode,
+               run_seconds AS parked_seconds_before
+        FROM post_agg
     ),
     ride AS (
         SELECT vehicle_identifier, episode, count(*) AS waypoint_count,
@@ -805,26 +944,29 @@ def _rental_episodes_from_archive_file(con, url: str, day: str,
         GROUP BY vehicle_identifier, episode
     )
     SELECT pre.vehicle_identifier, pre.vehicle_model_name,
-           pre.snapshot_time::VARCHAR  AS departed_at,
-           post.snapshot_time::VARCHAR AS arrived_at,
-           date_diff('second', pre.snapshot_time, post.snapshot_time) AS duration_seconds,
+           pre.snapshot_time::VARCHAR      AS departed_at,
+           post_agg.arrived_at::VARCHAR    AS arrived_at,
+           date_diff('second', pre.snapshot_time, post_agg.arrived_at) AS duration_seconds,
            pre.latitude, pre.longitude,
-           post.latitude  AS lat2,
-           post.longitude AS lon2,
-           pre.current_range_meters  AS range_start,
-           post.current_range_meters AS range_end,
+           post_agg.lat2,
+           post_agg.lon2,
+           pre.current_range_meters AS range_start,
+           post_agg.settled_range   AS range_end,
+           post_agg.settled_k       AS soc_end_offset_cycles,
+           prev_park.parked_seconds_before,
            ride.waypoint_count,
            list_transform(ride.waypoints, x -> [x.la, x.lo]) AS waypoints
     FROM pre
-    JOIN post USING (vehicle_identifier, episode)
+    JOIN post_agg USING (vehicle_identifier, episode)
+    LEFT JOIN prev_park USING (vehicle_identifier, episode)
     JOIN ride USING (vehicle_identifier, episode)
     WHERE pre.current_range_meters IS NOT NULL
-      AND post.current_range_meters IS NOT NULL
+      AND post_agg.settled_range IS NOT NULL
       AND NOT pre.disabled
       -- The episode belongs to this day if it ENDED in it, so an episode
       -- pulled in by the lookback is not also claimed by the previous day.
-      AND post.snapshot_time >= TIMESTAMP '{day} 00:00:00+00'
-      AND date_diff('second', pre.snapshot_time, post.snapshot_time)
+      AND post_agg.arrived_at >= TIMESTAMP '{day} 00:00:00+00'
+      AND date_diff('second', pre.snapshot_time, post_agg.arrived_at)
             BETWEEN {MIN_DURATION_S} AND {MAX_DURATION_S}
     -- Random, for the same reason the Postgres path is random: taking the
     -- head of a time-ordered file would sample one part of the day.
@@ -969,11 +1111,18 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
                 """
                 SELECT route_distance_meters, elevation_gain_meters,
                        temperature_c, burn_percent, departed_at,
-                       vehicle_model_name
+                       vehicle_model_name, parked_seconds_before
                 FROM battery_trip_observations
                 WHERE departed_at >= %s
                   AND elevation_gain_meters IS NOT NULL
                   AND temperature_c IS NOT NULL
+                  -- sql/071. Rows without these were measured against the
+                  -- UNSETTLED end-of-ride reading and carry no staleness, so
+                  -- they are a different quantity: mixing them in would push
+                  -- the sag they contain into the intercept and leave
+                  -- beta_parked_seconds fitting a half-NULL column.
+                  AND soc_end_offset_cycles IS NOT NULL
+                  AND parked_seconds_before IS NOT NULL
                 ORDER BY departed_at
                 """,
                 (window_start,),
@@ -1000,9 +1149,16 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
     reference = max(counts, key=counts.get) if counts else "unknown"
     dummies = [m for m in sorted(counts) if m != reference]
 
+    # parked_seconds_before is a MEASUREMENT ARTIFACT term, not a physical one:
+    # the reported range is frozen while a vehicle sits, so a stale pre-ride
+    # reading overstates burn by ~0.17 pp per hour parked. Fitting it keeps
+    # every observation training the distance coefficient, and
+    # estimate_burn_percent then evaluates it at ZERO so a prediction describes
+    # a vehicle whose reading is current rather than the fleet's average
+    # staleness.
     def design(subset):
         X = np.array([
-            [1.0, float(r[0]), float(r[1]), float(r[2])]
+            [1.0, float(r[0]), float(r[1]), float(r[2]), float(r[6])]
             + [1.0 if (r[5] or "unknown") == m else 0.0 for m in dummies]
             for r in subset
         ])
@@ -1018,6 +1174,7 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else None
     residual_std = float(np.std(residuals))
     mean_temp = float(np.mean(X[:, 3]))
+    beta_parked = float(beta[4])
 
     holdout_mae = None
     if test_rows:
@@ -1029,7 +1186,7 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
     # the route endpoint usually can't, since it prices a route, not a vehicle.
     model_offsets = {reference: 0.0}
     for i, m in enumerate(dummies):
-        model_offsets[m] = float(beta[4 + i])
+        model_offsets[m] = float(beta[5 + i])
     total_n = sum(counts.values()) or 1
     model_offsets["_default"] = round(
         sum(model_offsets[m] * counts[m] for m in counts) / total_n, 6)
@@ -1061,12 +1218,14 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
                 INSERT INTO battery_model_coefficients (
                     window_start, window_end, n_observations,
                     intercept, beta_distance, beta_elevation, beta_temperature,
+                    beta_parked_seconds,
                     r_squared, residual_std, mean_temperature_c,
                     zero_delta_fraction, model_offsets, notes
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (window_start, now, len(train_rows),
                  float(beta[0]), float(beta[1]), float(beta[2]), float(beta[3]),
+                 beta_parked,
                  r2, residual_std, mean_temp, zero_delta_fraction,
                  json.dumps(model_offsets), notes),
             )
@@ -1079,6 +1238,8 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
         "beta_distance": float(beta[1]),
         "beta_elevation": float(beta[2]),
         "beta_temperature": float(beta[3]),
+        "beta_parked_seconds": beta_parked,
+        "beta_parked_pp_per_hour": round(beta_parked * 3600, 4),
         "r_squared": r2,
         "residual_std": residual_std,
         "mean_temperature_c": mean_temp,
@@ -1122,7 +1283,8 @@ def latest_model(refresh: bool = False) -> dict[str, Any] | None:
                     """
                     SELECT intercept, beta_distance, beta_elevation,
                            beta_temperature, mean_temperature_c, r_squared,
-                           n_observations, fitted_at, model_offsets
+                           n_observations, fitted_at, model_offsets,
+                           beta_parked_seconds
                     FROM battery_model_coefficients
                     ORDER BY fitted_at DESC LIMIT 1
                     """
@@ -1145,6 +1307,8 @@ def latest_model(refresh: bool = False) -> dict[str, Any] | None:
         "n_observations": int(row[6]),
         "fitted_at": row[7].isoformat() if row[7] else None,
         "model_offsets": row[8] or {},
+        # Reported for transparency, never applied - see estimate_burn_percent.
+        "beta_parked_seconds": float(row[9]) if row[9] is not None else None,
     }
     return _MODEL_CACHE
 
@@ -1181,6 +1345,12 @@ def estimate_burn_percent(distance_meters: float | None,
         offset = float(offsets[vehicle_model])
     else:
         offset = float(offsets.get("_default", 0.0))
+    # PREDICTED AT parked_seconds_before = 0, which is why the fitted
+    # beta_parked_seconds does not appear below. That term measures how much a
+    # STALE reading inflates burn (the reported range is frozen while a vehicle
+    # sits), not energy anyone spends. Evaluating it at zero answers the
+    # question a rider is actually asking - what this route costs on a vehicle
+    # whose reading is current - instead of quoting fleet-average staleness.
     percent = (model["intercept"] + offset
                + model["beta_distance"] * distance_meters
                + model["beta_elevation"] * climb
@@ -1199,6 +1369,11 @@ def estimate_burn_percent(distance_meters: float | None,
         "model_fitted_at": model["fitted_at"],
         "model_r_squared": model["r_squared"],
         "model_n": model["n_observations"],
+        # Surfaced so a caller can see the artifact was fitted and excluded,
+        # rather than never modelled at all.
+        "staleness_pp_per_hour_parked": (
+            round(model["beta_parked_seconds"] * 3600, 4)
+            if model.get("beta_parked_seconds") is not None else None),
     }
 
 
