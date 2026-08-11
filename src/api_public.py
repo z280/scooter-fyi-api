@@ -20,6 +20,7 @@ from .daily_sla import _AVG_FIELDS
 from .dwell_stats import stats_for_cycle
 from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
 from .pg import connection
+from . import battery_model
 from .quality import (
     compute_battery_percent,
     compute_quality_designation,
@@ -454,6 +455,11 @@ def _devices_current_impl(
     # public/private identifier split in src/identity.py (only the HMAC
     # vehicle_identifier is public). The last four SELECT columns are always
     # fetched but only emitted under include_plate (see the feature loop).
+    # One clock for the whole payload: staleness computed per row against
+    # datetime.now() would drift across a 9,000-device response and make two
+    # devices parked at the same instant disagree.
+    now_utc = snapshot_time or datetime.now(timezone.utc)
+
     features = []
     for r in rows:
         number_failed_starts = int(r[22]) if r[22] is not None else None
@@ -485,6 +491,21 @@ def _devices_current_impl(
             "is_reserved": r[7],
             "current_range_meters": r[8],
             "battery_percent": compute_battery_percent(r[8]),
+            # A distance is the question a rider actually has; the percentage
+            # is the least trustworthy number the feed publishes. See
+            # battery_model.OBSERVED_METERS_PER_SOC_POINT - measured from the
+            # fleet running itself flat, not inverted out of the regression.
+            "estimated_range_meters": battery_model.usable_range_meters(
+                compute_battery_percent(r[8])),
+            # How much to trust that charge. The reported range is frozen while
+            # a vehicle sits (99.4% of parked 2-minute steps show no change at
+            # all), so a long-parked scooter reads optimistically and the
+            # difference lands on whoever unlocks it next.
+            "battery_reading": battery_model.reading_confidence(
+                (now_utc - r[23]).total_seconds() if r[23] else None),
+            "parked_hours": (
+                round((now_utc - r[23]).total_seconds() / 3600.0, 1)
+                if r[23] else None),
             "propulsion_type": r[9],
             "has_negative_report": bool(r[20]),
             "quality_designation": quality,

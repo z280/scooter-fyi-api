@@ -227,6 +227,51 @@ MAX_BURN_PCT = 60.0
 
 METERS_PER_MILE = 1609.34
 
+# --- Serving the rider a distance instead of a percentage --------------------
+#
+# OBSERVED_METERS_PER_SOC_POINT is measured, not modelled, and deliberately so.
+# Inverting beta_distance gives ~113 km on a full charge, which is nonsense on
+# a fleet whose vehicles are rated 67 km and derate hard in service. The
+# regression's slope describes burn WITHIN a ride, where the intercept absorbs
+# a large fixed offset; it was never meant to be extrapolated to a whole
+# battery.
+#
+# So this comes from the fleet running itself flat. 220 vehicles were followed
+# from >=95% SoC (selection on ENTRY, never on outcome) until they reached
+# <=5%, summing the routed distance of every rental in between; 210 of them
+# got there. Median 32.7 km over 10 rides and 85 hours, which is 36.4 km per
+# 100 points of SoC.
+#
+# That figure is CONSERVATIVE for a single ride, because those 85 hours
+# included ~84 hours of standby drain a rider taking the vehicle now will not
+# pay. Under-promising is the right failure mode for "will I make it".
+OBSERVED_METERS_PER_SOC_POINT = 364.0
+
+# Beyond this the reported charge is a frozen number of unknown age: 99.4% of
+# parked 2-minute steps show no change at all, and vehicles parked more than an
+# hour before a rental show measurably more apparent burn per km (1.81 pp/km
+# under 15 min, 2.73 pp/km beyond 12 h, at the same distances). Same threshold
+# train() uses to decide what it will fit on.
+STALE_READING_SECONDS = TRAIN_MAX_PARKED_SECONDS
+
+
+def usable_range_meters(battery_percent: float | None) -> int | None:
+    """Roughly how far this charge goes, from observed fleet discharges.
+
+    Deliberately NOT derived from the regression - see
+    OBSERVED_METERS_PER_SOC_POINT. Returns None when the charge is unknown.
+    """
+    if battery_percent is None:
+        return None
+    return int(max(0.0, float(battery_percent)) * OBSERVED_METERS_PER_SOC_POINT)
+
+
+def reading_confidence(parked_seconds: float | None) -> str:
+    """"fresh" | "stale" | "unknown" for a vehicle's reported charge."""
+    if parked_seconds is None:
+        return "unknown"
+    return "stale" if parked_seconds >= STALE_READING_SECONDS else "fresh"
+
 
 def _implied_mph(distance_meters: float, duration_seconds: float) -> float:
     if duration_seconds <= 0:
@@ -1383,8 +1428,21 @@ def estimate_burn_percent(distance_meters: float | None,
     # A negative predicted burn is nonsense; clamp rather than emit it.
     percent = max(0.0, min(100.0, percent))
 
+    # How much of the estimate is the CLIMB. Riders have no other way to know
+    # this, and it is where the model is most differentiated: 0.072 pp per
+    # metre fleet-wide, and an Apollo costs ~2.2x a Cosmo per metre climbed.
+    from_elevation = model["beta_elevation"] * climb
+    # An honest resolution. residual_std is the spread of the fit's own errors;
+    # quoting a bare point estimate implies a precision that held-out error
+    # (~5.7 pp MAE) does not support.
+    band = model.get("residual_std") or 0.0
     return {
         "percent": round(percent, 1),
+        "percent_low": round(max(0.0, percent - band), 1),
+        "percent_high": round(min(100.0, percent + band), 1),
+        "from_elevation_percent": round(max(0.0, from_elevation), 1),
+        "from_elevation_share": (
+            round(max(0.0, from_elevation) / percent, 2) if percent > 0 else None),
         "source": "regression",
         "temperature_c": round(temp, 1) if temp is not None else None,
         "temperature_fallback": used_fallback,

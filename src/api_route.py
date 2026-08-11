@@ -459,6 +459,14 @@ def route(
         "shade_score": score,
         "street_share": night_share,
         "battery_percent_estimate": battery.get("percent"),
+        # A band, not just a point. Held-out error is ~5.7 pp; a bare number
+        # reads as a promise the model cannot keep.
+        "battery_percent_low": battery.get("percent_low"),
+        "battery_percent_high": battery.get("percent_high"),
+        # The climb's share of the cost, so a client can say "the hill is a
+        # third of this" instead of just quoting a total.
+        "battery_from_elevation_percent": battery.get("from_elevation_percent"),
+        "battery_from_elevation_share": battery.get("from_elevation_share"),
         "battery_model": battery.get("source"),
         "graph_bbox": cfg.bbox,
         "beta_warning": NAV_BETA_WARNING,
