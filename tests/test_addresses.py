@@ -137,6 +137,132 @@ def test_edit_distance_gives_up_once_the_budget_is_blown():
     assert A._bounded_levenshtein("colfax", "champa", 2) is None
 
 
+# --- how a number is written back -------------------------------------------
+
+def test_a_fractional_address_is_not_mangled_into_the_label():
+    """974 rows in the city file carry a "1/2" suffix. Concatenating it — and
+    normalising the slash away first — rendered 4039 1/2 N Wyandot St as
+    "40391 2 N Wyandot St", which is exactly the label a rider cannot trust
+    and the reason the index exists at all."""
+    assert A.house_number_text(4039, "1/2") == "4039 1/2"
+
+
+def test_a_bare_letter_still_closes_up():
+    """1226B is a real neighbouring door and Denver writes it closed up."""
+    assert A.house_number_text(1226, "B") == "1226B"
+
+
+def test_a_word_suffix_is_spaced_the_way_the_city_writes_it():
+    """The suffix column is not only letters: BSMT, REAR, UPPER and CA all
+    appear, and one row carries a second number. The city's own FULL_ADDRESS
+    spaces them ("11400 11420 E 51st Ave"), so this matches."""
+    assert A.house_number_text(1226, "BSMT") == "1226 BSMT"
+    assert A.house_number_text(11400, "11420") == "11400 11420"
+
+
+def test_no_suffix_is_just_the_number():
+    assert A.house_number_text(1226, None) == "1226"
+    assert A.house_number_text(1226, "") == "1226"
+
+
+# --- the index has to notice a rebuild --------------------------------------
+
+def test_an_empty_index_is_retried_rather_than_cached_forever(monkeypatch):
+    """THE DEPLOY-ORDER TRAP. The migration creates the tables empty, the API
+    starts, its first address query builds an index over zero rows, and the
+    load job runs afterwards — in a different container, which cannot reach
+    into this process. Cached for the life of the process, that empty index
+    makes the whole feature a silent no-op: every lookup returns nothing and
+    falls through to Photon, which is also what success looks like."""
+    calls = {"n": 0}
+
+    def rows(_refresh=False):
+        calls["n"] += 1
+        return [] if calls["n"] == 1 else [_street(1, "E", "10th", "Ave")]
+
+    monkeypatch.setattr(A, "_INDEX", None)
+    monkeypatch.setattr(A, "_INDEX_BUILT_AT", 0.0)
+    monkeypatch.setattr(A, "_load_street_rows", rows)
+    # A clock the test controls, so this asserts on the TTL rather than on
+    # having waited a real minute.
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(A.time, "monotonic", lambda: clock["t"])
+
+    assert len(A.street_index()) == 0
+    clock["t"] += A._EMPTY_INDEX_TTL_SECONDS + 1
+    assert len(A.street_index()) == 1, "an empty index must be retried"
+
+
+def test_a_loaded_index_is_not_re_read_on_every_query(monkeypatch):
+    """The other half: 909 streets do not change between two keystrokes."""
+    calls = {"n": 0}
+
+    def rows(_refresh=False):
+        calls["n"] += 1
+        return [_street(1, "E", "10th", "Ave")]
+
+    monkeypatch.setattr(A, "_INDEX", None)
+    monkeypatch.setattr(A, "_INDEX_BUILT_AT", 0.0)
+    monkeypatch.setattr(A, "_load_street_rows", rows)
+    monkeypatch.setattr(A.time, "monotonic", lambda: 1000.0)
+
+    for _ in range(5):
+        A.street_index()
+    assert calls["n"] == 1
+
+
+def test_a_failed_re_read_keeps_the_index_it_already_had(monkeypatch):
+    """A database blip on the scheduled re-read must not swap a working index
+    out for an empty one. Stale street names are harmless; no street names
+    silently disables address search."""
+    state = {"fail": False}
+
+    def rows(_refresh=False):
+        return [] if state["fail"] else [_street(1, "E", "10th", "Ave")]
+
+    monkeypatch.setattr(A, "_INDEX", None)
+    monkeypatch.setattr(A, "_INDEX_BUILT_AT", 0.0)
+    monkeypatch.setattr(A, "_load_street_rows", rows)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(A.time, "monotonic", lambda: clock["t"])
+
+    assert len(A.street_index()) == 1
+    state["fail"] = True
+    clock["t"] += A._INDEX_TTL_SECONDS + 1
+    assert len(A.street_index()) == 1, "a blip must not empty a working index"
+
+
+# --- ingest refuses to publish a partial city -------------------------------
+
+def test_pagination_follows_the_service_not_the_page_size(monkeypatch):
+    """ARCGIS_PAGE matches the layer's maxRecordCount today. If Denver lowers
+    it, the server clamps silently — and a `len(rows) < ARCGIS_PAGE` test would
+    read one short page, conclude it had finished, and index a fraction of the
+    city while reporting success. Every query would still answer, just not for
+    most streets."""
+    import inspect
+    src = inspect.getsource(A.refresh_address_points)
+    assert "if not more:" in src
+    assert "len(rows) < ARCGIS_PAGE" not in src
+
+
+def test_a_short_read_leaves_the_previous_index_serving(monkeypatch):
+    """Losing half the city silently is worse than serving last week's copy."""
+    pages = [([{"LATITUDE": 39.7, "LONGITUDE": -104.9, "STREET_NAME": "10TH",
+                "ADDRESS_NUMBER": 1226, "PREDIRECTIONAL": "E",
+                "POSTTYPE": "AVE"}], False)]
+    monkeypatch.setattr(A, "_fetch_page", lambda c, o: pages[0])
+    monkeypatch.setattr(A, "_fetch_count", lambda c: 413405)
+
+    def no_database(*a, **k):
+        raise AssertionError("a short read must never reach the swap")
+
+    monkeypatch.setattr(A, "connection", no_database)
+    out = A.refresh_address_points()
+    assert "short read" in out["error"]
+    assert out["fetched"] == 1 and out["expected"] == 413405
+
+
 # --- normalisation ----------------------------------------------------------
 
 def test_the_source_is_not_trusted_raw():

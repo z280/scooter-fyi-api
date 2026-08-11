@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -100,6 +101,31 @@ _POSTTYPES = {
 # "10" should find "10TH", because a rider typing a numbered street rarely
 # types the ordinal and the city is full of them.
 _ORDINAL_RE = re.compile(r"^(\d+)(ST|ND|RD|TH)$")
+
+# A house-number suffix keeps its slash, for the same reason a query does.
+_SUFFIX_CLEAN_RE = re.compile(r"[^\w\s/]")
+
+
+def house_number_text(number: Any, suffix: Any) -> str:
+    """How a house number is written back to the rider. "4039" + "1/2".
+
+    The city's ADDRESS_NUMBER_SUFFIX is not just apartment letters. Counted
+    against the live layer: 974 rows carry "1/2", eight carry a bare letter,
+    and a handful carry BSMT / REAR / UPPER / CA. Concatenating blindly — and
+    normalising the slash away first, as normalize_token does — rendered
+    4039 1/2 N Wyandot St as "40391 2 N Wyandot St". That is precisely the
+    label a rider cannot trust, which is the whole reason this index exists.
+
+    A single letter closes up ("1226B"), because that is how Denver writes a
+    real neighbouring door. Everything else is spaced, which is how the city's
+    own FULL_ADDRESS renders it.
+    """
+    text = _WS_RE.sub(" ", _SUFFIX_CLEAN_RE.sub(" ", str(suffix or "")).upper()).strip()
+    if not text:
+        return str(number)
+    if len(text) == 1 and text.isalpha():
+        return f"{number}{text}"
+    return f"{number} {text}"
 
 
 def normalize_token(value: Any) -> str:
@@ -400,19 +426,34 @@ def _bounded_levenshtein(a: str, b: str, max_distance: int) -> int | None:
 # --- the index, loaded from the database -------------------------------------
 
 _INDEX: StreetIndex | None = None
+_INDEX_BUILT_AT: float = 0.0
+
+# THE INDEX MUST EXPIRE, and this is not an optimisation.
+#
+# refresh_address_points runs from cron, which lives in the SCHEDULER
+# container. This index lives in the API's. Nothing in-process is notified when
+# the table is rebuilt, so a build cached for the life of the process is a
+# build that never sees an update.
+#
+# The failure that matters is not the weekly refresh, though — it is the first
+# deploy. The migration creates the tables EMPTY, the API starts and answers
+# its first address query by building an index over zero rows, and the load job
+# runs afterwards. Cached forever, that empty index makes every address lookup
+# return nothing and fall through to Photon: the feature would be dead on
+# arrival, and dead SILENTLY, because falling through to Photon is also what
+# success looks like from outside. A timer is what makes that self-heal.
+_INDEX_TTL_SECONDS = 900.0
+# An empty index is retried far sooner. It means "not loaded yet", which is a
+# state that should last minutes, not until the next restart.
+_EMPTY_INDEX_TTL_SECONDS = 60.0
 
 
-def street_index(refresh: bool = False) -> StreetIndex:
-    """The process-wide street index, built on first use.
+def _load_street_rows() -> list[StreetRow]:
+    """Every indexed street, or [] if the table cannot be read.
 
-    A failure to build is never fatal: an empty index means address lookup
-    quietly returns nothing and the caller falls back to Photon, which is the
-    behaviour that existed before this module.
+    Separate from street_index so the caching rules above can be tested
+    against a clock rather than against a database.
     """
-    global _INDEX
-    if _INDEX is not None and not refresh:
-        return _INDEX
-    rows: list[StreetRow] = []
     try:
         with connection() as conn:
             with conn.cursor() as cur:
@@ -421,12 +462,37 @@ def street_index(refresh: bool = False) -> StreetIndex:
                     "       postdirectional, search_key, name_key, "
                     "       display_name, point_count "
                     "FROM address_streets")
-                rows = [StreetRow(*r) for r in cur.fetchall()]
+                return [StreetRow(*r) for r in cur.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.warning("address street index unavailable (%s) — "
                     "address lookup will defer to photon", exc)
-    _INDEX = StreetIndex(rows)
-    log.info("address street index: %d streets", len(_INDEX))
+        return []
+
+
+def street_index(refresh: bool = False) -> StreetIndex:
+    """The process-wide street index, rebuilt on first use and on a timer.
+
+    A failure to build is never fatal: address lookup quietly returns nothing
+    and the caller falls back to Photon, which is the behaviour that existed
+    before this module.
+    """
+    global _INDEX, _INDEX_BUILT_AT
+    now = time.monotonic()
+    if _INDEX is not None and not refresh:
+        ttl = _INDEX_TTL_SECONDS if len(_INDEX) else _EMPTY_INDEX_TTL_SECONDS
+        if now - _INDEX_BUILT_AT < ttl:
+            return _INDEX
+    built = StreetIndex(_load_street_rows())
+    _INDEX_BUILT_AT = now
+    # Only publish a build that found something. A database blip on a scheduled
+    # re-read must not swap a working index out for an empty one mid-day; the
+    # old one is stale at worst, and street names barely move.
+    if len(built) or _INDEX is None:
+        _INDEX = built
+        log.info("address street index: %d streets", len(_INDEX))
+    else:
+        log.warning("address street index re-read found 0 streets — "
+                    "keeping the %d already loaded", len(_INDEX))
     return _INDEX
 
 
@@ -452,7 +518,18 @@ _FIELDS = ("ADDRESS_NUMBER,ADDRESS_NUMBER_SUFFIX,PREDIRECTIONAL,STREET_NAME,"
            "FULL_ADDRESS,LATITUDE,LONGITUDE")
 
 
-def _fetch_page(client, offset: int) -> list[dict]:
+def _fetch_page(client, offset: int) -> tuple[list[dict], bool]:
+    """One page, and whether the service says there is more.
+
+    The "more" flag comes from ArcGIS's own `exceededTransferLimit` rather than
+    from `len(rows) == ARCGIS_PAGE`. The layer's maxRecordCount is 2000 today
+    and ARCGIS_PAGE matches it — but the server silently clamps to its own
+    ceiling, so if Denver ever lowers it, a length test would read one short
+    page, conclude it had reached the end, and index 1,000 of 413,405 addresses
+    while reporting success. Silent truncation is the failure mode that would
+    be hardest to notice from the outside: every query still answers, just for
+    a city that is mostly missing.
+    """
     r = client.get(f"{ARCGIS_LAYER}/query", params={
         "where": "1=1", "outFields": _FIELDS, "returnGeometry": "false",
         "resultOffset": offset, "resultRecordCount": ARCGIS_PAGE,
@@ -462,7 +539,26 @@ def _fetch_page(client, offset: int) -> list[dict]:
     body = r.json()
     if "error" in body:
         raise RuntimeError(f"arcgis: {body['error']}")
-    return [f.get("attributes") or {} for f in (body.get("features") or [])]
+    rows = [f.get("attributes") or {} for f in (body.get("features") or [])]
+    return rows, bool(body.get("exceededTransferLimit"))
+
+
+def _fetch_count(client) -> int | None:
+    """How many rows the service says it holds, for the completeness check.
+
+    None when the service will not say, which downgrades the check rather than
+    failing the run.
+    """
+    try:
+        r = client.get(f"{ARCGIS_LAYER}/query", params={
+            "where": "1=1", "returnCountOnly": "true", "f": "json"}, timeout=30)
+        r.raise_for_status()
+        count = r.json().get("count")
+        return int(count) if count is not None else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("address count probe failed (%s) — "
+                    "completeness check disabled for this run", exc)
+        return None
 
 
 def refresh_address_points(page_limit: int | None = None) -> dict[str, Any]:
@@ -471,102 +567,141 @@ def refresh_address_points(page_limit: int | None = None) -> dict[str, Any]:
     Loaded into a scratch table and swapped in one transaction: a half-written
     address index is worse than a stale one, since the geocoder would answer
     confidently from whatever happened to have landed.
+
+    POINTS ARE SPOOLED TO DISK, not accumulated in memory. Measured against the
+    live layer: the Python-side list cost 816 bytes a row, so 413k rows is
+    ~337 MB — inside a scheduler container capped at 1 GiB, before psycopg
+    builds its own copy of every parameter for the insert. This service has
+    OOM-killed itself on exactly that pattern before. The spool is a few tens
+    of megabytes and streams straight into COPY, which is also several times
+    faster than executemany at this row count.
     """
+    import csv
+    import tempfile
+
     import httpx
 
-    from .pg import connection as _connection
-
     streets: dict[tuple, dict] = {}
-    points: list[tuple] = []
-    fetched = pages = skipped = 0
+    fetched = pages = skipped = written = 0
 
-    with httpx.Client() as client:
-        offset = 0
-        while True:
-            rows = _fetch_page(client, offset)
-            if not rows:
-                break
-            pages += 1
-            fetched += len(rows)
-            for a in rows:
-                lat, lon = a.get("LATITUDE"), a.get("LONGITUDE")
-                name = normalize_token(a.get("STREET_NAME"))
-                number = a.get("ADDRESS_NUMBER")
-                # A point with no street, no number or no position cannot be
-                # looked up or routed to; it is not worth indexing.
-                if not name or lat is None or lon is None or number is None:
-                    skipped += 1
-                    continue
-                pre = canonical_directional(a.get("PREDIRECTIONAL"))
-                post_t = canonical_posttype(a.get("POSTTYPE"))
-                post_d = canonical_directional(a.get("POSTDIRECTIONAL"))
-                key = (pre, name, post_t, post_d)
-                if key not in streets:
-                    sk, nk, disp = street_keys(pre, name, post_t, post_d)
-                    streets[key] = {"search_key": sk, "name_key": nk,
-                                    "display_name": disp, "n": 0}
-                streets[key]["n"] += 1
-                suffix = normalize_token(a.get("ADDRESS_NUMBER_SUFFIX"))
-                points.append((
-                    key, int(number), f"{int(number)}{suffix}",
-                    normalize_token(a.get("UNIT_IDENTIFIER")) or None,
-                    float(lat), float(lon),
-                    normalize_token(a.get("ADDRESS_TYPE")) or None,
-                    a.get("FULL_ADDRESS"),
-                ))
-            offset += len(rows)
-            if len(rows) < ARCGIS_PAGE:
-                break
-            if page_limit and pages >= page_limit:
-                break
+    with tempfile.TemporaryFile("w+", newline="", encoding="utf-8") as spool:
+        writer = csv.writer(spool)
+        with httpx.Client() as client:
+            expected = _fetch_count(client)
+            offset = 0
+            while True:
+                rows, more = _fetch_page(client, offset)
+                if not rows:
+                    break
+                pages += 1
+                fetched += len(rows)
+                for a in rows:
+                    lat, lon = a.get("LATITUDE"), a.get("LONGITUDE")
+                    name = normalize_token(a.get("STREET_NAME"))
+                    number = a.get("ADDRESS_NUMBER")
+                    # A point with no street, no number or no position cannot
+                    # be looked up or routed to; it is not worth indexing.
+                    if not name or lat is None or lon is None or number is None:
+                        skipped += 1
+                        continue
+                    pre = canonical_directional(a.get("PREDIRECTIONAL"))
+                    post_t = canonical_posttype(a.get("POSTTYPE"))
+                    post_d = canonical_directional(a.get("POSTDIRECTIONAL"))
+                    key = (pre, name, post_t, post_d)
+                    street = streets.get(key)
+                    if street is None:
+                        sk, nk, disp = street_keys(pre, name, post_t, post_d)
+                        # The id is assigned here so a point can be spooled
+                        # immediately; the temp table carries no foreign key,
+                        # so the streets themselves can be inserted last.
+                        street = streets[key] = {
+                            "id": len(streets) + 1, "search_key": sk,
+                            "name_key": nk, "display_name": disp, "n": 0}
+                    street["n"] += 1
+                    writer.writerow([
+                        street["id"], int(number),
+                        house_number_text(int(number),
+                                          a.get("ADDRESS_NUMBER_SUFFIX")),
+                        normalize_token(a.get("UNIT_IDENTIFIER")),
+                        float(lat), float(lon),
+                        normalize_token(a.get("ADDRESS_TYPE")),
+                        a.get("FULL_ADDRESS") or "",
+                    ])
+                    written += 1
+                offset += len(rows)
+                if not more:
+                    break
+                if page_limit and pages >= page_limit:
+                    break
 
-    log.info("address refresh: fetched %d rows over %d pages (%d unusable), "
-             "%d streets", fetched, pages, skipped, len(streets))
-    if not points:
-        return {"error": "no address points fetched", "fetched": fetched}
+        log.info("address refresh: fetched %d rows over %d pages (%d unusable),"
+                 " %d streets", fetched, pages, skipped, len(streets))
+        if not written:
+            return {"error": "no address points fetched", "fetched": fetched}
 
-    with _connection() as conn:
-        with conn.cursor() as cur:
-            # One transaction: the old index stays queryable until the new one
-            # is complete, and a failure leaves the old one untouched.
-            cur.execute("CREATE TEMP TABLE new_streets (LIKE address_streets "
-                        "INCLUDING DEFAULTS) ON COMMIT DROP")
-            cur.execute("CREATE TEMP TABLE new_points (LIKE address_points "
-                        "INCLUDING DEFAULTS) ON COMMIT DROP")
-            ordered = list(streets.items())
-            cur.executemany(
-                "INSERT INTO new_streets (id, predirectional, street_name, "
-                "posttype, postdirectional, search_key, name_key, "
-                "display_name, point_count) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                [(i, k[0], k[1], k[2], k[3], v["search_key"], v["name_key"],
-                  v["display_name"], v["n"])
-                 for i, (k, v) in enumerate(ordered, start=1)])
-            sid = {k: i for i, (k, _) in enumerate(ordered, start=1)}
-            cur.executemany(
-                "INSERT INTO new_points (street_id, number, number_text, unit, "
-                "lat, lon, address_type, full_address) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                [(sid[p[0]], *p[1:]) for p in points])
-            cur.execute("TRUNCATE address_points, address_streets RESTART IDENTITY")
-            cur.execute("INSERT INTO address_streets SELECT * FROM new_streets")
-            cur.execute("INSERT INTO address_points (street_id, number, "
-                        "number_text, unit, lat, lon, address_type, full_address) "
-                        "SELECT street_id, number, number_text, unit, lat, lon, "
-                        "address_type, full_address FROM new_points")
-            cur.execute("SELECT setval(pg_get_serial_sequence("
-                        "'address_streets','id'), (SELECT max(id) "
-                        "FROM address_streets))")
-            cur.execute(
-                "INSERT INTO system_state (key, value, updated_at) "
-                "VALUES ('address_points_refreshed_at', NOW()::text, NOW()) "
-                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "
-                "updated_at = NOW()")
-        conn.commit()
+        # A short read must not overwrite a good index. Losing half the city
+        # silently is worse than serving last week's copy, and every symptom of
+        # it — queries that answer, just not for your street — looks exactly
+        # like the Photon fallback working as designed.
+        if expected and not page_limit and fetched < expected * 0.98:
+            log.error("address refresh: short read, %d of %d rows — "
+                      "refusing to swap", fetched, expected)
+            return {"error": "short read; index left unchanged",
+                    "fetched": fetched, "expected": expected}
+
+        spool.flush()
+        spool.seek(0)
+
+        with connection() as conn:
+            with conn.cursor() as cur:
+                # One transaction, entered only after the fetch has finished
+                # and been checked: the old index stays queryable throughout,
+                # and a failure anywhere leaves it untouched.
+                cur.execute("CREATE TEMP TABLE new_streets (LIKE "
+                            "address_streets INCLUDING DEFAULTS) ON COMMIT DROP")
+                cur.execute("CREATE TEMP TABLE new_points (LIKE address_points "
+                            "INCLUDING DEFAULTS) ON COMMIT DROP")
+                cur.executemany(
+                    "INSERT INTO new_streets (id, predirectional, street_name, "
+                    "posttype, postdirectional, search_key, name_key, "
+                    "display_name, point_count) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    [(v["id"], k[0], k[1], k[2], k[3], v["search_key"],
+                      v["name_key"], v["display_name"], v["n"])
+                     for k, v in streets.items()])
+                # An unquoted empty field is NULL under `NULL ''`; a genuinely
+                # empty string would arrive quoted. csv.writer emits None and
+                # "" identically, and for these columns absent and empty mean
+                # the same thing anyway.
+                with cur.copy(
+                    "COPY new_points (street_id, number, number_text, unit, "
+                    "lat, lon, address_type, full_address) FROM STDIN "
+                    "WITH (FORMAT csv, NULL '')"
+                ) as copy:
+                    while chunk := spool.read(1 << 20):
+                        copy.write(chunk)
+                cur.execute("TRUNCATE address_points, address_streets "
+                            "RESTART IDENTITY")
+                cur.execute("INSERT INTO address_streets "
+                            "SELECT * FROM new_streets")
+                cur.execute("INSERT INTO address_points (street_id, number, "
+                            "number_text, unit, lat, lon, address_type, "
+                            "full_address) SELECT street_id, number, "
+                            "number_text, unit, lat, lon, address_type, "
+                            "full_address FROM new_points")
+                cur.execute("SELECT setval(pg_get_serial_sequence("
+                            "'address_streets','id'), (SELECT max(id) "
+                            "FROM address_streets))")
+                cur.execute(
+                    "INSERT INTO system_state (key, value, updated_at) "
+                    "VALUES ('address_points_refreshed_at', NOW()::text, NOW())"
+                    " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "
+                    "updated_at = NOW()")
+            conn.commit()
 
     street_index(refresh=True)
     return {"fetched": fetched, "pages": pages, "unusable": skipped,
-            "streets": len(streets), "points": len(points)}
+            "streets": len(streets), "points": written}
 
 
 # --- lookup ------------------------------------------------------------------
