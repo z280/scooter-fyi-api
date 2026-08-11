@@ -1354,7 +1354,7 @@ def latest_model(refresh: bool = False) -> dict[str, Any] | None:
                     SELECT intercept, beta_distance, beta_elevation,
                            beta_temperature, mean_temperature_c, r_squared,
                            n_observations, fitted_at, model_offsets,
-                           beta_parked_seconds
+                           beta_parked_seconds, residual_std
                     FROM battery_model_coefficients
                     ORDER BY fitted_at DESC LIMIT 1
                     """
@@ -1379,6 +1379,12 @@ def latest_model(refresh: bool = False) -> dict[str, Any] | None:
         "model_offsets": row[8] or {},
         # Reported for transparency, never applied - see estimate_burn_percent.
         "beta_parked_seconds": float(row[9]) if row[9] is not None else None,
+        # Width of the estimate's band. estimate_burn_percent reads this; it
+        # was omitted from this SELECT when the band shipped, so every band
+        # collapsed to the point estimate and low == high == percent in
+        # production while the unit test passed against a hand-built dict that
+        # happened to contain the key.
+        "residual_std": float(row[10]) if row[10] is not None else None,
     }
     return _MODEL_CACHE
 

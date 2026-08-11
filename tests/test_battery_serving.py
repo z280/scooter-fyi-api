@@ -99,3 +99,30 @@ def test_a_band_is_never_negative_or_over_100(monkeypatch):
     assert tiny["percent_low"] >= 0.0
     huge = bm.estimate_burn_percent(200_000.0, 3000.0)
     assert huge["percent_high"] <= 100.0
+
+
+# --- the fake model must not out-promise the real one ------------------------
+
+def test_latest_model_returns_every_key_the_estimate_reads():
+    """The band shipped collapsed - low == high == percent - because
+    latest_model()'s SELECT omitted residual_std while the unit test asserted
+    against a hand-built dict that happened to include it. A mock that is
+    richer than the real thing hides exactly this.
+
+    Asserted structurally: every key estimate_burn_percent reads off the model
+    must be one latest_model actually builds."""
+    import inspect
+    est = inspect.getsource(bm.estimate_burn_percent)
+    built = inspect.getsource(bm.latest_model)
+    for key in ("intercept", "beta_distance", "beta_elevation",
+                "beta_temperature", "mean_temperature_c", "model_offsets",
+                "residual_std"):
+        assert f'"{key}"' in est or f"'{key}'" in est, f"{key} unused?"
+        assert f'"{key}":' in built, f"latest_model never sets {key}"
+
+
+def test_the_band_is_actually_wide(monkeypatch):
+    """Guards the symptom as well as the cause."""
+    _fake_model(monkeypatch, residual_std=7.95)
+    out = bm.estimate_burn_percent(8000.0, 97.0)
+    assert out["percent_high"] - out["percent_low"] > 5.0
