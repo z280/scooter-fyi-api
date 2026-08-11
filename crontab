@@ -83,6 +83,19 @@
 # limitation as refresh_routing_graph above.
 0 5 * * * cd /app && python -m src.cli refresh_photon_index
 
+# Denver address index (sql/074). ~413k points over ~207 paginated requests
+# against the city's open-data service, so WEEKLY rather than nightly: a
+# municipal address file gains a few hundred rows a month, and hammering
+# someone else's public endpoint nightly for that is rude as well as
+# pointless. Sunday 04:15, clear of the 02:00 archive and the 05:00 photon
+# refresh so three heavy jobs never overlap.
+#
+# Loads into scratch tables and swaps in one transaction, so a failed or
+# half-finished run leaves the previous index serving rather than answering
+# confidently from whatever landed. Freshness is stamped into system_state
+# under address_points_refreshed_at.
+15 4 * * 0 cd /app && python -m src.cli refresh_address_points
+
 # Battery model. Reads the last ~26h of raw_telemetry_points, so it MUST run
 # BEFORE the 02:00 archive, which flushes that table to R2 and truncates it.
 # Running after would see only the handful of cycles since the truncate. 01:30

@@ -44,6 +44,14 @@ Available commands:
                       Sync the Photon geocoding index from R2 into the
                       photon_files volume. Runs as a one-shot sidecar before
                       the photon service starts.
+    refresh_address_points
+                      Rebuild the Denver address index (address_streets +
+                      address_points) from the city's open-data feature
+                      service. ~413k points over ~207 paginated requests, so
+                      weekly rather than nightly - a municipal address file
+                      does not move fast. Loads into scratch tables and swaps
+                      in one transaction, because a half-written address index
+                      answers confidently from whatever landed.
     refresh_photon_index
                       Re-check R2 for a newer geocoding index (ETag-gated, a
                       no-op on all but the ~4 days a year it is rebuilt) and
@@ -579,6 +587,19 @@ def _cli_fetch_photon_index() -> dict:
     return sync_photon_index()
 
 
+def _cli_refresh_address_points() -> dict:
+    """Rebuild the Denver address index from the city's open-data service.
+
+    Separate from the Photon index on purpose: Photon answers "Union Station"
+    and "the Botanic Gardens", this answers "1226 E 10th Ave". OSM simply does
+    not carry Denver's house numbers - the routing extract has 607, 609, 611,
+    613, 1412 and 3009 on East 10th Avenue, and not 1226 - so no amount of
+    Photon tuning reaches an address the city publishes and OSM never mapped.
+    """
+    from .addresses import refresh_address_points
+    return refresh_address_points()
+
+
 def _cli_refresh_photon_index() -> dict:
     """Re-check R2 for a newer geocoding index on a schedule (cron, 05:00).
 
@@ -803,6 +824,7 @@ COMMANDS = {
     "fetch_map_pbf":         _cli_fetch_map_pbf,
     "refresh_routing_graph": _cli_refresh_routing_graph,
     "fetch_photon_index":    _cli_fetch_photon_index,
+    "refresh_address_points": _cli_refresh_address_points,
     "refresh_photon_index":  _cli_refresh_photon_index,
     "extract_battery_trips": _cli_extract_battery_trips,
     "train_battery_model":   _cli_train_battery_model,

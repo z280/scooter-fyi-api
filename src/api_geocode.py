@@ -47,6 +47,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from . import config as config_module
 from .client_ip import real_client_ip
+from . import addresses
 from .config import load
 from .pg import connection
 from .ratelimit import enforce
@@ -603,8 +604,40 @@ def dedupe_by_label(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def query_photon(upstream: str, q: str, lat: float | None, lon: float | None,
                  limit: int) -> list[dict[str, Any]]:
-    """GET {upstream}/api and normalize, or raise the 503."""
+    """The city address index first, then Photon for everything else.
+
+    THE SPLIT. Photon indexes OpenStreetMap, and OSM does not carry Denver's
+    house numbers: the routing extract has 607, 609, 611, 613, 1412 and 3009
+    on East 10th Avenue, and not 1226. No amount of ranking reaches an address
+    that was never mapped, which is why "1226 E 10th Ave" could only ever come
+    back as the bare avenue — or, briefly and much worse, as 1226 East 22nd.
+
+    Denver publishes 413k authoritative address points, so house numbers are
+    answered from those (src/addresses.py). Photon keeps everything it is
+    genuinely good at and the city file has none of: businesses, parks,
+    landmarks, "Union Station".
+
+    The address index NEVER raises and never blocks: an empty result — no
+    index yet, a query it cannot parse, a database blip — falls straight
+    through to the behaviour that existed before it.
+    """
     housenumber = leading_housenumber(q)
+    if housenumber:
+        try:
+            hits = addresses.lookup(q, limit)
+        except Exception:  # noqa: BLE001 — never fail a search over this
+            log.exception("address index raised for %r; deferring to photon", q)
+            hits = []
+        graph = load().valhalla
+        resolved = [
+            {"label": h["label"], "lat": h["lat"], "lon": h["lon"],
+             "kind": h["kind"], "in_coverage": bool(graph.contains(h["lat"], h["lon"])),
+             "requested_housenumber": housenumber, "matched_housenumber": True,
+             "source": "denver_address_points"}
+            for h in hits if h.get("lat") is not None and h.get("lon") is not None
+        ]
+        if resolved:
+            return resolved[:limit]
     if not housenumber:
         results = normalize_results(
             _fetch(upstream, q, _photon_params(q, lat, lon, limit)), limit)
