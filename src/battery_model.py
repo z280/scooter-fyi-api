@@ -150,6 +150,29 @@ SETTLE_MAX_CYCLES = 5
 # appear to show R2 DECLINING with offset - which sent a previous attempt at
 # this fix to the wrong cycle.
 SWAP_STEP_METERS = 3000
+# train() fits only on observations whose PRE-ride reading was fresh. The
+# staleness term (beta_parked_seconds) turned out to be nearly useless as a
+# correction and very useful as a FILTER — measured on 16,780 observations
+# with a 3-day holdout:
+#
+#     spec                          n       intercept  pp/km    R2   holdoutMAE
+#     no staleness term         13640            6.42  0.933  .2431      6.290
+#     + linear parked seconds   13640            6.37  0.934  .2468      6.257
+#     + log1p(parked hours)     13640            5.97  0.932  .2459      6.260
+#     parked < 4h  + log1p      10096            6.01  0.937  .2666      5.980
+#     parked < 1h               5566             5.34  0.898  .2796      5.755
+#     parked < 1h  + term       5566             5.19  0.896  .2798      5.757
+#     parked < 30min            3696             5.49  0.965  .2692      5.730
+#
+# Modelling staleness moves holdout MAE by 0.03 pp; refusing to train on it
+# moves it by 0.54. The improvement is monotone in strictness, which is what a
+# real mechanism looks like rather than a lucky cut. 1h rather than 30min
+# because the extra 50% of data is worth more than the remaining 0.03 pp, and
+# the fleet produces ~25k episodes a day so the filter is not a data
+# constraint. The term is still fitted (it costs nothing — see "parked < 1h +
+# term" above, identical fit) and still predicted at zero, because it is the
+# standing diagnostic for whether staleness is creeping back in.
+TRAIN_MAX_PARKED_SECONDS = 3600
 
 
 # --- Anchor filter ----------------------------------------------------------
@@ -1123,9 +1146,11 @@ def train(days: int = 60, holdout_days: int = 3) -> dict[str, Any]:
                   -- beta_parked_seconds fitting a half-NULL column.
                   AND soc_end_offset_cycles IS NOT NULL
                   AND parked_seconds_before IS NOT NULL
+                  -- Fresh pre-ride readings only; see TRAIN_MAX_PARKED_SECONDS.
+                  AND parked_seconds_before < %s
                 ORDER BY departed_at
                 """,
-                (window_start,),
+                (window_start, TRAIN_MAX_PARKED_SECONDS),
             )
             rows = cur.fetchall()
 
