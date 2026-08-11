@@ -5,6 +5,8 @@ CORS is mounted at the app level in src/main.py.
 
 from __future__ import annotations
 
+import logging
+
 import re
 from datetime import date as date_cls, datetime, timedelta, timezone
 from typing import Any
@@ -20,14 +22,17 @@ from .daily_sla import _AVG_FIELDS
 from .dwell_stats import stats_for_cycle
 from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
 from .pg import connection
-from . import battery_model
+from . import battery_model, vehicle_identity
 from .quality import (
+    smart_ride_grade,
     compute_battery_percent,
     compute_quality_designation,
     compute_reliability_tier,
 )
 
 _COMPLIANCE_PASS_COLUMNS = tuple(compliance_pass_column(g) for g in COMPLIANCE_GROUPS)
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -260,6 +265,32 @@ def _if_none_match_hit(request: Request, etag: str) -> bool:
     return etag in (t.strip() for t in inm.split(","))
 
 
+def _rental_outcomes() -> dict[str, tuple[int, int]]:
+    """{vehicle_identifier: (rentals_observed, rentals_no_go)} for the fleet.
+
+    sql/072. One row per device, two integers - small enough to fetch whole
+    rather than join, and fetching it separately keeps the payload SELECT (all
+    of it read positionally) stable when a counter is added.
+
+    A failure here costs the grade, never the map: the caller degrades to
+    "no grade yet" rather than 500ing on a field nobody has to have.
+    """
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT vehicle_identifier, rentals_observed, rentals_no_go "
+                    "FROM device_state WHERE rentals_observed > 0")
+                return {r[0]: (int(r[1] or 0), int(r[2] or 0)) for r in cur.fetchall()}
+    except Exception:  # noqa: BLE001
+        log.warning("rental outcomes unavailable — grades omitted this cycle")
+        return {}
+
+
+def _outcome(outcomes: dict[str, tuple[int, int]], vid: str | None) -> tuple[int, int]:
+    return outcomes.get(vid or "", (0, 0))
+
+
 def _devices_current_impl(
     request: Request,
     response: Response,
@@ -449,6 +480,13 @@ def _devices_current_impl(
     # filtered subset — a bbox request must not shrink anyone's peer set.
     dwell_stats = stats_for_cycle(cycle_id, snapshot_time)
 
+    # sql/072 rental outcomes. Deliberately a SEPARATE query rather than two
+    # more columns on the payload SELECT above: every field in that row is
+    # read by POSITION, across several test fixtures and ~30 call sites, so
+    # adding a column there shifts indices silently. Same shape as
+    # dwell_stats - load once, look up per device.
+    rental_outcomes = _rental_outcomes()
+
     # The raw vehicle_plate is emitted ONLY when include_plate is set — i.e.
     # from /api/v1/user/devices/current for an admin session. On the public
     # path (include_plate=False) it stays off the wire, preserving the
@@ -512,6 +550,16 @@ def _devices_current_impl(
             "number_failed_starts": number_failed_starts,
             "first_observed_at_location": r[23].isoformat() if r[23] else None,
             "reliability_tier": reliability,
+            # sql/072 — the one reliability signal that survived validation:
+            # a vehicle's no-go rate persists at r=+0.275 across weeks, and
+            # the worst 10% of vehicles carry 32.4% of all failures.
+            "rentals_observed": _outcome(rental_outcomes, r[5])[0],
+            "rentals_no_go": _outcome(rental_outcomes, r[5])[1],
+            "smart_ride_grade": smart_ride_grade(*_outcome(rental_outcomes, r[5])),
+            # sql/073 — a label a rider can say out loud. Derived from the
+            # identifier, never stored. The plate suffix that disambiguates it
+            # is added below, only where the plate is already permitted.
+            "public_name": vehicle_identity.public_name(r[5]),
             "dwell_percentile_hood": (
                 round(dstat.percentile * 100)
                 if dstat and dstat.percentile is not None
@@ -545,6 +593,10 @@ def _devices_current_impl(
         if include_plate:
             # Admin-only private fields (retired /private/devices/current).
             properties["vehicle_plate"] = r[26]
+            # "Lunar 🐸 928" — the suffix is what is printed on the scooter, so
+            # it rides with the plate's own permission and never appears on the
+            # public payload (see src/vehicle_identity.py).
+            properties["display_name"] = vehicle_identity.display_name(r[5], r[26])
             properties["first_ever_observed_at"] = r[27].isoformat() if r[27] else None
             properties["max_observed_range_meters"] = r[28]
             properties["max_observed_range_at"] = r[29].isoformat() if r[29] else None

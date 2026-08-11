@@ -432,6 +432,73 @@ def compute_quality_designation(
     return tier
 
 
+# --- Smart Ride Grade --------------------------------------------------------
+#
+# One number, 65-100, for "how likely is this scooter to actually take me
+# somewhere". Derived from ONE validated signal: the share of a vehicle's
+# completed rentals that ended within the stationary threshold of where the
+# rider unlocked it (sql/072).
+#
+# WHY ONLY ONE SIGNAL. Three candidates were tested against the outcome; one
+# survived:
+#   no-go rate       PERSISTS per vehicle, r=+0.275 over 7,534 vehicles.
+#                    Best quartile 6.9%, worst 11.0%, fleet 8.1%.
+#   reliability_tier separates it (ok 7.4% / unknown 13.1% / high_risk 50.0%),
+#                    so it stays as its own field - but it is largely built
+#                    FROM dwell and failed starts, so folding it in would
+#                    double-count.
+#   cell-rel. dwell  REJECTED. Correcting it so a van collection censors
+#                    rather than counts as demand halved its persistence
+#                    (r=+0.149 -> +0.074 on identical runs).
+#
+# WHY 65-100 AND NOT 0-100. Vehicle-attributable persistence is r=+0.275. That
+# supports separating ~7% from ~11% failure; it does not support separating 1%
+# from 50%. A compressed scale refuses to imply precision the data cannot
+# carry. Vehicles that genuinely fail 40%+ of the time - 123 of them, 1.6% of
+# the active fleet - are not a low grade, they are a different question, and
+# belong behind a flag rather than a number two points below their neighbour.
+#
+# THIS IS PROVISIONAL. It is a monotone transform of a smoothed rate, not a
+# fitted probability. The intended end state is a logistic fit on SoC, dwell,
+# prior outcomes and model, calibrated on held-out data, with the tiers cut
+# from predicted probability. Until that exists this is honest but blunt.
+GRADE_FLOOR = 65
+GRADE_CEILING = 100
+# Fleet no-go rate, measured over 214,846 reservation episodes across 8 days.
+# The prior a thinly-observed vehicle is pulled toward.
+GRADE_FLEET_NO_GO_RATE = 0.085
+# Pseudo-rentals of that prior. At 20, a vehicle with 5 clean rentals sits near
+# the fleet mean rather than at 100 - a perfect record over a handful of rides
+# is not evidence, and a grade that says otherwise is lying with arithmetic.
+GRADE_PRIOR_STRENGTH = 20.0
+# Slope: how many grade points a percentage point of failure costs. Set so the
+# fleet median (~6%) lands near 87 and the floor is reached around 17%, which
+# is roughly the p90 of the per-vehicle distribution.
+GRADE_POINTS_PER_RATE = 210.0
+# Below this many observed rentals there is no grade at all. Not a low grade -
+# no grade, so a client can say "not enough rides yet" instead of implying
+# something was measured.
+GRADE_MIN_RENTALS = 5
+
+
+def smart_ride_grade(rentals_observed: int | None,
+                     rentals_no_go: int | None) -> int | None:
+    """65-100, or None when the vehicle has not been seen enough.
+
+    Beta-smoothed toward the fleet rate so that few observations produce a
+    grade near the fleet's, not an extreme one. See the block above for why
+    this rests on a single signal and why the scale is compressed.
+    """
+    n = rentals_observed or 0
+    if n < GRADE_MIN_RENTALS:
+        return None
+    bad = min(max(rentals_no_go or 0, 0), n)
+    prior_bad = GRADE_FLEET_NO_GO_RATE * GRADE_PRIOR_STRENGTH
+    rate = (bad + prior_bad) / (n + GRADE_PRIOR_STRENGTH)
+    grade = GRADE_CEILING - GRADE_POINTS_PER_RATE * rate
+    return int(round(max(GRADE_FLOOR, min(GRADE_CEILING, grade))))
+
+
 def compute_reliability_tier(
     *,
     number_failed_starts: int | None,
