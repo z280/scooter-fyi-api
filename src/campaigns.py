@@ -117,6 +117,32 @@ def set_archived(code: str, archived: bool) -> bool:
     return changed
 
 
+def get(code: str) -> dict | None:
+    """One campaign by code, or None."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT code, name, channel, notes, created_by,
+                       created_at, archived_at
+                FROM campaigns WHERE code = %s
+                """,
+                (code,),
+            )
+            r = cur.fetchone()
+    if r is None:
+        return None
+    return {
+        "code": r[0],
+        "name": r[1],
+        "channel": r[2],
+        "notes": r[3],
+        "created_by": r[4],
+        "created_at": r[5],
+        "archived_at": r[6],
+    }
+
+
 def list_campaigns() -> list[dict]:
     """All campaigns, live first, newest first within each group."""
     with connection() as conn:

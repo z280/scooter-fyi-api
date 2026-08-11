@@ -13,7 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from . import accounts, auth, campaigns, job_runs
@@ -833,6 +833,64 @@ def campaigns_page(
         detail=detail,
         error=error,
         saved=saved,
+    )
+
+
+# QR codes for the tagged links, for stickers/posters. Error correction
+# 'q' (25%) because printed codes get scuffed. SVG for print (crisp at any
+# size), PNG for pasting into chats/docs. Served for archived campaigns
+# too — an operator may still need the artwork file, and the admin session
+# gate means nothing here is public.
+
+
+def _campaign_qr(code: str):
+    import segno
+
+    if campaigns.get(code) is None:
+        return None
+    return segno.make(f"{_site_origin()}/?utm_campaign={code}", error="q")
+
+
+@router.get("/campaigns/{code}/qr.png")
+def campaign_qr_png(
+    code: str,
+    scale: int = Query(10, ge=2, le=40),
+    user: dict = Depends(auth.require_admin),
+):
+    import io
+
+    qr = _campaign_qr(code)
+    if qr is None:
+        return _render("not_found.html", user=user, what=f"campaign {code}")
+    buf = io.BytesIO()
+    qr.save(buf, kind="png", scale=scale, border=4)
+    return Response(
+        buf.getvalue(),
+        media_type="image/png",
+        headers={
+            "Content-Disposition": f'inline; filename="campaign-{code}-qr.png"'
+        },
+    )
+
+
+@router.get("/campaigns/{code}/qr.svg")
+def campaign_qr_svg(
+    code: str,
+    user: dict = Depends(auth.require_admin),
+):
+    import io
+
+    qr = _campaign_qr(code)
+    if qr is None:
+        return _render("not_found.html", user=user, what=f"campaign {code}")
+    buf = io.BytesIO()
+    qr.save(buf, kind="svg", scale=10, border=4)
+    return Response(
+        buf.getvalue(),
+        media_type="image/svg+xml",
+        headers={
+            "Content-Disposition": f'inline; filename="campaign-{code}-qr.svg"'
+        },
     )
 
 

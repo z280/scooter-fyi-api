@@ -39,6 +39,7 @@
   <thead>
     <tr>
       <th>code</th><th>name</th><th>channel</th><th>tagged link</th>
+      <th>QR</th>
       <th>visitors ({{ days }}d)</th><th>sessions ({{ days }}d)</th>
       <th>page loads ({{ days }}d)</th><th>sign-ins ({{ days }}d)</th>
       <th>rides ({{ days }}d)</th>
@@ -53,6 +54,8 @@
         <td>{{ c.name or "—" }}</td>
         <td>{{ c.channel or "—" }}</td>
         <td><code>{{ c.link }}</code></td>
+        <td><a href="/admin/campaigns/{{ c.code }}/qr.png">png</a> ·
+            <a href="/admin/campaigns/{{ c.code }}/qr.svg">svg</a></td>
         <td>{{ c.stats.visitors if c.stats else 0 }}</td>
         <td>{{ c.stats.sessions if c.stats else 0 }}</td>
         <td>{{ c.stats.page_loads if c.stats else 0 }}</td>
@@ -75,12 +78,12 @@
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="12"><em>No campaigns yet — create one above, then share the tagged link.</em></td></tr>
+      <tr><td colspan="13"><em>No campaigns yet — create one above, then share the tagged link or its QR code.</em></td></tr>
     {% endfor %}
     {% if other %}
       <tr>
         <td><code>other</code></td>
-        <td colspan="3"><em>tagged traffic with an unknown, malformed, or archived code</em></td>
+        <td colspan="4"><em>tagged traffic with an unknown, malformed, or archived code</em></td>
         <td>{{ other.visitors }}</td>
         <td>{{ other.sessions }}</td>
         <td>{{ other.page_loads }}</td>
@@ -98,6 +101,14 @@
 
 {% if detail %}
 <h2>Daily — <code>{{ detail.code }}</code> (last {{ days }}d, Denver days)</h2>
+<p>
+  <img src="/admin/campaigns/{{ detail.code }}/qr.png?scale=5"
+       alt="QR code for the {{ detail.code }} campaign link"
+       style="border:1px solid #e2e2e2; background:white; vertical-align:middle;" />
+  &nbsp;<a href="/admin/campaigns/{{ detail.code }}/qr.png">download PNG</a> ·
+  <a href="/admin/campaigns/{{ detail.code }}/qr.svg">download SVG</a>
+  <small>(SVG for print — crisp at any size)</small>
+</p>
 <table>
   <thead><tr><th>day</th><th>visitors</th><th>sessions</th><th>events</th><th>rides completed</th></tr></thead>
   <tbody>
