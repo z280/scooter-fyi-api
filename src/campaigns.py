@@ -1,4 +1,4 @@
-"""Marketing-campaign registry and attribution (sql/074_campaigns.sql).
+"""Marketing-campaign registry and attribution (sql/075_campaigns.sql).
 
 Campaigns are links WE publish (QR stickers, social posts, email) tagged
 with ?utm_campaign=<code>. The frontend forwards the code with telemetry

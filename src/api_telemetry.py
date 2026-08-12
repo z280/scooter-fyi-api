@@ -22,7 +22,7 @@ in sql/061_telemetry.sql:
     resolved against the campaigns registry before storage — unknown or
     malformed values collapse to 'other', absent to 'none' — so the
     stored campaign dimension is a bounded vocabulary, never free text
-    (src/campaigns.py, sql/074_campaigns.sql).
+    (src/campaigns.py, sql/075_campaigns.sql).
 
 Limits are enforced in code, not DDL, per house convention (sql/043):
 they are product limits and will move.
