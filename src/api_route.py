@@ -512,6 +512,197 @@ WALK_COSTING_OPTIONS: dict[str, Any] = {
 }
 
 
+# How much charge a rider should still have when they get there. Not zero:
+# a scooter that arrives empty stranded them for the last block, and Veo will
+# not start a vehicle in the low single digits at all (observed on their own
+# map — devices showing 3-4% are displayed but refuse to start). Ten points is
+# a short detour's worth of slack on top of that.
+ARRIVAL_RESERVE_PERCENT = 10.0
+
+
+def _shape_key(coords: list[list[float]]) -> str:
+    """Identity of a road, to five decimal places (~1 m).
+
+    Two profiles that produce the same road ARE the same route, however
+    differently they were asked for. Rounding rather than comparing floats
+    exactly because the same shape reaches us via two independent polyline
+    decodes.
+    """
+    return "|".join(f"{lon:.5f},{lat:.5f}" for lon, lat in coords)
+
+
+def _arrival_battery(burn: dict[str, Any],
+                     battery_percent: float | None) -> dict[str, Any]:
+    """Turn a predicted BURN into "what you will have left when you arrive".
+
+    The burn is what the model predicts; the arrival percentage is what the
+    rider actually wants and cannot work out in their head while standing in
+    the street. Both ends of the burn band are carried through, and the
+    will-it-make-it verdict is taken from the PESSIMISTIC end — the whole
+    point of having a band is to use it when the answer matters, and here the
+    cost of being wrong is being stranded.
+    """
+    out: dict[str, Any] = {
+        "arrival_percent": None,
+        "arrival_percent_low": None,
+        "arrival_percent_high": None,
+        "will_make_it": None,
+        "reserve_percent": ARRIVAL_RESERVE_PERCENT,
+    }
+    percent = burn.get("percent")
+    if battery_percent is None or percent is None:
+        return out
+
+    def left(spent: float | None) -> float | None:
+        if spent is None:
+            return None
+        return round(max(0.0, battery_percent - spent), 1)
+
+    # The HIGH burn is the LOW arrival. Naming them by what the rider has when
+    # they get there, not by what the model spent, so `arrival_percent_low`
+    # means the bad case in both directions.
+    out["arrival_percent"] = left(percent)
+    out["arrival_percent_low"] = left(burn.get("percent_high"))
+    out["arrival_percent_high"] = left(burn.get("percent_low"))
+    worst = out["arrival_percent_low"]
+    out["will_make_it"] = (worst if worst is not None else out["arrival_percent"]) \
+        >= ARRIVAL_RESERVE_PERCENT
+    return out
+
+
+@router.get("/api/v1/route/options", dependencies=[Depends(_limit_route_ip)])
+def route_options(
+    from_: str = Query(..., alias="from", description="Origin as 'lat,lon'"),
+    to: str = Query(..., description="Destination as 'lat,lon'"),
+    vehicle_model: str | None = Query(
+        None, description="Vehicle model for a model-specific battery estimate"),
+    battery_percent: float | None = Query(
+        None, ge=0, le=100,
+        description="The vehicle's CURRENT charge, so each option can say what "
+                    "will be left on arrival and whether it will get there"),
+) -> dict[str, Any]:
+    """Every genuinely different route to a destination, once each.
+
+    THE PROBLEM THIS SOLVES. Asking for all five profiles separately offered
+    the rider five choices that were two roads. Measured on one Denver trip:
+
+        safe     2456 m  601 s  164 pts  shape A
+        range    2456 m  601 s  164 pts  shape A
+        shade    2456 m  601 s  164 pts  shape A
+        night    2370 m  558 s  123 pts  shape B
+        express  2370 m  421 s  123 pts  shape B
+
+    Two failures, both bad. Three entries were the same road under different
+    names. And `night` and `express` quoted 9 minutes and 7 minutes for a
+    BYTE-IDENTICAL shape — the difference is entirely a costing artefact
+    (their speed knobs differ), not anything the rider would experience. An
+    app that says the same road takes two different lengths of time has told
+    the rider its numbers are decorative.
+
+    So: route every profile, group by the shape that comes back, and return
+    one option per distinct road.
+
+    WHICH DURATION SURVIVES a group is the interesting question, since they
+    are all estimates of the same ride. The slowest, deliberately. They are
+    all Valhalla BICYCLE estimates on a graph built for bicycles, and Denver
+    caps these scooters around 15 mph, so the optimistic end is the least
+    defensible number in the set. An ETA that runs long costs a rider nothing;
+    one that runs short is how somebody misses the thing they were riding to.
+    Same reasoning as the walking pace in `walk`.
+
+    The dropped profiles are not hidden — each option lists the other names
+    that produce it, so a rider looking for "the shaded one" can still see
+    that it is this one.
+    """
+    cfg = load().valhalla
+    origin = _parse_point(from_, "from")
+    dest = _parse_point(to, "to")
+
+    for label, (lat, lon) in (("from", origin), ("to", dest)):
+        if not cfg.contains(lat, lon):
+            raise HTTPException(400, {
+                "error": "out_of_coverage",
+                "detail": f"{label} ({lat}, {lon}) is outside the routing graph",
+                "graph_bbox": cfg.bbox,
+            })
+
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    failures: list[str] = []
+
+    for prof in cfg.profiles:
+        try:
+            body = _route_with_retry([origin, dest], prof)
+        except valhalla.ValhallaError:
+            # One profile failing is not the request failing: the HIN
+            # exclusions mean `safe` can legitimately find nothing where
+            # `express` does. Note it and carry on.
+            failures.append(prof.key)
+            continue
+        trips = valhalla.all_trips(body)
+        if not trips:
+            failures.append(prof.key)
+            continue
+        trip = trips[0]
+        shape = valhalla.trip_shape(trip)
+        geometry = valhalla.to_geojson(shape)
+        key = _shape_key(geometry["coordinates"])
+        summary = valhalla.trip_summary(trip)
+
+        group = groups.get(key)
+        if group is None:
+            groups[key] = {
+                "key": prof.key,
+                "label": prof.label,
+                "also": [],
+                "geometry": geometry,
+                "summary": summary,
+                "profile": prof,
+            }
+            order.append(key)
+            continue
+        group["also"].append({"key": prof.key, "label": prof.label})
+        # Conservative: the slowest estimate of the same road wins.
+        if (summary["duration_seconds"] or 0) > (group["summary"]["duration_seconds"] or 0):
+            group["summary"]["duration_seconds"] = summary["duration_seconds"]
+
+    if not groups:
+        raise HTTPException(422, {
+            "error": "no_route",
+            "detail": "No route exists between these locations.",
+            "profiles_tried": [p.key for p in cfg.profiles],
+        })
+
+    options: list[dict[str, Any]] = []
+    for key in order:
+        g = groups[key]
+        summary = g["summary"]
+        burn = battery_model.estimate_burn_percent(
+            distance_meters=summary["distance_meters"],
+            elevation_gain_meters=summary["elevation_gain_meters"],
+            vehicle_model=vehicle_model,
+        )
+        options.append({
+            "key": g["key"],
+            "label": g["label"],
+            "also": g["also"],
+            **summary,
+            "battery_percent_estimate": burn.get("percent"),
+            "battery_percent_low": burn.get("percent_low"),
+            "battery_percent_high": burn.get("percent_high"),
+            "battery_model": burn.get("source"),
+            **_arrival_battery(burn, battery_percent),
+            "geometry": g["geometry"],
+        })
+
+    return {
+        "graph_bbox": cfg.bbox,
+        "beta_warning": NAV_BETA_WARNING,
+        "profiles_unavailable": failures,
+        "options": options,
+    }
+
+
 @router.get("/api/v1/route/walk", dependencies=[Depends(_limit_route_ip)])
 def walk(
     from_: str = Query(..., alias="from", description="Origin as 'lat,lon'"),
