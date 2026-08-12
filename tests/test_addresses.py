@@ -263,6 +263,42 @@ def test_a_short_read_leaves_the_previous_index_serving(monkeypatch):
     assert out["fetched"] == 1 and out["expected"] == 413405
 
 
+def test_one_door_is_one_result(monkeypatch):
+    """Denver files one address point per UNIT, so "1226 E 10th Ave" is six
+    rows and "1500 Champa St" is six more — separate apartments behind one
+    street door. Keyed on the rounded coordinate this did nothing: the units
+    sit 5-25 m apart across the building, far outside what five decimals
+    collapse, and riders saw the same address six times with no way to tell
+    the rows apart."""
+    street = _street(1, "E", "10th", "Ave")
+    monkeypatch.setattr(A, "street_index",
+                        lambda refresh=False: A.StreetIndex([street]))
+
+    # Six units, scattered across the footprint exactly as the city files them.
+    rows = [(1, "1226", unit, 39.731924 + i * 0.00002, -104.972079 - i * 0.00002,
+             "E 10th Ave")
+            for i, unit in enumerate([None, "101", "102", "201", "202", "301"])]
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, *a): pass
+        def fetchall(self): return rows
+
+    class _Conn:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def cursor(self): return _Cur()
+
+    monkeypatch.setattr(A, "connection", lambda: _Conn())
+
+    hits = A.lookup("1226 e 10th ave")
+    assert len(hits) == 1, f"one door, one row — got {[h['label'] for h in hits]}"
+    assert hits[0]["label"] == "1226 E 10th Ave, Denver"
+    # `unit IS NULL` sorts first, so the survivor is the street door itself.
+    assert hits[0]["lat"] == round(39.731924, 6)
+
+
 # --- normalisation ----------------------------------------------------------
 
 def test_the_source_is_not_trusted_raw():

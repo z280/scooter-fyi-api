@@ -764,11 +764,20 @@ def lookup(q: str, limit: int = 8) -> list[dict[str, Any]]:
     order = {sid: i for i, sid in enumerate(ids)}
     rows.sort(key=lambda r: order.get(r[0], 99))
     out: list[dict[str, Any]] = []
-    seen: set[tuple] = set()
+    seen: set[str] = set()
     for street_id, number_text, unit, lat, lon, display in rows:
-        # 15 units behind one door are one destination to a rider; the door is
-        # what they are riding to.
-        key = (round(lat, 5), round(lon, 5))
+        # DEDUPE ON THE LABEL, not on position. Denver files one point per
+        # UNIT, so 1226 E 10th Ave is six rows and 1500 Champa St is six more,
+        # each a separate apartment behind one street door. This first shipped
+        # keyed on the rounded coordinate, which did nothing: the units are
+        # scattered 5-25 m apart across the building footprint, well outside
+        # the ~1 m that five decimal places collapses. Riders saw the same
+        # address six times and no way to tell the rows apart.
+        #
+        # Two rows with the same label ARE the same destination — that is what
+        # the label being identical means. Ordering put `unit IS NULL` first,
+        # so the survivor is the street door itself where the city files one.
+        key = f"{number_text} {display}"
         if key in seen:
             continue
         seen.add(key)
