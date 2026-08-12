@@ -111,7 +111,28 @@ GBFS_TIME_WINDOW_MS = 10 * 60 * 1000  # +/- 10 minutes
 # --- check 6: volume ------------------------------------------------------
 MIN_WAYPOINTS = 10
 MIN_DISTANCE_METERS = 500.0
-MIN_DURATION_MS = 180_000  # 3 minutes
+
+# A duration floor USED to sit here (180_000 ms) alongside the distance
+# floor, failing a ride when EITHER was under. It was removed because it
+# could only ever fire on riders who were going fast, which is the opposite
+# of what a volume floor is for.
+#
+# Work through what reaches it. To fail the old duration test a track had to
+# cover >= MIN_DISTANCE_METERS in under three minutes -- an average of more
+# than 10 km/h. A stationary phone jiggling out fake GPS noise never gets
+# there; it fails MIN_DISTANCE_METERS first. So the duration clause rejected
+# no fraud the distance floor wasn't already rejecting, and the only tracks
+# it ever actually caught were real rides at real scooter speeds.
+#
+# The upper bound is somebody else's job and always was: _verify_speed
+# (check 5) hard-rejects implausible per-segment speed and independently
+# raises pending_review for a sustained-fast track, both accuracy-adjusted.
+# Covering ground quickly is that check's question, not this one's.
+#
+# Found in production on two of eighteen donations -- one of them 1096.7 m
+# over 163 waypoints, clean on every other check, ineligible because its
+# track ran 162 s instead of 180 s. An eighteen-second penalty for riding
+# a kilometre briskly.
 
 # The six outward-facing per-check keys, in pipeline order. "chain" covers
 # both check 1 (signature) and check 2 (chain integrity) -- see module
@@ -591,16 +612,19 @@ def _verify_volume(points: list[_Point], distance_m: float) -> list[str]:
     volume-too-few-waypoints scenario asserts exactly this
     ("This chain misses all three [minimums], so both reasons apply;
     assert reasons as a set."). too_few_waypoints is waypoint_count alone;
-    trip_too_short is distance OR duration alone -- the two tokens never
+    trip_too_short is distance alone -- the two tokens never
     overlap in what they describe, so there is no real ambiguity to
     tie-break: a ride can independently be both too-sparse and too-short,
-    and says so."""
+    and says so.
+
+    trip_too_short is a DISTANCE verdict only; see the note standing where
+    MIN_DURATION_MS used to be defined for why the duration half of it was
+    removed outright rather than loosened."""
     reasons: list[str] = []
     if len(points) < MIN_WAYPOINTS:
         reasons.append("too_few_waypoints")
 
-    duration_ms = (points[-1][0] - points[0][0]) if len(points) >= 2 else 0
-    if distance_m < MIN_DISTANCE_METERS or duration_ms < MIN_DURATION_MS:
+    if distance_m < MIN_DISTANCE_METERS:
         reasons.append("trip_too_short")
     return reasons
 
