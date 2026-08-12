@@ -41,6 +41,7 @@ taken.
 
 from __future__ import annotations
 
+import io
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -332,14 +333,27 @@ def dibs_qr(dibs_id: str) -> Response:
         # certificate and not merely to the channel.
         f"&ref={dibs_id}"
     )
-    # `currentColor` is not a colour segno will accept, so the ink is set on
-    # the wrapper instead: the SVG is emitted without a fill and the page's
-    # colour cascades into it. (Kept explicit rather than hardcoding black —
-    # the certificate is printed on parchment in light mode and on a lighter
-    # card in dark, and the code has to stay legible on both.)
-    buf = segno.make(target, error="q").svg_inline(scale=1, border=2)
+    # A STANDALONE SVG DOCUMENT, not an inline fragment.
+    #
+    # This used to call `svg_inline()`, which is segno's embed-in-HTML form:
+    # it deliberately omits the XML declaration AND the `xmlns`, because
+    # inline SVG inherits the namespace from the HTML parser. But this is a
+    # URL, and the certificate modal loads it through `<img src=…>` — which
+    # parses it as a standalone XML document, finds no namespace, and refuses
+    # to render it. The response was a valid 200 image/svg+xml the whole
+    # time; browsers simply would not draw it.
+    #
+    # The ink is explicit for the same reason. `svg_inline` emitted no fill so
+    # the page's `currentColor` could cascade in, which works for a fragment
+    # and cannot work here: an <img> is an isolated document and inherits
+    # nothing from the page around it. #2b2418 is the parchment ink the
+    # certificate already uses, dark enough to scan on both card colours.
+    buf = io.BytesIO()
+    segno.make(target, error="q").save(
+        buf, kind="svg", scale=1, border=2, dark="#2b2418", xmldecl=False,
+    )
     return Response(
-        content=buf,
+        content=buf.getvalue(),
         media_type="image/svg+xml",
         headers={
             # A certificate's QR never changes once issued.
@@ -463,6 +477,8 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
               you walked. Ten to set off plus the fifteen you were allowed.</li>
           <li><strong>A certificate only counts while it's moving.</strong>
               The real one animates. A screenshot doesn't.</li>
+          <li><strong>Scooter.fyi will try to notify you</strong> if the
+              device you have dibs on is no longer available.</li>
         </ol>
       </details>
 

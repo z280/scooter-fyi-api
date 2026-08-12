@@ -349,6 +349,34 @@ def test_the_qr_is_vector(client):
     assert "<svg" in r.text or "<path" in r.text
 
 
+def test_the_qr_declares_the_svg_NAMESPACE(client):
+    """Without `xmlns`, an <img src=…/qr.svg> renders NOTHING.
+
+    This shipped broken. The endpoint used segno's `svg_inline()`, which is
+    the embed-in-HTML form: it deliberately omits the XML declaration and the
+    namespace, because inline SVG inherits the namespace from the HTML
+    parser. But this is a URL, and the certificate modal loads it through an
+    <img> — which parses it as a standalone XML document, finds no namespace,
+    and refuses to draw it. The response was a valid 200 image/svg+xml the
+    whole time, which is exactly why it took a rider to notice.
+
+    Asserted on the namespace rather than on "does it look like SVG", because
+    the old output passed every looser check.
+    """
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    r = client.get(f"/api/v1/dibs/{dibs_id}/qr.svg")
+    assert 'xmlns="http://www.w3.org/2000/svg"' in r.text
+
+
+def test_the_qr_carries_its_own_ink(client):
+    """An <img> is an isolated document — the page's `currentColor` cannot
+    reach inside it, so a fill-less QR renders as nothing visible even once
+    the namespace lets it parse."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    r = client.get(f"/api/v1/dibs/{dibs_id}/qr.svg")
+    assert "#2b2418" in r.text
+
+
 def test_the_qr_points_at_this_certificate_with_a_registered_campaign(client):
     """An UNREGISTERED code scans perfectly and reports zero — campaigns.py
     resolves anything not in the registry to 'other'. sql/076 seeds these."""
