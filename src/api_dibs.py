@@ -284,38 +284,62 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
         ), status_code=404)
 
     active = d["expires_at"] > d["now"]
-    status = (
-        '<p class="status status--live">✅ Still live right now.</p>'
-        if active else
-        '<p class="status status--past">🕓 This one has since expired — but it '
-        'was real, and this is when it was called.</p>'
-    )
     # "(provider) (device_type) (vanity_name)" — "Veo scooter Lunar 🐸 928".
-    # Assembled from the parts that are actually present rather than joined
-    # blindly: an older certificate has no device_type, and "Veo  Lunar" with
-    # a hole in it reads as a bug.
+    # Assembled from the parts that are present rather than joined blindly: an
+    # older certificate has no device_type, and "Veo  Lunar" with a hole in it
+    # reads as a bug.
     what = " ".join(
         _esc(x) for x in (d.get("provider"), d.get("device_type"), d["vehicle_name"]) if x
     )
-    plate = f'<p class="plate">Plate {_esc(d["plate"])}</p>' if d["plate"] else ""
+    plate = f' <span class="plate">(plate {_esc(d["plate"])})</span>' if d["plate"] else ""
     who = _esc(d["claimed_by"])
 
+    # THE SENTENCE IS THE PAGE. Present tense while it stands, past tense with
+    # the verdict attached once it does not — because the two readers are
+    # different people with different questions. Somebody checking a live claim
+    # wants to know it is real; somebody checking a dead one is, almost always,
+    # about to take the scooter.
+    if active:
+        claim_line = (
+            f'<strong>{who}</strong> has dibbs on <strong>{what}</strong>{plate}'
+        )
+        verdict = '<p class="verdict verdict--live">Still good.</p>'
+    else:
+        claim_line = (
+            f'<strong>{who}</strong> had dibbs on <strong>{what}</strong>{plate}, '
+            f'but they expired at <strong>{_esc(_denver(d["expires_at"]))}</strong> '
+            f'and are now'
+        )
+        verdict = '<p class="verdict verdict--void">null and void.</p>'
+
     body = f'''
-      <p class="callout">
-        <span class="who">{who}</span>
-        <span class="verb">called dibbs on</span>
-        <span class="what">{what}</span>
-      </p>
-      {plate}
-      <p class="lede">at</p>
+      <div class="fyi">{FYI_SVG}</div>
+      <p class="claim">{claim_line}</p>
+      {verdict}
+      <p class="lede">called at</p>
       <p class="when">{_esc(_denver(d["claimed_at"]))}</p>
-      {status}
       <p class="fine">
         That time came from Scooter.fyi's servers, not from anyone's phone —
-        which is the only reason it's worth anything in an argument. Dibbs
-        isn't a reservation; Veo doesn't offer one. It's a timestamp, and
-        whatever standing it earns you in person.
+        which is the only reason it's worth anything in an argument.
       </p>
+
+      <details class="rules">
+        <summary>The rules of dibbs</summary>
+        <ol>
+          <li><strong>Dibbs isn't a reservation.</strong> Veo doesn't offer
+              one. This is a timestamp and whatever standing it earns you in
+              person — nothing stops anyone riding anything.</li>
+          <li><strong>Ten minutes to set off.</strong> Call dibbs and don't
+              start walking towards it, and your claim is void. Not ten
+              minutes to arrive — ten minutes to move.</li>
+          <li><strong>Fifteen minutes' walk, maximum.</strong> You can't call
+              dibbs on something you couldn't plausibly reach.</li>
+          <li><strong>Twenty-five minutes and it's over</strong>, however well
+              you walked. Ten to set off plus the fifteen you were allowed.</li>
+          <li><strong>A certificate only counts while it's moving.</strong>
+              The real one animates. A screenshot doesn't.</li>
+        </ol>
+      </details>
 
       <div class="signup">
         <h2>Want to call dibbs yourself?</h2>
@@ -458,25 +482,36 @@ def _page_shell(title: str, body: str) -> str:
           background:radial-gradient(circle at 8px 50%, #f2ead8 7px, transparent 7px) left/22px 14px repeat-x; }}
   .card::before {{ margin:-20px -20px 12px; }}
   .card::after  {{ margin:16px -20px -22px; transform:rotate(180deg); }}
-  .logo {{ color:var(--accent); }}
-  .logo__mark {{ display:block; width:104px; height:auto; margin:0 auto; }}
-  .wordmark {{ margin:2px 0 0; font-size:12px; font-weight:800; letter-spacing:.14em;
-              text-transform:uppercase; color:var(--muted); }}
-  h1 {{ margin:12px 0 14px; font-size:15px; font-weight:800; letter-spacing:.12em;
+  .mark {{ display:flex; align-items:center; justify-content:center; gap:9px;
+          color:var(--accent); }}
+  .mark__art {{ width:38px; height:auto; flex:0 0 auto; }}
+  .mark__word {{ font-size:19px; font-weight:800; letter-spacing:-.02em;
+                color:var(--ink); }}
+  .mark__tld {{ color:var(--accent); }}
+  h1 {{ margin:14px 0 16px; font-size:13px; font-weight:800; letter-spacing:.14em;
        text-transform:uppercase; color:var(--muted); }}
   h1::before, h1::after {{ content:"✦"; color:var(--gold); margin:0 8px; }}
-  .callout {{ margin:0; display:flex; flex-direction:column; gap:2px; }}
-  .who {{ font-size:26px; font-weight:800; line-height:1.15; overflow-wrap:anywhere; }}
-  .verb {{ font-size:13px; color:var(--muted); }}
-  .what {{ font-size:22px; font-weight:800; line-height:1.2; overflow-wrap:anywhere; }}
-  .plate {{ margin:6px 0 0; font-size:12px; color:var(--muted); }}
-  .lede {{ margin:10px 0 0; font-size:13px; color:var(--muted); }}
-  .when {{ margin:2px 0 0; font-size:17px; font-weight:800;
+
+  /* The FYI, lifted straight from the mark it came from. */
+  /* The certificate's opening word IS the mark. */
+  .fyi {{ margin:0 0 10px; color:var(--accent); }}
+  .fyi__art {{ display:block; width:96px; height:auto; margin:0 auto; }}
+  .claim {{ margin:0; font-size:19px; line-height:1.4; overflow-wrap:anywhere; }}
+  .plate {{ color:var(--muted); font-size:14px; white-space:nowrap; }}
+  .verdict {{ margin:8px 0 0; font-size:22px; font-weight:900; letter-spacing:.02em; }}
+  .verdict--live {{ color:#12833c; }}
+  .verdict--void {{ color:#c02626; text-transform:uppercase; }}
+  .lede {{ margin:14px 0 0; font-size:13px; color:var(--muted); }}
+  .when {{ margin:2px 0 0; font-size:16px; font-weight:800;
           font-variant-numeric:tabular-nums; }}
-  .status {{ margin:14px 0 0; font-size:14px; font-weight:800; }}
-  .status--live {{ color:#12833c; }}
-  .status--past {{ color:var(--muted); }}
   .fine {{ margin:14px 0 0; font-size:11.5px; line-height:1.55; color:var(--muted); }}
+
+  .rules {{ margin:16px 0 0; text-align:left; border-top:1px solid #eadfc4;
+           padding-top:12px; }}
+  .rules summary {{ font-size:12.5px; font-weight:800; letter-spacing:.06em;
+                   text-transform:uppercase; color:var(--muted); cursor:pointer; }}
+  .rules ol {{ margin:10px 0 0; padding-left:18px; }}
+  .rules li {{ margin:0 0 8px; font-size:12.5px; line-height:1.5; color:var(--ink); }}
 
   .signup {{ margin:20px -20px -22px; padding:20px; text-align:left;
             background:#1d2733; color:#eef3f8;
@@ -509,22 +544,31 @@ def _page_shell(title: str, body: str) -> str:
 
 
 def _logo() -> str:
-    """The FYI speech-bubble mark, inlined.
+    """The scooter.fyi mark, inlined.
 
-    INLINE, NOT AN <img>. The whole page is one request on purpose — somebody
+    INLINE, NOT AN <img>. The page is one request on purpose — somebody
     scanning this is on a street, on someone else's phone plan — and a second
-    round trip for a logo is the one that shows up as a blank box while it
+    round trip for artwork is the one that shows as a blank box while it
     loads.
 
-    Inlining is only affordable because the artwork was reduced first. The
-    supplied EPS traced to 69 KB of near-collinear points; simplified to 0.12
-    units it is 2.2 KB and renders identically at every size this page uses.
-    It draws in `currentColor`, so the mark themes with the card rather than
-    carrying a second hardcoded blue.
+    Extracted from the supplied artwork as the ART ONLY: the wordmark beside
+    it is set below in real text, which stays legible at any size and to a
+    screen reader. Curves are preserved verbatim from the source; only
+    coordinate precision was trimmed. It draws in `currentColor` (streets at
+    22% of it), so one mark serves the blue card, the dark panel and anything
+    else without a second copy.
     """
-    return f'<div class="logo">{LOGO_SVG}</div><p class="wordmark">Scooter.fyi</p>'
+    return (
+        f'<div class="mark">{MARK_SVG}'
+        f'<span class="mark__word">scooter<span class="mark__tld">.fyi</span></span>'
+        f'</div>'
+    )
 
 
-#: See _logo(). Kept as a constant so the artwork is one obvious thing to
-#: replace, and so the function above stays readable.
-LOGO_SVG = '<svg class="logo__mark" role="img" aria-label="Scooter.fyi" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 109 80"><path fill-rule="evenodd" fill="currentColor" d="M 58.2 1.5 L 52.2 1.8 L 25.1 1.6 L 16.8 2 L 11.4 2.8 L 9.1 3.6 L 7.6 4.4 L 6.9 4.9 L 5 6.9 L 3.6 9.2 L 2.9 10.8 L 1.6 15.3 L 1.1 18.6 L 0.9 22.4 L 1.2 35.3 L 0.8 42.7 L 0.8 49.2 L 1.1 52.3 L 1.9 55.9 L 2.8 58.3 L 3.7 60 L 5.4 62.2 L 7.2 63.7 L 9.7 64.8 L 12.1 65.3 L 15.6 65.6 L 34.2 65.4 L 37.9 65.6 L 39.8 66 L 40.8 66.9 L 41.4 69.2 L 41.5 73.5 L 41.2 75.9 L 41.3 77.3 L 41.8 78.3 L 42.7 78.9 L 43.5 79.1 L 45.9 79.1 L 47 78.9 L 49.7 77.9 L 51.2 77 L 53.9 74.9 L 60.8 68.2 L 64.2 66 L 66.2 65.3 L 68.2 64.9 L 71 64.7 L 79.6 64.6 L 84.8 64.6 L 90 65 L 93.8 65 L 96.9 64.5 L 99.1 63.8 L 102.5 62 L 105.1 59.6 L 106.8 56.8 L 107.5 54.9 L 107.9 53.1 L 108.4 48.6 L 108.4 43.4 L 108.2 40.2 L 108.3 15.2 L 107.8 11.5 L 107.3 9.8 L 106.1 7.4 L 104.7 5.6 L 102.8 3.9 L 100.5 2.5 L 98.1 1.6 L 94.8 1 L 88.9 0.9 L 85 1.1 L 77.8 1.1 L 68 0.8 L 58.3 1.5 Z M 63.1 7.4 L 76.9 6.9 L 87.2 6.9 L 92.9 7.1 L 95.3 7.4 L 97.4 8 L 99.2 9.1 L 100.1 10.1 L 101.2 12.1 L 101.8 14 L 102.3 16.8 L 102.5 19.7 L 102.1 31.5 L 102.1 38.9 L 102.5 45.3 L 102.5 49.3 L 102.2 51.3 L 101.3 53.6 L 99.3 56 L 97 57.6 L 93.8 58.7 L 90.6 59.1 L 87.9 59.1 L 78 58.5 L 74.3 58.8 L 69.4 59.5 L 64.2 59.7 L 62 60.1 L 60.9 60.5 L 59.5 61.4 L 55.8 65.2 L 54 66.7 L 49.4 69.8 L 47.9 70.3 L 47.4 70.2 L 47 69.8 L 46.6 68.2 L 46.6 66.6 L 46.9 64.3 L 46.8 61.6 L 45.9 60.5 L 44.9 59.9 L 43.5 59.5 L 41.5 59.3 L 36 59.6 L 30.9 59.6 L 27.3 59.3 L 24.8 59.3 L 19.7 59.8 L 15.9 59.7 L 14 59.3 L 11.6 58.3 L 10.6 57.7 L 8.5 55.6 L 7.5 53.4 L 7 50.4 L 7 24.5 L 7.3 19.8 L 8.1 15.2 L 9.3 12.3 L 10 11.3 L 11.4 9.9 L 13 9 L 14.7 8.4 L 17.8 7.8 L 20.4 7.6 L 31.1 7.8 L 50.1 7.8 L 62.8 7.4 Z"/><path fill-rule="nonzero" fill="currentColor" d="M 30.9 21.7 L 29.4 33.5 L 42.6 33.5 L 41.8 39 L 28.8 39 L 26.8 54.8 L 19.8 54.8 L 24.6 16.2 L 47.1 16.2 L 46.4 21.7 Z M 65.7 39.8 L 63.9 54.8 L 56.9 54.8 L 58.8 39.8 L 48.7 16.2 L 54.9 16.2 L 55.7 16.3 L 56.8 17.1 L 62.4 32.1 L 63.1 34.8 L 65.1 31.1 L 73.8 17.2 L 74.4 16.6 L 75 16.3 L 81.6 16.2 Z M 87.7 54.8 L 80.7 54.8 L 85.4 16.2 L 92.4 16.2 Z"/></svg>'
+#: The FYI speech bubble. The certificate's opening word IS the mark — it is a
+#: notice, delivered to somebody who did not ask for one, and the bubble says
+#: that in one glance where the letters only say it in three.
+FYI_SVG = '<svg class="fyi__art" role="img" aria-label="FYI" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 109 80"><path fill-rule="evenodd" fill="currentColor" d="M 58.2 1.5 L 52.2 1.8 L 25.1 1.6 L 16.8 2 L 11.4 2.8 L 9.1 3.6 L 7.6 4.4 L 6.9 4.9 L 5 6.9 L 3.6 9.2 L 2.9 10.8 L 1.6 15.3 L 1.1 18.6 L 0.9 22.4 L 1.2 35.3 L 0.8 42.7 L 0.8 49.2 L 1.1 52.3 L 1.9 55.9 L 2.8 58.3 L 3.7 60 L 5.4 62.2 L 7.2 63.7 L 9.7 64.8 L 12.1 65.3 L 15.6 65.6 L 34.2 65.4 L 37.9 65.6 L 39.8 66 L 40.8 66.9 L 41.4 69.2 L 41.5 73.5 L 41.2 75.9 L 41.3 77.3 L 41.8 78.3 L 42.7 78.9 L 43.5 79.1 L 45.9 79.1 L 47 78.9 L 49.7 77.9 L 51.2 77 L 53.9 74.9 L 60.8 68.2 L 64.2 66 L 66.2 65.3 L 68.2 64.9 L 71 64.7 L 79.6 64.6 L 84.8 64.6 L 90 65 L 93.8 65 L 96.9 64.5 L 99.1 63.8 L 102.5 62 L 105.1 59.6 L 106.8 56.8 L 107.5 54.9 L 107.9 53.1 L 108.4 48.6 L 108.4 43.4 L 108.2 40.2 L 108.3 15.2 L 107.8 11.5 L 107.3 9.8 L 106.1 7.4 L 104.7 5.6 L 102.8 3.9 L 100.5 2.5 L 98.1 1.6 L 94.8 1 L 88.9 0.9 L 85 1.1 L 77.8 1.1 L 68 0.8 L 58.3 1.5 Z M 63.1 7.4 L 76.9 6.9 L 87.2 6.9 L 92.9 7.1 L 95.3 7.4 L 97.4 8 L 99.2 9.1 L 100.1 10.1 L 101.2 12.1 L 101.8 14 L 102.3 16.8 L 102.5 19.7 L 102.1 31.5 L 102.1 38.9 L 102.5 45.3 L 102.5 49.3 L 102.2 51.3 L 101.3 53.6 L 99.3 56 L 97 57.6 L 93.8 58.7 L 90.6 59.1 L 87.9 59.1 L 78 58.5 L 74.3 58.8 L 69.4 59.5 L 64.2 59.7 L 62 60.1 L 60.9 60.5 L 59.5 61.4 L 55.8 65.2 L 54 66.7 L 49.4 69.8 L 47.9 70.3 L 47.4 70.2 L 47 69.8 L 46.6 68.2 L 46.6 66.6 L 46.9 64.3 L 46.8 61.6 L 45.9 60.5 L 44.9 59.9 L 43.5 59.5 L 41.5 59.3 L 36 59.6 L 30.9 59.6 L 27.3 59.3 L 24.8 59.3 L 19.7 59.8 L 15.9 59.7 L 14 59.3 L 11.6 58.3 L 10.6 57.7 L 8.5 55.6 L 7.5 53.4 L 7 50.4 L 7 24.5 L 7.3 19.8 L 8.1 15.2 L 9.3 12.3 L 10 11.3 L 11.4 9.9 L 13 9 L 14.7 8.4 L 17.8 7.8 L 20.4 7.6 L 31.1 7.8 L 50.1 7.8 L 62.8 7.4 Z"/><path fill-rule="nonzero" fill="currentColor" d="M 30.9 21.7 L 29.4 33.5 L 42.6 33.5 L 41.8 39 L 28.8 39 L 26.8 54.8 L 19.8 54.8 L 24.6 16.2 L 47.1 16.2 L 46.4 21.7 Z M 65.7 39.8 L 63.9 54.8 L 56.9 54.8 L 58.8 39.8 L 48.7 16.2 L 54.9 16.2 L 55.7 16.3 L 56.8 17.1 L 62.4 32.1 L 63.1 34.8 L 65.1 31.1 L 73.8 17.2 L 74.4 16.6 L 75 16.3 L 81.6 16.2 Z M 87.7 54.8 L 80.7 54.8 L 85.4 16.2 L 92.4 16.2 Z"/></svg>'
+
+#: See _logo(). One obvious thing to replace when the artwork changes.
+MARK_SVG = '<svg class="mark__art" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="-3.8 973.2 517.7 457.8"><path fill-rule="nonzero" fill="currentColor" d="M 35.17 1000.42 C 49.78 983.01 72.76 973.22 95.41 974.06 C 212.76 974.08 330.11 974.02 447.46 974.09 C 463.52 973.75 478.95 980.85 490.77 991.43 C 504.43 1004.32 512.71 1022.83 512.71 1041.67 C 512.64 1148.35 512.75 1255.03 512.67 1361.71 C 513.85 1385.07 502.52 1409.30 482.16 1421.42 C 472.74 1427.37 461.58 1430.60 450.43 1430.37 C 454.23 1425.92 456.21 1420.37 456.65 1414.58 C 460.84 1413.23 465.27 1412.53 469.26 1410.60 C 482.86 1404.21 492.78 1391 495.77 1376.35 C 497.58 1368.92 496.77 1361.26 496.97 1353.71 C 496.81 1288.53 497.14 1223.37 496.85 1158.19 C 496.94 1155.89 496.95 1153.60 496.95 1151.30 C 496.85 1119.12 497.06 1086.94 496.93 1054.76 C 496.80 1046.73 497.61 1038.57 495.73 1030.69 C 492.53 1016.35 483.34 1003.17 470.33 996.15 C 465.34 993.75 460.11 991.79 454.69 990.64 C 449.97 989.99 445.20 990.20 440.45 990.15 C 325.43 990.20 210.42 990.21 95.40 990.15 C 79.15 989.56 62.48 995.39 50.80 1006.83 C 47.01 1010.85 43.42 1015.12 40.91 1020.07 C 37.54 1026.44 35.36 1033.53 35.15 1040.76 C 34.99 1126.76 35.32 1212.78 34.98 1298.76 C 29.41 1299.5 24.08 1301.62 19.35 1304.60 C 19.22 1217.32 19.34 1130.03 19.29 1042.73 C 19.53 1027.37 25.17 1012.12 35.17 1000.42"/><path fill-rule="nonzero" fill="currentColor" d="M 386.48 1064.78 C 394.55 1063.42 403.19 1064.60 410.25 1068.89 C 420.40 1074.25 427.72 1084.53 429.87 1095.73 C 430.52 1102.17 430.78 1108.91 428.52 1115.08 C 424.55 1127.44 413.68 1137.32 401.00 1140.12 C 382.53 1144.96 362.00 1132.57 356.61 1114.46 C 350.17 1097.23 359.38 1076.62 375.60 1068.58 C 378.99 1066.75 382.70 1065.55 386.48 1064.78"/><path fill-rule="nonzero" fill="currentColor" d="M 38.77 1361.33 C 31.08 1363.71 24.79 1370.17 22.97 1378.07 C 18.96 1391.37 29.41 1406.78 43.40 1407.42 C 51.36 1408.44 59.57 1404.89 64.22 1398.35 C 69.19 1392.37 70.07 1383.85 67.90 1376.55 C 64.35 1364.82 50.52 1357.19 38.77 1361.33 Z M 87.77 1120.07 C 89.67 1117.98 92.46 1116.67 95.33 1116.85 C 116.39 1116.87 137.45 1116.80 158.51 1116.87 C 166.39 1117.03 170.49 1126.91 166.99 1133.35 C 165.24 1136.89 161.29 1138.98 157.42 1139 C 149.32 1139.01 141.21 1138.96 133.11 1139.12 C 127.25 1160.12 120.84 1180.94 114.51 1201.80 C 107.95 1223.30 101.50 1244.82 94.72 1266.26 C 92.11 1275.62 88.74 1284.78 86.49 1294.23 C 104.14 1305.23 117.23 1322.26 126.25 1340.80 C 130.93 1348.85 133.88 1357.75 138.12 1366.03 C 190.89 1366.19 243.67 1366.03 296.44 1366.12 C 302.81 1366.12 309.17 1366.10 315.54 1365.96 C 317.94 1351.12 324.79 1337.17 334.47 1325.73 C 347.66 1310.03 367.00 1299.69 387.34 1297.25 C 402.10 1296.07 417.53 1298.21 430.55 1305.57 C 434.20 1307.58 437.20 1311.32 437.09 1315.67 C 437.56 1321.25 432.55 1325.96 427.27 1326.62 C 422.21 1327.80 418.06 1323.92 413.49 1322.58 C 397.60 1316.57 379.35 1319.51 365.03 1328.23 C 349.26 1338.08 338.31 1355.23 336.11 1373.69 C 335.75 1376.82 336.50 1380.21 334.93 1383.10 C 333.36 1386.21 330.06 1388.62 326.47 1388.48 C 261.45 1388.58 196.45 1388.48 131.42 1388.51 C 126.48 1388.96 121.91 1385.58 120.11 1381.10 C 117.05 1373.89 114.67 1366.39 110.79 1359.55 C 103.22 1343.35 93.73 1327.32 79.15 1316.48 C 76.72 1326.23 73.06 1335.60 70.50 1345.28 C 80.10 1350.91 86.47 1360.73 89.74 1371.16 C 93.12 1384.41 91.20 1399.16 83.24 1410.46 C 74.63 1423.44 58.90 1431.03 43.41 1430.33 C 31.48 1429.62 19.85 1424.17 11.86 1415.23 C -1.34 1400.89 -3.80 1378.03 5.91 1361.16 C 12.56 1349.14 24.88 1340.39 38.49 1338.33 C 42.45 1337.83 46.42 1337.46 50.42 1337.51 C 56.19 1316.35 62.92 1295.48 69.23 1274.48 C 82.92 1229.42 96.80 1184.37 110.04 1139.19 C 103.58 1138.32 96.60 1140.42 90.51 1137.58 C 84.00 1134.60 82.78 1124.94 87.77 1120.07"/><path fill-rule="nonzero" fill="currentColor" d="M 387.94 1360.5 C 372.14 1364.78 365.73 1387.94 377.79 1399.35 C 385.35 1408.01 399.77 1409 408.74 1402 C 416.21 1396.83 419.29 1386.89 417.75 1378.19 C 416.12 1372.10 412.54 1366.32 407.05 1363.01 C 401.44 1359.41 394.30 1358.78 387.94 1360.5 Z M 388.92 1337.41 C 400.52 1335.94 412.74 1338.87 421.88 1346.33 C 431.04 1353.12 437.55 1363.39 439.57 1374.64 C 441.23 1384.94 440.16 1396.03 434.74 1405.14 C 428.54 1417.03 416.70 1425.76 403.54 1428.32 C 391.22 1430.83 377.91 1427.83 367.79 1420.39 C 358.70 1413.91 352.64 1403.73 350.13 1392.96 C 348.13 1382.26 349.26 1370.66 354.76 1361.12 C 361.42 1348.30 374.47 1338.94 388.92 1337.41"/><path fill-rule="nonzero" fill="currentColor" opacity=".22" d="M 206.66 1232.12 C 202.07 1233 198.01 1236.17 195.75 1240.21 C 194.40 1243.5 194.62 1247.26 195.23 1250.69 C 196.50 1254.91 199.86 1258.35 203.69 1260.42 C 211.82 1264.80 223.11 1258.82 224.66 1249.87 C 225.89 1244.39 223.21 1238.62 219.18 1234.98 C 215.82 1231.89 210.96 1231.60 206.66 1232.12 Z M 378.48 1203.64 C 381.86 1202.16 385.21 1200.60 388.43 1198.78 C 385.09 1195.69 381.58 1192.78 378.03 1189.92 C 377.69 1194.5 378.05 1199.07 378.48 1203.64 Z M 261.72 1122.73 C 259.69 1127.03 258.23 1131.55 256.70 1136.03 C 252.63 1146.67 248.67 1157.33 244.82 1168.05 C 238.47 1185.94 231.57 1203.66 225.56 1221.67 C 228.93 1224.94 233.06 1227.66 235.14 1232.01 C 237.69 1236.42 238.40 1241.5 239.59 1246.37 C 248.10 1248.46 255.95 1252.53 264.40 1254.83 C 268.81 1256.03 272.98 1258.05 277.47 1258.98 C 281.40 1258.01 284.72 1255.35 288.39 1253.67 C 308.62 1242.14 329.07 1231.01 349.41 1219.71 C 353.48 1217.41 358.02 1215.89 361.77 1213.03 C 362.38 1210.66 362.14 1208.17 362.20 1205.73 C 362.02 1196.03 361.90 1186.30 362.75 1176.62 C 356.13 1170.85 349.84 1164.48 342.38 1159.78 C 324.58 1151.07 306.39 1143.17 288.53 1134.57 C 279.49 1130.85 270.87 1126.17 261.72 1122.73 Z M 293.32 991.38 C 298.91 991.27 304.52 990.93 310.11 991.36 C 295.79 1030.03 281.13 1068.60 267.26 1107.44 C 280.73 1113.82 294.34 1119.87 307.83 1126.21 C 321.51 1132.35 334.87 1139.26 348.87 1144.69 C 351.53 1146.51 353.52 1149.16 356.23 1150.94 C 366.41 1157.94 375.01 1166.87 384.44 1174.78 C 390.74 1180.21 396.49 1186.37 403.49 1190.94 C 427.22 1181.16 450.53 1170.32 474.30 1160.60 C 481.96 1157.76 488.99 1153.37 496.95 1151.30 C 496.54 1157.12 496.13 1162.92 495.72 1168.73 C 492.95 1170.66 489.54 1171.32 486.48 1172.67 C 466.59 1181.17 446.75 1189.80 426.83 1198.26 C 418.19 1202.39 408.96 1205.21 400.63 1209.98 C 393.25 1214.44 385.54 1218.33 377.97 1222.44 C 377.70 1234.37 377.44 1246.28 377.18 1258.21 C 372.91 1257.91 368.64 1257.60 364.37 1257.30 C 363.51 1248.44 362.65 1239.57 361.79 1230.71 C 357.51 1232.71 353.75 1235.62 349.62 1237.89 C 331.99 1247.05 314.83 1257.07 297.39 1266.60 C 295.38 1267.94 292.75 1268.69 291.32 1270.69 C 281.11 1300.28 269.97 1329.55 259.64 1359.10 C 254.28 1358.85 248.92 1358.60 243.57 1358.35 C 253.45 1330.37 263.26 1302.37 273.16 1274.39 C 260.25 1270.57 247.91 1264.92 234.81 1261.73 C 231.48 1267.85 225.39 1271.82 219.08 1274.35 C 214.76 1276.10 210.02 1275.57 205.48 1275.57 C 195.17 1303.37 184.61 1331.10 174.50 1359 C 169.02 1358.75 163.54 1358.5 158.07 1358.25 C 160.81 1353.19 162.46 1347.66 164.35 1342.26 C 173.51 1317.85 182.05 1293.21 191.26 1268.83 C 183.75 1262.17 179.19 1251.33 182.24 1241.42 C 175.80 1237.23 168.29 1235.14 161.59 1231.42 C 164.98 1227.98 168.38 1224.53 171.78 1221.10 C 177.82 1220.85 182.51 1225.42 188.22 1226.48 C 191.93 1224.83 194.74 1221.53 198.61 1220.10 C 202.04 1218.23 206.15 1218.48 209.67 1217.05 C 212.46 1211.46 214.10 1205.41 216.29 1199.57 C 226.61 1171.66 236.80 1143.69 247.21 1115.80 C 235.28 1109.96 223.23 1104.32 211.04 1099.05 C 198.40 1093.51 186.29 1086.75 173.35 1081.94 C 170.55 1091.19 166.12 1099.82 163.44 1109.12 C 158.50 1108.80 153.57 1108.48 148.63 1108.16 C 151.40 1097.14 155.81 1086.62 159.10 1075.78 C 128.14 1061.14 97.16 1046.53 66.17 1031.94 C 61.00 1029.53 46.07 1022.5 40.91 1020.07 C 43.42 1015.12 47.01 1010.85 50.80 1006.83 C 82.53 1022.67 114.95 1037.08 147.06 1052.12 C 152.69 1055.03 158.47 1057.64 164.45 1059.73 C 172.42 1036.92 180.39 1014.12 188.36 991.33 C 193.76 990.99 199.17 991.00 204.57 991.39 C 196.20 1016.64 187.83 1041.89 179.46 1067.14 C 193.81 1073.57 207.94 1080.48 222.36 1086.76 C 232.37 1091.71 242.59 1096.21 252.83 1100.69 C 255.28 1091.73 259.53 1083.42 262.37 1074.60 C 272.74 1046.87 282.71 1019.01 293.32 991.38"/><path fill-rule="nonzero" fill="currentColor" opacity=".22" d="M 454.69 990.64 C 460.11 991.79 465.34 993.75 470.33 996.15 C 467.00 1001.12 464.55 1006.60 461.58 1011.78 C 453.10 1028.07 444.56 1044.32 436.13 1060.64 C 433.74 1065.78 431.33 1070.94 428.03 1075.58 C 424.47 1072.12 420.55 1068.80 417.86 1064.60 C 418.06 1060.28 420.83 1056.62 422.63 1052.82 C 433.17 1032.01 444.30 1011.51 454.69 990.64"/></svg>'

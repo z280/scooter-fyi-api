@@ -94,7 +94,7 @@ BODY = {
     "vehicle_identifier": "abc123",
     "vehicle_name": "Lunar 🐸 928",
     "plate": "1020922",
-    "claimed_by": "zeke",
+    "claimed_by": "Resourceful 🌈",
 }
 
 
@@ -123,7 +123,33 @@ def test_an_expired_claim_is_still_a_true_one(client):
     client.store["__now__"] = NOW + timedelta(hours=2)
     after = client.get(f"/api/v1/dibs/{dibs_id}").json()
     assert after["active"] is False
-    assert after["claimed_by"] == "zeke"
+    assert after["claimed_by"] == "Resourceful 🌈"
+
+
+def test_an_expired_page_says_had_and_names_the_verdict(client):
+    """The two readers are different people with different questions. Somebody
+    checking a LIVE claim wants to know it is real; somebody checking a dead
+    one is, almost always, about to take the scooter."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.store["__now__"] = NOW + timedelta(hours=2)
+    html = client.get(f"/dibs/{dibs_id}").text
+    assert "had dibbs on" in html
+    assert "null and void" in html
+    assert "they expired at" in html
+
+
+def test_the_rules_are_on_the_page(client):
+    """Somebody arguing about dibbs should be able to read what dibbs is,
+    without taking the other person's word for it."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    html = client.get(f"/dibs/{dibs_id}").text
+    assert "The rules of dibbs" in html
+    assert "isn't a reservation" in html
+    assert "Ten minutes to set off" in html
+    assert "Fifteen minutes" in html
+    assert "Twenty-five minutes" in html
+    # The anti-screenshot rule has to be stated, or it protects nobody.
+    assert "only counts while it's moving" in html
 
 
 def test_verification_needs_no_account(client):
@@ -152,9 +178,12 @@ def test_the_page_answers_the_question_in_words(client):
     a phone. A wall of braces does not settle an argument."""
     dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
     html = client.get(f"/dibs/{dibs_id}").text
-    assert "zeke" in html and "Lunar" in html
-    assert "called dibbs on" in html
-    assert "live right now" in html
+    assert "Resourceful 🌈" in html and "Lunar" in html
+    assert "has dibbs on" in html
+    assert "Still good." in html
+    # The "FYI" is the speech-bubble mark, not the letters — so the label on
+    # it is what a screen reader (and this test) has to go by.
+    assert 'aria-label="FYI"' in html
 
 
 def test_the_page_says_plainly_that_dibs_is_not_a_reservation(client):
@@ -194,7 +223,7 @@ def test_the_form_creates_a_referral_for_the_certificate_owner(client):
     assert r.status_code == 200
     (params,) = client.store["__referrals__"]
     assert params[0] == dibs_id
-    assert params[1] == "zeke"          # referrer
+    assert params[1] == "Resourceful 🌈"   # referrer
     assert params[2] == "new@example.com"
     # ...and WHERE it happened, inherited from the claim.
     assert (params[4], params[5]) == (39.74, -104.99)
@@ -227,7 +256,7 @@ def test_the_offer_names_the_friend_and_the_points(client):
     dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
     html = client.get(f"/dibs/{dibs_id}").text
     assert "100 pts" in html
-    assert "zeke" in html
+    assert "Resourceful 🌈" in html
 
 
 def test_the_page_escapes_what_a_rider_typed(client):
