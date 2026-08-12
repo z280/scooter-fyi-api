@@ -26,4 +26,3 @@ segno==1.6.6
 # src/r2_map.py: stdlib tarfile reads only gz/bz2/xz and the worker image ships
 # no zstd binary. Imported lazily, so src.cli stays importable without it.
 zstandard==0.25.0
-
