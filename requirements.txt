@@ -18,6 +18,10 @@ pyarrow==18.1.0
 numpy==2.2.6
 h3==4.1.2
 pillow==11.0.0
+# QR codes for campaign links (/admin/campaigns/<code>/qr.png|svg in
+# src/api_admin.py). Pure Python, no deps; writes PNG and SVG itself, so
+# it doesn't ride on pillow.
+segno==1.6.6
 # Unpacking the Photon geocoding index (photon-index-<date>.tar.zst) in
 # src/r2_map.py: stdlib tarfile reads only gz/bz2/xz and the worker image ships
 # no zstd binary. Imported lazily, so src.cli stays importable without it.

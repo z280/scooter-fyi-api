@@ -13,10 +13,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from . import accounts, auth, job_runs
+from . import accounts, auth, campaigns, job_runs
 from .cli import COMMANDS
 from .pg import connection
 
@@ -691,4 +691,251 @@ def analytics(
         entry_modes=entry_modes,
         drawer_sets=drawer_sets,
         api_health=api_health,
+    )
+
+
+# --- Campaigns --------------------------------------------------------------
+# Marketing-campaign registry (sql/074) + per-campaign acquisition numbers.
+# Monitoring reads the RAW telemetry_events table like /admin/analytics does
+# (live, covers every window this page offers); the all-time column reads the
+# campaigns_daily rollup, which outlives the 90-day raw pruning.
+
+
+def _site_origin() -> str:
+    """The public frontend origin, for displaying shareable tagged links.
+    Derived from the configured magic-link template rather than a second
+    hardcoded URL."""
+    from urllib.parse import urlparse
+
+    from .config import load
+
+    try:
+        u = urlparse(load().accounts.magic_link_url_template)
+        if u.scheme and u.netloc:
+            return f"{u.scheme}://{u.netloc}"
+    except Exception:
+        pass
+    return "https://denver.scooter.fyi"
+
+
+@router.get("/campaigns", response_class=HTMLResponse)
+def campaigns_page(
+    request: Request,
+    days: int = Query(30, ge=1, le=90),
+    code: str | None = Query(None),
+    error: str | None = Query(None),
+    saved: str | None = Query(None),
+    user: dict = Depends(auth.require_admin),
+):
+    from datetime import timedelta, timezone
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = campaigns.list_campaigns()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT campaign,
+                       COUNT(DISTINCT visitor_hash) AS visitors,
+                       COUNT(DISTINCT session_id)   AS sessions,
+                       COUNT(*)                     AS events,
+                       COUNT(*) FILTER (WHERE name = 'page_load'),
+                       COUNT(*) FILTER (WHERE name = 'ride_complete'),
+                       COUNT(*) FILTER (WHERE name = 'auth_success')
+                FROM telemetry_events
+                WHERE received_at >= %s AND campaign <> 'none'
+                GROUP BY campaign
+                """,
+                (since,),
+            )
+            window_stats = {
+                r[0]: {
+                    "visitors": r[1],
+                    "sessions": r[2],
+                    "events": r[3],
+                    "page_loads": r[4],
+                    "ride_completes": r[5],
+                    "auth_successes": r[6],
+                }
+                for r in cur.fetchall()
+            }
+
+            # Sessions/events sum cleanly across days; distinct visitors do
+            # not (the hash rotates daily by design), so all-time shows
+            # sessions, not a bogus visitor total.
+            cur.execute(
+                """
+                SELECT campaign, SUM(sessions), SUM(ride_completes),
+                       MIN(day), MAX(day)
+                FROM campaigns_daily
+                GROUP BY campaign
+                """
+            )
+            alltime = {
+                r[0]: {
+                    "sessions": r[1],
+                    "ride_completes": r[2],
+                    "first_day": r[3],
+                    "last_day": r[4],
+                }
+                for r in cur.fetchall()
+            }
+
+            detail = None
+            if code and any(c["code"] == code for c in rows):
+                cur.execute(
+                    """
+                    SELECT (received_at AT TIME ZONE 'America/Denver')::date,
+                           COUNT(DISTINCT visitor_hash),
+                           COUNT(DISTINCT session_id),
+                           COUNT(*),
+                           COUNT(*) FILTER (WHERE name = 'ride_complete')
+                    FROM telemetry_events
+                    WHERE campaign = %s AND received_at >= %s
+                    GROUP BY 1 ORDER BY 1 DESC
+                    """,
+                    (code, since),
+                )
+                detail = {
+                    "code": code,
+                    "daily": [
+                        {
+                            "day": d,
+                            "visitors": v,
+                            "sessions": s,
+                            "events": e,
+                            "ride_completes": rc,
+                        }
+                        for d, v, s, e, rc in cur.fetchall()
+                    ],
+                }
+
+    known_codes = {c["code"] for c in rows}
+    # Tagged traffic whose code matched no live campaign ('other'), shown so
+    # typos in printed material don't vanish silently.
+    other = window_stats.get(campaigns.UNKNOWN)
+    for c in rows:
+        c["stats"] = window_stats.get(c["code"])
+        c["alltime"] = alltime.get(c["code"])
+        c["link"] = f"{_site_origin()}/?utm_campaign={c['code']}"
+    # Rollup rows for campaigns since deleted from the registry would be
+    # invisible above; surface them too (defensive — deletion isn't offered).
+    orphaned = sorted(
+        k for k in alltime if k not in known_codes and k != campaigns.UNKNOWN
+    )
+    return _render(
+        "campaigns.html",
+        user=user,
+        days=days,
+        rows=rows,
+        other=other,
+        orphaned=orphaned,
+        detail=detail,
+        error=error,
+        saved=saved,
+    )
+
+
+# QR codes for the tagged links, for stickers/posters. Error correction
+# 'q' (25%) because printed codes get scuffed. SVG for print (crisp at any
+# size), PNG for pasting into chats/docs. Served for archived campaigns
+# too — an operator may still need the artwork file, and the admin session
+# gate means nothing here is public.
+
+
+def _campaign_qr(code: str):
+    import segno
+
+    if campaigns.get(code) is None:
+        return None
+    return segno.make(f"{_site_origin()}/?utm_campaign={code}", error="q")
+
+
+@router.get("/campaigns/{code}/qr.png")
+def campaign_qr_png(
+    code: str,
+    scale: int = Query(10, ge=2, le=40),
+    user: dict = Depends(auth.require_admin),
+):
+    import io
+
+    qr = _campaign_qr(code)
+    if qr is None:
+        return _render("not_found.html", user=user, what=f"campaign {code}")
+    buf = io.BytesIO()
+    qr.save(buf, kind="png", scale=scale, border=4)
+    return Response(
+        buf.getvalue(),
+        media_type="image/png",
+        headers={
+            "Content-Disposition": f'inline; filename="campaign-{code}-qr.png"'
+        },
+    )
+
+
+@router.get("/campaigns/{code}/qr.svg")
+def campaign_qr_svg(
+    code: str,
+    user: dict = Depends(auth.require_admin),
+):
+    import io
+
+    qr = _campaign_qr(code)
+    if qr is None:
+        return _render("not_found.html", user=user, what=f"campaign {code}")
+    buf = io.BytesIO()
+    qr.save(buf, kind="svg", scale=10, border=4)
+    return Response(
+        buf.getvalue(),
+        media_type="image/svg+xml",
+        headers={
+            "Content-Disposition": f'inline; filename="campaign-{code}-qr.svg"'
+        },
+    )
+
+
+@router.post("/campaigns/add")
+def campaigns_add(
+    request: Request,
+    code: str = Form(...),
+    name: str = Form(""),
+    channel: str = Form(""),
+    notes: str = Form(""),
+    user: dict = Depends(auth.require_admin),
+):
+    if not _csrf_ok(request):
+        return RedirectResponse(
+            "/admin/campaigns?error=cross-site+request+blocked", status_code=303
+        )
+    try:
+        created = campaigns.create(
+            code, name, channel, notes, created_by=user.get("login") or ""
+        )
+    except ValueError:
+        return RedirectResponse(
+            "/admin/campaigns?error=code+must+be+a+slug+(a-z+0-9+-+_,+max+40)",
+            status_code=303,
+        )
+    return RedirectResponse(
+        f"/admin/campaigns?saved={'created' if created else 'code+already+exists'}",
+        status_code=303,
+    )
+
+
+@router.post("/campaigns/archive")
+def campaigns_archive(
+    request: Request,
+    code: str = Form(...),
+    action: str = Form("archive"),
+    user: dict = Depends(auth.require_admin),
+):
+    if not _csrf_ok(request):
+        return RedirectResponse(
+            "/admin/campaigns?error=cross-site+request+blocked", status_code=303
+        )
+    changed = campaigns.set_archived(code, archived=(action != "unarchive"))
+    verb = "unarchived" if action == "unarchive" else "archived"
+    return RedirectResponse(
+        f"/admin/campaigns?saved={verb if changed else 'no+change'}",
+        status_code=303,
     )

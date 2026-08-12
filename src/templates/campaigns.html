@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}campaigns · veo-audit admin{% endblock %}
+{% block content %}
+<h1>Campaigns</h1>
+<p>
+  Marketing links tagged <code>?utm_campaign=&lt;code&gt;</code>. The web app
+  forwards the code with its first-party telemetry, ingest validates it
+  against this registry (unknown or archived codes count as
+  <code>other</code>), and events carry it as a bounded dimension — no free
+  text, no personal data, same privacy contract as the rest of analytics.
+  Archiving a campaign stops attribution immediately but keeps its history.
+</p>
+
+{% if saved %}<p style="color:#2a7;">Saved: {{ saved }}</p>{% endif %}
+{% if error %}<p style="color:#c00;">Error: {{ error }}</p>{% endif %}
+
+<form method="post" action="/admin/campaigns/add" style="margin: 16px 0;">
+  <input type="text" name="code" placeholder="code (a-z 0-9 - _)" required
+         pattern="[a-z0-9][a-z0-9_-]{0,39}"
+         style="padding:6px 8px; width:180px; font-size:13px;" />
+  <input type="text" name="name" placeholder="display name"
+         style="padding:6px 8px; width:220px; font-size:13px;" />
+  <input type="text" name="channel" placeholder="channel (qr, social, …)"
+         style="padding:6px 8px; width:160px; font-size:13px;" />
+  <input type="text" name="notes" placeholder="notes"
+         style="padding:6px 8px; width:260px; font-size:13px;" />
+  <button type="submit" style="padding:6px 12px; font-size:13px;">Create campaign</button>
+</form>
+
+<p>Window:
+  {% for d in (7, 30, 90) %}
+    {% if d == days %}<strong>{{ d }}d</strong>
+    {% else %}<a href="/admin/campaigns?days={{ d }}{% if detail %}&code={{ detail.code }}{% endif %}">{{ d }}d</a>{% endif %}
+    {% if not loop.last %} · {% endif %}
+  {% endfor %}
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>code</th><th>name</th><th>channel</th><th>tagged link</th>
+      <th>QR</th>
+      <th>visitors ({{ days }}d)</th><th>sessions ({{ days }}d)</th>
+      <th>page loads ({{ days }}d)</th><th>sign-ins ({{ days }}d)</th>
+      <th>rides ({{ days }}d)</th>
+      <th>sessions (all-time)</th><th>created</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in rows %}
+      <tr{% if c.archived_at %} style="opacity:0.55;"{% endif %}>
+        <td><a href="/admin/campaigns?days={{ days }}&code={{ c.code }}"><code>{{ c.code }}</code></a>
+            {% if c.archived_at %} <em>(archived)</em>{% endif %}</td>
+        <td>{{ c.name or "—" }}</td>
+        <td>{{ c.channel or "—" }}</td>
+        <td><code>{{ c.link }}</code></td>
+        <td><a href="/admin/campaigns/{{ c.code }}/qr.png">png</a> ·
+            <a href="/admin/campaigns/{{ c.code }}/qr.svg">svg</a></td>
+        <td>{{ c.stats.visitors if c.stats else 0 }}</td>
+        <td>{{ c.stats.sessions if c.stats else 0 }}</td>
+        <td>{{ c.stats.page_loads if c.stats else 0 }}</td>
+        <td>{{ c.stats.auth_successes if c.stats else 0 }}</td>
+        <td>{{ c.stats.ride_completes if c.stats else 0 }}</td>
+        <td>{{ c.alltime.sessions if c.alltime else 0 }}</td>
+        <td>{{ c.created_at | denver_ts }}<br/><small>{{ c.created_by }}</small></td>
+        <td>
+          <form method="post" action="/admin/campaigns/archive" style="margin:0;">
+            <input type="hidden" name="code" value="{{ c.code }}" />
+            {% if c.archived_at %}
+              <input type="hidden" name="action" value="unarchive" />
+              <button type="submit" style="padding:2px 8px; font-size:12px;">reactivate</button>
+            {% else %}
+              <input type="hidden" name="action" value="archive" />
+              <button type="submit" style="padding:2px 8px; font-size:12px; color:#b80;"
+                      onclick="return confirm('Archive this campaign? Its link stops attributing (counts as other) but history is kept.');">archive</button>
+            {% endif %}
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="13"><em>No campaigns yet — create one above, then share the tagged link or its QR code.</em></td></tr>
+    {% endfor %}
+    {% if other %}
+      <tr>
+        <td><code>other</code></td>
+        <td colspan="4"><em>tagged traffic with an unknown, malformed, or archived code</em></td>
+        <td>{{ other.visitors }}</td>
+        <td>{{ other.sessions }}</td>
+        <td>{{ other.page_loads }}</td>
+        <td>{{ other.auth_successes }}</td>
+        <td>{{ other.ride_completes }}</td>
+        <td colspan="3"></td>
+      </tr>
+    {% endif %}
+  </tbody>
+</table>
+
+{% if orphaned %}
+<p><small>Rollup history also exists for: {% for o in orphaned %}<code>{{ o }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</small></p>
+{% endif %}
+
+{% if detail %}
+<h2>Daily — <code>{{ detail.code }}</code> (last {{ days }}d, Denver days)</h2>
+<p>
+  <img src="/admin/campaigns/{{ detail.code }}/qr.png?scale=5"
+       alt="QR code for the {{ detail.code }} campaign link"
+       style="border:1px solid #e2e2e2; background:white; vertical-align:middle;" />
+  &nbsp;<a href="/admin/campaigns/{{ detail.code }}/qr.png">download PNG</a> ·
+  <a href="/admin/campaigns/{{ detail.code }}/qr.svg">download SVG</a>
+  <small>(SVG for print — crisp at any size)</small>
+</p>
+<table>
+  <thead><tr><th>day</th><th>visitors</th><th>sessions</th><th>events</th><th>rides completed</th></tr></thead>
+  <tbody>
+    {% for r in detail.daily %}
+      <tr>
+        <td><code>{{ r.day }}</code></td>
+        <td>{{ r.visitors }}</td>
+        <td>{{ r.sessions }}</td>
+        <td>{{ r.events }}</td>
+        <td>{{ r.ride_completes }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5"><em>no tagged traffic in this window</em></td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p><small>Raw events are pruned after 90 days; older per-day history lives in
+the <code>campaigns_daily</code> rollup (all-time totals above).</small></p>
+{% endif %}
+{% endblock %}
