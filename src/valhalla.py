@@ -90,13 +90,21 @@ def route(points: list[tuple[float, float]],
           costing_options: dict[str, Any],
           alternates: int = 0,
           radius: int | None = None,
-          with_elevation: bool = True) -> dict[str, Any]:
-    """Request a bicycle route through ``points`` (list of (lat, lon))."""
+          with_elevation: bool = True,
+          costing: str = "bicycle") -> dict[str, Any]:
+    """Request a route through ``points`` (list of (lat, lon)).
+
+    ``costing`` is Valhalla's own mode. It is "bicycle" for every rider-facing
+    profile, and "pedestrian" for the walk to a scooter — the leg before the
+    ride, which the same tiles already serve without a rebuild (verified
+    against the live graph: pedestrian returns a shape and maneuvers on the
+    bicycle-built Denver clip).
+    """
     cfg = load().valhalla
     payload: dict[str, Any] = {
         "locations": _locations(points, radius),
-        "costing": "bicycle",
-        "costing_options": {"bicycle": dict(costing_options)},
+        "costing": costing,
+        "costing_options": {costing: dict(costing_options)},
         # Kilometres throughout; the shade score is a length-weighted ratio so
         # units cancel there, and distances are converted to metres on output.
         "directions_options": {"units": "kilometers"},
