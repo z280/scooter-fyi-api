@@ -39,6 +39,20 @@ class _Cur:
         if "INSERT INTO referrals" in sql:
             self.store.setdefault("__referrals__", []).append(params)
 
+    def fetchall(self):
+        now = self.store["__now__"]
+        rows = [r for k, r in self.store.items()
+                if k not in ("__now__", "__referrals__") and r["expires_at"] > now]
+        rows.sort(key=lambda r: r["claimed_at"])
+        seen, out = set(), []
+        for r in rows:
+            if r["vehicle_identifier"] in seen:
+                continue
+            seen.add(r["vehicle_identifier"])
+            out.append((r["vehicle_identifier"], r["id"], r["claimed_by"],
+                        r["claimed_at"], r["expires_at"]))
+        return out
+
     def fetchone(self):
         if "INSERT INTO dibs" in self._sql:
             dibs_id = self._params[0]
@@ -53,6 +67,9 @@ class _Cur:
                 "expires_at": expires,
             }
             return (claimed, expires)
+        if "DISTINCT ON (vehicle_identifier)" in self._sql:
+            self._all = True
+            return None
         if "WHERE vehicle_identifier" in self._sql:
             now = self.store["__now__"]
             live = [r for k, r in self.store.items()
@@ -376,3 +393,29 @@ def test_it_reveals_no_more_than_the_handle_they_chose(client):
     d = client.get("/api/v1/dibs/vehicle/abc123").json()["dibs"]
     assert set(d) == {"id", "claimed_by", "claimed_at", "expires_at",
                       "denver_time", "certificate_url"}
+
+
+def test_live_claims_come_as_one_small_map(client):
+    """Fetched once per device refresh rather than per popup: dibbs are rare —
+    a handful across the fleet against thousands of vehicles — so one small
+    response beats a request every time somebody taps a scooter, and the popup
+    already knows the answer when it opens."""
+    client.post("/api/v1/dibs", json=BODY)
+    client.post("/api/v1/dibs", json={**BODY, "vehicle_identifier": "def456",
+                                      "claimed_by": "Nimble 🦊"})
+    live = client.get("/api/v1/dibs/live").json()["dibs"]
+    assert set(live) == {"abc123", "def456"}
+    assert live["def456"]["claimed_by"] == "Nimble 🦊"
+
+
+def test_live_claims_exclude_the_expired(client):
+    client.post("/api/v1/dibs", json=BODY)
+    client.store["__now__"] = NOW + timedelta(hours=2)
+    assert client.get("/api/v1/dibs/live").json()["dibs"] == {}
+
+
+def test_live_claims_keep_the_oldest_per_vehicle(client):
+    first = client.post("/api/v1/dibs", json={**BODY, "claimed_by": "Early 🐦"}).json()["id"]
+    client.store[first]["claimed_at"] = NOW - timedelta(minutes=5)
+    client.post("/api/v1/dibs", json={**BODY, "claimed_by": "Late 🦥"})
+    assert client.get("/api/v1/dibs/live").json()["dibs"]["abc123"]["claimed_by"] == "Early 🐦"

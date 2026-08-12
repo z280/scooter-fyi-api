@@ -157,6 +157,45 @@ def create_dibs(body: DibsIn) -> dict[str, Any]:
     }
 
 
+@router.get("/api/v1/dibs/live")
+def live_dibs() -> dict[str, Any]:
+    """Every live claim in the city, keyed by vehicle.
+
+    Fetched once per device refresh rather than per popup. Dibbs are RARE —
+    a handful across the fleet at any moment against thousands of vehicles —
+    so one small response every refresh is cheaper than a request each time
+    somebody taps a scooter, and it means the popup already knows the answer
+    when it opens instead of gaining it a moment later.
+
+    Only the oldest live claim per vehicle is returned, for the reason given
+    on the per-vehicle endpoint: when two people call dibbs, the earlier claim
+    wins by the rules, and returning the newest would have the app quietly
+    siding with whoever tapped last.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT ON (vehicle_identifier) "
+                "       vehicle_identifier, id, claimed_by, claimed_at, expires_at "
+                "FROM dibs WHERE expires_at > NOW() "
+                "ORDER BY vehicle_identifier, claimed_at ASC"
+            )
+            rows = cur.fetchall()
+    return {
+        "dibs": {
+            r[0]: {
+                "id": r[1],
+                "claimed_by": r[2],
+                "claimed_at": r[3].isoformat(),
+                "expires_at": r[4].isoformat(),
+                "denver_time": _denver(r[3]),
+                "certificate_url": f"{API_BASE}/dibs/{r[1]}",
+            }
+            for r in rows
+        }
+    }
+
+
 @router.get("/api/v1/dibs/vehicle/{vehicle_identifier}")
 def dibs_for_vehicle(vehicle_identifier: str) -> dict[str, Any]:
     """Does anybody have a live claim on this scooter?
