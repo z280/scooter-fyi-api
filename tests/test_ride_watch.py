@@ -450,3 +450,31 @@ def test_finalize_validation_returning_none_is_not_counted(monkeypatch):
     )
     assert stats.newly_reappeared == 1
     assert stats.finalized_validations == 0
+
+
+def test_left_feed_never_clobbers_a_completed_ride():
+    """A ride that ENDED while a cycle was still in flight must not be dragged
+    back to `left_feed` when that cycle finally commits.
+
+    `snapshot_time` is when the cycle OBSERVED the feed, not when its
+    transaction commits, and a cycle can run for minutes. Seen in production
+    on ride faf14a49: departure observed 13:00:01, rider ended at 13:01:22
+    (status -> completed), row last written 13:05:34 with status left_feed.
+    The end had landed and the late commit undid it.
+
+    Asserted against the SQL rather than through a database because the guard
+    is the WHERE clause itself — a fake cursor would happily "apply" an
+    UPDATE whose predicate it never evaluates, and prove nothing.
+    """
+    import inspect
+
+    from src import ride_watch
+
+    src = inspect.getsource(ride_watch.update_watches_for_cycle)
+    # The TRACKED_RIDES update, not the watch-list one a few lines above it —
+    # both set a status called 'left_feed' and only one of them is this rule.
+    start = src.index("UPDATE tracked_rides SET")
+    stmt = src[start : src.index('"""', start)]
+    assert "AND status = 'watching'" in stmt, (
+        "the left_feed transition must be legal only from 'watching'"
+    )
