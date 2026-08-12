@@ -61,9 +61,9 @@ class _Cur:
             self.store[dibs_id] = {
                 "id": dibs_id, "vehicle_identifier": self._params[1],
                 "vehicle_name": self._params[2], "plate": self._params[3],
-                "claimed_by": self._params[4], "provider": self._params[5],
-                "device_type": self._params[6], "lat": self._params[7],
-                "lon": self._params[8], "claimed_at": claimed,
+                "claimed_by": self._params[4], "device_type": self._params[5],
+                "lat": self._params[6], "lon": self._params[7],
+                "claimed_at": claimed,
                 "expires_at": expires,
             }
             return (claimed, expires)
@@ -88,7 +88,7 @@ class _Cur:
             return (row["id"], row["vehicle_identifier"], row["vehicle_name"],
                     row["plate"], row["claimed_by"], row["claimed_at"],
                     row["expires_at"], self.store["__now__"],
-                    row["provider"], row["device_type"], row["lat"], row["lon"])
+                    row["device_type"], row["lat"], row["lon"])
         return None
 
 
@@ -133,6 +133,15 @@ def test_the_server_owns_the_timestamp(client):
     client sent."""
     body = client.post("/api/v1/dibs", json={**BODY, "claimed_at": "1999-01-01T00:00:00Z"}).json()
     assert body["claimed_at"] == NOW.isoformat()
+
+
+def test_the_certificate_links_are_absolute(client):
+    """The app is served from a different host than this API. A relative
+    qr_url resolved against the app's origin and 404'd, so the certificate
+    rendered with a broken image where its QR should be."""
+    body = client.post("/api/v1/dibs", json=BODY).json()
+    assert body["verify_url"].startswith("https://")
+    assert body["qr_url"].startswith("https://")
 
 
 def test_the_id_is_not_guessable(client):
@@ -214,6 +223,19 @@ def test_the_page_answers_the_question_in_words(client):
     assert 'aria-label="FYI"' in html
 
 
+def test_the_page_proves_its_own_liveness(client):
+    """The in-app certificate proves it is live by MOVING. A server-rendered
+    page cannot move without JavaScript, and this one ships none on purpose —
+    so it proves liveness the way only a server can: by stamping when it was
+    generated. A screenshot carries a stale stamp, visible at a glance."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    html = client.get(f"/dibs/{dibs_id}").text
+    assert "Loaded live at" in html
+    assert "you&rsquo;re looking at a\n        screenshot" in html or "screenshot" in html
+    # And still no script, because that is why the stamp had to be the answer.
+    assert "<script" not in html
+
+
 def test_the_page_says_plainly_that_dibs_is_not_a_reservation(client):
     """The rider is the person most harmed by believing otherwise."""
     dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
@@ -221,14 +243,15 @@ def test_the_page_says_plainly_that_dibs_is_not_a_reservation(client):
 
 
 def test_the_page_names_the_provider_and_type(client):
-    """"(provider) (device_type) (vanity_name)" — a stranger has no idea what
-    a "Cosmo" is, and "Veo scooter" tells them what they are arguing about."""
+    """The device name and the vanity name, once each."""
     dibs_id = client.post(
-        "/api/v1/dibs",
-        json={**BODY, "provider": "Veo", "device_type": "scooter"},
+        "/api/v1/dibs", json={**BODY, "device_type": "Veo Cosmo"},
     ).json()["id"]
     html = client.get(f"/dibs/{dibs_id}").text
-    assert "Veo scooter Lunar" in html
+    assert "Veo Cosmo Lunar" in html
+    # ...and exactly once. The catalogue name already carries the maker, so a
+    # separate provider field printed "Veo Veo Cosmo Veo Cosmo".
+    assert html.count("Veo Cosmo") == 1
 
 
 def test_the_parts_that_are_missing_leave_no_hole(client):
@@ -237,7 +260,7 @@ def test_the_parts_that_are_missing_leave_no_hole(client):
     dibs_id = client.post(
         "/api/v1/dibs", json={**BODY, "device_type": ""}
     ).json()["id"]
-    assert "Veo Lunar" in client.get(f"/dibs/{dibs_id}").text
+    assert "on <strong>Lunar" in client.get(f"/dibs/{dibs_id}").text
 
 
 # --- the referral form ------------------------------------------------------
