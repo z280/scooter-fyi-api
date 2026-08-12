@@ -161,17 +161,17 @@ def test_an_expired_page_says_had_and_names_the_verdict(client):
     dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
     client.store["__now__"] = NOW + timedelta(hours=2)
     html = client.get(f"/dibs/{dibs_id}").text
-    assert "had dibbs on" in html
+    assert "had dibs on" in html
     assert "null and void" in html
     assert "they expired at" in html
 
 
 def test_the_rules_are_on_the_page(client):
-    """Somebody arguing about dibbs should be able to read what dibbs is,
+    """Somebody arguing about dibs should be able to read what dibs is,
     without taking the other person's word for it."""
     dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
     html = client.get(f"/dibs/{dibs_id}").text
-    assert "The rules of dibbs" in html
+    assert "The rules of dibs" in html
     assert "isn't a reservation" in html
     assert "Ten minutes to set off" in html
     assert "Fifteen minutes" in html
@@ -207,7 +207,7 @@ def test_the_page_answers_the_question_in_words(client):
     dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
     html = client.get(f"/dibs/{dibs_id}").text
     assert "Resourceful 🌈" in html and "Lunar" in html
-    assert "has dibbs on" in html
+    assert "has dibs on" in html
     assert "Still good." in html
     # The "FYI" is the speech-bubble mark, not the letters — so the label on
     # it is what a screen reader (and this test) has to go by.
@@ -334,7 +334,7 @@ def test_the_qr_points_at_this_certificate_with_a_registered_campaign(client):
     # Re-derive what the endpoint encodes and check it, rather than decoding
     # the SVG: the payload is the contract, the rendering is not.
     client.get(f"/api/v1/dibs/{dibs_id}/qr.svg")
-    assert api_dibs.CAMPAIGN_SCAN == "dibbs"
+    assert api_dibs.CAMPAIGN_SCAN == "dibs"
     target = (f"{api_dibs.API_BASE}/dibs/{dibs_id}"
               f"?utm_source=dibs-certificate&utm_medium=qr"
               f"&utm_campaign={api_dibs.CAMPAIGN_SCAN}&ref={dibs_id}")
@@ -353,7 +353,7 @@ def test_no_qr_for_a_certificate_that_does_not_exist(client):
     assert client.get("/api/v1/dibs/nope/qr.svg").status_code == 404
 
 
-# --- "who has dibbs on this one?" -------------------------------------------
+# --- "who has dibs on this one?" -------------------------------------------
 
 def test_a_vehicle_with_no_claim_says_so_plainly(client):
     assert client.get("/api/v1/dibs/vehicle/nobody").json() == {"dibs": None}
@@ -369,7 +369,7 @@ def test_a_live_claim_is_visible_to_everyone(client):
 
 
 def test_the_OLDEST_claim_wins_not_the_newest(client):
-    """Two people can both call dibbs — nothing prevents it. When they do, the
+    """Two people can both call dibs — nothing prevents it. When they do, the
     earlier claim is the one that wins by the rules, so it is the one shown.
     Showing the newest would have the app quietly siding with whoever tapped
     last."""
@@ -396,7 +396,7 @@ def test_it_reveals_no_more_than_the_handle_they_chose(client):
 
 
 def test_live_claims_come_as_one_small_map(client):
-    """Fetched once per device refresh rather than per popup: dibbs are rare —
+    """Fetched once per device refresh rather than per popup: dibs are rare —
     a handful across the fleet against thousands of vehicles — so one small
     response beats a request every time somebody taps a scooter, and the popup
     already knows the answer when it opens."""

@@ -17,7 +17,7 @@ That page is also the app's front door, which is the other half of why the
 certificate exists — a rider showing one is, at that moment, introducing
 somebody to both the app and the idea.
 
-WHAT DIBBS DOES AND DOES NOT DO. It does not reserve anything: Veo has no
+WHAT DIBS DOES AND DOES NOT DO. It does not reserve anything: Veo has no
 reservation system, this app cannot stop a vehicle unlocking, and no claim
 here changes what the operator will rent to whom.
 
@@ -25,9 +25,9 @@ It DOES now gate our own buttons. `GET /api/v1/dibs/vehicle/{id}` reports a
 live claim so the app can grey out "I'll ride this one" and say who called it
 — a deliberate change of stance from the first version of this module, which
 refused to tell one rider about another's claim on the grounds that doing so
-would make dibbs a promise.
+would make dibs a promise.
 
-The reason for the change is that the alternative was worse. Dibbs that only
+The reason for the change is that the alternative was worse. Dibs that only
 its own holder can see is not a social object at all, just a private note; the
 whole premise — two people at one scooter settling it — needs the second
 person to be told. A greyed button with a name and a timestamp beside it is an
@@ -35,7 +35,7 @@ argument the app is making on somebody's behalf, and riders can override it by
 opening Veo directly, which they always could.
 
 So: visible to everyone, binding on nobody, and never presented as
-unavailability. The copy says a person called dibbs, not that the scooter is
+unavailability. The copy says a person called dibs, not that the scooter is
 taken.
 """
 
@@ -78,12 +78,12 @@ APP_BASE = "https://denver.scooter.fyi"
 #: 'other' — the QR would scan, the traffic would arrive, and the report would
 #: read zero.
 #:
-#: The scan itself is `dibbs`; a click THROUGH the verification page is
-#: `dibbs-validation`, and they are separated because they mean different
+#: The scan itself is `dibs`; a click THROUGH the verification page is
+#: `dibs-validation`, and they are separated because they mean different
 #: things. One is a stranger being curious about a certificate they were just
 #: shown. The other is that stranger going and getting the app.
-CAMPAIGN_SCAN = "dibbs"
-CAMPAIGN_VALIDATION = "dibbs-validation"
+CAMPAIGN_SCAN = "dibs"
+CAMPAIGN_VALIDATION = "dibs-validation"
 
 VALIDATION_UTM = (
     f"?utm_source=dibs-validation&utm_medium=referral&utm_campaign={CAMPAIGN_VALIDATION}"
@@ -161,14 +161,14 @@ def create_dibs(body: DibsIn) -> dict[str, Any]:
 def live_dibs() -> dict[str, Any]:
     """Every live claim in the city, keyed by vehicle.
 
-    Fetched once per device refresh rather than per popup. Dibbs are RARE —
+    Fetched once per device refresh rather than per popup. Dibs are RARE —
     a handful across the fleet at any moment against thousands of vehicles —
     so one small response every refresh is cheaper than a request each time
     somebody taps a scooter, and it means the popup already knows the answer
     when it opens instead of gaining it a moment later.
 
     Only the oldest live claim per vehicle is returned, for the reason given
-    on the per-vehicle endpoint: when two people call dibbs, the earlier claim
+    on the per-vehicle endpoint: when two people call dibs, the earlier claim
     wins by the rules, and returning the newest would have the app quietly
     siding with whoever tapped last.
     """
@@ -200,14 +200,14 @@ def live_dibs() -> dict[str, Any]:
 def dibs_for_vehicle(vehicle_identifier: str) -> dict[str, Any]:
     """Does anybody have a live claim on this scooter?
 
-    Read by the device popup so it can say "Resourceful 🌈 has dibbs!" and
+    Read by the device popup so it can say "Resourceful 🌈 has dibs!" and
     grey its own ride button. Public and unauthenticated: the second person in
     the argument is exactly who needs to see this, and they may well not have
     an account.
 
     Returns the OLDEST live claim rather than the newest. Two people can both
-    call dibbs — nothing prevents it — and when they do, the earlier claim is
-    the one that wins by the rules of dibbs, so it is the one shown. Showing
+    call dibs — nothing prevents it — and when they do, the earlier claim is
+    the one that wins by the rules of dibs, so it is the one shown. Showing
     the newest would have the app quietly siding with whoever tapped last.
 
     `claimed_by` is a public display name the rider chose. No contact details,
@@ -368,7 +368,7 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
     certificate is that the other person can check it themselves without
     installing anything, and a wall of braces does not settle an argument.
 
-    Everything that leaves here goes to the app tagged `dibbs-validation` —
+    Everything that leaves here goes to the app tagged `dibs-validation` —
     somebody who was shown a certificate by a stranger and then went looking
     for the app is a different, more interesting event than the scan itself.
     """
@@ -398,12 +398,12 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
     # about to take the scooter.
     if active:
         claim_line = (
-            f'<strong>{who}</strong> has dibbs on <strong>{what}</strong>{plate}'
+            f'<strong>{who}</strong> has dibs on <strong>{what}</strong>{plate}'
         )
         verdict = '<p class="verdict verdict--live">Still good.</p>'
     else:
         claim_line = (
-            f'<strong>{who}</strong> had dibbs on <strong>{what}</strong>{plate}, '
+            f'<strong>{who}</strong> had dibs on <strong>{what}</strong>{plate}, '
             f'but they expired at <strong>{_esc(_denver(d["expires_at"]))}</strong> '
             f'and are now'
         )
@@ -421,16 +421,16 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
       </p>
 
       <details class="rules">
-        <summary>The rules of dibbs</summary>
+        <summary>The rules of dibs</summary>
         <ol>
-          <li><strong>Dibbs isn't a reservation.</strong> Veo doesn't offer
+          <li><strong>Dibs isn't a reservation.</strong> Veo doesn't offer
               one. This is a timestamp and whatever standing it earns you in
               person — nothing stops anyone riding anything.</li>
-          <li><strong>Ten minutes to set off.</strong> Call dibbs and don't
+          <li><strong>Ten minutes to set off.</strong> Call dibs and don't
               start walking towards it, and your claim is void. Not ten
               minutes to arrive — ten minutes to move.</li>
           <li><strong>Fifteen minutes' walk, maximum.</strong> You can't call
-              dibbs on something you couldn't plausibly reach.</li>
+              dibs on something you couldn't plausibly reach.</li>
           <li><strong>Twenty-five minutes and it's over</strong>, however well
               you walked. Ten to set off plus the fifteen you were allowed.</li>
           <li><strong>A certificate only counts while it's moving.</strong>
@@ -439,7 +439,7 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
       </details>
 
       <div class="signup">
-        <h2>Want to call dibbs yourself?</h2>
+        <h2>Want to call dibs yourself?</h2>
         <p class="signup__sub">
           Sign up with your phone and email and your friend
           <strong>{who}</strong> gets <strong>100 pts</strong> for referring you.
@@ -465,7 +465,7 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
         </a>
       </div>
     '''
-    return HTMLResponse(_page_shell("Certificate of Dibbs", body))
+    return HTMLResponse(_page_shell("Certificate of Dibs", body))
 
 
 class ReferIn(BaseModel):
@@ -500,7 +500,7 @@ def dibs_refer(
     d = _fetch(dibs_id)
     if d is None:
         return HTMLResponse(
-            _page_shell("Not a dibbs claim",
+            _page_shell("Not a dibs claim",
                         '<p class="lede">That certificate could not be found.</p>'),
             status_code=404,
         )
@@ -558,7 +558,7 @@ def _page_shell(title: str, body: str) -> str:
 <title>{_esc(title)} · Scooter.fyi</title>
 <meta name="robots" content="noindex">
 <meta property="og:title" content="{_esc(title)}">
-<meta property="og:description" content="Somebody called dibbs. Here's the receipt.">
+<meta property="og:description" content="Somebody called dibs. Here's the receipt.">
 <style>
   :root {{ color-scheme: light; --ink:#2b2418; --muted:#7a6a4c; --gold:#c9a94f;
           --paper:#fffdf7; --accent:#0066ff; }}

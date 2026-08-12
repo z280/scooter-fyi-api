@@ -77,15 +77,15 @@ COMMENT ON TABLE dibs IS
 -- QR would have worked, the scans would have landed, and the campaign report
 -- would have read zero.
 --
---   dibbs             a stranger scanned the QR on somebody's certificate
---   dibbs-validation  ...and then clicked through to the app from the
+--   dibs             a stranger scanned the QR on somebody's certificate
+--   dibs-validation  ...and then clicked through to the app from the
 --                     verification page. A much stronger signal, and worth
 --                     separating: one is curiosity, the other is intent.
 INSERT INTO campaigns (code, name, channel, notes, created_by)
 VALUES
-  ('dibbs', 'Dibs certificate QR', 'qr',
+  ('dibs', 'Dibs certificate QR', 'qr',
    'Scanned off a rider''s certificate of dibs, in person.', 'system'),
-  ('dibbs-validation', 'Dibs validation page', 'referral',
+  ('dibs-validation', 'Dibs validation page', 'referral',
    'Clicked through to the app from a dibs verification page.', 'system')
 ON CONFLICT (code) DO NOTHING;
 
