@@ -493,6 +493,95 @@ def route(
     }
 
 
+# Walking costing for the leg BEFORE the ride. Deliberately small and fixed:
+# there is nothing for a rider to tune about walking two blocks, so this is not
+# a selectable profile and does not appear in /route/profiles — that list means
+# "how do you want to RIDE", and putting a walk in it would offer a scooter
+# route the rider cannot take on foot and vice versa.
+#
+# `walking_speed` is Valhalla's km/h. 4.5 is a shade under its 5.1 default:
+# somebody crossing a city block to a scooter, phone in hand, checking numbers
+# against a photo, is not walking at a commuter's pace, and an optimistic ETA
+# on a two-minute walk is the kind of small lie that makes a rider stop
+# believing the other numbers.
+WALK_COSTING_OPTIONS: dict[str, Any] = {
+    "walking_speed": 4.5,
+    # Sidewalks and crossings are the point — a rider on foot is not bound by
+    # the High Injury Network exclusions the bicycle profiles enforce.
+    "use_ferry": 0,
+}
+
+
+@router.get("/api/v1/route/walk", dependencies=[Depends(_limit_route_ip)])
+def walk(
+    from_: str = Query(..., alias="from", description="Origin as 'lat,lon'"),
+    to: str = Query(..., description="Destination as 'lat,lon'"),
+    maneuvers: Annotated[bool, Query(
+        description="Include turn-by-turn walking directions")] = False,
+) -> dict[str, Any]:
+    """Walk from where the rider is standing to the vehicle they picked.
+
+    THE LEG THAT WAS MISSING. Choosing a scooter told the rider it was 300 m
+    away and drew a dashed straight line to it — then handed them off to Google
+    or Apple Maps to actually get there. That is the one moment the app has a
+    router of its own and was not using it, and it is also the moment a rider
+    is standing on a pavement deciding whether to trust the app at all.
+
+    Pedestrian costing runs on the SAME tiles the bicycle profiles use — no
+    rebuild, no second graph — so this is the existing router asked a different
+    question. Crucially it is not one of the bicycle profiles: those exclude
+    the High Injury Network, which is a sensible thing to avoid riding along
+    and a nonsense thing to avoid walking along.
+    """
+    cfg = load().valhalla
+    origin = _parse_point(from_, "from")
+    dest = _parse_point(to, "to")
+
+    for label, (lat, lon) in (("from", origin), ("to", dest)):
+        if not cfg.contains(lat, lon):
+            raise HTTPException(400, {
+                "error": "out_of_coverage",
+                "detail": f"{label} ({lat}, {lon}) is outside the routing graph",
+                "graph_bbox": cfg.bbox,
+            })
+
+    try:
+        body = valhalla.route([origin, dest], WALK_COSTING_OPTIONS,
+                              costing="pedestrian", with_elevation=False)
+    except valhalla.ValhallaError as exc:
+        # A walk that cannot be routed is not a dead end the way an unroutable
+        # ride is: the rider can see the scooter on the map and walk to it.
+        # Say so plainly rather than pretending the vehicle is unreachable.
+        if exc.no_suitable_edges or exc.no_path:
+            raise HTTPException(422, {
+                "error": "no_walking_route",
+                "detail": "No walking route found between these points.",
+            }) from exc
+        raise
+
+    trips = valhalla.all_trips(body)
+    if not trips:
+        raise HTTPException(422, {
+            "error": "no_walking_route",
+            "detail": "No walking route found between these points.",
+        })
+    trip = trips[0]
+    shape = valhalla.trip_shape(trip)
+    summary = valhalla.trip_summary(trip)
+    properties: dict[str, Any] = {
+        "mode": "walk",
+        "distance_meters": summary["distance_meters"],
+        "duration_seconds": summary["duration_seconds"],
+    }
+    if maneuvers:
+        properties["maneuvers"] = valhalla.trip_maneuvers(trip)
+    return {
+        "type": "Feature",
+        "geometry": valhalla.to_geojson(shape),
+        "properties": properties,
+    }
+
+
 @router.get("/api/v1/route/profiles",
             dependencies=[Depends(_limit_route_profiles_ip)])
 def profiles() -> dict[str, Any]:
