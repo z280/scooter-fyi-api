@@ -22,19 +22,37 @@ label and would not be fine for identity. What matters is the handful a rider
 can see at once, where a collision is vanishingly unlikely — and the plate
 suffix disambiguates wherever it is permitted to appear.
 
-THE PLATE SUFFIX IS NOT PUBLIC. src/identity.py is emphatic that the raw plate
-never crosses an unauthenticated wire, and records that a previous promotion of
-it to the public endpoint "was later reverted". Publishing the last three
-digits for all ~8,000 vehicles would partition the fleet into ~1,000 buckets
-which, combined with model and position, is often a unique identification — a
-real erosion of the HMAC the whole privacy model rests on. So:
+THE PLATE SUFFIX IS PUBLIC. It was not, and the argument for withholding it
+was wrong on its facts, so it is recorded here rather than quietly deleted.
 
-    public / bulk map     "Lunar 🐸"                 name only
-    plate-permitted paths "Lunar 🐸 928"             the same call sites that
-                                                     already emit vehicle_plate
+The argument ran: publishing the last three digits for all ~8,000 vehicles
+partitions the fleet into ~1,000 buckets which, combined with model and
+position, is often a unique identification — a real erosion of the HMAC the
+whole privacy model rests on.
 
-which keeps the rider-facing benefit (matching the app to the scooter in front
-of you) without handing a scraper a partial plate for the entire fleet.
+Every step of that is true except the one that matters: it assumes we are the
+only source. We are not. VEO PUBLISHES THE PLATE THEMSELVES, in their public
+free_bike_status feed, inside each entry's rental_uris deep link as
+``&number=<plate>``. That feed is keyed by ``bike_id``, which is the same
+value we emit verbatim as ``device_id``. So anyone holding our public payload
+could join it against one unauthenticated request to Veo and recover the FULL
+plate for the entire fleet — not a three-digit bucket, the whole number.
+
+Our own frontend already did exactly that join (see the client's gbfs.ts,
+which calls it "privacy-neutral" for the same reason). Withholding the suffix
+never denied an adversary anything; it only denied it to the rider standing in
+a cluster, since the client-side join needs a GPS fix AND a CORS-reachable
+feed, and fails silently without both. We were paying a real usability cost
+for a protection that did not exist.
+
+    public / bulk map     "Lunar 🐸 928"   name + suffix (`plate_suffix`)
+    plate-permitted paths  full plate      unchanged: admin sessions only
+
+The RAW plate remains admin-only, and src/identity.py's rule that it never
+crosses an unauthenticated wire is untouched — a three-character suffix is not
+the plate, and the HMAC identifier is still the only vehicle key we publish.
+What changed is the claim that hiding three characters bought privacy from an
+adversary who can already fetch all of them from the operator.
 """
 
 from __future__ import annotations
@@ -91,8 +109,14 @@ def public_name(vehicle_identifier: str | None) -> str | None:
 def plate_suffix(vehicle_plate: str | None) -> str | None:
     """Last three characters of the plate — what is printed on the scooter.
 
-    ONLY for call sites already permitted to emit the plate itself. See the
-    module docstring: this is deliberately absent from the public map payload.
+    PUBLIC, including on the bulk map payload. See the module docstring for
+    why the previous restriction was withdrawn.
+
+    Three, not two, because three is what a rider reads off the deck: the
+    point of this string is to be compared against a physical object, and any
+    other length makes the rider do the truncating. The privacy argument that
+    would have favoured two does not survive the operator publishing the whole
+    plate itself.
     """
     if not vehicle_plate:
         return None

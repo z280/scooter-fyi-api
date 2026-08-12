@@ -487,12 +487,19 @@ def _devices_current_impl(
     # dwell_stats - load once, look up per device.
     rental_outcomes = _rental_outcomes()
 
-    # The raw vehicle_plate is emitted ONLY when include_plate is set — i.e.
+    # The RAW vehicle_plate is emitted ONLY when include_plate is set — i.e.
     # from /api/v1/user/devices/current for an admin session. On the public
     # path (include_plate=False) it stays off the wire, preserving the
     # public/private identifier split in src/identity.py (only the HMAC
     # vehicle_identifier is public). The last four SELECT columns are always
     # fetched but only emitted under include_plate (see the feature loop).
+    #
+    # Its last three characters (`plate_suffix`) ARE public, on every path.
+    # That is not a softening of the rule above — it is the recognition that
+    # the rule never bound here. Veo publishes the plate in their own public
+    # free_bike_status feed, keyed by the bike_id we already emit verbatim as
+    # device_id, so the suffix was one unauthenticated request away the whole
+    # time. See src/vehicle_identity.py for the full reasoning.
     # One clock for the whole payload: staleness computed per row against
     # datetime.now() would drift across a 9,000-device response and make two
     # devices parked at the same instant disagree.
@@ -557,9 +564,14 @@ def _devices_current_impl(
             "rentals_no_go": _outcome(rental_outcomes, r[5])[1],
             "smart_ride_grade": smart_ride_grade(*_outcome(rental_outcomes, r[5])),
             # sql/073 — a label a rider can say out loud. Derived from the
-            # identifier, never stored. The plate suffix that disambiguates it
-            # is added below, only where the plate is already permitted.
+            # identifier, never stored.
             "public_name": vehicle_identity.public_name(r[5]),
+            # ...and the digits that tell two Lunar 🐸s apart, which is the
+            # whole job of a label. PUBLIC — see vehicle_identity's docstring
+            # for why withholding it protected nothing: Veo publishes the
+            # plate itself in free_bike_status, keyed by the same bike_id we
+            # emit as device_id. The raw plate is still admin-only, below.
+            "plate_suffix": vehicle_identity.plate_suffix(r[26]),
             "dwell_percentile_hood": (
                 round(dstat.percentile * 100)
                 if dstat and dstat.percentile is not None
