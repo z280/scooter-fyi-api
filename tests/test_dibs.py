@@ -53,6 +53,17 @@ class _Cur:
                 "expires_at": expires,
             }
             return (claimed, expires)
+        if "WHERE vehicle_identifier" in self._sql:
+            now = self.store["__now__"]
+            live = [r for k, r in self.store.items()
+                    if k not in ("__now__", "__referrals__")
+                    and r["vehicle_identifier"] == self._params[0]
+                    and r["expires_at"] > now]
+            if not live:
+                return None
+            live.sort(key=lambda r: r["claimed_at"])
+            r = live[0]
+            return (r["id"], r["claimed_by"], r["claimed_at"], r["expires_at"])
         if "FROM dibs WHERE id" in self._sql:
             row = self.store.get(self._params[0])
             if row is None:
@@ -323,3 +334,45 @@ def test_the_qr_carries_the_claim_id_so_a_signup_can_credit_a_person(client):
 
 def test_no_qr_for_a_certificate_that_does_not_exist(client):
     assert client.get("/api/v1/dibs/nope/qr.svg").status_code == 404
+
+
+# --- "who has dibbs on this one?" -------------------------------------------
+
+def test_a_vehicle_with_no_claim_says_so_plainly(client):
+    assert client.get("/api/v1/dibs/vehicle/nobody").json() == {"dibs": None}
+
+
+def test_a_live_claim_is_visible_to_everyone(client):
+    """The second person in the argument is exactly who needs to see this, and
+    they may well not have an account."""
+    client.post("/api/v1/dibs", json=BODY)
+    d = client.get("/api/v1/dibs/vehicle/abc123").json()["dibs"]
+    assert d["claimed_by"] == "Resourceful 🌈"
+    assert d["certificate_url"].endswith(d["id"])
+
+
+def test_the_OLDEST_claim_wins_not_the_newest(client):
+    """Two people can both call dibbs — nothing prevents it. When they do, the
+    earlier claim is the one that wins by the rules, so it is the one shown.
+    Showing the newest would have the app quietly siding with whoever tapped
+    last."""
+    first = client.post("/api/v1/dibs", json={**BODY, "claimed_by": "Early 🐦"}).json()["id"]
+    client.store[first]["claimed_at"] = NOW - timedelta(minutes=5)
+    client.post("/api/v1/dibs", json={**BODY, "claimed_by": "Late 🦥"})
+    assert client.get("/api/v1/dibs/vehicle/abc123").json()["dibs"]["claimed_by"] == "Early 🐦"
+
+
+def test_an_expired_claim_does_not_gate_anything(client):
+    """A dead claim must not keep a scooter greyed out for anybody."""
+    client.post("/api/v1/dibs", json=BODY)
+    client.store["__now__"] = NOW + timedelta(hours=2)
+    assert client.get("/api/v1/dibs/vehicle/abc123").json()["dibs"] is None
+
+
+def test_it_reveals_no_more_than_the_handle_they_chose(client):
+    """No contact details, no account id — the second person needs a name to
+    argue with, not a way to find somebody."""
+    client.post("/api/v1/dibs", json=BODY)
+    d = client.get("/api/v1/dibs/vehicle/abc123").json()["dibs"]
+    assert set(d) == {"id", "claimed_by", "claimed_at", "expires_at",
+                      "denver_time", "certificate_url"}

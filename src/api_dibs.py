@@ -17,10 +17,26 @@ That page is also the app's front door, which is the other half of why the
 certificate exists — a rider showing one is, at that moment, introducing
 somebody to both the app and the idea.
 
-STILL NOT ENFORCEMENT. Nothing here prevents anyone from riding anything, and
-no endpoint here will ever tell a rider that a vehicle is unavailable because
-somebody else called dibs. The moment it did, dibs would be a promise the app
-has no standing to make.
+WHAT DIBBS DOES AND DOES NOT DO. It does not reserve anything: Veo has no
+reservation system, this app cannot stop a vehicle unlocking, and no claim
+here changes what the operator will rent to whom.
+
+It DOES now gate our own buttons. `GET /api/v1/dibs/vehicle/{id}` reports a
+live claim so the app can grey out "I'll ride this one" and say who called it
+— a deliberate change of stance from the first version of this module, which
+refused to tell one rider about another's claim on the grounds that doing so
+would make dibbs a promise.
+
+The reason for the change is that the alternative was worse. Dibbs that only
+its own holder can see is not a social object at all, just a private note; the
+whole premise — two people at one scooter settling it — needs the second
+person to be told. A greyed button with a name and a timestamp beside it is an
+argument the app is making on somebody's behalf, and riders can override it by
+opening Veo directly, which they always could.
+
+So: visible to everyone, binding on nobody, and never presented as
+unavailability. The copy says a person called dibbs, not that the scooter is
+taken.
 """
 
 from __future__ import annotations
@@ -138,6 +154,48 @@ def create_dibs(body: DibsIn) -> dict[str, Any]:
         "expires_at": expires_at.isoformat(),
         "verify_url": f"{API_BASE}/dibs/{dibs_id}",
         "qr_url": f"/api/v1/dibs/{dibs_id}/qr.svg",
+    }
+
+
+@router.get("/api/v1/dibs/vehicle/{vehicle_identifier}")
+def dibs_for_vehicle(vehicle_identifier: str) -> dict[str, Any]:
+    """Does anybody have a live claim on this scooter?
+
+    Read by the device popup so it can say "Resourceful 🌈 has dibbs!" and
+    grey its own ride button. Public and unauthenticated: the second person in
+    the argument is exactly who needs to see this, and they may well not have
+    an account.
+
+    Returns the OLDEST live claim rather than the newest. Two people can both
+    call dibbs — nothing prevents it — and when they do, the earlier claim is
+    the one that wins by the rules of dibbs, so it is the one shown. Showing
+    the newest would have the app quietly siding with whoever tapped last.
+
+    `claimed_by` is a public display name the rider chose. No contact details,
+    no account id, nothing that identifies them beyond the handle they picked
+    to be known by.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, claimed_by, claimed_at, expires_at "
+                "FROM dibs "
+                "WHERE vehicle_identifier = %s AND expires_at > NOW() "
+                "ORDER BY claimed_at ASC LIMIT 1",
+                (vehicle_identifier,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {"dibs": None}
+    return {
+        "dibs": {
+            "id": row[0],
+            "claimed_by": row[1],
+            "claimed_at": row[2].isoformat(),
+            "expires_at": row[3].isoformat(),
+            "denver_time": _denver(row[2]),
+            "certificate_url": f"{API_BASE}/dibs/{row[0]}",
+        }
     }
 
 
