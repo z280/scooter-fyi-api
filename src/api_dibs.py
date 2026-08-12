@@ -106,7 +106,8 @@ class DibsIn(BaseModel):
     vehicle_name: str = Field(min_length=1, max_length=120)
     plate: str | None = Field(default=None, max_length=32)
     claimed_by: str = Field(min_length=1, max_length=120)
-    provider: str = Field(default="Veo", max_length=40)
+    #: The catalogue's device name, maker included — "Veo Cosmo". There is no
+    #: separate provider field; see the certificate's `what` line.
     device_type: str = Field(default="", max_length=40)
     #: Where the rider was standing. Carried onto any referral made from this
     #: certificate — a signup won at a light-rail stop is a different fact
@@ -137,12 +138,11 @@ def create_dibs(body: DibsIn) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO dibs (id, vehicle_identifier, vehicle_name, "
-                "plate, claimed_by, provider, device_type, lat, lon, "
-                "expires_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW() + %s) "
+                "plate, claimed_by, device_type, lat, lon, expires_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW() + %s) "
                 "RETURNING claimed_at, expires_at",
                 (dibs_id, body.vehicle_identifier, body.vehicle_name,
-                 body.plate, body.claimed_by, body.provider, body.device_type,
+                 body.plate, body.claimed_by, body.device_type,
                  body.lat, body.lon,
                  timedelta(minutes=DIBS_MAX_TOTAL_MINUTES)),
             )
@@ -153,7 +153,11 @@ def create_dibs(body: DibsIn) -> dict[str, Any]:
         "claimed_at": claimed_at.isoformat(),
         "expires_at": expires_at.isoformat(),
         "verify_url": f"{API_BASE}/dibs/{dibs_id}",
-        "qr_url": f"/api/v1/dibs/{dibs_id}/qr.svg",
+        # ABSOLUTE, like verify_url. The app is served from a different host
+        # (denver.scooter.fyi) than this API, so a relative path resolved
+        # against the app's origin and 404'd — the certificate rendered with a
+        # broken image where its QR should be.
+        "qr_url": f"{API_BASE}/api/v1/dibs/{dibs_id}/qr.svg",
     }
 
 
@@ -244,7 +248,7 @@ def _fetch(dibs_id: str) -> dict[str, Any] | None:
             cur.execute(
                 "SELECT id, vehicle_identifier, vehicle_name, plate, "
                 "       claimed_by, claimed_at, expires_at, NOW(), "
-                "       provider, device_type, lat, lon "
+                "       device_type, lat, lon "
                 "FROM dibs WHERE id = %s",
                 (dibs_id,),
             )
@@ -260,10 +264,9 @@ def _fetch(dibs_id: str) -> dict[str, Any] | None:
         "claimed_at": row[5],
         "expires_at": row[6],
         "now": row[7],
-        "provider": row[8],
-        "device_type": row[9],
-        "lat": row[10],
-        "lon": row[11],
+        "device_type": row[8],
+        "lat": row[9],
+        "lon": row[10],
     }
 
 
@@ -381,12 +384,13 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
         ), status_code=404)
 
     active = d["expires_at"] > d["now"]
-    # "(provider) (device_type) (vanity_name)" — "Veo scooter Lunar 🐸 928".
-    # Assembled from the parts that are present rather than joined blindly: an
-    # older certificate has no device_type, and "Veo  Lunar" with a hole in it
-    # reads as a bug.
+    # "(device_type) (vanity_name)" — "Veo Cosmo Lunar 🐸 928". NO separate
+    # provider: the catalogue's device name already carries the maker, and
+    # printing both rendered "Veo Veo Cosmo Veo Cosmo". Assembled from the
+    # parts that are present rather than joined blindly, since an older
+    # certificate has no device_type and a hole in the middle reads as a bug.
     what = " ".join(
-        _esc(x) for x in (d.get("provider"), d.get("device_type"), d["vehicle_name"]) if x
+        _esc(x) for x in (d.get("device_type"), d["vehicle_name"]) if x
     )
     plate = f' <span class="plate">(plate {_esc(d["plate"])})</span>' if d["plate"] else ""
     who = _esc(d["claimed_by"])
@@ -418,6 +422,30 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
       <p class="fine">
         That time came from Scooter.fyi's servers, not from anyone's phone —
         which is the only reason it's worth anything in an argument.
+      </p>
+
+      <!-- THIS PAGE'S OWN ANTI-SCREENSHOT. The in-app certificate proves it
+           is live by moving; a server-rendered page cannot move without
+           JavaScript, and this page deliberately ships none — the person
+           reading it is on a street, on somebody else's phone, and it has to
+           work on the first packet.
+
+           So it proves liveness the way only a server can: by stating the
+           time it was GENERATED. A screenshot of this page carries a stamp
+           that is minutes or days stale, and the reader can see that at a
+           glance without being told how to check anything. It is a stronger
+           claim than an animation, not a weaker one — an animation proves a
+           page is running, this proves WHEN it was fetched.
+
+           The shimmer beside it is there so the rule stated on the in-app
+           certificate ("only counts while it's moving") is not contradicted
+           by the page it points at. It is CSS, so it costs no script. -->
+      <p class="asof"><span class="asof__sweep"></span>
+        <span class="asof__text">Loaded live at {_esc(_denver(d["now"]))}</span>
+      </p>
+      <p class="fine">
+        If that time isn&rsquo;t about now, you&rsquo;re looking at a
+        screenshot &mdash; open the link yourself.
       </p>
 
       <details class="rules">
@@ -602,6 +630,22 @@ def _page_shell(title: str, body: str) -> str:
   .when {{ margin:2px 0 0; font-size:16px; font-weight:800;
           font-variant-numeric:tabular-nums; }}
   .fine {{ margin:14px 0 0; font-size:11.5px; line-height:1.55; color:var(--muted); }}
+
+  /* Liveness. See the comment on .asof in the body. */
+  .asof {{ position:relative; overflow:hidden; margin:14px 0 0; padding:8px 10px;
+          border-radius:999px; background:rgba(0,102,255,.08);
+          border:1px solid rgba(0,102,255,.25); }}
+  .asof__sweep {{ position:absolute; inset:0;
+    background:linear-gradient(100deg, transparent 0%, rgba(0,102,255,.26) 45%,
+                               rgba(0,102,255,.05) 60%, transparent 100%);
+    transform:translateX(-100%); animation:asof-sweep 2.1s linear infinite; }}
+  @keyframes asof-sweep {{ to {{ transform:translateX(100%); }} }}
+  @media (prefers-reduced-motion: reduce) {{
+    .asof__sweep {{ animation:asof-pulse 2.4s ease-in-out infinite; transform:none; }}
+    @keyframes asof-pulse {{ 0%,100% {{ opacity:.25 }} 50% {{ opacity:.75 }} }}
+  }}
+  .asof__text {{ position:relative; font-size:12.5px; font-weight:800; color:#0b4fbf;
+                font-variant-numeric:tabular-nums; }}
 
   .rules {{ margin:16px 0 0; text-align:left; border-top:1px solid #eadfc4;
            padding-top:12px; }}
