@@ -527,8 +527,8 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
         </ol>
       </details>
 
-      <div class="signup signup--standdown">
-        <h2>Did you have your heart set on riding this {model_q}?</h2>
+      <details class="signup signup--standdown" open>
+        <summary>Did you have your heart set on riding this {model_q}?</summary>
         <p class="signup__sub">
           We will give you <strong>300 pts</strong> for being a good guy and
           letting <strong>{who}</strong> use {what}. Just fill out your phone
@@ -551,10 +551,10 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
             We&rsquo;ll only use it to set up your account and pay you.
           </p>
         </form>
-      </div>
+      </details>
 
-      <div class="signup">
-        <h2>Want to call dibs yourself?</h2>
+      <details class="signup">
+        <summary>Want to call dibs yourself?</summary>
         <p class="signup__sub">
           Sign up with your phone and email and your friend
           <strong>{who}</strong> gets <strong>100 pts</strong> for referring you.
@@ -578,7 +578,7 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
         <a class="plainlink" href="{APP_BASE}/{VALIDATION_UTM}&amp;ref={_esc(d["id"])}">
           or just have a look at the map first &rarr;
         </a>
-      </div>
+      </details>
     '''
     return HTMLResponse(_page_shell("Certificate of Dibs", body))
 
@@ -881,9 +881,30 @@ def _page_shell(title: str, body: str) -> str:
   .rules ol {{ margin:10px 0 0; padding-left:18px; }}
   .rules li {{ margin:0 0 8px; font-size:12.5px; line-height:1.5; color:var(--ink); }}
 
-  .signup {{ margin:20px -20px -22px; padding:20px; text-align:left;
-            background:#1d2733; color:#eef3f8;
-            border-radius:0 0 22px 22px; }}
+  /* ONE CARD PER SECTION, fully rounded and inset.
+     This used to be `margin:20px -20px -22px` with `border-radius:0 0 22px
+     22px` — written for exactly ONE block sitting at the bottom of the
+     certificate, bleeding to its edge. A second block made the first bleed
+     INTO it, round its corners in the middle of the page, and let the
+     parchment show through the 20px gap: the "random colour shift and weird
+     border radius" as reported. Sections are peers now, so they are styled
+     as peers. */
+  .signup {{ margin:14px 0 0; padding:16px 18px; text-align:left;
+            background:#1d2733; color:#eef3f8; border-radius:16px; }}
+  /* Collapsed, like the rules above them. A stranger who scanned this code
+     came to check ONE claim; two open forms below the answer is a page
+     asking for a phone number before it has finished replying. The
+     stand-down stays open because it is the offer this page exists to make
+     to the one person guaranteed to be reading it. */
+  /* The browser's own disclosure triangle, exactly as `.rules` above uses
+     it. A hand-rolled `::before` with a CSS escape rendered as tofu plus a
+     stray "B8" on the device — the marker is not worth a custom glyph and an
+     encoding question when the native one is already correct and already
+     used one section up. */
+  .signup > summary {{ cursor:pointer; margin:0; font-size:18px;
+            font-weight:800; }}
+  .signup > summary:focus-visible {{ outline:2px solid #4c9ffe;
+            outline-offset:3px; border-radius:8px; }}
   .signup h2 {{ margin:0; font-size:18px; font-weight:800; }}
   .signup__sub {{ margin:6px 0 14px; font-size:13.5px; line-height:1.5; color:#c4d0dd; }}
   .signup__form {{ display:flex; flex-direction:column; gap:10px; }}
