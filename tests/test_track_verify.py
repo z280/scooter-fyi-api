@@ -623,7 +623,7 @@ def test_volume_boundary_at_every_minimum_passes():
     fixes = _boundary_ride_fixes(
         waypoints=track_verify.MIN_WAYPOINTS,
         total_distance_m=track_verify.MIN_DISTANCE_METERS + 5.0,  # see _boundary_ride_fixes docstring
-        total_duration_ms=track_verify.MIN_DURATION_MS,
+        total_duration_ms=180_000,
     )
     result, _ = _verify(fixes)
     assert result.waypoint_count == track_verify.MIN_WAYPOINTS
@@ -636,7 +636,7 @@ def test_volume_boundary_one_waypoint_under_fails_only_on_waypoint_count():
     fixes = _boundary_ride_fixes(
         waypoints=track_verify.MIN_WAYPOINTS - 1,
         total_distance_m=track_verify.MIN_DISTANCE_METERS + 5.0,
-        total_duration_ms=track_verify.MIN_DURATION_MS,
+        total_duration_ms=180_000,
     )
     result, _ = _verify(fixes)
     assert result.reasons == ["too_few_waypoints"]
@@ -647,34 +647,43 @@ def test_volume_boundary_distance_just_under_fails_only_on_trip_too_short():
     fixes = _boundary_ride_fixes(
         waypoints=track_verify.MIN_WAYPOINTS,
         total_distance_m=track_verify.MIN_DISTANCE_METERS - 5.0,
-        total_duration_ms=track_verify.MIN_DURATION_MS,
+        total_duration_ms=180_000,
     )
     result, _ = _verify(fixes)
     assert result.reasons == ["trip_too_short"]
     assert result.verdict == "ineligible"
 
 
-def test_volume_boundary_duration_one_ms_under_fails_only_on_trip_too_short():
-    """Duration IS integer-ms exact via _boundary_ride_fixes, so this one
-    is asserted at the literal 1 ms boundary."""
+def test_volume_ignores_duration_a_brisk_ride_over_the_distance_passes():
+    """The volume check has NO duration floor -- covering the distance is
+    the whole of it. Regression for a real donation that lost its points:
+    1096.7 m over 163 waypoints, clean on every other check, ineligible
+    only because the track ran 162 s against a since-deleted 180 s floor.
+
+    Deliberately asserted well under any plausible duration a floor would
+    have used, so reintroducing one at ANY value fails here.
+    """
     fixes = _boundary_ride_fixes(
         waypoints=track_verify.MIN_WAYPOINTS,
         total_distance_m=track_verify.MIN_DISTANCE_METERS + 5.0,
-        total_duration_ms=track_verify.MIN_DURATION_MS - 1,
-    )
-    result, _ = _verify(fixes)
-    assert result.reasons == ["trip_too_short"]
-    assert result.verdict == "ineligible"
-
-
-def test_volume_boundary_duration_exactly_at_minimum_passes():
-    fixes = _boundary_ride_fixes(
-        waypoints=track_verify.MIN_WAYPOINTS,
-        total_distance_m=track_verify.MIN_DISTANCE_METERS + 5.0,
-        total_duration_ms=track_verify.MIN_DURATION_MS,
+        total_duration_ms=1_000,
     )
     result, _ = _verify(fixes)
     assert "trip_too_short" not in result.reasons
+
+
+def test_volume_still_fails_a_stationary_track_however_long_it_ran():
+    """The other side of removing the duration floor: distance alone has to
+    carry the rejection, so a track that sat still for half an hour must
+    still be ineligible."""
+    fixes = _boundary_ride_fixes(
+        waypoints=track_verify.MIN_WAYPOINTS * 4,
+        total_distance_m=5.0,
+        total_duration_ms=30 * 60 * 1000,
+    )
+    result, _ = _verify(fixes)
+    assert result.reasons == ["trip_too_short"]
+    assert result.verdict == "ineligible"
 
 
 def test_volume_failure_reports_both_reasons_when_both_conditions_hold():

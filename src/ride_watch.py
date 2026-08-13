@@ -184,6 +184,25 @@ def update_watches_for_cycle(
                         gbfs_left_feed_cycle_id = %s,
                         updated_at = NOW()
                     WHERE id = ANY(%s)
+                      -- ONLY FORWARD, never back over a finished ride.
+                      --
+                      -- `snapshot_time` is when the cycle OBSERVED the feed,
+                      -- not when this statement commits, and an ingest cycle
+                      -- can run for minutes. So a rider who ends their ride
+                      -- while a cycle is still in flight gets `completed`
+                      -- written at 13:01 and then clobbered back to
+                      -- `left_feed` when the cycle that saw the departure at
+                      -- 13:00 finally commits at 13:05.
+                      --
+                      -- Observed exactly that on ride
+                      -- faf14a49-48b1-4c0c-80ca-1168fc19eff7: left feed
+                      -- 13:00:01, rider ended 13:01:22, row last written
+                      -- 13:05:34, status left_feed. The end had landed; the
+                      -- late commit undid it.
+                      --
+                      -- 'watching' is the only status this transition is
+                      -- ever legal from.
+                      AND status = 'watching'
                     """,
                     (snapshot_time, str(cycle_id), left_ride_ids),
                 )
