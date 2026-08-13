@@ -1123,7 +1123,8 @@ def profiles() -> dict[str, Any]:
         "profiles": [
             {"key": p.key, "label": p.label, "shade_ranked": p.rerank_by_shade,
              "elevation_ranked": p.rerank_by_elevation,
-             "street_ranked": p.rerank_by_street_share}
+             "street_ranked": p.rerank_by_street_share,
+             "bikeway_ranked": p.rerank_by_bikeway}
             for p in cfg.profiles
         ],
     }
