@@ -55,12 +55,17 @@ def test_every_profile_is_configured():
 
 
 def test_only_the_reranked_profiles_ask_for_alternates():
-    """`safe` and `express` must not pay for alternates at all.
+    """A profile pays for alternates if and only if it ranks them.
 
     Shade stays opt-in (§2C): a rider asking for `express` should never be
-    steered toward tree cover. `range` now also ranks its alternates, but on
+    steered toward tree cover. `range` also ranks its alternates, but on
     climb rather than canopy -- Valhalla's `use_hills` is inert on this graph,
     so the flattest route has to be chosen outside it.
+
+    `safe` joined them: it ranks on bike-network share, because Valhalla's own
+    bike-network preference is a hardcoded 0.95 with no request-tunable lever
+    and is far too weak to reorder anything. `express` is now the only profile
+    that takes Valhalla's first answer unexamined, which is the point of it.
     """
     cfg = load().valhalla
     for p in cfg.profiles:
@@ -77,10 +82,17 @@ def test_only_the_reranked_profiles_ask_for_alternates():
             assert p.rerank_by_shade is False
             assert p.rerank_by_elevation is False
             assert p.alternates >= 2
+        elif p.key == "safe":
+            assert p.rerank_by_bikeway is True
+            assert p.rerank_by_shade is False
+            assert p.rerank_by_elevation is False
+            assert p.rerank_by_street_share is False
+            assert p.alternates >= 2
         else:
             assert p.rerank_by_shade is False
             assert p.rerank_by_elevation is False
             assert p.rerank_by_street_share is False
+            assert p.rerank_by_bikeway is False
             assert p.alternates == 0
 
 
@@ -567,3 +579,151 @@ def test_range_still_ranks_by_climb_before_any_model_is_fit(monkeypatch):
         lambda pts: {"type": "LineString", "coordinates": []})
     out = api_route.route(from_="39.74,-104.99", to="39.70,-104.95", profile="range")
     assert out["properties"]["elevation_gain_meters"] == pytest.approx(5.0)
+
+
+# --- the bike network -------------------------------------------------------
+
+def _edge(length_km, *, network=0, lane="none", use="road", begin=0, end=1):
+    return {"length": length_km, "bicycle_network": network, "cycle_lane": lane,
+            "use": use, "begin_shape_index": begin, "end_shape_index": end}
+
+
+@pytest.mark.parametrize("edge,on_network", [
+    (_edge(1.0, network=1), True),                    # lcn route relation
+    (_edge(1.0, network=4), True),                    # ncn — any bit counts
+    (_edge(1.0, lane="dedicated"), True),             # painted lane
+    (_edge(1.0, lane="separated"), True),             # protected lane
+    (_edge(1.0, lane="shared"), True),                # sharrow
+    (_edge(1.0, use="cycleway"), True),               # off-street trail
+    (_edge(1.0, use="path"), True),
+    (_edge(1.0), False),                              # plain residential road
+    (_edge(1.0, lane="none", use="road"), False),
+])
+def test_bikeway_share_counts_every_signal_the_graph_exposes(monkeypatch, edge, on_network):
+    """Three independent signals mean "bike network", and missing all three
+    means an ordinary street.
+
+    Denver's neighbourhood bikeways carry the first (Hazel Court is in the
+    `lcn` relation "Denver D3"), painted lanes the second, trails the third.
+    A route scored on only one of them would miss most of the network.
+    """
+    monkeypatch.setattr(api_route.valhalla, "trace_attributes",
+                        lambda *a, **kw: [edge])
+    share = api_route.bikeway_share(_trip(), {}, [(39.7, -105.0), (39.71, -105.0)])
+    assert share == (1.0 if on_network else 0.0)
+
+
+def test_bikeway_share_is_none_when_the_trace_fails(monkeypatch):
+    """Unknown is not zero. A trip that cannot be snapped back onto the graph
+    must keep Valhalla's own ranking rather than being scored as bikeway-free
+    and quietly losing to everything."""
+    def boom(*a, **kw):
+        raise api_route.valhalla.ValhallaError("no match")
+    monkeypatch.setattr(api_route.valhalla, "trace_attributes", boom)
+    assert api_route.bikeway_share(_trip(), {}, [(39.7, -105.0), (39.71, -105.0)]) is None
+
+
+def test_safe_prices_bikeway_AGAINST_distance(monkeypatch):
+    """The preference must be a tradeoff, not an obsession.
+
+    This is the same trap the Range Maximizer fell into: ranking on `max(share)`
+    would send a rider any distance at all to touch a bikeway. At
+    BIKEWAY_METER_DISCOUNT a bikeway metre bills at 0.85 of an ordinary one, so
+    an all-bikeway route wins only while it is under 1/0.85 = 18% longer.
+
+    Both cases below are measured against that bound, in opposite directions,
+    because a fix that only ever prefers the bikeway passes the first and a fix
+    that only ever prefers the shorter route passes the second.
+    """
+    monkeypatch.setattr(api_route.valhalla, "to_geojson",
+                        lambda pts: {"type": "LineString", "coordinates": []})
+    monkeypatch.setattr(api_route, "_bikeway_detour_candidate",
+                        lambda *a, **kw: None)
+
+    def run(primary, alternate, shares):
+        monkeypatch.setattr(
+            api_route.valhalla, "route",
+            lambda *a, **kw: {"trip": primary, "alternates": [{"trip": alternate}]})
+        monkeypatch.setattr(
+            api_route, "bikeway_share",
+            lambda trip, opts, shape=None: shares[id(trip)])
+        return api_route.route(from_="39.74,-104.99", to="39.70,-104.95",
+                               profile="safe")
+
+    # WORTH IT. The reported case: 1,629 m at 40.3% against 1,642 m at 73.0%.
+    # Thirteen metres for two thirds of the ride on a designated bikeway.
+    hooker = _trip(length_km=1.629)
+    hazel = _trip(length_km=1.642)
+    out = run(hooker, hazel, {id(hooker): 0.403, id(hazel): 0.730})
+    assert out["properties"]["distance_meters"] == pytest.approx(1642.0)
+    assert out["properties"]["bikeway_share"] == pytest.approx(0.730)
+
+    # NOT WORTH IT. Same bikeway gain, but now the detour is 25% — past the
+    # point where the discount pays for itself. The short route must win.
+    direct = _trip(length_km=1.629)
+    scenic = _trip(length_km=2.036)
+    out2 = run(direct, scenic, {id(direct): 0.403, id(scenic): 0.730})
+    assert out2["properties"]["distance_meters"] == pytest.approx(1629.0)
+
+
+def test_bikeway_detour_skips_short_off_network_stretches(monkeypatch):
+    """Every route leaves the network for the last block to a front door.
+    Re-routing around 80 m of residential street spends a Valhalla call to
+    rediscover that the rider must still ride down their own road."""
+    monkeypatch.setattr(
+        api_route.valhalla, "trace_attributes",
+        lambda *a, **kw: [_edge(0.08, begin=0, end=1)])   # 80 m, under the floor
+    called = []
+    monkeypatch.setattr(api_route.valhalla, "route",
+                        lambda *a, **kw: called.append(kw) or {"trip": _trip()})
+    prof = load().valhalla.profile("safe")
+    got = api_route._bikeway_detour_candidate(
+        [(39.7, -105.0), (39.71, -105.0)], prof, _trip(),
+        [(39.7, -105.0), (39.71, -105.0)])
+    assert got is None
+    assert called == []
+
+
+def test_bikeway_detour_excludes_the_longest_off_network_run(monkeypatch):
+    """It must route around the WORST stretch, not the first one it meets.
+
+    On the reported pair the trip leaves the network twice — 27 m of Hazel
+    Court at the very start, then 613 m of Hooker Street. Excluding the first
+    changes nothing; excluding the second is what returns the bikeway route.
+    """
+    shape = [(39.70 + i * 0.001, -105.0) for i in range(11)]
+    monkeypatch.setattr(api_route.valhalla, "trace_attributes", lambda *a, **kw: [
+        _edge(0.027, begin=0, end=1),                       # 27 m off-network
+        _edge(0.500, use="cycleway", begin=1, end=2),       # back on the network
+        _edge(0.613, begin=2, end=8),                       # 613 m off-network
+    ])
+    seen = {}
+
+    def fake_route(points, opts, **kw):
+        seen.update(kw)
+        return {"trip": _trip(length_km=1.642)}
+
+    monkeypatch.setattr(api_route.valhalla, "route", fake_route)
+    prof = load().valhalla.profile("safe")
+    got = api_route._bikeway_detour_candidate(
+        [(39.7, -105.0), (39.71, -105.0)], prof, _trip(), shape)
+    assert got is not None
+    # Midpoint of the 613 m run (shape indices 2..8), not of the 27 m one.
+    assert seen["exclude_locations"] == [shape[5]]
+
+
+def test_bikeway_detour_survives_having_no_answer(monkeypatch):
+    """Excluding the only road through can leave no route at all. That is an
+    answer — this pair has no bikeway option — and it must never fail a request
+    that would otherwise have succeeded."""
+    monkeypatch.setattr(api_route.valhalla, "trace_attributes",
+                        lambda *a, **kw: [_edge(0.613, begin=0, end=4)])
+
+    def boom(*a, **kw):
+        raise api_route.valhalla.ValhallaError("no route")
+
+    monkeypatch.setattr(api_route.valhalla, "route", boom)
+    prof = load().valhalla.profile("safe")
+    assert api_route._bikeway_detour_candidate(
+        [(39.7, -105.0), (39.71, -105.0)], prof, _trip(),
+        [(39.7 + i * 0.001, -105.0) for i in range(6)]) is None

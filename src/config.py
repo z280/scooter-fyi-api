@@ -99,6 +99,13 @@ class RouteProfile:
     up to 77 m of climb, it returns a byte-identical shape every time, while
     ``use_roads`` and ``bicycle_type`` visibly change the route in the same
     request. So hills, like shade, have to be ranked outside the graph.
+
+    ``rerank_by_bikeway`` is the fourth of the same family, and the graph's
+    refusal is the most explicit of the four: Valhalla DOES carry the network
+    (``edge.bicycle_network`` is 1 on Hazel Court and 0 on Hooker Street a block
+    west) and applies a hardcoded 0.95 discount to it, with no request-tunable
+    lever and not enough weight to reorder anything. See
+    ``api_route.bikeway_share``.
     """
     key: str
     label: str
@@ -106,6 +113,7 @@ class RouteProfile:
     rerank_by_shade: bool = False
     rerank_by_elevation: bool = False
     rerank_by_street_share: bool = False
+    rerank_by_bikeway: bool = False
     alternates: int = 0
 
 
@@ -269,6 +277,7 @@ def _valhalla(raw: dict[str, Any]) -> ValhallaConfig:
             rerank_by_shade=bool(p.get("rerank_by_shade", False)),
             rerank_by_elevation=bool(p.get("rerank_by_elevation", False)),
             rerank_by_street_share=bool(p.get("rerank_by_street_share", False)),
+            rerank_by_bikeway=bool(p.get("rerank_by_bikeway", False)),
             alternates=int(p.get("alternates", 0)),
         )
         for p in raw.get("profiles", [])
