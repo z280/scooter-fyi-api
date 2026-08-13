@@ -810,7 +810,78 @@ def deidentify_donations(dry_run: bool = False) -> dict:
     }
 
 
+def backfill_ride_distances_from_donations() -> dict[str, int]:
+    """Teach existing rides the distance their own donated track already knew.
+
+    `PATCH .../end` measures from `ride_waypoints`, a live-stream table
+    nothing writes to any more — the app uploads batched, signed, chained
+    tracks at DONATION time, into `donated_track_points`. So every ride ended
+    with a crow-flies distance between its endpoints and `distance_source =
+    'straight_line'`, and the real track landed a moment later in a different
+    table with nothing joining the two up.
+
+    `api_tracked_rides.donate_track` does that join going forward. This is the
+    same correction for rides that already happened.
+
+    ONLY THE RECORD. Points are untouched and none are owed:
+    `credit_nav_distance_bonus` and `credit_battery_contribution` have always
+    read the donation's verified distance, not this column — a ride paid 4
+    points of distance bonus where the straight line would have paid 2, which
+    is how we know. The battery model reads `trip_events`. What was wrong was
+    what the RIDER saw in their own history.
+
+    Idempotent: only rows still reading 'straight_line' are touched, so a
+    second run is a no-op. Never widens a distance without evidence — a
+    donation with no stored waypoints is skipped rather than trusted for its
+    summary alone.
+    """
+    from .polyline import encode as encode_polyline
+
+    fixed = 0
+    skipped = 0
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, d.id, d.distance_meters
+                FROM tracked_rides r
+                JOIN track_donations d ON d.tracked_ride_id = r.id
+                WHERE r.distance_source IS DISTINCT FROM 'waypoints'
+                  AND d.distance_meters IS NOT NULL
+                ORDER BY r.started_at
+                """
+            )
+            rows = cur.fetchall()
+            for ride_id, donation_id, dist in rows:
+                cur.execute(
+                    "SELECT lat, lon FROM donated_track_points "
+                    "WHERE donation_id = %s ORDER BY seq ASC",
+                    (str(donation_id),),
+                )
+                pts = cur.fetchall()
+                if len(pts) < 2:
+                    # A summary with no points behind it is not evidence.
+                    skipped += 1
+                    continue
+                cur.execute(
+                    """
+                    UPDATE tracked_rides SET
+                        distance_meters = %s,
+                        distance_source = 'waypoints',
+                        path_polyline = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (dist, encode_polyline([(p[0], p[1]) for p in pts]), str(ride_id)),
+                )
+                fixed += 1
+        conn.commit()
+    log.info("backfill_ride_distances: fixed=%d skipped=%d", fixed, skipped)
+    return {"fixed": fixed, "skipped": skipped}
+
+
 COMMANDS = {
+    "backfill_ride_distances_from_donations": backfill_ride_distances_from_donations,
     "ingest_cycle":          _cli_ingest_cycle,
     "archive_if_due":        _cli_archive_if_due,
     "daily_sla":             _cli_daily_sla,

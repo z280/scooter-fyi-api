@@ -634,3 +634,63 @@ def test_pending_feed_donation_settles_ineligible_when_gbfs_never_matches(pg_con
             (ride_id,),
         )
         assert cur.fetchone()[0] == 0
+
+
+def test_donating_teaches_the_ride_its_real_distance(pg_conn):
+    """`PATCH .../end` measures from `ride_waypoints`, a live-stream table
+    nothing writes to any more — the app uploads batched, signed, chained
+    tracks HERE, at donation time, into `donated_track_points`. So every ride
+    ended `straight_line` with a crow-flies number between its endpoints, and
+    the real track landed a moment later in a different table with nothing
+    joining the two up.
+
+    Twenty-six of twenty-seven production rides read 'straight_line'; not one
+    read 'waypoints'. A 3,901 m ride was recorded as 2,924 m, and the rider's
+    own history is where they saw it.
+
+    Points are NOT affected and none were owed: `credit_nav_distance_bonus`
+    and `credit_battery_contribution` have always read the donation's
+    verified distance rather than this column. This corrects the RECORD.
+    """
+    client, _account_id = _client(pg_conn)
+    ride, fixes, t1_ms = _start_and_walk(client)
+    ride_id = ride["id"]
+    pg_conn.commit()
+
+    _left_feed_cycle(pg_conn, ride_id)
+    _end_ride(client, ride_id, t1_ms)
+    pg_conn.commit()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT distance_source FROM tracked_rides WHERE id = %s", (ride_id,)
+        )
+        # The bug's shape: no live waypoints exist, so the end falls back to
+        # the two endpoints.
+        assert cur.fetchone()[0] == "straight_line"
+
+    batches = _seal_chain(
+        fixes, ride_id=ride_id,
+        nonce_hex=ride["track_signing"]["nonce"], key_b64=ride["track_signing"]["key"],
+    )
+    r = client.post(f"/api/v1/tracked-rides/{ride_id}/track", json={"batches": batches})
+    assert r.status_code == 200, r.text
+    donated = r.json()["distance_meters"]
+    pg_conn.commit()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT distance_source, distance_meters, path_polyline "
+            "FROM tracked_rides WHERE id = %s",
+            (ride_id,),
+        )
+        source, distance, polyline = cur.fetchone()
+
+    assert source == "waypoints"
+    assert polyline, "the ride keeps the shape it was actually ridden"
+    assert distance == pytest.approx(donated, abs=0.5), (
+        "the ride's distance IS the donation's — one number, one source"
+    )
+    # And it is the LONGER, truer one: a straight line between the endpoints
+    # can never exceed the path walked between them.
+    assert distance > 2000
