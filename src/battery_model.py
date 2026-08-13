@@ -1592,26 +1592,54 @@ def _donated_elevation_gain_meters(points: list[tuple[float, float]]) -> float |
     return valhalla.trip_summary(trips[0])["elevation_gain_meters"]
 
 
-def _resolve_soc(ride_row: dict[str, Any]) -> tuple[float, float] | None:
-    """(soc_start, soc_end) percent, or None when either end is unknown.
+def _resolve_soc(ride_row: dict[str, Any]) -> tuple[float, float, str] | None:
+    """(soc_start, soc_end, end_source) percent, or None when either end is
+    unknown.
 
     soc_start prefers feed_start_battery_percent (sql/049, an independent
     feed-derived reading the rider cannot influence) and falls back to
     reported_start_battery_percent (what the rider read off the vehicle's
     own display) only when the feed had no fresh observation at ride start
     — the same preference order PLAN_RIDE_MODE_API.md's A2 spec states.
-    soc_end is always reported_battery_percent (there is no feed-observed
-    end battery on tracked_rides — gbfs_end_battery_percent exists but is
-    read from the vehicle reappearing on GBFS, an independent corroboration
-    signal used elsewhere, not the battery-model's end-of-trip reading).
+
+    soc_end NOW FALLS BACK TO gbfs_end_battery_percent, and until it did,
+    THIS FUNCTION WAS THE REASON RIDE MODE HAD NEVER PRODUCED A SINGLE
+    BATTERY OBSERVATION.
+
+    It used to demand `reported_battery_percent` — a number the rider types
+    at the end of a ride. But the frontend deliberately stopped asking for
+    it (see ride-post-s8.ts, which removed a form that riders abandoned),
+    and its comment states the reason plainly: "The server already derives
+    its own end-of-ride battery reading from the GBFS feed
+    (`gbfs_end_battery_percent`) independently of anything a rider types."
+    This function's own docstring asserted the opposite. Two modules, exactly
+    contradictory assumptions, and the arithmetic between them:
+
+        27 rides · 25 with a feed START reading
+                 ·  2 with a rider-reported END
+                 ·  8 with a GBFS END
+                 ·  0 with both ends resolvable
+
+    Zero. Every tracked ride was discarded before reaching the model.
+
+    The rider's own reading still WINS when it exists: it is taken at the
+    moment the ride ended, where the feed's is taken when the vehicle
+    reappears — one watch cycle later, at rest. That gap is real and is why
+    the source is returned rather than silently blended; `soc_end_offset_
+    cycles` on the observation row already exists to carry it, and the
+    feed-mined path populates it the same way.
     """
     start = ride_row.get("feed_start_battery_percent")
     if start is None:
         start = ride_row.get("reported_start_battery_percent")
     end = ride_row.get("reported_battery_percent")
+    end_source = "reported"
+    if end is None:
+        end = ride_row.get("gbfs_end_battery_percent")
+        end_source = "gbfs_reappearance"
     if start is None or end is None:
         return None
-    return float(start), float(end)
+    return float(start), float(end), end_source
 
 
 def ingest_donated_observation(
@@ -1683,7 +1711,7 @@ def ingest_donated_observation(
     soc = _resolve_soc(ride_row)
     if soc is None:
         return None
-    soc_start, soc_end = soc
+    soc_start, soc_end, soc_end_source = soc
 
     # REVIEW FIX: the feed-mined path (`_accept_pair`, above) rejects a
     # battery swap (a large jump UP, `burn <= -SWAP_JUMP_PCT`), a zero
@@ -1743,8 +1771,9 @@ def ingest_donated_observation(
             vehicle_identifier, vehicle_model_name, departed_at, arrived_at,
             duration_seconds, from_lat, from_lon, to_lat, to_lon,
             route_distance_meters, elevation_gain_meters, temperature_c,
-            soc_start_percent, soc_end_percent, burn_percent, source
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            soc_start_percent, soc_end_percent, burn_percent, source,
+            soc_end_offset_cycles
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (vehicle_identifier, departed_at) DO NOTHING
         RETURNING id
         """,
@@ -1752,7 +1781,16 @@ def ingest_donated_observation(
          departed_at, arrived_at, duration_seconds,
          from_lat, from_lon, to_lat, to_lon,
          float(distance_m), elevation_gain, temperature_c,
-         soc_start, soc_end, soc_start - soc_end, "donated_ride"),
+         soc_start, soc_end, soc_start - soc_end, "donated_ride",
+         # WHERE THE END READING CAME FROM, in the column the feed-mined path
+         # already uses for exactly this. 0 = the rider's own number, taken at
+         # the moment they ended; 1 = the feed's, taken when the vehicle
+         # reappeared a cycle later, at rest.
+         #
+         # Not blended and not hidden: a scooter at the kerb and a scooter
+         # parked for a few minutes are different readings, and a model that
+         # cannot tell them apart cannot later decide to weight or drop one.
+         0 if soc_end_source == "reported" else 1),
     )
     row = cur.fetchone()
     if row is None:
