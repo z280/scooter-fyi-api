@@ -41,15 +41,19 @@ taken.
 
 from __future__ import annotations
 
+import io
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
+from .accounts import normalize_us_phone
+from .api_auth import send_sign_in_code
 from .client_ip import real_client_ip
 from .pg import connection
 from .ratelimit import enforce
@@ -159,6 +163,44 @@ def create_dibs(body: DibsIn) -> dict[str, Any]:
         # broken image where its QR should be.
         "qr_url": f"{API_BASE}/api/v1/dibs/{dibs_id}/qr.svg",
     }
+
+
+@router.post("/api/v1/dibs/{dibs_id}/release")
+def dibs_release(dibs_id: str) -> dict[str, Any]:
+    """Give a claim back before it expires.
+
+    A RELEASE HAS TO REACH THE SERVER. The claim lives in two places: the
+    holder's own device (`dibs.ts`) and this table, which is what every OTHER
+    rider's map reads. Dropping only the local copy would leave the row live
+    for up to twenty-five minutes — still dimming that scooter on everybody
+    else's map, and, worse, now reading as a STRANGER'S claim to the person
+    who just released it, because "is this mine?" is answered by the local
+    record that no longer exists.
+
+    Expiring rather than deleting: the row is the evidence behind a
+    certificate somebody may already have been shown, and a claim that was
+    real and then given back is a different thing from one that never
+    happened. `expires_at = NOW()` makes every live-claim query skip it while
+    the history stays honest.
+
+    Idempotent, and deliberately not authenticated. There is no session on a
+    dibs claim — it is identified by an unguessable id the holder's device
+    generated — so possession of that id IS the credential, exactly as it is
+    for the certificate URL. The worst a guessed id could do is hand a
+    scooter back to everyone.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE dibs SET expires_at = NOW() "
+                "WHERE id = %s AND expires_at > NOW() RETURNING id",
+                (dibs_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    # 200 either way: a claim that was already gone is the state the caller
+    # wanted, and a retry after a dropped connection must not read as failure.
+    return {"released": row is not None}
 
 
 @router.get("/api/v1/dibs/live")
@@ -332,14 +374,27 @@ def dibs_qr(dibs_id: str) -> Response:
         # certificate and not merely to the channel.
         f"&ref={dibs_id}"
     )
-    # `currentColor` is not a colour segno will accept, so the ink is set on
-    # the wrapper instead: the SVG is emitted without a fill and the page's
-    # colour cascades into it. (Kept explicit rather than hardcoding black —
-    # the certificate is printed on parchment in light mode and on a lighter
-    # card in dark, and the code has to stay legible on both.)
-    buf = segno.make(target, error="q").svg_inline(scale=1, border=2)
+    # A STANDALONE SVG DOCUMENT, not an inline fragment.
+    #
+    # This used to call `svg_inline()`, which is segno's embed-in-HTML form:
+    # it deliberately omits the XML declaration AND the `xmlns`, because
+    # inline SVG inherits the namespace from the HTML parser. But this is a
+    # URL, and the certificate modal loads it through `<img src=…>` — which
+    # parses it as a standalone XML document, finds no namespace, and refuses
+    # to render it. The response was a valid 200 image/svg+xml the whole
+    # time; browsers simply would not draw it.
+    #
+    # The ink is explicit for the same reason. `svg_inline` emitted no fill so
+    # the page's `currentColor` could cascade in, which works for a fragment
+    # and cannot work here: an <img> is an isolated document and inherits
+    # nothing from the page around it. #2b2418 is the parchment ink the
+    # certificate already uses, dark enough to scan on both card colours.
+    buf = io.BytesIO()
+    segno.make(target, error="q").save(
+        buf, kind="svg", scale=1, border=2, dark="#2b2418", xmldecl=False,
+    )
     return Response(
-        content=buf,
+        content=buf.getvalue(),
         media_type="image/svg+xml",
         headers={
             # A certificate's QR never changes once issued.
@@ -394,6 +449,10 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
     )
     plate = f' <span class="plate">(plate {_esc(d["plate"])})</span>' if d["plate"] else ""
     who = _esc(d["claimed_by"])
+    # "this Cosmo" reads better than "this Veo Cosmo Lunar 🐸 928" in a
+    # question, and falls back to the generic noun rather than to an empty
+    # gap when an older claim carries no device_type.
+    model_q = _esc(d.get("device_type") or "") or "ride"
 
     # THE SENTENCE IS THE PAGE. Present tense while it stands, past tense with
     # the verdict attached once it does not — because the two readers are
@@ -463,8 +522,36 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
               you walked. Ten to set off plus the fifteen you were allowed.</li>
           <li><strong>A certificate only counts while it's moving.</strong>
               The real one animates. A screenshot doesn't.</li>
+          <li><strong>Scooter.fyi will try to notify you</strong> if the
+              device you have dibs on is no longer available.</li>
         </ol>
       </details>
+
+      <div class="signup signup--standdown">
+        <h2>Did you have your heart set on riding this {model_q}?</h2>
+        <p class="signup__sub">
+          We will give you <strong>300 pts</strong> for being a good guy and
+          letting <strong>{who}</strong> use {what}. Just fill out your phone
+          number and you&rsquo;ll get 300 pts when you start a ride on
+          scooter.fyi today. That&rsquo;s enough to take over a whole
+          neighbourhood! <span class="signup__fine-inline">(see 🏆 in app)</span>
+        </p>
+        <p class="signup__sub signup__sub--alt">
+          Already ride with us? Then it&rsquo;s <strong>50 pts</strong> —
+          still yours, just for walking away.
+        </p>
+        <form method="post" action="/dibs/{_esc(d["id"])}/stand-down" class="signup__form">
+          <label>
+            <span>Phone</span>
+            <input type="tel" name="phone" autocomplete="tel"
+                   placeholder="(303) 555-0142" inputmode="tel" required>
+          </label>
+          <button type="submit">I&rsquo;ll be a good guy/gal, help me find a new ride &rarr;</button>
+          <p class="signup__fine">
+            We&rsquo;ll only use it to set up your account and pay you.
+          </p>
+        </form>
+      </div>
 
       <div class="signup">
         <h2>Want to call dibs yourself?</h2>
@@ -494,6 +581,146 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
       </div>
     '''
     return HTMLResponse(_page_shell("Certificate of Dibs", body))
+
+
+#: What standing down is worth, and how long the offer lasts. Both are
+#: printed on a page people screenshot, so both are constants rather than
+#: expressions evaluated at payout time.
+#:
+#: TWO TIERS, because both kinds of reader deserve the offer and they are not
+#: worth the same. 300 buys a NEW rider — an account that would not otherwise
+#: exist, which is the whole reason this page is worth having. 50 thanks an
+#: EXISTING one for the same courtesy, which is generous for walking away from
+#: a scooter and small enough not to be a wage.
+#:
+#: This is a cheatable shape and it is worth naming: two accounts, one claim,
+#: one stand-down, repeat. The deadline and the ride requirement blunt it (you
+#: must actually ride to be paid), the amount caps the take, and the honest
+#: answer is that per-account point accumulation needs watching in the admin
+#: panel. That monitoring does not exist yet.
+STAND_DOWN_POINTS_NEW = 300
+STAND_DOWN_POINTS_EXISTING = 50
+#: "today" — end of the calendar day in Denver, not 24 hours. The copy says
+#: today and a rider reads that as "before I go to bed", not "before this time
+#: tomorrow".
+STAND_DOWN_TZ = ZoneInfo("America/Denver")
+
+
+def _end_of_denver_day(now: datetime) -> datetime:
+    local = now.astimezone(STAND_DOWN_TZ)
+    return (local + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+
+
+@router.post("/dibs/{dibs_id}/stand-down", response_class=HTMLResponse)
+def dibs_stand_down(
+    request: Request,
+    dibs_id: str,
+    phone: str = Form(default=""),
+) -> HTMLResponse:
+    """"I wanted this scooter, I am letting them have it."
+
+    The one person guaranteed to read a dibs certificate is somebody standing
+    at the same scooter who wanted it, and the outcome this page exists to
+    avoid is two people arguing on a pavement. So it buys the argument out.
+
+    Recorded on `referrals` as `kind = 'stand_down'` (sql/077): the dibs
+    holder still gets their referral 100 for the introduction, and the person
+    who walked away is owed 300 in `newcomer_points`. Two debts to two people
+    on one row, both gated on the newcomer actually turning up and riding.
+
+    NOTHING IS AWARDED HERE, and that is not a shortcut — see sql/076's note.
+    Somebody who types a phone number into a box and never rides has not
+    stood down from anything.
+
+    A PLAIN HTML FORM, like the referral above it: this is somebody on a
+    pavement on a strange connection, and a form that needs a bundle to submit
+    is a form that fails exactly there.
+    """
+    phone = (phone or "").strip()
+    d = _fetch(dibs_id)
+    if d is None:
+        return HTMLResponse(
+            _page_shell("Not a dibs claim",
+                        '<p class="lede">That certificate could not be found.</p>'),
+            status_code=404,
+        )
+    if not phone:
+        return HTMLResponse(
+            _page_shell("One more thing",
+                        '<p class="lede">We need a phone number to set up your '
+                        'account and pay you.</p>'
+                        f'<a class="cta" href="/dibs/{_esc(dibs_id)}">Back</a>'),
+            status_code=400,
+        )
+
+    deadline = _end_of_denver_day(d["now"])
+    # NEW or EXISTING decides the amount. Matched on the normalised number so
+    # "(303) 555-0142" and "+13035550142" are the same rider — an existing
+    # account that typed its number differently must not be paid the
+    # new-rider rate.
+    e164 = normalize_us_phone(phone) or phone
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM accounts WHERE phone_number = %s LIMIT 1",
+                (e164,),
+            )
+            existing = cur.fetchone() is not None
+            award = (
+                STAND_DOWN_POINTS_EXISTING if existing else STAND_DOWN_POINTS_NEW
+            )
+            cur.execute(
+                "INSERT INTO referrals (dibs_id, referrer_username, phone, "
+                "lat, lon, kind, newcomer_points, newcomer_deadline) "
+                "VALUES (%s, %s, %s, %s, %s, 'stand_down', %s, %s)",
+                (dibs_id, d["claimed_by"], e164, d.get("lat"), d.get("lon"),
+                 award, deadline),
+            )
+        conn.commit()
+
+    # TEXT THEM A WAY IN, through the same door the app's own SMS sign-in
+    # uses (`send_sign_in_code`) — send budgets, per-phone and per-IP limits,
+    # blocked-recipient handling and the issue/settle dance around delivery
+    # all included. A second sender that skipped any of those would be a
+    # second way to spend real messages on a physical handset with none of
+    # the protections the first one has.
+    #
+    # NEVER FATAL. The row is already written and the debt already recorded,
+    # so a comms outage costs the rider a text, not their 300 points — they
+    # can sign in any other way and the payout finds them by phone number.
+    # Raising here would be the page telling somebody who just did a
+    # generous thing that it did not work.
+    texted = False
+    try:
+        send_sign_in_code(e164, real_client_ip(request))
+        texted = True
+    except Exception:  # noqa: BLE001 — see above; delivery is a bonus here
+        log.exception("stand-down: sign-in text failed for dibs %s", dibs_id)
+
+    who = _esc(d["claimed_by"])
+    next_step = (
+        "Check your phone — we&rsquo;ve texted you a code to finish setting "
+        "up your account."
+        if texted
+        else "Sign in with this number on scooter.fyi to claim it."
+    )
+    return HTMLResponse(_page_shell("Good guy move 🛴", f'''
+      <p class="callout"><span class="what">Respect.</span></p>
+      <p class="lede">
+        <strong>{who}</strong> gets their scooter, and you get
+        <strong>{award} points</strong> the moment you start a ride on
+        scooter.fyi today. Let&rsquo;s find you a better one.
+      </p>
+      <a class="cta" href="{APP_BASE}/{VALIDATION_UTM}&amp;ref={_esc(dibs_id)}">
+        Find me a ride &rarr;
+      </a>
+      <p class="fine">
+        {next_step} Points land once you&rsquo;ve actually ridden — before
+        midnight, Denver time.
+      </p>
+    '''))
 
 
 class ReferIn(BaseModel):

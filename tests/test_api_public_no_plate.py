@@ -113,6 +113,29 @@ class _FakeConn:
         return False
 
 
+def _conn_returning(row):
+    """A `connection` stand-in whose cursor yields ONE given row.
+
+    The module-level fakes hardcode `_ROW`; the plate-suffix tests need a row
+    that actually has a plate in it, and rebuilding the whole fake for one
+    column would be a second thing to keep in sync with the SELECT.
+    """
+
+    class _Cur(_FakeCursor):
+        def fetchall(self):
+            return [row]
+
+    class _Conn(_FakeConn):
+        def cursor(self):
+            return _Cur()
+
+    @contextmanager
+    def _conn():
+        yield _Conn()
+
+    return _conn
+
+
 @pytest.fixture
 def _fake_db(monkeypatch):
     @contextmanager
@@ -140,3 +163,35 @@ def test_trailing_fields_still_map_after_plate_removal(_fake_db):
     assert props["vehicle_identifier"] == "8c4a1f0d2e9b7a35"
     assert props["current_range_meters"] == 45293
     assert props["reliability_tier"] in ("ok", "unknown", "high_risk")
+
+
+def test_public_devices_current_DOES_carry_the_plate_suffix(_fake_db, monkeypatch):
+    """The three digits printed on the deck are public; the plate is not.
+
+    Withholding the suffix protected nothing — Veo publishes the whole plate
+    in their own free_bike_status feed, keyed by the same bike_id this payload
+    emits verbatim as device_id, so it was always one unauthenticated request
+    away. It only ever cost the rider standing in a cluster, who could not
+    tell two identically-named scooters apart. See src/vehicle_identity.py.
+
+    Both halves are asserted together on purpose: the point of this change is
+    that the suffix became public WITHOUT the raw plate following it.
+    """
+    plated = _ROW[:26] + ("1025899",) + _ROW[27:]
+    monkeypatch.setattr(
+        api_public, "connection", _conn_returning(plated), raising=True,
+    )
+    props = _call()["features"][0]["properties"]
+
+    assert props["plate_suffix"] == "899"
+    assert "vehicle_plate" not in props, "the RAW plate is still admin-only"
+    # And it is the raw value that was truncated, not something reformatted:
+    # a rider compares this against the number on the deck.
+    assert "1025899".endswith(props["plate_suffix"])
+
+
+def test_plate_suffix_is_null_rather_than_absent_when_there_is_no_plate(_fake_db):
+    """A device we have never resolved a plate for still carries the key, so
+    a client can tell "no plate known" from "old payload shape"."""
+    props = _call()["features"][0]["properties"]
+    assert props["plate_suffix"] is None

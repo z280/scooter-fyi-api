@@ -68,7 +68,11 @@ from .pg import connection
 # tests/test_ride_hard_caps.py) but are no longer called from this module —
 # PLAN_RIDE_MODE_API.md phase A2 supersedes both awards; see end_tracked_ride
 # below and the module docstring's "TRACK DONATION" note.
-from .points import credit_battery_contribution, credit_nav_distance_bonus
+from .points import (
+    credit_battery_contribution,
+    credit_nav_distance_bonus,
+    settle_referrals_for_account,
+)
 from .polyline import PolylineError, decode as decode_polyline, encode as encode_polyline
 from .quality import compute_battery_percent
 from .ratelimit import enforce
@@ -1193,6 +1197,27 @@ async def donate_track(
 
             points_awarded: list[dict[str, Any]] = []
             may_award = result.verdict == "eligible" and result.points_status == "ok"
+
+            # A COMPLETED RIDE IS WHAT ACTIVATES A REFERRAL. Not a signup and
+            # not a login: somebody who fills in a phone number and never
+            # rides has not been referred to anything, which is why sql/076
+            # calls an un-activated row a lead. This is the one place that
+            # knows the fact, so it is where the debts are settled — the
+            # referrer's 100, and, for a stand-down, the newcomer's own 300
+            # or 50.
+            #
+            # OUTSIDE `may_award`, deliberately. That gate is about whether
+            # THIS RIDE earned points — verdict eligible, nothing pending
+            # review — and a referral is not a reward for the quality of the
+            # ride. It is the moment the newcomer became real. A rider whose
+            # first ride was too short to score still turned up and rode, and
+            # the person who introduced them has done exactly what was asked.
+            points_awarded.extend(
+                settle_referrals_for_account(
+                    cur, account_id=user.account_id,
+                    lat=start_lat, lng=start_lon,
+                )
+            )
 
             if may_award and battery_modeling_on and not own_device and both_batteries_known:
                 award = credit_battery_contribution(

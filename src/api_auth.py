@@ -740,23 +740,23 @@ def send_code_sms(phone: str, body: str, *, idempotency_key: str, purpose: str) 
         raise HTTPException(502, "couldn't send the code — try again in a minute")
 
 
-@router.post("/api/v1/auth/sms/code", status_code=202)
-def auth_sms_code_request(request: Request, payload: SmsCodeRequestIn = Body(...)) -> dict[str, Any]:
-    """Text a short AA000AA sign-in code (typed back at
-    /api/v1/auth/sms/code/verify). Requires z280-comms (503 if not).
+def send_sign_in_code(phone: str, ip: str | None) -> dict[str, Any]:
+    """Issue and text a sign-in code. The body of the endpoint below, lifted
+    out so it has ONE owner.
 
-    Unlike the email door this does NOT always 202. A `409` (the recipient
-    has blocked texts) has to reach the rider: the alternative is a
-    permanently silent "check your phone" for a message that will never be
-    sent, and the 409 body names the exact keyword and number that undo it.
-    That leaks nothing about accounts — it is a fact about the phone
-    number's relationship to the shared sender, and the rider asking is
-    holding the phone.
-    """
+    The dibs stand-down form (src/api_dibs.py) needs to text somebody a way
+    in, and the choice was between a new SMS token type and reusing this. It
+    reuses this: the send budgets, the per-phone and per-IP rate limits, the
+    blocked-recipient handling and the issue/settle dance around delivery are
+    all load-bearing, and a second path that skipped any of them would be a
+    second path that spends real messages on a physical handset with none of
+    the protections this one has.
+
+    `phone` must already be E.164; `_require_us_phone` is the caller's job,
+    since the two callers report a bad number differently (a JSON 400 versus
+    an HTML page)."""
     if not comms_credentials():
         raise HTTPException(503, "SMS sign-in not configured")
-    phone = _require_us_phone(payload.phone_number)
-    ip = real_client_ip(request)
 
     with connection() as conn:
         with conn.cursor() as cur:
@@ -794,6 +794,24 @@ def auth_sms_code_request(request: Request, payload: SmsCodeRequestIn = Body(...
         raise
     _settle_issued_code("phone_number", phone, code_id, delivered=True)
     return {"sent": True}
+
+
+@router.post("/api/v1/auth/sms/code", status_code=202)
+def auth_sms_code_request(request: Request, payload: SmsCodeRequestIn = Body(...)) -> dict[str, Any]:
+    """Text a short AA000AA sign-in code (typed back at
+    /api/v1/auth/sms/code/verify). Requires z280-comms (503 if not).
+
+    Unlike the email door this does NOT always 202. A `409` (the recipient
+    has blocked texts) has to reach the rider: the alternative is a
+    permanently silent "check your phone" for a message that will never be
+    sent, and the 409 body names the exact keyword and number that undo it.
+    That leaks nothing about accounts — it is a fact about the phone
+    number's relationship to the shared sender, and the rider asking is
+    holding the phone.
+    """
+    return send_sign_in_code(
+        _require_us_phone(payload.phone_number), real_client_ip(request)
+    )
 
 
 @router.post("/api/v1/auth/sms/code/verify")

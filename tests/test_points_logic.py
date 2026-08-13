@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.points import (
+    settle_referrals_for_account,
     REPORT_TYPE_POINTS,
     credit_gbfs_validation_points,
     credit_points,
@@ -203,3 +204,130 @@ def test_profile_completion_uses_work_location_when_home_absent():
     maybe_credit_profile_completion(cur, account_id=1)
     _, params = cur.executed[-1]
     assert params[3] == 39.75 and params[4] == -105.0
+
+
+# ---------- referrals & stand-downs (sql/076-078) -----------------------------
+
+class _RefCursor(_FakeCursor):
+    """Adds `fetchall`, which the referral sweep needs and the base fake
+    (built for single-row credit_points) does not have."""
+
+    def __init__(self, fetches, rows):
+        super().__init__(fetches)
+        self._rows = list(rows)
+
+    def fetchall(self):
+        return self._rows.pop(0) if self._rows else []
+
+
+NOW = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+LATER = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+
+
+def _sql_for(cur, needle):
+    return [s for s, _ in cur.executed if needle in s]
+
+
+def test_a_completed_ride_pays_the_referrer():
+    """Activation is a COMPLETED RIDE, not a signup — a lead who never rides
+    has not been referred to anything (sql/076)."""
+    cur = _RefCursor(
+        fetches=[
+            ("new@example.com", "+13035550142"),   # the rider's contacts
+            (1, NOW),                              # credit_points -> referrer
+        ],
+        rows=[[(7, "Resourceful 🌈", 100, "referral", 0, None, 39.74, -104.99)]],
+    )
+    cur.fetchone = _seq(cur, [
+        ("new@example.com", "+13035550142"),
+        (42,),          # _account_id_for_username -> referrer's id
+        (1, NOW),       # credit_points
+    ])
+    out = settle_referrals_for_account(cur, account_id=9, lat=39.7, lng=-104.9)
+    assert [r["action"] for r in out] == ["referral"]
+    assert out[0]["points"] == 100
+    # Marked paid, so a second ride cannot pay it again.
+    assert _sql_for(cur, "SET awarded_at = NOW()")
+
+
+def test_a_stand_down_pays_BOTH_people():
+    """Two debts, two payees, one row (sql/077): the holder's 100 for the
+    introduction and the newcomer's 300 for walking away."""
+    cur = _RefCursor(fetches=[], rows=[
+        [(8, "Resourceful 🌈", 100, "stand_down", 300, LATER, 39.74, -104.99)],
+    ])
+    cur.fetchone = _seq(cur, [
+        ("new@example.com", "+13035550142"),
+        (42,),          # referrer id
+        (1, NOW),       # referrer credit
+        (2, NOW),       # newcomer credit
+    ])
+    out = settle_referrals_for_account(cur, account_id=9, lat=39.7, lng=-104.9)
+    assert sorted(r["action"] for r in out) == ["referral", "stand_down"]
+    assert {r["action"]: r["points"] for r in out} == {"referral": 100, "stand_down": 300}
+
+
+def test_an_expired_stand_down_pays_the_referrer_but_NOT_the_newcomer():
+    """The page promises the newcomer's points "when you start a ride on
+    scooter.fyi today". Printing an expiry the payout ignores would be worse
+    than not printing one — but the introduction still happened, so the
+    referrer is still owed."""
+    past = datetime(2026, 8, 12, 6, 0, tzinfo=timezone.utc)
+    cur = _RefCursor(fetches=[], rows=[
+        [(9, "Resourceful 🌈", 100, "stand_down", 300, past, 39.74, -104.99)],
+    ])
+    cur.fetchone = _seq(cur, [
+        ("new@example.com", "+13035550142"),
+        (42,),
+        (1, NOW),
+    ])
+    out = settle_referrals_for_account(cur, account_id=9, lat=39.7, lng=-104.9)
+    assert [r["action"] for r in out] == ["referral"]
+
+
+def test_a_missing_referrer_does_not_stop_the_newcomer_being_paid():
+    """The referrer is stored as a public username so a referral survives a
+    handle change (sql/076), which means resolving it back can legitimately
+    MISS. That must not cost the newcomer their points."""
+    cur = _RefCursor(fetches=[], rows=[
+        [(10, "Gone 👻", 100, "stand_down", 300, LATER, 39.74, -104.99)],
+    ])
+    cur.fetchone = _seq(cur, [
+        ("new@example.com", "+13035550142"),
+        None,           # username no longer resolves
+        (2, NOW),       # newcomer still credited
+    ])
+    out = settle_referrals_for_account(cur, account_id=9, lat=39.7, lng=-104.9)
+    assert [r["action"] for r in out] == ["stand_down"]
+
+
+def test_an_account_with_no_contacts_settles_nothing():
+    cur = _RefCursor(fetches=[], rows=[])
+    cur.fetchone = _seq(cur, [(None, None)])
+    assert settle_referrals_for_account(cur, account_id=9, lat=39.7, lng=-104.9) == []
+
+
+def test_points_land_where_the_referral_was_MADE():
+    """"You get 100 points at the geographic spot where you referred them" —
+    the claim's position, not the ride's end."""
+    cur = _RefCursor(fetches=[], rows=[
+        [(11, "Resourceful 🌈", 100, "referral", 0, None, 39.111, -104.222)],
+    ])
+    cur.fetchone = _seq(cur, [
+        ("new@example.com", None),
+        (42,),
+        (1, NOW),
+    ])
+    settle_referrals_for_account(cur, account_id=9, lat=39.9, lng=-104.9)
+    insert = [p for s, p in cur.executed if "INSERT INTO user_points" in s][0]
+    assert insert[3] == 39.111 and insert[4] == -104.222
+
+
+def _seq(cur, values):
+    """fetchone() returning a scripted sequence."""
+    it = iter(values)
+
+    def _next():
+        return next(it)
+
+    return _next
