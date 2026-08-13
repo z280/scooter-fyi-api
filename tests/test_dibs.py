@@ -36,6 +36,13 @@ class _Cur:
 
     def execute(self, sql, params=()):
         self._sql, self._params = sql, params
+        if "UPDATE dibs SET expires_at" in sql:
+            self.store["__last_release_sql__"] = sql
+            rec = self.store.get(params[0])
+            live = rec is not None and rec["expires_at"] > self.store["__now__"]
+            if live:
+                rec["expires_at"] = self.store["__now__"]
+            self.store["__released__"] = live
         if "INSERT INTO referrals" in sql:
             self.store.setdefault("__referrals__", []).append(params)
             # The SQL too: `kind` is a literal in the statement rather than a
@@ -58,6 +65,8 @@ class _Cur:
         return out
 
     def fetchone(self):
+        if "UPDATE dibs SET expires_at" in self._sql:
+            return ("x",) if self.store.get("__released__") else None
         if "FROM accounts" in self._sql:
             # The stand-down tier lookup. `__accounts__` holds normalised
             # E.164 numbers, which is what the handler queries with.
@@ -567,3 +576,27 @@ def test_standing_down_needs_a_phone_number(client):
 def test_standing_down_on_a_claim_that_does_not_exist_is_a_404(client):
     r = client.post("/dibs/nope/stand-down", data={"phone": "3035550142"})
     assert r.status_code == 404
+
+
+def test_releasing_a_claim_expires_it_rather_than_deleting_it(client):
+    """The row is the evidence behind a certificate somebody may already have
+    been shown. A claim that was real and then given back is a different
+    thing from one that never happened — so it expires, and the history
+    stays honest."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    r = client.post(f"/api/v1/dibs/{dibs_id}/release")
+    assert r.status_code == 200
+    assert r.json() == {"released": True}
+    assert "UPDATE dibs SET expires_at = NOW()" in client.store["__last_release_sql__"]
+    assert "DELETE" not in client.store["__last_release_sql__"]
+
+
+def test_releasing_twice_is_not_an_error(client):
+    """Idempotent on purpose: a claim already gone is the state the caller
+    wanted, and a retry after a dropped connection must not read as
+    failure."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    assert client.post(f"/api/v1/dibs/{dibs_id}/release").status_code == 200
+    second = client.post(f"/api/v1/dibs/{dibs_id}/release")
+    assert second.status_code == 200
+    assert second.json() == {"released": False}

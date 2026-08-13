@@ -164,6 +164,44 @@ def create_dibs(body: DibsIn) -> dict[str, Any]:
     }
 
 
+@router.post("/api/v1/dibs/{dibs_id}/release")
+def dibs_release(dibs_id: str) -> dict[str, Any]:
+    """Give a claim back before it expires.
+
+    A RELEASE HAS TO REACH THE SERVER. The claim lives in two places: the
+    holder's own device (`dibs.ts`) and this table, which is what every OTHER
+    rider's map reads. Dropping only the local copy would leave the row live
+    for up to twenty-five minutes — still dimming that scooter on everybody
+    else's map, and, worse, now reading as a STRANGER'S claim to the person
+    who just released it, because "is this mine?" is answered by the local
+    record that no longer exists.
+
+    Expiring rather than deleting: the row is the evidence behind a
+    certificate somebody may already have been shown, and a claim that was
+    real and then given back is a different thing from one that never
+    happened. `expires_at = NOW()` makes every live-claim query skip it while
+    the history stays honest.
+
+    Idempotent, and deliberately not authenticated. There is no session on a
+    dibs claim — it is identified by an unguessable id the holder's device
+    generated — so possession of that id IS the credential, exactly as it is
+    for the certificate URL. The worst a guessed id could do is hand a
+    scooter back to everyone.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE dibs SET expires_at = NOW() "
+                "WHERE id = %s AND expires_at > NOW() RETURNING id",
+                (dibs_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    # 200 either way: a claim that was already gone is the state the caller
+    # wanted, and a retry after a dropped connection must not read as failure.
+    return {"released": row is not None}
+
+
 @router.get("/api/v1/dibs/live")
 def live_dibs() -> dict[str, Any]:
     """Every live claim in the city, keyed by vehicle.
