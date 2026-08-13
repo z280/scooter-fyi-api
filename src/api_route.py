@@ -430,10 +430,48 @@ def route(
             except valhalla.ValhallaError as exc:
                 log.warning("elevation baseline route failed, ranking alternates only: %s", exc)
         considered = len(trips)
-        rated = [(valhalla.elevation_gain_meters(t), t) for t in trips]
-        # A trip whose gain is unknown keeps Valhalla's ranking rather than
-        # winning by default -- None is not flat, it is unmeasured.
-        measured = [(g, t) for g, t in rated if g is not None]
+
+        # RANKED BY PREDICTED ENERGY, NOT BY CLIMB. This used to be
+        # `min(gain)` — the flattest alternate won outright, whatever it cost
+        # in distance. Measured against production on the reported pair,
+        # Federal & 8th -> 10th & Knox: it detoured 722 m to save 4.7 m of
+        # climb. On another it returned a route byte-identical to `safe`.
+        #
+        # The profile is called The Range Maximizer, and range is spent on
+        # BOTH axes. Four metres of climb is a rounding error against most of
+        # a kilometre of extra road, and a rider who picked this profile to
+        # get further was being sent further out of their way to get less far.
+        #
+        # `estimate_burn_percent` already prices exactly this tradeoff, from
+        # the fitted model, in the units the rider cares about — and it is the
+        # same function that fills in `battery_percent_estimate` a few lines
+        # below, so the route is now ranked by the number it reports.
+        def _cost(trip: dict[str, Any]) -> tuple[float, float] | None:
+            gain = valhalla.elevation_gain_meters(trip)
+            if gain is None:
+                # None is not flat, it is unmeasured — such a trip keeps
+                # Valhalla's own ranking rather than winning by default.
+                return None
+            summary = valhalla.trip_summary(trip)
+            burn = battery_model.estimate_burn_percent(
+                distance_meters=summary["distance_meters"],
+                elevation_gain_meters=gain,
+                vehicle_model=vehicle_model,
+            )
+            percent = burn.get("percent")
+            if percent is None:
+                # No model yet (or none for this vehicle). Fall back to the
+                # old behaviour rather than to nothing: climb-only ranking is
+                # wrong about tradeoffs but still beats not ranking at all,
+                # and it is what this profile did before the model existed.
+                return (float(gain), float(summary["distance_meters"] or 0.0))
+            # Distance breaks ties, so two routes the model prices the same
+            # resolve to the shorter one instead of to whichever Valhalla
+            # happened to list first.
+            return (float(percent), float(summary["distance_meters"] or 0.0))
+
+        rated = [(_cost(t), t) for t in trips]
+        measured = [(c, t) for c, t in rated if c is not None]
         if measured:
             _, chosen = min(measured, key=lambda pair: pair[0])
         if explain:

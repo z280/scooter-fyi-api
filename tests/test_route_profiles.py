@@ -491,3 +491,79 @@ def test_night_is_configured_and_advertised():
     by_key = {p["key"]: p for p in api_route.profiles()["profiles"]}
     assert by_key["night"]["street_ranked"] is True
     assert by_key["safe"]["street_ranked"] is False
+
+
+def test_the_range_maximizer_prices_climb_AGAINST_distance(monkeypatch):
+    """It used to pick `min(elevation_gain)` outright — the flattest alternate
+    won whatever it cost in road. Measured against production on the reported
+    pair, Federal & 8th -> 10th & Knox: a 722 m detour to save 4.7 m of climb.
+
+    The profile is called The Range Maximizer, and range is spent on BOTH
+    axes. The fitted model (5,570 observations) prices a metre of climb at
+    beta_elevation/beta_distance = 0.07171/0.000885, about 81 m of flat road:
+
+        722 m detour to save 4.7 m climb  ->  worth 381 m  ->  REJECT
+        341 m detour to save 6.9 m climb  ->  worth 559 m  ->  TAKE
+
+    Both were measured on the live graph, and a correct fix has to get BOTH
+    right. Climb-only ranking takes the first; distance-only refuses the
+    second. Only pricing the tradeoff answers both, which is why this asserts
+    on two cases in opposite directions rather than on "prefer shorter".
+
+    The coefficients are pinned rather than read from the database: reading
+    the live model would skip this wherever there is no database, which is CI,
+    which is where it most needs to run.
+    """
+    BETA_D, BETA_E = 0.000885, 0.07171
+
+    def priced(**kw):
+        d = kw.get("distance_meters")
+        e = kw.get("elevation_gain_meters") or 0.0
+        if d is None:
+            return {"percent": None, "source": "unavailable"}
+        return {"percent": BETA_D * d + BETA_E * e, "source": "regression"}
+
+    monkeypatch.setattr(
+        api_route.battery_model, "estimate_burn_percent", priced)
+    monkeypatch.setattr(
+        api_route.valhalla, "to_geojson",
+        lambda pts: {"type": "LineString", "coordinates": []})
+
+    def run(primary, alternate):
+        monkeypatch.setattr(
+            api_route.valhalla, "route",
+            lambda *a, **kw: {"trip": primary, "alternates": [{"trip": alternate}]})
+        return api_route.route(
+            from_="39.74,-104.99", to="39.70,-104.95", profile="range")
+
+    # THE REPORTED CASE. A long detour for a trivial climb saving must lose.
+    direct = _trip(length_km=3.131, elevation=[100, 163.3, 100])
+    long_way = _trip(length_km=3.853, elevation=[100, 158.6, 100])
+    out = run(direct, long_way)
+    assert out["properties"]["distance_meters"] == pytest.approx(3131.0)
+
+    # THE MEASURED CASE. A real climb saving must still win, even though the
+    # winning route is longer — this is the assertion that fails if somebody
+    # "fixes" the bug by ranking on distance.
+    direct2 = _trip(length_km=3.131, elevation=[100, 163.3, 100])
+    hillier_but_shorter = _trip(length_km=3.472, elevation=[100, 156.4, 100])
+    out2 = run(direct2, hillier_but_shorter)
+    assert out2["properties"]["distance_meters"] == pytest.approx(3472.0)
+
+
+def test_range_still_ranks_by_climb_before_any_model_is_fit(monkeypatch):
+    """The fallback. `estimate_burn_percent` returns None until a model
+    exists, and climb-only ranking — wrong about tradeoffs but better than no
+    ranking — is what this profile did before the model existed. Every other
+    test in this file runs through this path, since the module's autouse
+    fixture stubs the model away."""
+    hilly = _trip(length_km=2.0, elevation=[100, 130, 100])
+    flat = _trip(length_km=2.1, elevation=[100, 105, 100])
+    monkeypatch.setattr(
+        api_route.valhalla, "route",
+        lambda *a, **kw: {"trip": hilly, "alternates": [{"trip": flat}]})
+    monkeypatch.setattr(
+        api_route.valhalla, "to_geojson",
+        lambda pts: {"type": "LineString", "coordinates": []})
+    out = api_route.route(from_="39.74,-104.99", to="39.70,-104.95", profile="range")
+    assert out["properties"]["elevation_gain_meters"] == pytest.approx(5.0)
