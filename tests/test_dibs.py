@@ -38,6 +38,10 @@ class _Cur:
         self._sql, self._params = sql, params
         if "INSERT INTO referrals" in sql:
             self.store.setdefault("__referrals__", []).append(params)
+            # The SQL too: `kind` is a literal in the statement rather than a
+            # bound parameter, so params alone cannot tell a stand-down from
+            # an ordinary referral.
+            self.store["__last_referral_sql__"] = sql
 
     def fetchall(self):
         now = self.store["__now__"]
@@ -54,6 +58,11 @@ class _Cur:
         return out
 
     def fetchone(self):
+        if "FROM accounts" in self._sql:
+            # The stand-down tier lookup. `__accounts__` holds normalised
+            # E.164 numbers, which is what the handler queries with.
+            known = self.store.get("__accounts__", set())
+            return (1,) if self._params[0] in known else None
         if "INSERT INTO dibs" in self._sql:
             dibs_id = self._params[0]
             claimed = NOW
@@ -249,9 +258,16 @@ def test_the_page_names_the_provider_and_type(client):
     ).json()["id"]
     html = client.get(f"/dibs/{dibs_id}").text
     assert "Veo Cosmo Lunar" in html
-    # ...and exactly once. The catalogue name already carries the maker, so a
+    # ...without DOUBLING. The catalogue name already carries the maker, so a
     # separate provider field printed "Veo Veo Cosmo Veo Cosmo".
-    assert html.count("Veo Cosmo") == 1
+    #
+    # Asserted as "the maker never appears twice in a row" rather than as a
+    # page-wide count of one. The count was a proxy that broke the moment the
+    # page legitimately named the scooter a second time (the stand-down offer
+    # asks about "this Cosmo"), and naming it again is not the bug this test
+    # is for.
+    assert "Veo Veo" not in html
+    assert "Cosmo Cosmo" not in html
 
 
 def test_the_parts_that_are_missing_leave_no_hole(client):
@@ -470,3 +486,84 @@ def test_live_claims_keep_the_oldest_per_vehicle(client):
     client.store[first]["claimed_at"] = NOW - timedelta(minutes=5)
     client.post("/api/v1/dibs", json={**BODY, "claimed_by": "Late 🦥"})
     assert client.get("/api/v1/dibs/live").json()["dibs"]["abc123"]["claimed_by"] == "Early 🐦"
+
+
+def test_the_certificate_offers_the_stand_down(client):
+    """The one person guaranteed to read this page is somebody standing at
+    the same scooter who wanted it. The offer has to be ON the page, not
+    behind a tap."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    html = client.get(f"/dibs/{dibs_id}").text
+    assert "heart set on riding" in html
+    assert "300" in html
+    assert f'action="/dibs/{dibs_id}/stand-down"' in html
+    # The button is the rider's own words, and the phone field is required —
+    # there is nothing to pay out to without one.
+    assert "good guy/gal" in html
+    assert 'name="phone"' in html and "required" in html
+
+
+def test_standing_down_records_two_debts_to_two_people(client):
+    """The dibs holder is still owed their referral 100 for the introduction;
+    the person who walked away is owed 300 for walking away. One row, because
+    the shape is identical and a second table would have to be joined into
+    every payout query forever."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    r = client.post(f"/dibs/{dibs_id}/stand-down", data={"phone": "3035550142"})
+    assert r.status_code == 200
+
+    # (dibs_id, referrer_username, phone, lat, lon, newcomer_points, deadline)
+    params = client.store["__referrals__"][-1]
+    assert params[0] == dibs_id
+    assert params[1] == BODY["claimed_by"], "the referrer's debt is unchanged"
+    assert params[2] == "+13035550142", "stored normalised, not as typed"
+    assert params[5] == 300, "an unknown number is a NEW rider: 300"
+    assert params[6] is not None, (
+        "the same-day deadline is STORED, not derived later — it is printed "
+        "on a page people screenshot"
+    )
+    # `kind` is a literal in the INSERT — and nothing sets activated_at or
+    # awarded_at, because somebody who types a number into a box and never
+    # rides has not stood down from anything.
+    sql = client.store["__last_referral_sql__"]
+    assert "'stand_down'" in sql
+    assert "activated_at" not in sql and "awarded_at" not in sql
+
+
+def test_an_existing_rider_stands_down_for_the_smaller_amount(client):
+    """Both kinds of reader get the offer; they are not worth the same. 300
+    buys an account that would not otherwise exist. 50 thanks one that
+    already does — generous for walking away, and not a wage.
+
+    Matched on the NORMALISED number, so an existing rider who types
+    "(303) 555-0142" against a stored "+13035550142" cannot collect the
+    new-rider rate by formatting their own phone differently."""
+    client.store["__accounts__"] = {"+13035550142"}
+
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    r = client.post(f"/dibs/{dibs_id}/stand-down", data={"phone": "(303) 555-0142"})
+    assert r.status_code == 200
+
+    params = client.store["__referrals__"][-1]
+    assert params[5] == 50
+    assert params[2] == "+13035550142", "stored normalised, not as typed"
+
+
+def test_the_page_names_both_tiers(client):
+    """A page that advertises 300 to somebody who will be paid 50 is a page
+    that lies to its most loyal readers."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    html = client.get(f"/dibs/{dibs_id}").text
+    assert "300" in html
+    assert "50" in html and "Already ride with us" in html
+
+
+def test_standing_down_needs_a_phone_number(client):
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    r = client.post(f"/dibs/{dibs_id}/stand-down", data={"phone": "  "})
+    assert r.status_code == 400
+
+
+def test_standing_down_on_a_claim_that_does_not_exist_is_a_404(client):
+    r = client.post("/dibs/nope/stand-down", data={"phone": "3035550142"})
+    assert r.status_code == 404
