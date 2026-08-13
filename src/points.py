@@ -22,6 +22,7 @@ would be a worse breach of it than the overpayment was.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 import math
 from typing import Any
 
@@ -764,3 +765,125 @@ def credit_nav_qualitative_feedback(
         lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
         source_table="tracked_rides", source_id=str(ride_id),
     )
+
+
+# --- Referrals and stand-downs (sql/076, sql/077, sql/078) -------------------
+
+POINTS_REFERRAL = 100
+
+
+def settle_referrals_for_account(
+    cur, *, account_id: int, lat: float, lng: float,
+) -> list[dict[str, Any]]:
+    """Pay out any referral this account's first ride has just activated.
+
+    ACTIVATION IS A COMPLETED RIDE, not a signup and not a login. A lead who
+    fills in a phone number and never rides has not been referred to anything
+    — see sql/076's note on why paying at signup rewards the wrong thing.
+    So this is called from the ride-completion path, where the fact is known.
+
+    TWO DEBTS PER ROW, to two different people (sql/077):
+
+      referrer_username / points        the introducer's 100
+      newcomer_points                   the stand-down's 300 or 50, owed to
+                                        THIS account
+
+    The newcomer's half is also DEADLINED — the certificate page promises it
+    "when you start a ride on scooter.fyi today" — so a stand-down settled
+    after midnight Denver pays the referrer and not the newcomer. That is the
+    offer as it was printed, and printing an expiry the payout ignores would
+    be worse than not printing one.
+
+    Idempotent twice over: `awarded_at` is set in the same statement that
+    claims the row, and `credit_points` dedupes on
+    (source_table, source_id, action) regardless. Two rides finishing in the
+    same second cannot pay a referral twice.
+
+    Returns the ledger rows it wrote, for the caller's `points_awarded` list.
+    """
+    cur.execute(
+        "SELECT email, phone_number FROM accounts WHERE id = %s", (account_id,)
+    )
+    row = cur.fetchone()
+    if row is None:
+        return []
+    email, phone = row
+    if not email and not phone:
+        return []
+
+    # Match on either contact. Both are normalised at write time (the refer
+    # and stand-down forms store E.164), so this is an equality test rather
+    # than a fuzzy one.
+    cur.execute(
+        """
+        UPDATE referrals SET activated_at = COALESCE(activated_at, NOW())
+        WHERE awarded_at IS NULL
+          AND (
+                (email IS NOT NULL AND email <> '' AND lower(email) = lower(%s))
+             OR (phone IS NOT NULL AND phone <> '' AND phone = %s)
+          )
+        RETURNING id, referrer_username, points, kind, newcomer_points,
+                  newcomer_deadline, lat, lon
+        """,
+        (email or "", phone or ""),
+    )
+    pending = cur.fetchall()
+    if not pending:
+        return []
+
+    awarded: list[dict[str, Any]] = []
+    for (ref_id, referrer, referrer_points, kind, newcomer_points,
+         deadline, ref_lat, ref_lon) in pending:
+        # WHERE the points land: the spot the referral was made, when the
+        # claim recorded one — "you get 100 points at the geographic spot
+        # where you referred them". Falls back to the ride's own end, since
+        # every ledger row needs a real position and inventing one would be
+        # worse than attributing it to where we know the rider was.
+        plat = ref_lat if ref_lat is not None else lat
+        plng = ref_lon if ref_lon is not None else lng
+
+        referrer_id = _account_id_for_username(cur, referrer)
+        if referrer_id is not None and referrer_points > 0:
+            got = credit_points(
+                cur, account_id=referrer_id, action="referral",
+                points=referrer_points, lat=plat, lng=plng,
+                source_table="referrals", source_id=str(ref_id),
+            )
+            if got is not None:
+                awarded.append(got)
+
+        if kind == "stand_down" and newcomer_points > 0:
+            expired = deadline is not None and datetime.now(timezone.utc) > deadline
+            if expired:
+                log.info(
+                    "referral %s: stand-down deadline passed, newcomer not paid",
+                    ref_id,
+                )
+            else:
+                got = credit_points(
+                    cur, account_id=account_id, action="stand_down",
+                    points=newcomer_points, lat=plat, lng=plng,
+                    source_table="referrals", source_id=str(ref_id),
+                )
+                if got is not None:
+                    awarded.append(got)
+
+        cur.execute(
+            "UPDATE referrals SET awarded_at = NOW() WHERE id = %s", (ref_id,)
+        )
+    return awarded
+
+
+def _account_id_for_username(cur, username: str) -> int | None:
+    """The referrer is stored as a public username rather than an id, so a
+    referral survives them changing their handle (sql/076). Resolving it back
+    is therefore a lookup that can legitimately MISS — a handle that no
+    longer exists, or an account since deleted — and a missed referrer must
+    not stop the newcomer being paid."""
+    if not username:
+        return None
+    cur.execute(
+        "SELECT id FROM accounts WHERE public_username = %s LIMIT 1", (username,)
+    )
+    row = cur.fetchone()
+    return int(row[0]) if row else None

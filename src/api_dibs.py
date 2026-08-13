@@ -53,6 +53,7 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from .accounts import normalize_us_phone
+from .api_auth import send_sign_in_code
 from .client_ip import real_client_ip
 from .pg import connection
 from .ratelimit import enforce
@@ -614,6 +615,7 @@ def _end_of_denver_day(now: datetime) -> datetime:
 
 @router.post("/dibs/{dibs_id}/stand-down", response_class=HTMLResponse)
 def dibs_stand_down(
+    request: Request,
     dibs_id: str,
     phone: str = Form(default=""),
 ) -> HTMLResponse:
@@ -678,7 +680,32 @@ def dibs_stand_down(
             )
         conn.commit()
 
+    # TEXT THEM A WAY IN, through the same door the app's own SMS sign-in
+    # uses (`send_sign_in_code`) — send budgets, per-phone and per-IP limits,
+    # blocked-recipient handling and the issue/settle dance around delivery
+    # all included. A second sender that skipped any of those would be a
+    # second way to spend real messages on a physical handset with none of
+    # the protections the first one has.
+    #
+    # NEVER FATAL. The row is already written and the debt already recorded,
+    # so a comms outage costs the rider a text, not their 300 points — they
+    # can sign in any other way and the payout finds them by phone number.
+    # Raising here would be the page telling somebody who just did a
+    # generous thing that it did not work.
+    texted = False
+    try:
+        send_sign_in_code(e164, real_client_ip(request))
+        texted = True
+    except Exception:  # noqa: BLE001 — see above; delivery is a bonus here
+        log.exception("stand-down: sign-in text failed for dibs %s", dibs_id)
+
     who = _esc(d["claimed_by"])
+    next_step = (
+        "Check your phone — we&rsquo;ve texted you a code to finish setting "
+        "up your account."
+        if texted
+        else "Sign in with this number on scooter.fyi to claim it."
+    )
     return HTMLResponse(_page_shell("Good guy move 🛴", f'''
       <p class="callout"><span class="what">Respect.</span></p>
       <p class="lede">
@@ -690,8 +717,8 @@ def dibs_stand_down(
         Find me a ride &rarr;
       </a>
       <p class="fine">
-        We&rsquo;ll text you to finish setting up your account. Points land
-        once you&rsquo;ve actually ridden — before midnight, Denver time.
+        {next_step} Points land once you&rsquo;ve actually ridden — before
+        midnight, Denver time.
       </p>
     '''))
 
