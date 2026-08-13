@@ -600,3 +600,32 @@ def test_releasing_twice_is_not_an_error(client):
     second = client.post(f"/api/v1/dibs/{dibs_id}/release")
     assert second.status_code == 200
     assert second.json() == {"released": False}
+
+
+def test_the_page_sections_are_peer_ACCORDIONS(client):
+    """Every section below the certificate is a <details>, and they are peers.
+
+    The stand-down block was styled `margin:20px -20px -22px` with
+    `border-radius:0 0 22px 22px` — written for exactly ONE block bleeding to
+    the bottom edge of the ticket. A second one made the first bleed INTO it,
+    round its corners mid-page, and let the parchment show through the gap.
+    Sections are peers, so they are styled as peers.
+    """
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    html = client.get(f"/dibs/{dibs_id}").text
+    assert html.count("<details") == html.count("</details>") == 3
+    assert '<div class="signup' not in html, "no section is a bare div any more"
+    # The offer this page exists to make is open; the rest are collapsed.
+    assert '<details class="signup signup--standdown" open>' in html
+    assert '<details class="signup">' in html
+
+
+def test_the_disclosure_marker_is_the_browsers_own(client):
+    """A hand-rolled `::before` with a CSS escape rendered as tofu plus a
+    stray "B8" on a real phone. The rules section one line up already uses
+    the native marker correctly; the triangle is not worth a custom glyph and
+    an encoding question."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    html = client.get(f"/dibs/{dibs_id}").text
+    assert "25B8" not in html
+    assert "details-marker" not in html
