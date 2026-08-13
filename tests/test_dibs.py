@@ -620,6 +620,29 @@ def test_the_page_sections_are_peer_ACCORDIONS(client):
     assert '<details class="signup">' in html
 
 
+def test_every_section_is_styled_like_the_rules(client):
+    """ONE accordion style on this page, shared by all three — they are the
+    same kind of thing: something below the certificate you can open.
+
+    This block went through two wrong answers first. A dark navy band bleeding
+    to the bottom edge (right when it was the only footer on a parchment
+    ticket, wrong the moment a section appeared above it), then a warm card —
+    which fixed the clash but left two sections looking like cards beside one
+    that was not. Asserted on the SHARED rule so a future section cannot
+    quietly grow its own look.
+    """
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    html = client.get(f"/dibs/{dibs_id}").text
+    css = html[html.index("<style"):html.index("</style>")]
+    # No card left: no fill and no rounded box on the sections themselves.
+    assert "background:#1d2733" not in css
+    assert "background:#f7f2e6" not in css
+    # The rules' own signature, now shared.
+    assert ".signup {{" not in css  # rendered, so braces are single
+    assert "border-top:1px solid #eadfc4" in css
+    assert css.count("border-top:1px solid #eadfc4") >= 2
+
+
 def test_the_disclosure_marker_is_the_browsers_own(client):
     """A hand-rolled `::before` with a CSS escape rendered as tofu plus a
     stray "B8" on a real phone. The rules section one line up already uses
