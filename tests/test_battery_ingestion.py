@@ -443,12 +443,12 @@ def test_downsample_always_keeps_both_endpoints():
 # ---------------------------------------------------------------------------
 
 def test_resolve_soc_prefers_feed_over_reported():
-    assert battery_model._resolve_soc(_ride_row()) == (80.0, 65.0)
+    assert battery_model._resolve_soc(_ride_row()) == (80.0, 65.0, "reported")
 
 
 def test_resolve_soc_falls_back_when_feed_is_none():
     assert battery_model._resolve_soc(
-        _ride_row(feed_start_battery_percent=None)) == (78.0, 65.0)
+        _ride_row(feed_start_battery_percent=None)) == (78.0, 65.0, "reported")
 
 
 def test_resolve_soc_is_none_when_both_start_sources_are_unknown():
@@ -472,3 +472,44 @@ def test_episode_sql_skips_episodes_overlapping_a_donated_observation():
     # The episode's own bracketing samples are the interval to compare against.
     assert "d.departed_at < post_agg.arrived_at" in sql
     assert "d.arrived_at  > pre.snapshot_time" in sql
+
+
+
+def test_resolve_soc_falls_back_to_the_GBFS_END_reading():
+    """THE BUG THIS FUNCTION WAS. It demanded `reported_battery_percent` — a
+    number the rider types at the end of a ride — while the frontend had
+    deliberately stopped asking for it, on the stated grounds that "the
+    server already derives its own end-of-ride battery reading from the GBFS
+    feed". Two modules, exactly contradictory assumptions.
+
+    The arithmetic between them: 27 rides, 25 with a feed start reading, 2
+    with a rider-reported end, 8 with a GBFS end — and ZERO with both ends
+    resolvable. Every tracked ride was discarded before reaching the model.
+    """
+    got = battery_model._resolve_soc({
+        "feed_start_battery_percent": 80.0,
+        "reported_battery_percent": None,
+        "gbfs_end_battery_percent": 61.0,
+    })
+    assert got == (80.0, 61.0, "gbfs_reappearance")
+
+
+def test_the_riders_own_reading_still_wins():
+    """It is taken at the moment the ride ended; the feed's is taken when the
+    vehicle reappears a watch cycle later, at rest. When both exist, the more
+    temporally accurate one is the right one."""
+    got = battery_model._resolve_soc({
+        "feed_start_battery_percent": 80.0,
+        "reported_battery_percent": 65.0,
+        "gbfs_end_battery_percent": 61.0,
+    })
+    assert got == (80.0, 65.0, "reported")
+
+
+def test_still_none_when_NEITHER_end_is_known():
+    """The fallback widens what counts as an answer; it does not invent one."""
+    assert battery_model._resolve_soc({
+        "feed_start_battery_percent": 80.0,
+        "reported_battery_percent": None,
+        "gbfs_end_battery_percent": None,
+    }) is None
