@@ -727,3 +727,13 @@ def test_bikeway_detour_survives_having_no_answer(monkeypatch):
     assert api_route._bikeway_detour_candidate(
         [(39.7, -105.0), (39.71, -105.0)], prof, _trip(),
         [(39.7 + i * 0.001, -105.0) for i in range(6)]) is None
+
+
+def test_profiles_endpoint_advertises_bikeway_ranking():
+    """Clients read this to know what a profile actually does; `safe` changing
+    from "Valhalla's first answer" to "ranked on the bike network" is exactly
+    the kind of thing they must not have to hardcode."""
+    by_key = {p["key"]: p for p in api_route.profiles()["profiles"]}
+    assert by_key["safe"]["bikeway_ranked"] is True
+    assert by_key["express"]["bikeway_ranked"] is False
+    assert by_key["shade"]["bikeway_ranked"] is False
