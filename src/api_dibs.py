@@ -881,44 +881,52 @@ def _page_shell(title: str, body: str) -> str:
   .rules ol {{ margin:10px 0 0; padding-left:18px; }}
   .rules li {{ margin:0 0 8px; font-size:12.5px; line-height:1.5; color:var(--ink); }}
 
-  /* ONE CARD PER SECTION, fully rounded and inset.
-     This used to be `margin:20px -20px -22px` with `border-radius:0 0 22px
-     22px` — written for exactly ONE block sitting at the bottom of the
-     certificate, bleeding to its edge. A second block made the first bleed
-     INTO it, round its corners in the middle of the page, and let the
-     parchment show through the 20px gap: the "random colour shift and weird
-     border radius" as reported. Sections are peers now, so they are styled
-     as peers. */
-  .signup {{ margin:14px 0 0; padding:16px 18px; text-align:left;
-            background:#1d2733; color:#eef3f8; border-radius:16px; }}
-  /* Collapsed, like the rules above them. A stranger who scanned this code
-     came to check ONE claim; two open forms below the answer is a page
-     asking for a phone number before it has finished replying. The
-     stand-down stays open because it is the offer this page exists to make
-     to the one person guaranteed to be reading it. */
-  /* The browser's own disclosure triangle, exactly as `.rules` above uses
-     it. A hand-rolled `::before` with a CSS escape rendered as tofu plus a
-     stray "B8" on the device — the marker is not worth a custom glyph and an
-     encoding question when the native one is already correct and already
-     used one section up. */
-  .signup > summary {{ cursor:pointer; margin:0; font-size:18px;
-            font-weight:800; }}
-  .signup > summary:focus-visible {{ outline:2px solid #4c9ffe;
-            outline-offset:3px; border-radius:8px; }}
-  .signup h2 {{ margin:0; font-size:18px; font-weight:800; }}
-  .signup__sub {{ margin:6px 0 14px; font-size:13.5px; line-height:1.5; color:#c4d0dd; }}
+  /* EVERY SECTION LOOKS LIKE THE RULES. One accordion style on this page,
+     shared by all three, because they are the same kind of thing: something
+     below the certificate you can open if you want it.
+     
+     This block has been through two wrong answers. It began as a dark navy
+     band (#1d2733) bleeding to the bottom edge with only its lower corners
+     rounded — correct when it was the ONE footer on a parchment ticket, and
+     the source of both the "colour shift" and the "weird border radius" the
+     moment a second section appeared above it. Then it became a warm card,
+     which fixed the clash but still made two sections look like cards beside
+     one that was not. The rules were always the right pattern; the sections
+     just had to stop being special.
+     
+     No fill, no border, no card. A hairline above, an uppercase muted
+     summary, ink content — the ticket stays one piece of paper. */
+  .signup {{ margin:16px 0 0; text-align:left; border-top:1px solid #eadfc4;
+            padding-top:12px; }}
+  /* Collapsed, like the rules. A stranger who scanned this code came to
+     check ONE claim; two open forms below the answer is a page asking for a
+     phone number before it has finished replying. The stand-down stays open
+     because it is the offer this page exists to make to the one person
+     guaranteed to be reading it. */
+  .signup > summary {{ font-size:12.5px; font-weight:800; letter-spacing:.06em;
+                      text-transform:uppercase; color:var(--muted);
+                      cursor:pointer; }}
+  .signup > summary:focus-visible {{ outline:2px solid var(--accent);
+            outline-offset:3px; border-radius:6px; }}
+  .signup__sub {{ margin:10px 0 14px; font-size:12.5px; line-height:1.5;
+                 color:var(--ink); }}
+  .signup__sub--alt {{ color:var(--muted); }}
   .signup__form {{ display:flex; flex-direction:column; gap:10px; }}
   .signup label {{ display:flex; flex-direction:column; gap:4px; font-size:12px;
                   font-weight:700; letter-spacing:.04em; text-transform:uppercase;
-                  color:#9fb0c2; }}
+                  color:var(--muted); }}
   .signup input {{ font:inherit; font-size:16px; padding:12px 13px; border-radius:12px;
-                  border:1px solid #33465c; background:#111a24; color:#fff; }}
-  .signup input::placeholder {{ color:#6b8098; }}
+                  border:1px solid rgba(122,106,76,.35); background:var(--paper);
+                  color:var(--ink); }}
+  /* --muted, which measures 5.17:1 on the input's parchment. The lighter tan
+     first reached for was 2.80:1 — and a placeholder here is not decoration,
+     it is the example phone FORMAT somebody is copying. */
+  .signup input::placeholder {{ color:var(--muted); }}
   .signup button {{ margin-top:4px; padding:14px 16px; border:0; border-radius:12px;
                    background:var(--accent); color:#fff; font:inherit; font-size:16px;
                    font-weight:800; cursor:pointer; }}
-  .signup__fine {{ margin:2px 0 0; font-size:11.5px; color:#8fa1b4; }}
-  .plainlink {{ display:block; margin:14px 0 0; font-size:13px; color:#9fc3ff; }}
+  .signup__fine {{ margin:2px 0 0; font-size:11.5px; color:var(--muted); }}
+  .plainlink {{ display:block; margin:14px 0 0; font-size:13px; color:var(--accent); }}
   .cta {{ display:block; margin:16px 0 0; padding:14px 16px; border-radius:14px;
          background:var(--accent); color:#fff; text-decoration:none;
          font-size:15px; font-weight:800; }}
