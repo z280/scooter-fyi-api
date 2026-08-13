@@ -1153,6 +1153,48 @@ async def donate_track(
                     ],
                 )
 
+            # THE RIDE LEARNS ITS OWN DISTANCE FROM THE DONATION.
+            #
+            # `PATCH .../end` measures from `ride_waypoints`, a live-stream
+            # table nothing writes to any more — the app records batched,
+            # signed, chained tracks and uploads them HERE. So every ride
+            # ended with `distance_source = 'straight_line'` and a crow-flies
+            # number between its endpoints, and then the real track arrived a
+            # moment later into a different table and nothing joined the two
+            # up. 26 of 27 rides in production read straight_line; not one
+            # read waypoints. A 3,901 m ride was recorded as 2,924 m, and the
+            # rider's own history is what showed it to them.
+            #
+            # The donated track is strictly better evidence than the two-point
+            # fallback: it has passed chain, monotonic, speed and GBFS
+            # correlation before reaching this line. Points are unaffected —
+            # `credit_nav_distance_bonus` and `credit_battery_contribution`
+            # already read `result.distance_meters` — so this corrects the
+            # RECORD, not anybody's balance.
+            #
+            # Only when there is a track to learn from, and only forward: a
+            # donation that produced no usable waypoints leaves the ride's
+            # existing measurement alone rather than overwriting it with a
+            # worse one.
+            if result.waypoints:
+                cur.execute(
+                    """
+                    UPDATE tracked_rides SET
+                        distance_meters = %s,
+                        distance_source = 'waypoints',
+                        path_polyline = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        result.distance_meters,
+                        encode_polyline(
+                            [(lat, lon) for (_ms, lat, lon, _acc) in result.waypoints]
+                        ),
+                        str(rid),
+                    ),
+                )
+
             # verdict != "pending_feed" -> settled now (eligible, ineligible
             # for a non-chain reason, or the internal "error" verdict — all
             # terminal); "pending_feed" -> still waiting on the live feed,
