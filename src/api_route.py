@@ -307,7 +307,7 @@ def _bikeway_detour_candidate(
     bikeway. Priced at BIKEWAY_METER_DISCOUNT that is 1,462 effective metres
     against 1,531, so the ranking now has something to choose and chooses it.
 
-    Costs exactly one extra /route. The trace is already paid for by scoring.
+    Costs one extra /route and one extra trace_attributes call.
 
     Returns None whenever the detour is not worth asking for or Valhalla cannot
     answer — a manufactured candidate is a bonus, never a requirement, and this

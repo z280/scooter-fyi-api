@@ -846,7 +846,7 @@ def backfill_ride_distances_from_donations() -> dict[str, int]:
                 SELECT r.id, d.id, d.distance_meters
                 FROM tracked_rides r
                 JOIN track_donations d ON d.tracked_ride_id = r.id
-                WHERE r.distance_source IS DISTINCT FROM 'waypoints'
+                WHERE r.distance_source = 'straight_line'
                   AND d.distance_meters IS NOT NULL
                 ORDER BY r.started_at
                 """
