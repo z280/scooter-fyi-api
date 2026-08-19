@@ -140,6 +140,7 @@ class ValhallaConfig:
     custom_files_dir: str
     map_object_key: str
     canopy_object_key: str
+    bikeways_object_key: str
 
     def contains(self, lat: float, lon: float) -> bool:
         return (self.bbox_south <= lat <= self.bbox_north
@@ -298,6 +299,7 @@ def _valhalla(raw: dict[str, Any]) -> ValhallaConfig:
         custom_files_dir=raw.get("custom_files_dir", "/custom_files"),
         map_object_key=raw.get("map_object_key", "denver_scooter_custom.pbf"),
         canopy_object_key=raw.get("canopy_object_key", "denver_canopy_coverage.csv.gz"),
+        bikeways_object_key=raw.get("bikeways_object_key", "denver_bikeways.csv.gz"),
     )
 
 

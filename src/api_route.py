@@ -40,7 +40,7 @@ from . import battery_model, valhalla
 from .client_ip import real_client_ip
 from .config import RouteProfile, load
 from .pg import connection
-from .r2_map import load_canopy_coverage
+from .r2_map import load_bikeway_ways, load_canopy_coverage
 from .ratelimit import enforce
 
 log = logging.getLogger(__name__)
@@ -89,6 +89,28 @@ def _canopy() -> dict[int, float]:
     _CANOPY = load_canopy_coverage()
     _CANOPY_LOADED_AT = time.monotonic()
     return _CANOPY
+
+
+# way_id -> (facility, network), loaded lazily from the shared volume. Same
+# lazy-with-retry shape as _CANOPY above and for the same reason: the worker can
+# reach /api/v1/route before the sidecar has finished downloading, and caching
+# an empty result forever would silently disable the designated-bikeway half of
+# the preference for the life of the process.
+_BIKEWAYS: dict[int, tuple[str, str]] | None = None
+_BIKEWAYS_LOADED_AT: float = 0.0
+
+
+def _bikeways() -> dict[int, tuple[str, str]]:
+    global _BIKEWAYS, _BIKEWAYS_LOADED_AT
+    import time
+
+    if _BIKEWAYS:
+        return _BIKEWAYS
+    if _BIKEWAYS is not None and (time.monotonic() - _BIKEWAYS_LOADED_AT) < _CANOPY_RETRY_SECONDS:
+        return _BIKEWAYS
+    _BIKEWAYS = load_bikeway_ways()
+    _BIKEWAYS_LOADED_AT = time.monotonic()
+    return _BIKEWAYS
 
 
 def _enforce_ip_limit(request: Request, *, bucket: str, limit: tuple[int, int]) -> None:
@@ -154,34 +176,41 @@ _STREET_USES = frozenset({
 #: What a metre of designated bikeway costs, as a fraction of an ordinary metre.
 #:
 #: This is the whole preference, and it is deliberately ONE number rather than a
-#: score plus a separate detour cap: at 0.85 a fully-bikeway route can be at most
-#: 1/0.85 = 18% longer than a rival with none, because that is exactly where the
+#: score plus a separate detour cap: at 0.80 a fully-bikeway route can be at most
+#: 1/0.80 = 25% longer than a rival with none, because that is exactly where the
 #: discount stops paying for itself. A second cap would be a knob that could
 #: disagree with this one.
 #:
 #: Calibrated, not chosen. Swept over 104 Denver route sets (26 real ride
 #: origin/destination pairs from `tracked_rides` plus 90 seeded random pairs at
 #: 0.6-4 km, the range scooter trips actually occupy), scoring every candidate
-#: including the manufactured one from `_bikeway_detour_candidate`:
+#: including the manufactured one from `_bikeway_detour_candidate`, and with the
+#: denver-map-prep bike-network sidecar loaded:
 #:
 #:     discount   bikeway share   mean distance   worst detour
-#:       1.00     40.0% -> 36.6%      -0.9%           0.0%
-#:       0.90     40.0% -> 44.3%      -0.5%           5.9%
-#:       0.85     40.0% -> 45.8%      -0.3%           5.9%   <- here
-#:       0.80     40.0% -> 46.5%      -0.1%          13.0%
-#:       0.75     40.0% -> 47.5%      +0.1%          19.9%
+#:       1.00     46.7% -> 44.2%      -0.8%           0.0%
+#:       0.90     46.7% -> 52.4%      -0.5%           5.9%
+#:       0.85     46.7% -> 54.3%      -0.3%           5.9%
+#:       0.80     46.7% -> 55.3%      -0.1%          13.0%   <- here
+#:       0.75     46.7% -> 56.0%      +0.1%          13.0%
+#:       0.70     46.7% -> 57.4%      +0.6%          19.9%
 #:
-#: 0.85 takes most of the available gain while the worst case a rider can be
-#: handed stays under 6%, which nobody notices; 0.80 buys 0.7 of a point more
-#: share and doubles that worst case. Note the top row: ranking these same
-#: candidates by distance alone LOWERS bikeway share to 36.6%, so the shortest
-#: route is actively anti-correlated with the bike network — the preference is
-#: not free-riding on a coincidence.
+#: 0.80 is where the curve flattens — 0.75 buys 0.7 of a point more and 0.70
+#: another 1.4 — and it still costs nothing in aggregate, with mean distance
+#: fractionally NEGATIVE because re-ranking picks up shorter alternates as
+#: often as longer ones (Valhalla's first choice is not the shortest either).
 #:
-#: Mean distance is NEGATIVE at every setting: re-ranking picks up shorter
-#: alternates as often as longer ones, because Valhalla's first choice is not
-#: the shortest either. In aggregate this costs riders nothing.
-BIKEWAY_METER_DISCOUNT = 0.85
+#: It is also what the reported case needs, which is the reason this moved from
+#: 0.85. From 3158 W 8th Ave to downtown the candidates are 4,816 m at 65.9% on
+#: the network and 5,115 m at 95.3% staying on Hazel Court. At 0.85 a 29-point
+#: share gap is worth only 4.4% of distance and the 5.9% shorter route wins; at
+#: 0.80 it is worth 5.9% and the bikeway wins. A rider who reported this twice
+#: was right that the preference was too weak to reach it.
+#:
+#: Note the top row: ranking these same candidates by distance alone LOWERS
+#: bikeway share to 44.2%, so the shortest route is actively anti-correlated
+#: with the bike network — the preference is not free-riding on a coincidence.
+BIKEWAY_METER_DISCOUNT = 0.80
 
 # Valhalla `edge.cycle_lane` values that mean "there is bike infrastructure on
 # this edge". `none` is the fourth value and the only one excluded.
@@ -190,6 +219,38 @@ _BIKE_LANES = frozenset({"shared", "dedicated", "separated"})
 # `edge.use` values that ARE the bike infrastructure rather than merely carrying
 # some. A trail is not "a road with a lane on it", it is the thing itself.
 _BIKEWAY_USES = frozenset({"cycleway", "path", "footway"})
+
+#: Everything `bikeway_share` and `_bikeway_detour_candidate` need from a traced
+#: edge. Kept in one place because the two must agree about what "on the
+#: network" means — a detour manufactured around a stretch the scorer then
+#: counts as bikeway would be a route that argues with itself.
+_BIKEWAY_TRACE_ATTRIBUTES = (
+    "edge.length", "edge.bicycle_network", "edge.cycle_lane", "edge.use",
+    "edge.way_id",
+)
+
+
+def _edge_on_network(edge: dict[str, Any],
+                     table: dict[int, tuple[str, str]]) -> bool:
+    """Is this traced edge on Denver's bike network?
+
+    Four signals, and the fourth is the reason the sidecar exists. Valhalla
+    reports route-relation membership, cycle lanes and off-street trail use, so
+    it already sees most of the network; `bicycle=designated` it folds into
+    access parsing and never surfaces. That is 17% of the network, and two of
+    Hazel Court's six segments — the very street this preference was built for.
+
+    `table` may be empty (the sidecar has not synced yet), in which case this
+    falls back to exactly the graph-side behaviour that shipped first.
+    """
+    if edge.get("bicycle_network") or 0:
+        return True
+    if (edge.get("cycle_lane") or "").lower() in _BIKE_LANES:
+        return True
+    if (edge.get("use") or "").lower() in _BIKEWAY_USES:
+        return True
+    entry = table.get(edge.get("way_id"))
+    return entry is not None and (entry[0] != "none" or entry[1] != "none")
 
 
 def bikeway_share(trip: dict[str, Any], costing_options: dict[str, Any],
@@ -248,13 +309,12 @@ def bikeway_share(trip: dict[str, Any], costing_options: dict[str, Any],
         return None
     try:
         edges = valhalla.trace_attributes(
-            shape, costing_options,
-            attributes=("edge.length", "edge.bicycle_network",
-                        "edge.cycle_lane", "edge.use"))
+            shape, costing_options, attributes=_BIKEWAY_TRACE_ATTRIBUTES)
     except valhalla.ValhallaError as exc:
         log.warning("bikeway scoring failed to trace route: %s", exc)
         return None
 
+    table = _bikeways()
     total = 0.0
     on_network = 0.0
     for edge in edges:
@@ -262,9 +322,7 @@ def bikeway_share(trip: dict[str, Any], costing_options: dict[str, Any],
         if length <= 0:
             continue
         total += length
-        if (edge.get("bicycle_network") or 0) \
-                or (edge.get("cycle_lane") or "").lower() in _BIKE_LANES \
-                or (edge.get("use") or "").lower() in _BIKEWAY_USES:
+        if _edge_on_network(edge, table):
             on_network += length
     if total <= 0:
         return None
@@ -318,11 +376,13 @@ def _bikeway_detour_candidate(
     try:
         edges = valhalla.trace_attributes(
             shape, profile.costing_options,
-            attributes=("edge.length", "edge.bicycle_network", "edge.cycle_lane",
-                        "edge.use", "edge.begin_shape_index", "edge.end_shape_index"))
+            attributes=_BIKEWAY_TRACE_ATTRIBUTES
+            + ("edge.begin_shape_index", "edge.end_shape_index"))
     except valhalla.ValhallaError as exc:
         log.warning("bikeway detour failed to trace route: %s", exc)
         return None
+
+    table = _bikeways()
 
     # Longest consecutive off-network run, measured in metres and remembered by
     # the shape indices that bound it.
@@ -330,10 +390,7 @@ def _bikeway_detour_candidate(
     run_len, run_begin, run_end = 0.0, None, None
     for edge in edges:
         length = (edge.get("length") or 0.0) * 1000.0
-        on_network = ((edge.get("bicycle_network") or 0)
-                      or (edge.get("cycle_lane") or "").lower() in _BIKE_LANES
-                      or (edge.get("use") or "").lower() in _BIKEWAY_USES)
-        if on_network:
+        if _edge_on_network(edge, table):
             run_len, run_begin, run_end = 0.0, None, None
             continue
         if run_begin is None:

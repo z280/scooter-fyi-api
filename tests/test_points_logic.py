@@ -3,7 +3,7 @@ a scripted fetchone() queue."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pytest
 
@@ -220,8 +220,15 @@ class _RefCursor(_FakeCursor):
         return self._rows.pop(0) if self._rows else []
 
 
-NOW = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
-LATER = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+# A stand-down deadline is compared against the real clock
+# (`settle_referrals_for_account` calls `datetime.now`), so LATER has to be in
+# the future or the newcomer is never paid and the tests below assert the
+# expiry path by accident. These were absolute dates — 2026-08-13 and -14 —
+# which passed on the day they were written and began failing permanently on
+# 2026-08-15. Relative to now, they cannot rot again.
+NOW = datetime.now(timezone.utc)
+LATER = NOW + timedelta(days=1)
+EXPIRED = NOW - timedelta(days=1)
 
 
 def _sql_for(cur, needle):
@@ -272,9 +279,8 @@ def test_an_expired_stand_down_pays_the_referrer_but_NOT_the_newcomer():
     scooter.fyi today". Printing an expiry the payout ignores would be worse
     than not printing one — but the introduction still happened, so the
     referrer is still owed."""
-    past = datetime(2026, 8, 12, 6, 0, tzinfo=timezone.utc)
     cur = _RefCursor(fetches=[], rows=[
-        [(9, "Resourceful 🌈", 100, "stand_down", 300, past, 39.74, -104.99)],
+        [(9, "Resourceful 🌈", 100, "stand_down", 300, EXPIRED, 39.74, -104.99)],
     ])
     cur.fetchone = _seq(cur, [
         ("new@example.com", "+13035550142"),
