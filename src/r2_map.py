@@ -132,10 +132,13 @@ def sync_map_assets() -> dict:
 
     pbf_changed = _try(vcfg.map_object_key, pbf_path)
     canopy_changed = _try(vcfg.canopy_object_key, dest_dir / vcfg.canopy_object_key)
+    bikeways_changed = _try(vcfg.bikeways_object_key,
+                            dest_dir / vcfg.bikeways_object_key)
 
     result = {
         "pbf_changed": pbf_changed,
         "canopy_changed": canopy_changed,
+        "bikeways_changed": bikeways_changed,
         "dir": str(dest_dir),
         "errors": errors,
         # Whether Valhalla has anything to build from, which is what actually
@@ -413,6 +416,40 @@ def load_canopy_coverage() -> dict[int, float]:
                 continue
     log.info("Loaded canopy coverage for %d ways from %s", len(coverage), path.name)
     return coverage
+
+
+def load_bikeway_ways() -> dict[int, tuple[str, str]]:
+    """Load the way_id -> (facility, network) table the safe profile prefers.
+
+    Closes the one gap in the API's graph-side scoring. `trace_attributes`
+    reports route-relation membership and cycle lanes, so it already sees most
+    of the network; what it cannot report is `bicycle=designated`, which
+    Valhalla folds into access parsing. That is 17% of Denver's bike network,
+    and two of Hazel Court's six segments.
+
+    Returns an empty mapping if the sidecar isn't there. The preference then
+    degrades to the graph's own signals rather than failing the request — the
+    same contract `load_canopy_coverage` keeps, and the reason bikeway scoring
+    was built to work without this file in the first place.
+    """
+    vcfg = load().valhalla
+    path = Path(vcfg.custom_files_dir) / vcfg.bikeways_object_key
+    if not path.exists():
+        log.warning("Bike network sidecar missing at %s — the bikeway "
+                    "preference falls back to the graph's own signals, which "
+                    "cannot see bicycle=designated", path)
+        return {}
+
+    ways: dict[int, tuple[str, str]] = {}
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", newline="") as fh:
+        for row in csv.DictReader(fh):
+            try:
+                ways[int(row["way_id"])] = (row["facility"], row["network"])
+            except (KeyError, ValueError):
+                continue
+    log.info("Loaded bike network for %d ways from %s", len(ways), path.name)
+    return ways
 
 
 def map_asset_path() -> Path:
