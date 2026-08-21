@@ -10,6 +10,12 @@ Available commands:
                       passed since the last successful archive.
     daily_sla         Compute today's 6-9 AM Denver SLA window.
     daily_trips       Roll up yesterday's full-day trip/popularity stats.
+    reprocess_equity_compliance
+                      Rebuild prior days' Equity Area compliance against
+                      the city's clarified map, from device_history's stop
+                      intervals (src/equity_backfill.py). Sweeps whatever
+                      is still missing; `equity_backfill <start> [end]`
+                      does an explicit range by hand.
     cleanup_receipts  Delete receipt images past the 18-month retention
                       (API_REQUIREMENTS.md §3.2 / privacy policy).
     cleanup_ride_screenshots
@@ -100,6 +106,8 @@ Available commands:
     migrate           Apply pending SQL migrations.
     admin             Manage the admin allowlist:
                       `admin (list | add <email> | remove <email>)`.
+    equity_backfill   Reprocess an explicit date range:
+                      `equity_backfill <start> [end] [--full-day]`.
 """
 
 from __future__ import annotations
@@ -107,6 +115,7 @@ from __future__ import annotations
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
 
 from .analytics import cleanup_telemetry, rollup_analytics
 from .archive import run_archive
@@ -124,6 +133,7 @@ from .r2_map import sync_map_assets, sync_photon_index
 from .daily_sla import run_daily
 from .daily_trips import run_daily as run_daily_trips
 from .device_features import process_pending as process_device_feature_reports
+from . import equity_backfill
 from .pg import connection, run_migrations
 from .ride_watch import finalize_validation
 from .sentry import capture_exception, init as sentry_init, monitor
@@ -170,6 +180,18 @@ _MONITOR_DAILY_TRIPS = {
     "failure_issue_threshold": 1,
     "recovery_threshold": 1,
 }
+_MONITOR_EQUITY_REPROCESS = {
+    "schedule": {"type": "crontab", "value": "40 9 * * *"},
+    "timezone": "America/Denver",
+    # Each day it rebuilds means a DuckDB point-in-polygon pass over the
+    # window's stops, so a backlog run is minutes, not seconds. The margin
+    # is generous because a slow run is normal here and a missed one is not
+    # urgent -- the sweep is idempotent and picks the day up tomorrow.
+    "checkin_margin": 30,
+    "max_runtime": 45,
+    "failure_issue_threshold": 1,
+    "recovery_threshold": 1,
+}
 
 
 @monitor(slug="ingest_cycle", monitor_config=_MONITOR_INGEST)
@@ -185,6 +207,20 @@ def _cli_daily_sla():
 @monitor(slug="daily_trips", monitor_config=_MONITOR_DAILY_TRIPS)
 def _cli_daily_trips():
     return run_daily_trips()
+
+
+@monitor(slug="reprocess_equity_compliance", monitor_config=_MONITOR_EQUITY_REPROCESS)
+def _cli_reprocess_equity_compliance():
+    """Fill in prior days' Equity Area compliance against the city's
+    clarified map (src/equity_backfill.py).
+
+    Snapshots older than the deploy that added the `equity` group carry
+    NULL in every `*_equity` column, so the contractual series would
+    otherwise only ever fill forward. This rebuilds them from
+    device_history's stop intervals. Idempotent per day, so a deep backlog
+    just takes a few nights rather than one long run.
+    """
+    return equity_backfill.run_backlog()
 
 
 @monitor(slug="archive_if_due", monitor_config=_MONITOR_ARCHIVE)
@@ -886,6 +922,7 @@ COMMANDS = {
     "archive_if_due":        _cli_archive_if_due,
     "daily_sla":             _cli_daily_sla,
     "daily_trips":           _cli_daily_trips,
+    "reprocess_equity_compliance": _cli_reprocess_equity_compliance,
     "cleanup_receipts":      cleanup_receipts,
     "cleanup_ride_screenshots": cleanup_ride_screenshots,
     "cleanup_model_report_photos": cleanup_model_report_photos,
@@ -914,6 +951,12 @@ COMMANDS = {
     "cleanup_telemetry":     cleanup_telemetry,
     "migrate":               lambda: run_migrations(),
 }
+
+
+#: Commands that take sub-arguments, dispatched before COMMANDS (whose
+#: entries are strictly zero-arg because cron calls them with no context).
+#: Populated below, once the functions exist.
+_SUBARG_COMMANDS: dict[str, Callable[[list[str]], int]] = {}
 
 
 def admin_cli(sub_args: list[str]) -> int:
@@ -957,6 +1000,49 @@ def admin_cli(sub_args: list[str]) -> int:
     return 2
 
 
+def equity_backfill_cli(sub_args: list[str]) -> int:
+    """`python -m src.cli equity_backfill <start> [end] [--full-day]` —
+    reprocess an explicit Denver-local date range against the city's
+    official Equity Area map.
+
+    The scheduled `reprocess_equity_compliance` command sweeps whatever is
+    still missing within its lookback; this is the by-hand door for a
+    deeper backfill or for re-running a day whose numbers are in question.
+    `--full-day` rebuilds every snapshot of the day rather than only the
+    6-9 AM window the SLA averages — ~8x the work, and only worth it if
+    something wants the whole series.
+    """
+    usage = "usage: python -m src.cli equity_backfill <start> [end] [--full-day]"
+    flags = {a for a in sub_args if a.startswith("--")}
+    dates = [a for a in sub_args if not a.startswith("--")]
+    unknown = flags - {"--full-day"}
+    if unknown or not 1 <= len(dates) <= 2:
+        print(usage, file=sys.stderr)
+        return 2
+    try:
+        start = datetime.strptime(dates[0], "%Y-%m-%d").date()
+        end = datetime.strptime(dates[1], "%Y-%m-%d").date() if len(dates) == 2 else start
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if end < start:
+        print("error: end < start", file=sys.stderr)
+        return 2
+
+    results = equity_backfill.reprocess_range(
+        start, end, window_only="--full-day" not in flags
+    )
+    for r in results:
+        print(r.as_dict())
+    return 0
+
+
+_SUBARG_COMMANDS.update({
+    "admin": admin_cli,
+    "equity_backfill": equity_backfill_cli,
+})
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -968,17 +1054,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # `admin` takes sub-arguments (list/add/remove <email>); the cron
     # commands are strictly zero-arg.
-    if args and args[0] == "admin":
+    if args and args[0] in _SUBARG_COMMANDS:
+        cmd = args[0]
         try:
-            return admin_cli(args[1:])
+            return _SUBARG_COMMANDS[cmd](args[1:])
         except Exception as e:  # noqa: BLE001
-            log.exception("cli command admin failed")
+            log.exception("cli command %s failed", cmd)
             capture_exception(e)
             return 1
 
     if len(args) != 1 or args[0] not in COMMANDS:
         choices = " | ".join(sorted(COMMANDS))
-        print(f"usage: python -m src.cli ({choices} | admin ...)", file=sys.stderr)
+        subs = " | ".join(f"{c} ..." for c in sorted(_SUBARG_COMMANDS))
+        print(f"usage: python -m src.cli ({choices} | {subs})", file=sys.stderr)
         return 2
 
     cmd = args[0]

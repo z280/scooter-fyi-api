@@ -85,6 +85,14 @@
       "name_strategy": "field"
     },
     {
+      "region_category": "equity_areas",
+      "region_type": "equity",
+      "file": "/app/data/equity.geojson",
+      "name_prefix": "EQ_",
+      "name_field": "EQUITY_AREA_ID",
+      "name_strategy": "field"
+    },
+    {
       "region_category": "council_districts",
       "region_type": "council_district",
       "file": "/app/data/CD.geojson",

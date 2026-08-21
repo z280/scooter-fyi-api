@@ -2,9 +2,18 @@
 snapshot (`snapshot_metadata_core`) and the 6am-9am daily SLA compliance
 window (`daily_sla_compliance`).
 
-    v1, v2   — the legacy Disadvantaged-Areas boundary (v1 is today's
-               contractual compliance metric) and its parallel-tracked
-               companion. See API_REQUIREMENTS.md §1.1a.
+    equity   — THE official Equity Area map, as finally clarified by the
+               city (2026-08) for the Veo contract: 30 polygons, backed by
+               `data/equity.geojson`, served as boundary layer `equity` and
+               named EQ_001..EQ_030. This is the contractually binding
+               boundary; everything below it is retained history, not a
+               live question.
+    v1, v2   — the legacy Disadvantaged-Areas boundary (v1 was the
+               contractual compliance metric before the city clarified the
+               map) and its parallel-tracked companion. Still computed and
+               still carrying a pass/fail flag so the historical series
+               stays continuous and comparable — the frontend no longer
+               shows either. See API_REQUIREMENTS.md §1.1a.
     er1..er6 — one group per exact `EquityGroupRank` tier (1 = highest
                need) from Denver DOTI's authoritative census-block-group
                Equity Index. Tracked individually and atomically — not
@@ -12,8 +21,10 @@ window (`daily_sla_compliance`).
                confirms as contractually authoritative can be
                reconstructed from history (e.g. rank<=2 = er1 ∪ er2)
                without having had to guess the right combination up
-               front. See config.json's `boundaries` list for the
-               backing GeoJSON files.
+               front — the question the `equity` group above has since
+               settled. Retained for the same reason v1/v2 are: the
+               history is already recorded against them. See config.json's
+               `boundaries` list for the backing GeoJSON files.
 
 Adding a group here is the wiring that makes `compute.py` compute it and
 `daily_sla.py` average it — but the Postgres columns for it
@@ -29,11 +40,11 @@ lists must stay identical since the daily SLA row is a straight average
 over these same snapshot columns.
 
 `COMPLIANCE_GROUPS` is a DELIBERATELY SMALLER subset: only these get a
-`compliance_<g>_pass` boolean. er1..er6 are tracked as raw averages only
-— no individual rank tier is itself a compliance boundary, so no
-pass/fail flag is computed for one. The frontend combines whichever
-er-groups make up a candidate cutoff (e.g. er1 + er2) and computes
-pass/fail itself from the averages; see API_REQUIREMENTS.md §1.1a.
+`compliance_<g>_pass` boolean. `equity` is the authoritative one —
+`OFFICIAL_GROUP` — and v1/v2 keep theirs so the pre-clarification series
+stays readable beside it. er1..er6 are tracked as raw averages only: no
+individual rank tier was ever itself a compliance boundary, so no
+pass/fail flag is computed for one. See API_REQUIREMENTS.md §1.1a.
 
 SPLIT DIMENSIONS -------------------------------------------------------
 Every tracked group also gets a binary breakdown along each dimension in
@@ -56,9 +67,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-TRACKED_GROUPS: tuple[str, ...] = ("v1", "v2", "er1", "er2", "er3", "er4", "er5", "er6")
+# `equity` is APPENDED, not inserted: core_metric_columns() derives both the
+# snapshot INSERT list and the daily-SLA average list from this order, and
+# run_cycle() zips a positional DuckDB result tuple against that same list.
+# Appending leaves every existing column's position untouched.
+TRACKED_GROUPS: tuple[str, ...] = (
+    "v1", "v2", "er1", "er2", "er3", "er4", "er5", "er6", "equity",
+)
 
-COMPLIANCE_GROUPS: tuple[str, ...] = ("v1", "v2")
+COMPLIANCE_GROUPS: tuple[str, ...] = ("v1", "v2", "equity")
+
+#: The group the contract actually binds — the city's clarified Equity Area
+#: map. Read this rather than hardcoding "equity" at a call site, so the day
+#: a future map supersedes it there is one line to change.
+OFFICIAL_GROUP = "equity"
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,25 @@
 # from daily_sla so a failure in one doesn't block or mask the other.
 0 9 * * * cd /app && python -m src.cli daily_trips
 
+# Equity Area compliance reprocessing (sql/079 / src/equity_backfill.py).
+# The city clarified WHICH map the Veo contract means in August 2026, so
+# every snapshot recorded before that deploy has NULL in every `*_equity`
+# column and the contractual series would otherwise only ever fill forward.
+# This rebuilds prior days from device_history's stop intervals -- the only
+# durable record of where the fleet was, now that raw_telemetry_points is
+# flushed to R2 after 24 hours.
+#
+# 9:40 AM, deliberately AFTER the 9:00 daily_sla / daily_trips pair and the
+# 9:15 area-leader recompute: it re-averages daily_sla rows that the 9:00
+# job may have only just written, so running first would just make it
+# re-run them tomorrow.
+#
+# Self-limiting and idempotent: it only picks up days whose SLA row still
+# has no equity figure, within a 14-day lookback, so steady state is a
+# no-op and a deep backlog drains over a few nights instead of one long
+# run. `equity_backfill <start> [end]` does an explicit range by hand.
+40 9 * * * cd /app && python -m src.cli reprocess_equity_compliance
+
 # Archive: fires daily at 02:00 AM Denver but only acts if >= archive_hours
 # (config.json; 24 since the 2-min cadence cutover — a 48h window at 2-min
 # is ~12.5M rows, too close to the archive job's memory ceiling) elapsed

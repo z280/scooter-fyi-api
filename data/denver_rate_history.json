@@ -73,7 +73,7 @@
       "status": "current",
       "operated_from": "2025-01-01",
       "source": {
-        "all": "Denver licensing agreement; mirrored in denver-scooter-fyi/src/config.ts RATE_PLANS"
+        "all": "Denver licensing agreement (Exhibit C, Multi-Year Pricing Plan); mirrored in denver-scooter-fyi/src/config.ts RATE_PLANS"
       },
       "plans": [
         {
@@ -111,13 +111,29 @@
         {
           "key": "equity",
           "kind": "rack",
-          "label": "Equity program",
+          "label": "Access Program (income-qualified)",
           "unlock_cents": 0,
           "per_min_cents": 15,
           "free_minutes_per_day": 60,
-          "cited": true
+          "cited": false,
+          "_note": "Renamed from 'Equity program'. It is a RIDER TIER and was sharing a name with the geographic Equity Area discount below, which is a different Exhibit C row -- the collision is how a rider concludes they are already getting the area discount. The key stays 'equity' because it is the rate_plan enum value in PUT /api/v1/profile and riders have it stored. cited=false: Exhibit C states a 0.19/min CAP on additional time for this tier, not the 15/min rate below, which comes from Veo's own program materials and sits under that cap."
+        },
+        {
+          "key": "equity_area",
+          "kind": "geographic",
+          "label": "Equity Area pricing",
+          "unlock_cents": 100,
+          "per_min_cents": 13,
+          "cited": true,
+          "applies": "any trip that starts or ends within a designated Equity Area",
+          "automatic": true,
+          "effective_from": "2026-05-01",
+          "effective_to": "2029-05-01",
+          "source_citation": "Exhibit A 5.2 (obligation); Exhibit C, Equity Area Pricing row (rate)",
+          "_note": "NOT a tier a rider picks -- kind='geographic', automatic=true. A 10-minute/1-mile ride is 2.30 here against 4.90 at the base price. The 1.00 unlock is part of the discounted row, so a rider seeing a 1 unlock on a receipt has not necessarily been denied the discount."
         }
-      ]
+      ],
+      "_note": "Exhibit C's pricing table has FOUR rows and they are not all the same KIND of thing. Base Price, Resident Pass and the Access Program are rider tiers -- which bracket a person is enrolled in. Equity Area Pricing is geographic and automatic: Exhibit A 5.2 obliges Veo to discount 'any trip that starts or ends within a designated Equity Area' regardless of the rider's tier, with no enrollment. It is carried below with kind='geographic' so a consumer cannot mistake it for something a rider selects. Exhibit C gives it no 'Maximums' figure, unlike Base Price (0.49/min cap), Resident Pass (0.33/min) and Access (0.19/min), so no ceiling is recorded here either. Rates are fixed May 2026 - May 2029 and adjustable only for documented cost-of-service increases with DOTI approval (Exhibit A 7.1)."
     }
   ]
 }
