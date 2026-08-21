@@ -154,6 +154,7 @@
     "custom_files_dir": "/custom_files",
     "map_object_key": "denver_scooter_custom.pbf",
     "canopy_object_key": "denver_canopy_coverage.csv.gz",
+    "bikeways_object_key": "denver_bikeways.csv.gz",
     "default_profile": "safe",
     "profiles": [
       {
@@ -163,7 +164,9 @@
           "bicycle_type": "Hybrid",
           "use_roads": 0.1,
           "use_hills": 0.5
-        }
+        },
+        "alternates": 3,
+        "rerank_by_bikeway": true
       },
       {
         "key": "range",

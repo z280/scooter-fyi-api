@@ -91,7 +91,8 @@ def route(points: list[tuple[float, float]],
           alternates: int = 0,
           radius: int | None = None,
           with_elevation: bool = True,
-          costing: str = "bicycle") -> dict[str, Any]:
+          costing: str = "bicycle",
+          exclude_locations: list[tuple[float, float]] | None = None) -> dict[str, Any]:
     """Request a route through ``points`` (list of (lat, lon)).
 
     ``costing`` is Valhalla's own mode. It is "bicycle" for every rider-facing
@@ -99,6 +100,10 @@ def route(points: list[tuple[float, float]],
     ride, which the same tiles already serve without a rebuild (verified
     against the live graph: pedestrian returns a shape and maneuvers on the
     bicycle-built Denver clip).
+
+    ``exclude_locations`` bars the route from passing through those points. It
+    is how `api_route` manufactures a bike-network candidate that Valhalla's own
+    `alternates` will not produce — see `_bikeway_detour_candidate`.
     """
     cfg = load().valhalla
     payload: dict[str, Any] = {
@@ -111,6 +116,9 @@ def route(points: list[tuple[float, float]],
     }
     if alternates:
         payload["alternates"] = alternates
+    if exclude_locations:
+        payload["exclude_locations"] = [{"lat": lat, "lon": lon}
+                                        for lat, lon in exclude_locations]
     if with_elevation:
         payload["elevation_interval"] = cfg.elevation_interval
     return _post("/route", payload)
