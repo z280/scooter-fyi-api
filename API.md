@@ -173,6 +173,14 @@ GET /api/v1/snapshots/latest
   "percent_scooters_v1": 33.72,
   "percent_bikes_v2": 63.64,
   "percent_scooters_v2": 36.36,
+  "total_devices_equity": 1811,
+  "total_bike_equity": 1211,
+  "total_scooter_equity": 600,
+  "percent_all_devices_equity": 30.68,
+  "percent_all_bikes_equity": 30.01,
+  "percent_all_scooters_equity": 32.12,
+  "percent_bikes_equity": 66.87,
+  "percent_scooters_equity": 33.13,
   "total_devices_er1": 1198,
   "total_bike_er1": 782,
   "total_scooter_er1": 416,
@@ -206,7 +214,8 @@ GET /api/v1/snapshots/latest
 | `total_scooter_v1` | int | Scooters inside v1. |
 | `total_scooter_v2` | int | Scooters inside v2. |
 | `total_not_in_denver` | int | Devices reporting coordinates outside the 200m-buffered Denver city polygon. Includes both obvious outliers (China factory glitches, devices in transit) and adjacent-jurisdiction devices more than 200m past the line (Aurora, Lakewood, repair shops well over the city line). Excluded from all `*_denver`/`*_v1`/`*_v2` counts. |
-| `percent_all_devices_v1` | float \| null | `total_devices_v1 / total_devices_denver * 100`. **This is the primary RFP §3.0 compliance metric — Denver requires ≥30%.** |
+| `percent_all_devices_equity` | float \| null | `total_devices_equity / total_devices_denver * 100`, against the city's official Equity Area map. **This is the primary RFP §3.0 compliance metric — Denver requires ≥30%.** |
+| `percent_all_devices_v1` | float \| null | `total_devices_v1 / total_devices_denver * 100`. Was the primary metric until the city clarified the map in August 2026; retained as history. |
 | `percent_all_devices_v2` | float \| null | `total_devices_v2 / total_devices_denver * 100`. |
 | `percent_all_bikes_v1` | float \| null | `total_bike_v1 / total_bike_denver * 100`. |
 | `percent_all_bikes_v2` | float \| null | `total_bike_v2 / total_bike_denver * 100`. |
@@ -237,9 +246,12 @@ pre-combined into a cutoff — specifically so that whatever cutoff DOTI
 confirms as contractually authoritative can be reconstructed from
 history later (e.g. a "rank ≤ 2" metric = `er1 + er2`) without this
 system having had to guess the right combination up front. None of
-`er1`–`er6` is a confirmed compliance boundary today — `percent_all_devices_v1`
-remains **the** primary RFP §3.0 metric until DOTI confirms otherwise;
-see API_REQUIREMENTS.md §1.1a.
+`er1`–`er6` is a compliance boundary, and the cutoff question they existed
+to keep answerable was settled in August 2026 when the city named the
+official Equity Area map: the `equity` group, and
+`percent_all_devices_equity`, are now **the** RFP §3.0 metric.
+`percent_all_devices_v1` and the `erN` families remain computed and
+returned as history; see API_REQUIREMENTS.md §1.1a.
 
 **Every tracked group also gets the same breakdown along a second,
 independent axis: `vehicle_use_type` (sitting vs standing), not just
@@ -399,7 +411,9 @@ Cached for 1 hour at the edge (`Cache-Control: public, max-age=3600`).
 Returns the full GeoJSON FeatureCollection for one boundary layer. The
 URL is what `/api/v1/boundaries` advertises.
 
-**Layer values:** `v1`, `v2`, `neighborhood`, `council_district`, `community_network`.
+**Layer values:** `equity`, `v1`, `v2`, `er1`–`er6`, `neighborhood`, `council_district`, `community_network`.
+
+`equity` is the city's official Equity Area map — the one the contract binds. See the Layer reference for the rest.
 
 **Example request:**
 ```http
@@ -1175,16 +1189,21 @@ GET /api/v1/equity-estimate?ranks=1,2
 - **Response 503:** no snapshot yet.
 - Carries a weak ETag keyed on `(cycle_id, ranks)` and
   `Cache-Control: public, max-age=60`.
-- Reminder: no `erN` combination is a confirmed compliance boundary today
-  — `percent_all_devices_v1` remains the primary RFP §3.0 metric (see
-  API_REQUIREMENTS.md §1.1a). This endpoint exists to preview candidate
-  cutoffs.
+- Reminder: no `erN` combination is a compliance boundary. This endpoint
+  was built to preview candidate cutoffs while the city had not yet said
+  which map binds; it has, so `percent_all_devices_equity` is the metric
+  and this is now a historical comparison tool (see
+  API_REQUIREMENTS.md §1.1a).
 
 ---
 
 ### `GET /api/v1/compliance/daily/latest`
 
 Most recent daily 6 AM – 9 AM Denver SLA window. **This is the contractually-correct compliance metric per License Exhibit B** — the every-10-min `/snapshots/latest` value is informational, but the binding SLA is the morning-window daily average. Computed once per day at 9:00 AM Denver time.
+
+> **Which field is the answer:** `avg_percent_all_devices_equity` / `compliance_equity_pass`, measured against the city's official Equity Area map (`equity`). The city clarified that map in August 2026; before then this documentation pointed at `..._v1`, which is now retained history. The `_v1`, `_v2` and `_erN` families are all still computed and still returned, so a dashboard built against the old field keeps working — it is just no longer reporting the number the contract turns on.
+>
+> **Days that predate the map return `null` there.** The `*_equity` columns did not exist when those snapshots were recorded, so they are backfilled by a nightly job that reconstructs each cycle's fleet from `device_history` (`python -m src.cli reprocess_equity_compliance`). A `null` means "not reprocessed yet", not "zero" — treat it as pending, the way `/api/v1/compliance/calendar` does.
 
 **Request:**
 ```http
@@ -1220,6 +1239,15 @@ GET /api/v1/compliance/daily/latest
   "avg_percent_scooters_v1": 33.84,
   "avg_percent_bikes_v2": 63.52,
   "avg_percent_scooters_v2": 36.48,
+  "avg_total_devices_equity": 1802.11,
+  "avg_total_bike_equity": 1204.90,
+  "avg_total_scooter_equity": 597.21,
+  "avg_percent_all_devices_equity": 30.68,
+  "avg_percent_all_bikes_equity": 30.04,
+  "avg_percent_all_scooters_equity": 32.05,
+  "avg_percent_bikes_equity": 66.86,
+  "avg_percent_scooters_equity": 33.14,
+  "compliance_equity_pass": true,
   "compliance_v1_pass": false,
   "compliance_v2_pass": false,
   "avg_total_devices_er1": 1189.44,
@@ -1237,7 +1265,7 @@ GET /api/v1/compliance/daily/latest
 
 **Response 200 (pending):** No daily row computed yet (first run pending, or pipeline just deployed). Returns the same shape with every field nulled and `snapshot_count: 0`, so the gauge can render a "pending" state without special-casing a non-2xx status. The `avg_*` and `compliance_*` fields are `null` (not absent), matching the field reference below.
 ```json
-{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null, including er1..er6 … */ "compliance_v1_pass": null, "compliance_v2_pass": null, "computed_at": null }
+{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_equity": null, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null, including er1..er6 … */ "compliance_equity_pass": null, "compliance_v1_pass": null, "compliance_v2_pass": null, "computed_at": null }
 ```
 
 #### Field reference
@@ -1249,7 +1277,8 @@ GET /api/v1/compliance/daily/latest
 | `window_end_ts` | string \| null | 9:00 AM Denver expressed as UTC. `null` in the pending response. |
 | `snapshot_count` | int | Number of cycles whose `snapshot_time` fell inside the window. Typically 18 (3 hours × 6 cycles/hour). Lower values indicate cycle misses; 0 means no data. |
 | `avg_*` fields | float \| null | Arithmetic mean of the corresponding `snapshot_metadata_core` field across all snapshots in the window, **for every tracked group** (`v1`, `v2`, `er1`–`er6` — see [Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6)). Null when `snapshot_count == 0`. |
-| `compliance_v1_pass` | bool \| null | `avg_percent_all_devices_v1 >= 30`. The primary SLA boolean. Null when no data. |
+| `compliance_equity_pass` | bool \| null | `avg_percent_all_devices_equity >= 30`, against the official map. **The SLA boolean.** Null when no data — including on days that predate the map and have not been reprocessed yet. |
+| `compliance_v1_pass` | bool \| null | `avg_percent_all_devices_v1 >= 30`. Was the primary SLA boolean; retained as history. Null when no data. |
 | `compliance_v2_pass` | bool \| null | Same for v2. The contractually-binding map (v1 vs v2) is being confirmed with DOTI; track both for now. |
 | `computed_at` | string \| null | UTC timestamp of when this row was computed. `null` in the pending response. |
 
@@ -1305,7 +1334,63 @@ GET /api/v1/compliance/daily/range?start=2026-05-16&end=2026-05-30
 }
 ```
 
-Days without any computed row are simply omitted from `rows` — don't expect dense coverage immediately after deploy or during pipeline outages.
+Days without any computed row are simply omitted from `rows` — don't expect dense coverage immediately after deploy or during pipeline outages. `/api/v1/compliance/calendar` below is the dense-by-construction alternative when you need a cell per day.
+
+---
+
+### `GET /api/v1/compliance/calendar?month=YYYY-MM&count=N&group=equity`
+
+Per-day compliance pass/fail for whole calendar months. Built for a calendar grid: unlike `/range`, it returns **every day of every requested month**, including days with no data and days that haven't happened yet.
+
+That density is the point. "The job never computed this day" and "this day failed" are different facts, and a sparse response renders them identically — as a gap in the grid. So each day carries an explicit `status`:
+
+| `status` | Meaning |
+|---|---|
+| `pass` | The 6–9 AM window average met the threshold |
+| `fail` | It did not |
+| `no_data` | No `daily_sla_compliance` row for that day at all |
+| `pending` | A row exists, but this group's average is `null`. For `equity` that means the day predates the official map and the reprocessing job hasn't reached it yet — **not** a failure |
+
+**Query parameters:**
+
+| Name | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `month` | YYYY-MM | no | current Denver month | The **newest** month returned |
+| `count` | int | no | `2` (max 12) | Walks **backwards** from `month`, so the default is "this month and last" |
+| `group` | string | no | `equity` | One of `equity`, `v1`, `v2`. `equity` is the official map; v1/v2 are the pre-clarification series |
+
+**Request:**
+```http
+GET /api/v1/compliance/calendar
+```
+
+**Response 200:**
+```json
+{
+  "group": "equity",
+  "threshold": 30.0,
+  "today": "2026-08-21",
+  "months": [
+    {
+      "month": "2026-07",
+      "first_date": "2026-07-01",
+      "last_date": "2026-07-31",
+      "pass_days": 4,
+      "fail_days": 27,
+      "days": [
+        { "date": "2026-07-01", "status": "fail", "percent": 19.84, "snapshot_count": 88, "in_future": false },
+        { "date": "2026-07-02", "status": "pass", "percent": 31.02, "snapshot_count": 90, "in_future": false }
+        /* … one entry per day of the month … */
+      ]
+    },
+    { "month": "2026-08", "…": "…" }
+  ]
+}
+```
+
+Months come back **oldest first**, so the array reads in calendar order. `in_future` is computed server-side against Denver's clock — the client's may not be in Denver.
+
+An unknown `group` is a `400`, not a fallback: the value reaches a column name, so it's checked against the compliance-group registry rather than trusted.
 
 ---
 
@@ -3354,12 +3439,13 @@ Behavior:
 
 ## Layer reference
 
-The eleven layers, their `region_type` values (used in `layer=` query
+The twelve layers, their `region_type` values (used in `layer=` query
 params), and the naming convention for `region_name` (used in the
 trend endpoint and as the keys of `regions` in spatial-snapshot).
 
 | `region_category` | `region_type` | # of regions | `region_name` examples |
 |---|---|---|---|
+| `equity_areas` | `equity` | 30 | `EQ_001`, `EQ_002`, … `EQ_030` (ordinal, zero-padded to 3 digits) |
 | `disadvantaged_areas` | `v1` | 34 | `V1_001`, `V1_002`, … `V1_034` (ordinal, zero-padded to 3 digits) |
 | `disadvantaged_areas` | `v2` | 65 | `V2_080010001001`, `V2_080010002003`, … (US Census Block Group GEOID20) |
 | `disadvantaged_areas` | `er1` | 34 | `ER1_080310043081`, … (US Census Block Group GEOID20; `EquityGroupRank == 1`, highest need) |
@@ -3374,8 +3460,9 @@ trend endpoint and as the keys of `regions` in spatial-snapshot).
 
 ### Notes on the layers
 
-- **v1 vs v2** are two distinct versions of the city's original Equity / Opportunity Areas polygon. Both exist because Denver's contract negotiations referenced both; the canonical compliance metric (`percent_all_devices_v1` on `/api/v1/snapshots/latest`) is computed against `v1` specifically, with `v2` tracked in parallel. They are not nested or disjoint — a device can be in both, neither, or one or the other.
-- **`er1`–`er6`** are Denver DOTI's newer, authoritative census-block-group Equity Index, split into one layer per exact `EquityGroupRank` tier (`er1` = highest need, `er6` = lowest). Unlike v1/v2 they **partition** the scored area — every scored block group falls in exactly one `erN` layer, never two. They're tracked individually (not pre-combined into a cutoff) in both `/api/v1/snapshots/latest` and `/api/v1/compliance/daily/latest` so that whatever cutoff DOTI confirms as contractually authoritative can be reconstructed from history later (e.g. a "rank ≤ 2" metric = `er1 + er2`). **No individual `erN` layer is a confirmed compliance boundary today** — `percent_all_devices_v1` remains the primary RFP §3.0 metric. See API_REQUIREMENTS.md §1.1a.
+- **`equity` is the official map.** In August 2026 the city clarified which polygon the Veo license agreement's Equity Area Deployment target (Exhibit B: 30% of the active fleet, averaged over the 6–9 AM window) is actually measured against. That map is this layer: 30 polygons, `EQ_001`–`EQ_030`. `percent_all_devices_equity` on `/api/v1/snapshots/latest` and `avg_percent_all_devices_equity` / `compliance_equity_pass` on the daily-SLA endpoints are the **contractually binding** figures. Everything below is retained history — still computed, still returned, no longer the answer.
+- **v1 vs v2** are two distinct versions of the city's original Equity / Opportunity Areas polygon. Both exist because Denver's contract negotiations referenced both; `percent_all_devices_v1` was the canonical compliance metric until the `equity` layer above superseded it, with `v2` tracked in parallel throughout. They are not nested or disjoint — a device can be in both, neither, or one or the other.
+- **`er1`–`er6`** are Denver DOTI's newer, authoritative census-block-group Equity Index, split into one layer per exact `EquityGroupRank` tier (`er1` = highest need, `er6` = lowest). Unlike v1/v2 they **partition** the scored area — every scored block group falls in exactly one `erN` layer, never two. They're tracked individually (not pre-combined into a cutoff) in both `/api/v1/snapshots/latest` and `/api/v1/compliance/daily/latest` so that whatever cutoff DOTI confirms as contractually authoritative can be reconstructed from history later (e.g. a "rank ≤ 2" metric = `er1 + er2`). **No individual `erN` layer is a compliance boundary** — and the question they were tracked to answer is now settled by the `equity` layer above, so they are historical. See API_REQUIREMENTS.md §1.1a.
 - **At-Large council districts** (Gonzales-Gutierrez and Parady, which cover the entire city) are **excluded** from `council_district` rows to avoid double-counting. Only the 11 numbered districts appear.
 - **Neighborhoods** uses Denver's Statistical Neighborhood Boundaries (DOTI). Spaces and punctuation are stripped from names: `Athmar Park` → `NB_AthmarPark`, `Park Hill` → `NB_ParkHill` (note: there are also separate `NB_NortheastParkHill`, `NB_NorthParkHill`, `NB_SouthParkHill` neighborhoods).
 - **Community Networks** are Denver's 13 official planning regions, broader than neighborhoods.
@@ -3558,6 +3645,7 @@ Explicit `Cache-Control` headers, per endpoint:
 | `/api/v1/devices/current` | `public, max-age=30` | weak, keyed on `(cycle_id, include tokens)` |
 | `/api/v1/h3/aggregates` | `public, max-age=600` | weak, keyed on `(res, cycle_id)` |
 | `/api/v1/equity-estimate` | `public, max-age=60` | weak, keyed on `(cycle_id, ranks)` |
+| `/api/v1/compliance/calendar` | `public, max-age=300` | — |
 | `/api/v1/boundaries` | `public, max-age=3600` | — |
 | `/api/v1/boundaries/{layer}` | `public, max-age=86400, stale-while-revalidate=604800` | — |
 | `/api/v1/reports/summary` | `public, max-age=600` | — |

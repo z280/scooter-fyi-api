@@ -72,7 +72,8 @@ def _local_boundaries() -> tuple[BoundaryLayer, ...]:
 
 
 def _er_boundaries() -> tuple[BoundaryLayer, ...]:
-    """v1/v2 plus all six equity-rank layers — same convention as v2."""
+    """Every tracked equity group's layer: v1/v2, er1..er6, and the city's
+    official `equity` map — i.e. the full production boundary set."""
     layers = list(_local_boundaries())
     for n in range(1, 7):
         layers.append(BoundaryLayer(
@@ -83,7 +84,20 @@ def _er_boundaries() -> tuple[BoundaryLayer, ...]:
             name_strategy="field",
             name_field="GEOID20",
         ))
+    layers.append(_equity_boundary())
     return tuple(layers)
+
+
+def _equity_boundary() -> BoundaryLayer:
+    """The city's clarified, contractually-binding Equity Area map."""
+    return BoundaryLayer(
+        region_category="equity_areas",
+        region_type="equity",
+        file=str(REPO_DATA / "equity.geojson"),
+        name_prefix="EQ_",
+        name_strategy="field",
+        name_field="EQUITY_AREA_ID",
+    )
 
 
 def _patched_config(boundaries):
@@ -347,7 +361,27 @@ def test_core_totals_include_all_tracked_equity_groups(monkeypatch):
     # otherwise the er1..er6 CTEs are silently matching nothing.
     assert er_total > 0
 
-    # Regional rows should include all six er layers too (generic
-    # per-layer breakdown, unrelated to the core-snapshot wiring above).
+    # The official `equity` group is the one the contract now binds, so it
+    # gets its own assertions rather than riding on the loop above: it must
+    # actually match points (a group whose CTE silently matches nothing
+    # reports a clean, wrong 0.0%), and it cannot exceed the denominator.
+    assert core["total_devices_equity"] > 0
+    assert core["total_devices_equity"] <= core["total_devices_denver"]
+    assert core["percent_all_devices_equity"] == pytest.approx(
+        core["total_devices_equity"] / core["total_devices_denver"] * 100, abs=0.01
+    )
+
+    # Regional rows should include all six er layers and the official map
+    # too (generic per-layer breakdown, unrelated to the core-snapshot
+    # wiring above).
     types = {r["region_type"] for r in result.regional_rows}
     assert {f"er{n}" for n in range(1, 7)} <= types
+    assert "equity" in types
+
+    # EQ_001..EQ_030: one region per polygon in data/equity.geojson, named
+    # from EQUITY_AREA_ID rather than the reader's row order.
+    eq_names = {
+        r["region_name"] for r in result.regional_rows if r["region_type"] == "equity"
+    }
+    assert len(eq_names) == 30
+    assert eq_names == {f"EQ_{i:03d}" for i in range(1, 31)}

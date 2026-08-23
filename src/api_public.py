@@ -18,9 +18,9 @@ from . import boundaries
 from .api_device_features import feature_payload
 from .api_frontend_reports import reliability_report_type_sql
 from .device_features import STATUS_NEEDS_CONFIRMED as FEATURE_STATUS_NEEDS_CONFIRMED
-from .daily_sla import _AVG_FIELDS
+from .daily_sla import COMPLIANCE_THRESHOLD as SLA_THRESHOLD, DENVER_TZ, _AVG_FIELDS
 from .dwell_stats import stats_for_cycle
-from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column
+from .equity_groups import COMPLIANCE_GROUPS, OFFICIAL_GROUP, compliance_pass_column
 from .pg import connection
 from . import battery_model, vehicle_identity
 from .quality import (
@@ -885,4 +885,165 @@ def daily_compliance_range(
         "end": d_end.isoformat(),
         "count": len(rows),
         "rows": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Compliance calendar
+# ---------------------------------------------------------------------------
+# The threshold the calendar's pass/fail colouring is drawn against is
+# daily_sla.COMPLIANCE_THRESHOLD (imported at the top as SLA_THRESHOLD) —
+# the same constant the nightly job stamps `compliance_<g>_pass` with, so
+# the calendar can never disagree with the flag it is rendering.
+
+#: How many months one request may ask for. The UI wants two (this month
+#: and last); the cap keeps a hand-written query from walking the history.
+_CALENDAR_MAX_MONTHS = 12
+
+
+def _month_bounds(year: int, month: int) -> tuple[date_cls, date_cls]:
+    """First and last Denver-local date of a calendar month, inclusive."""
+    first = date_cls(year, month, 1)
+    last = date_cls(year + (month == 12), (month % 12) + 1, 1) - timedelta(days=1)
+    return first, last
+
+
+def _prev_month(year: int, month: int) -> tuple[int, int]:
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+@router.get("/api/v1/compliance/calendar")
+def compliance_calendar(
+    response: Response,
+    month: str | None = Query(
+        None,
+        description="Denver-local month, YYYY-MM. Defaults to the current one.",
+    ),
+    count: int = Query(
+        2,
+        ge=1,
+        le=_CALENDAR_MAX_MONTHS,
+        description="How many months to return, ending at `month` and walking backwards.",
+    ),
+    group: str = Query(
+        OFFICIAL_GROUP,
+        description=(
+            "Which equity-area map to report. Defaults to the city's official "
+            "map; v1/v2 are still available for the pre-clarification series."
+        ),
+    ),
+) -> dict[str, Any]:
+    """Per-day compliance pass/fail for whole calendar months.
+
+    Built for a calendar grid, so it returns EVERY day of each month, not
+    just the ones with data: a day the job never computed and a day that
+    failed are different facts, and a grid that silently omitted the former
+    would render them identically (as a gap). Each day therefore carries an
+    explicit `status`:
+
+        "pass"    — the window average met the threshold
+        "fail"    — it did not
+        "no_data" — no SLA row for that day at all
+        "pending" — a row exists but this group's average is NULL, which
+                    for the official map means the day predates it and has
+                    not been reprocessed yet (src/equity_backfill.py)
+
+    `count` walks BACKWARDS from `month`, so the default `count=2` is
+    exactly "this month and last" — the two the compliance calendar shows.
+    """
+    if group not in COMPLIANCE_GROUPS:
+        raise HTTPException(
+            400,
+            detail=f"unknown group {group!r}; expected one of {list(COMPLIANCE_GROUPS)}",
+        )
+
+    today = datetime.now(DENVER_TZ).date()
+    if month is None:
+        year, mon = today.year, today.month
+    else:
+        try:
+            parsed = datetime.strptime(month, "%Y-%m")
+        except ValueError:
+            raise HTTPException(400, detail="bad month format; expected YYYY-MM")
+        year, mon = parsed.year, parsed.month
+
+    # Oldest month first, so the response reads in calendar order.
+    months: list[tuple[int, int]] = []
+    y, m = year, mon
+    for _ in range(count):
+        months.append((y, m))
+        y, m = _prev_month(y, m)
+    months.reverse()
+
+    range_start, _ = _month_bounds(*months[0])
+    _, range_end = _month_bounds(*months[-1])
+
+    pct_col = f"avg_percent_all_devices_{group}"
+    pass_col = compliance_pass_column(group)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT sla_date, {pct_col}, {pass_col}, snapshot_count
+                FROM daily_sla_compliance
+                WHERE sla_date >= %s AND sla_date <= %s
+                """,
+                (range_start, range_end),
+            )
+            by_date = {
+                r[0]: {
+                    "percent": None if r[1] is None else float(r[1]),
+                    "pass": None if r[2] is None else bool(r[2]),
+                    "snapshot_count": int(r[3] or 0),
+                }
+                for r in cur.fetchall()
+            }
+
+    out_months = []
+    for y, m in months:
+        first, last = _month_bounds(y, m)
+        days = []
+        d = first
+        while d <= last:
+            row = by_date.get(d)
+            if row is None:
+                status = "no_data"
+            elif row["pass"] is None:
+                # A stored row whose average for THIS group is NULL. For the
+                # official map that means the day predates it and the
+                # reprocessing job has not reached it yet — a real, nameable
+                # state, not an error.
+                status = "pending"
+            else:
+                status = "pass" if row["pass"] else "fail"
+            days.append({
+                "date": d.isoformat(),
+                "status": status,
+                "percent": row["percent"] if row else None,
+                "snapshot_count": row["snapshot_count"] if row else 0,
+                # The calendar renders the whole month including days that
+                # have not happened; saying so beats the client re-deriving
+                # it from a clock that may not be in Denver.
+                "in_future": d > today,
+            })
+            d += timedelta(days=1)
+        out_months.append({
+            "month": f"{y:04d}-{m:02d}",
+            "first_date": first.isoformat(),
+            "last_date": last.isoformat(),
+            "days": days,
+            "pass_days": sum(1 for x in days if x["status"] == "pass"),
+            "fail_days": sum(1 for x in days if x["status"] == "fail"),
+        })
+
+    # 5 minutes. The underlying rows change once a day (the 9:00 AM SLA job,
+    # and the 9:40 reprocessing sweep behind it), so a long TTL would be
+    # defensible -- except that the day the number finally lands is exactly
+    # the day someone is refreshing this page.
+    response.headers["Cache-Control"] = "public, max-age=300"
+    return {
+        "group": group,
+        "threshold": SLA_THRESHOLD,
+        "today": today.isoformat(),
+        "months": out_months,
     }

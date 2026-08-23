@@ -5,21 +5,38 @@ from __future__ import annotations
 
 from src.equity_groups import (
     COMPLIANCE_GROUPS,
+    OFFICIAL_GROUP,
     TRACKED_GROUPS,
     compliance_pass_column,
     core_metric_columns,
 )
 
 
-def test_tracked_groups_are_v1_v2_and_six_equity_ranks():
-    assert TRACKED_GROUPS == ("v1", "v2", "er1", "er2", "er3", "er4", "er5", "er6")
+def test_tracked_groups_are_the_legacy_maps_the_ranks_and_the_official_map():
+    assert TRACKED_GROUPS == (
+        "v1", "v2", "er1", "er2", "er3", "er4", "er5", "er6", "equity",
+    )
 
 
-def test_compliance_groups_is_only_v1_v2():
-    """er1..er6 get metric tracking (TRACKED_GROUPS) but no pass/fail
-    boolean — no individual rank tier is itself a compliance boundary."""
-    assert COMPLIANCE_GROUPS == ("v1", "v2")
+def test_official_group_is_last_so_existing_columns_keep_their_positions():
+    """core_metric_columns() drives both the snapshot INSERT list and the
+    positional zip in compute.run_cycle(). A group inserted anywhere but
+    the END shifts every later column one place — which writes real
+    numbers into the wrong columns, silently. So the official map's
+    position in the tuple is itself the invariant."""
+    assert TRACKED_GROUPS[-1] == OFFICIAL_GROUP
+    assert OFFICIAL_GROUP == "equity"
+
+
+def test_compliance_groups_are_the_official_map_plus_the_two_legacy_ones():
+    """The official map is what the contract binds; v1/v2 keep their
+    pass/fail flags so the pre-clarification series stays readable beside
+    it. er1..er6 get metric tracking (TRACKED_GROUPS) but no boolean — no
+    individual rank tier was ever itself a compliance boundary."""
+    assert COMPLIANCE_GROUPS == ("v1", "v2", "equity")
+    assert OFFICIAL_GROUP in COMPLIANCE_GROUPS
     assert set(COMPLIANCE_GROUPS) <= set(TRACKED_GROUPS)
+    assert not any(g.startswith("er") for g in COMPLIANCE_GROUPS)
 
 
 def test_core_metric_columns_has_no_duplicates():
@@ -59,3 +76,27 @@ def test_core_metric_columns_respects_custom_group_subset():
 def test_compliance_pass_column_naming():
     assert compliance_pass_column("v1") == "compliance_v1_pass"
     assert compliance_pass_column("er4") == "compliance_er4_pass"
+    assert compliance_pass_column(OFFICIAL_GROUP) == "compliance_equity_pass"
+
+
+def test_official_group_columns_match_the_migration():
+    """sql/079 spells its ALTER TABLE columns out by hand; this is the
+    list they must equal. A group column added in Python with no matching
+    migration computes fine and then fails at INSERT time, in production,
+    at 9 AM."""
+    assert [c for c in core_metric_columns((OFFICIAL_GROUP,)) if c.endswith("_equity")] == [
+        "total_devices_equity",
+        "total_bike_equity",
+        "total_scooter_equity",
+        "total_sitting_equity",
+        "total_standing_equity",
+        "percent_all_devices_equity",
+        "percent_all_bikes_equity",
+        "percent_all_scooters_equity",
+        "percent_all_sitting_equity",
+        "percent_all_standing_equity",
+        "percent_bikes_equity",
+        "percent_scooters_equity",
+        "percent_sitting_equity",
+        "percent_standing_equity",
+    ]

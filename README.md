@@ -129,6 +129,10 @@ agent process).
 │   ├── dwell_stats.py           dwell-time outlier detection
 │   ├── daily_sla.py             9am daily SLA compliance rollup
 │   ├── daily_trips.py           9am daily trip/popularity rollup (trip_events → ranked stats)
+│   ├── equity_backfill.py       9:40am reprocessing of PRIOR days' Equity Area compliance
+│   │                            against the city's clarified map — rebuilds each past
+│   │                            cycle's fleet from device_history's stop intervals, gated
+│   │                            on agreeing with the fleet count that cycle recorded
 │   ├── accounts.py              account/session core: bearer tokens, require_session/
 │   │                            require_admin, public-username generation/
 │   │                            choice, phone number validation
