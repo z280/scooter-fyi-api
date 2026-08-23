@@ -605,6 +605,10 @@ def _edge(length_km, *, network=0, lane="none", use="road", begin=0, end=1):
     (_edge(1.0, lane="shared"), True),                # sharrow
     (_edge(1.0, use="cycleway"), True),               # off-street trail
     (_edge(1.0, use="path"), True),
+    # A SIDEWALK IS NOT A BIKEWAY. `footway` was in the set and credited a
+    # route for clipping the pavement; a genuine shared-use path tagged
+    # highway=footway carries bicycle=designated and arrives via the sidecar.
+    (_edge(1.0, use="footway"), False),
     (_edge(1.0), False),                              # plain residential road
     (_edge(1.0, lane="none", use="road"), False),
 ])

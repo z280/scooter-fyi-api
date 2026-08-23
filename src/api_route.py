@@ -218,7 +218,15 @@ _BIKE_LANES = frozenset({"shared", "dedicated", "separated"})
 
 # `edge.use` values that ARE the bike infrastructure rather than merely carrying
 # some. A trail is not "a road with a lane on it", it is the thing itself.
-_BIKEWAY_USES = frozenset({"cycleway", "path", "footway"})
+#
+# `footway` was in here and should not have been: it is Valhalla's value for a
+# SIDEWALK, and counting sidewalks as bike network credits a route for clipping
+# the pavement. Measured across five Denver pairs and their alternates, it was
+# scoring 0.79 km of 88.7 km traced — small, and wrong. A genuine shared-use
+# path tagged `highway=footway` is not lost with it: it carries
+# `bicycle=designated`, which is exactly what the denver-map-prep sidecar
+# publishes and `_edge_on_network` checks next.
+_BIKEWAY_USES = frozenset({"cycleway", "path"})
 
 #: Everything `bikeway_share` and `_bikeway_detour_candidate` need from a traced
 #: edge. Kept in one place because the two must agree about what "on the
@@ -554,6 +562,13 @@ def _score_bikeway(trips: list[dict[str, Any]],
     """
     if len(trips) == 1:
         return [(bikeway_share(trips[0], costing_options, shapes[0]), trips[0])]
+
+    # Load the sidecar BEFORE the pool starts. `_bikeways()` populates a module
+    # global on first call, and every worker calls it — on a cold cache that is
+    # four threads racing to read and parse the same file. Nothing corrupts
+    # (the assignment is atomic and the parses are equivalent), but the first
+    # request after a deploy would pay for the load several times over.
+    _bikeways()
 
     def score(pair: tuple[dict[str, Any], list[tuple[float, float]]]) -> float | None:
         trip, shape = pair
