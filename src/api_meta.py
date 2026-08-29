@@ -93,6 +93,22 @@ _PRIVACY = {
                       "account until self-serve deletion ships.",
         },
         {
+            "data": "favorite_devices",
+            "retention": "until you delete them",
+            "detail": "Vehicles you kept in My Scooters: the vehicle "
+                      "identifier, your nickname for it, when you last "
+                      "proved at the kerb that you were standing at it, and "
+                      "whether you want telling when it comes free. WHERE "
+                      "you were standing is NOT stored — the 75 m check runs "
+                      "when you keep the scooter and the position is then "
+                      "discarded. A kept vehicle's position is withheld "
+                      "while somebody is riding it: you can see where yours "
+                      "is parked, never where it is going. DELETE "
+                      "/api/v1/profile/favorite-devices/:vehicle_identifier "
+                      "is an immediate hard delete, and every row cascades "
+                      "when the account is deleted.",
+        },
+        {
             "data": "user_preferences",
             "retention": "until you delete them",
             "detail": "Rider-owned preference blobs: named map settings, the "
