@@ -35,9 +35,19 @@ more dangerous of the two, because an adapter that trusts it produces
 thousands of phantom vehicles and phantom trips at each rotation instead of
 an obviously empty feature.
 
-That is the same wall `MULTI_TENANCY_PLAN.md` §7c drew, and it lands in the
-same place: Atlanta gets the fleet-analytics half and none of the
-per-vehicle half.
+That is the same wall `MULTI_TENANCY_PLAN.md` §7c drew, and it lands in
+mostly the same place: Atlanta gets the fleet-analytics half and almost
+none of the per-vehicle half.
+
+**Almost**, because dwell is a genuine exception and it is worth pulling
+out (§2c). Dwell is a statement about a *location's* turnover — the
+codebase's own docstring says so — and it ends the moment a vehicle moves,
+which is exactly the case position-matching gets wrong. So the failure modes
+miss each other. For Lime the construction is `bike_id` within an epoch plus
+a position stitch across the rare boundary, and it re-links **95.4%
+unambiguously at 2 m**, with the ambiguous remainder being co-located peers
+whose swap costs dwell nothing. Bird, re-minting every cycle, gets
+location-level dwell only.
 
 But the ride-mode conclusion is **not** the obvious one. `api_rides.py`'s
 off-feed ride path needs no vehicle identity at all, and it already carries
@@ -223,6 +233,10 @@ means:
 - every per-device report, photo and QR binding orphaned at the next
   rotation.
 
+All of that is the cost of trusting `bike_id` *naively*. A boundary is
+detectable and partly bridgeable, which rescues dwell specifically and
+nothing else — §2c.
+
 Bird's honest rotation produces an obviously empty feature. Lime's produces
 a plausible-looking one that is quietly wrong, which is the more expensive
 failure. **Treat both as `stable_vehicle_id: false`** and do not special-case
@@ -232,7 +246,7 @@ Lime on the strength of the 99% steady-state number.
 detectable and whether identity is recoverable across it — a global re-mint
 with 96.6% coordinate stability is, in principle, re-linkable by position at
 the boundary alone. That is a research question, not a launch dependency,
-and §2c's warning about position-matching applies to any answer it produces.
+and §2d's warning about position-matching applies to any answer it produces.
 
 ### 2a. What this costs, concretely
 
@@ -245,14 +259,20 @@ join, the `snapshot_metadata_core` metrics, `regional_metrics_narrow`,
 This is the project's origin purpose and it is a counting exercise over
 anonymous points.
 
-**Cannot exist in Atlanta without a stable id** — `device_state`,
-`device_history`, dwell, reliability tiers, failed-start detection,
-`trip_events` and both daily trip rollups, `ride_watch` / `tracked_rides`,
-dibs, QR scans, device photos, per-device reports, device features,
-recommendations, and the battery model — plus, as currently wired, the
-points ledger, because every points hook hangs off `tracked_rides`. That
-last one is the only entry on this list that is a wiring accident rather
-than a data limit; see §2b.
+**Cannot exist in Atlanta without a stable id** — `device_history`,
+reliability tiers, failed-start detection, `trip_events` and both daily
+trip rollups, `ride_watch` / `tracked_rides`, dibs, QR scans, device
+photos, per-device reports, device features, recommendations, and the
+battery model — plus, as currently wired, the points ledger, because every
+points hook hangs off `tracked_rides`.
+
+Two entries that look like they belong on that list do not:
+
+- **The points ledger** is a wiring accident rather than a data limit
+  (§2b).
+- **Dwell is recoverable for Lime**, and this is measured, not argued
+  (§2c). It is the one identity-gated metric whose failure mode position
+  matching does not share.
 
 That second list is not a footnote. It is most of what shipped in the last
 year — dibs (`sql/076`), ride mode (`PLAN_RIDE_MODE_API.md`), device
@@ -301,10 +321,93 @@ before Phase 4, not during.
 
 What stays genuinely gone in Atlanta, with no off-feed equivalent: dibs
 (you cannot call dibs on a vehicle you cannot name), QR scan bonuses, device
-photos, device features, per-device reports and recommendations, dwell and
-reliability tiers, failed-start detection, and the battery model.
+photos, device features, per-device reports and recommendations, reliability
+tiers, failed-start detection, and the battery model. Dwell is not on this
+list — see §2c.
 
-### 2c. Do not try to reconstruct identity by position
+### 2c. Dwell is the exception, and Lime supports it
+
+`dwell_stats.py`'s own docstring says what dwell is: *"dwell is a statement
+about a **location's** turnover, so bikes and scooters are peers of each
+other."* The peer math is keyed on `h3_9_index`. Identity enters the
+implementation only as the mechanism for noticing that a vehicle moved —
+`device_state` resets `first_observed_at_location` on a MOVED transition.
+
+That makes dwell structurally different from everything else on §2a's list,
+and it is why §2d's warning does not reach it. §2d is about linking a
+vehicle **across movement**, where a wrong match silently merges two
+histories forever. Dwell only needs identity **while a vehicle sits still**,
+and it *ends* at the moment §2d is worried about. The failure modes do not
+overlap.
+
+**Measured, on the 2026-08-29 window.** Consecutive-snapshot matching by
+position, nearest neighbour within a tolerance:
+
+```
+                       LIME                      BIRD
+exact coordinate     95.5–98.6%              22.7–79.6%   (Bird's positions jitter)
+within 5 m           98.3–99.8%              97.6–99.5%
+  ...of which ambiguous (a co-located peer inside the tolerance):
+                     ~11%                    ~37%
+```
+
+For Lime the right construction is not position matching at all — it is
+**`bike_id` within an epoch, position only to stitch across a boundary**:
+
+- Within an epoch `bike_id` is exact and unambiguous. No inference.
+- A boundary is trivially detectable: shared ids between consecutive
+  snapshots drops to **0** while the fleet stays put. Nothing subtle to
+  detect.
+- Boundaries are rare — one in ~19 minutes of continuous polling.
+
+Re-linking across the one real boundary observed (L2→L3, 2,929 → 2,923
+vehicles, 0 shared ids):
+
+| tolerance | unambiguous re-link | ambiguous | unmatched |
+|---|---:|---:|---:|
+| **2 m** | **95.4%** | 2.9% | 1.6% |
+| 5 m | 87.6% | 11.4% | 1.0% |
+| 10 m | 78.5% | 20.7% | 0.8% |
+
+Use 2 m. And note what the two error columns actually cost:
+
+- The **1.6% unmatched** are vehicles that genuinely moved or went into
+  rental between polls. Dwell *should* reset for those. That is not an
+  error, it is the metric working.
+- The **2.9% ambiguous** are two or more vehicles parked within 2 m of each
+  other. Swapping their labels **costs dwell nothing**, because both have
+  been at that spot for the same duration. It would corrupt a per-device
+  report or photo binding; it does not corrupt a location's turnover.
+
+An occupancy cross-check says the same thing: of 2,727 10 m cells present on
+both sides of the boundary, **2,721 had identical occupancy and 6 changed.**
+
+**Bird does not get this.** Every cycle is a boundary, so the re-link runs
+~1,440×/day instead of a handful, and Bird's coordinates jitter, so it is
+worse at every tolerance:
+
+```
+Bird, per-cycle re-link at 2 m:  unambiguous 72–75%   ambiguous 19–20%   unmatched 6–9%
+```
+
+Compounded every cycle, that is not a dwell clock, it is a random walk.
+Bird gets **location-level** dwell — occupancy of an H3 cell over time,
+which needs no vehicle identity whatsoever and is most of what the peer
+stats consume anyway — and not per-vehicle dwell.
+
+**What this does not license.** This argues for dwell specifically, not for
+lifting `stable_vehicle_id`. A co-located swap is free for dwell and
+permanently corrupting for a report, a photo, a QR binding or a dibs claim,
+which is exactly §2d's point. Ship dwell for Lime as a separate, narrower
+capability — `location_dwell` — rather than by relaxing the identity flag.
+
+The honest residual risk: a vehicle rented and replaced by a *different*
+vehicle at the same spot between two polls reads as continuous dwell and
+inflates it. A tighter cycle shrinks the window, and it is likeliest exactly
+at high-turnover locations, which are the ones dwell is most interesting
+about. Worth a caveat in the UI, not a reason to skip the feature.
+
+### 2d. Do not try to reconstruct identity by position
 
 Bird's ids rotate but its coordinates are stable across a generation, so
 nearest-neighbour matching between cycles is superficially tempting. Don't:
@@ -485,6 +588,7 @@ Atlanta adds on top:
 | 2 | Boundary ingest: city limits, council districts, neighborhoods, NPUs from ATLDOT's FeatureServer; COC as an equity-style group with **no** compliance flag (§3c) | M |
 | 3 | `GbfsAdapter` gains Bird + Lime capability declarations; `battery_percent()` for Bird's `current_fuel_percent`; Lime's registry corrections | M |
 | 4 | `stable_vehicle_id: false` end to end — capability endpoint, and the frontend actually hiding ~half its surfaces on it | **L**, and mostly frontend |
+| 4b | A separate, narrower `location_dwell` capability: epoch-boundary detection + 2 m position stitch for Lime, H3-occupancy dwell for Bird (§2c) | M |
 | 5 | Address index + geocoder: Atlanta ArcGIS field mapping, Photon index widened to GA | M |
 | 6 | Routing graph: combined Denver+Atlanta `.pbf`, measured (§4) | **L**, infra-bound, may not fit |
 | 7 | Per-feed `cycle_minutes`, `raw_telemetry_points` partitioning, per-feed archive | M |
