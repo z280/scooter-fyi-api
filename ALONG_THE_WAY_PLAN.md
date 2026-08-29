@@ -265,11 +265,19 @@ the feature rather than an export button:
 
 - **Spec → map.** A toggle on the Filters drawer *and* on the spec sheet:
   **"Show only my ideal scooters."** Projects the spec onto the live filter
-  state. The projection is **lossy in exactly one stated direction**: the map
-  has no way to draw "preferred", so **musts and prefers both become plain
-  filters** and the toggle's helper line says so — *"the map can only show or
-  hide; your preferences are treated as requirements here."* A rider who
-  wanted the softer behaviour has it everywhere the ranking runs.
+  state, carrying `area` and `rideTypes` through untouched and forcing
+  `hideUnavailable` ON — availability is the one requirement a spec never
+  relaxes, so a view under that label containing a scooter somebody is riding
+  is a false label. (That corrects this document's first draft, which carried
+  `hideUnavailable` through with the rest.)
+
+  The projection is **lossy in two directions**, and only the first is worth a
+  rider's attention: the map has no way to draw "preferred", so **musts and
+  prefers both become plain filters**, which is what the toggle's helper line
+  says — *"the map can only show or hide; your preferences are treated as
+  requirements here."* The second is that the result is a **superset** of what
+  the spec accepts, because a model filter keeps mystery hardware visible
+  while the spec rejects it; that one lives in the code's own doc comment.
 - **Map → spec.** From the Filters drawer: **"Save these as my ideal
   scooter."** Seeds a new spec from the current filter state, drops the
   map-only fields, and opens the sheet with everything marked *prefer* — the
