@@ -31,6 +31,7 @@ from .api_legal import router as legal_router
 from .api_lexicon import router as lexicon_router
 from .api_meta import router as meta_router
 from .api_points import router as points_router
+from .api_favorites import router as favorites_router
 from .api_preferences import router as preferences_router
 from .api_qr import router as qr_router
 from .api_rides import router as rides_router
@@ -126,6 +127,7 @@ app.include_router(reports_router)
 app.include_router(auth_router)
 app.include_router(profile_router)
 app.include_router(preferences_router)
+app.include_router(favorites_router)
 app.include_router(frontend_reports_router)
 app.include_router(rides_router)
 app.include_router(tracked_rides_router)
