@@ -55,9 +55,10 @@ from pydantic import BaseModel, Field
 
 from .accounts import SessionUser, require_session
 from .geo import distance_meters
+from .identity import hash_plate
 from .pg import connection
 from .points import credit_qr_scan_points
-from .qr import QrValidationError, validate_scan
+from .qr import QrValidationError, extract_plate, validate_scan
 from .quality import compute_battery_percent
 from .ratelimit import enforce
 
@@ -103,8 +104,23 @@ class FavoriteIn(BaseModel):
     be a gate living on the wrong side of the network.
     """
 
-    vehicle_identifier: str = Field(..., min_length=16, max_length=16,
-                                    pattern=_VEHICLE_IDENTIFIER_RE)
+    #: OPTIONAL, because the scan is the identity.
+    #:
+    #: `src/api_device_features.py` established this: the tools-drawer flow
+    #: scans a scooter the rider never tapped on the map, and the QR is the
+    #: only identity it has. My Scooters has exactly the same flow — "keep
+    #: one" from the panel, camera straight up — and requiring the client to
+    #: already know a salted hash it cannot compute would have forced a
+    #: plate-extraction copy into the browser to work around it.
+    #:
+    #: When it IS sent, it must agree with the sticker. Unlike a features
+    #: report — where a mismatch re-targets, because the answers describe the
+    #: scooter the rider was standing at and there is data worth saving — a
+    #: disagreement here is refused. "Keep this one" naming one scooter while
+    #: the sticker names another is a client bug, and quietly keeping the
+    #: other one would be the app deciding which scooter somebody meant.
+    vehicle_identifier: str | None = Field(None, min_length=16, max_length=16,
+                                           pattern=_VEHICLE_IDENTIFIER_RE)
     qr_raw_value: str = Field(..., min_length=1, max_length=2000)
     lat: float = Field(..., ge=-90, le=90)
     lng: float = Field(..., ge=-180, le=180)
@@ -277,10 +293,22 @@ def add_favorite(
     `verified_at` and returns the row. A rider standing at their own scooter
     pressing the button again has not made a mistake.
     """
-    try:
-        validate_scan(payload.qr_raw_value, payload.vehicle_identifier)
-    except QrValidationError as e:
-        raise HTTPException(400, {"error": "qr_mismatch", "detail": str(e)})
+    # Resolve the vehicle from the sticker. `extract_plate`'s whole-payload
+    # fallback means this is None only for an empty payload, which the model
+    # already refuses.
+    plate = extract_plate(payload.qr_raw_value)
+    if not plate:
+        raise HTTPException(
+            400, {"error": "qr_mismatch",
+                  "detail": "could not read a plate from this QR code"},
+        )
+    scanned = hash_plate(plate)
+    if payload.vehicle_identifier is not None:
+        try:
+            validate_scan(payload.qr_raw_value, payload.vehicle_identifier)
+        except QrValidationError as e:
+            raise HTTPException(400, {"error": "qr_mismatch", "detail": str(e)})
+    vehicle_identifier = payload.vehicle_identifier or scanned
 
     now = datetime.now(timezone.utc)
     with connection() as conn:
@@ -293,7 +321,7 @@ def add_favorite(
             cur.execute(
                 "SELECT current_lat, current_lon, last_observed_at "
                 "FROM device_state WHERE vehicle_identifier = %s",
-                (payload.vehicle_identifier,),
+                (vehicle_identifier,),
             )
             device = cur.fetchone()
             if device is None:
@@ -337,7 +365,7 @@ def add_favorite(
             cur.execute(
                 "SELECT COUNT(*) FROM favorite_devices "
                 "WHERE account_id = %s AND vehicle_identifier <> %s",
-                (user.account_id, payload.vehicle_identifier),
+                (user.account_id, vehicle_identifier),
             )
             (others,) = cur.fetchone()
             if others >= MAX_FAVORITE_DEVICES:
@@ -364,7 +392,7 @@ def add_favorite(
                                         favorite_devices.nickname)
                 RETURNING (xmax = 0) AS inserted
                 """,
-                (user.account_id, payload.vehicle_identifier,
+                (user.account_id, vehicle_identifier,
                  payload.nickname, last_observed_at),
             )
             (inserted,) = cur.fetchone()
@@ -374,7 +402,7 @@ def add_favorite(
             # something already scanned.
             awarded = credit_qr_scan_points(
                 cur, account_id=user.account_id,
-                vehicle_identifier=payload.vehicle_identifier,
+                vehicle_identifier=vehicle_identifier,
                 lat=payload.lat, lng=payload.lng,
             )
 
@@ -382,7 +410,7 @@ def add_favorite(
         conn.commit()
 
     mine = next(
-        (r for r in rows if r[0] == payload.vehicle_identifier), None
+        (r for r in rows if r[0] == vehicle_identifier), None
     )
     return {
         "favorite": _favorite_payload(mine, now) if mine else None,

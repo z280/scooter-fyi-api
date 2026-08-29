@@ -531,3 +531,41 @@ def test_delete_and_then_404(client, store):
 def test_the_list_carries_the_cap_so_the_ui_need_not_hardcode_it(client, store):
     body = client.get("/api/v1/profile/favorite-devices").json()
     assert body["max_favorites"] == api_favorites.MAX_FAVORITE_DEVICES
+
+
+# ---------------------------------------------------------------------------
+# The scan as identity
+# ---------------------------------------------------------------------------
+def test_a_scan_alone_keeps_the_right_scooter(client, store):
+    """No vehicle_identifier at all — the flow a rider gets from the panel,
+    where the camera opens on a scooter they never tapped on the map.
+
+    The alternative would have been a plate-extraction copy in the browser to
+    compute an identifier the client cannot compute (the hash is salted
+    server-side), which is exactly the duplication api_device_features.py
+    avoided when it made the same field optional.
+    """
+    r = client.post(
+        "/api/v1/profile/favorite-devices",
+        json={"qr_raw_value": _QR, **_AT_SCOOTER},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["favorite"]["vehicle_identifier"] == _VID
+
+
+def test_a_claim_that_disagrees_with_the_sticker_is_refused_not_retargeted(
+    client, store
+):
+    """Unlike a features report, which re-targets because the answers describe
+    the scooter the rider was standing at and there is data worth saving.
+    "Keep this one" naming one scooter while the sticker names another is a
+    client bug, and quietly keeping the other would be the app deciding which
+    scooter somebody meant."""
+    other = "f" * 16
+    r = client.post(
+        "/api/v1/profile/favorite-devices",
+        json={"vehicle_identifier": other, "qr_raw_value": _QR, **_AT_SCOOTER},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "qr_mismatch"
+    assert store.rows == {}

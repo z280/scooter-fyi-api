@@ -446,7 +446,7 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `PUT /api/v1/profile/ride-specs/{name}` | Create or replace a named spec (opaque JSON blob: requirements + which are `must`); 5 per account |
 | `DELETE /api/v1/profile/ride-specs/{name}` | Delete a named spec |
 | `GET /api/v1/profile/favorite-devices` | Vehicles the caller keeps, with live state; position withheld while in use |
-| `POST /api/v1/profile/favorite-devices` | Keep a vehicle — needs a valid QR scan **and** a fix within 75 m of it; 10 per account |
+| `POST /api/v1/profile/favorite-devices` | Keep a vehicle — needs a valid QR scan **and** a fix within 75 m of it; the scan is the identity, so `vehicle_identifier` is optional; 10 per account |
 | `PATCH /api/v1/profile/favorite-devices/{vehicle_identifier}` | Rename, or turn the availability alert on/off |
 | `DELETE /api/v1/profile/favorite-devices/{vehicle_identifier}` | Let one go |
 | `GET /api/v1/emoji-nouns` | Full emoji → noun-word list, for building a username picker |
