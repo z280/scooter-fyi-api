@@ -11,6 +11,10 @@
     GET    /api/v1/profile/ride-usuals/{name}     one, by name
     PUT    /api/v1/profile/ride-usuals/{name}     create or replace
     DELETE /api/v1/profile/ride-usuals/{name}
+    GET    /api/v1/profile/ride-specs             every saved ride spec
+    GET    /api/v1/profile/ride-specs/{name}      one, by name
+    PUT    /api/v1/profile/ride-specs/{name}      create or replace
+    DELETE /api/v1/profile/ride-specs/{name}
 
 `settings` is an opaque, client-owned JSON object. This module never reads
 inside it, never merges it, and never validates its shape: it is the
@@ -54,12 +58,17 @@ MAX_SAVED_MAP_SETTINGS = 50
 # scrolling list on Screen 2.5 mid-wizard, so a rider who can save fifty of
 # them has built something slower to search than re-setting eight toggles.
 MAX_RIDE_USUALS = 10
+# Ride specs (sql/080) — a rider's saved "ideal scooter". Five, not the
+# Usuals' ten: a spec is chosen at the top of a trip from a short list, and a
+# rider with ten of them has built a search problem rather than a shortcut.
+MAX_RIDE_SPECS = 5
 MAX_BLOB_BYTES = 16 * 1024
 MAX_NAME_LENGTH = 64  # mirrors user_preferences_name_length
 
 _MAP_KIND = "saved_map_settings"
 _FIND_RIDE_KIND = "find_ride_pref"
 _USUAL_KIND = "ride_mode_usual"
+_SPEC_KIND = "ride_spec"
 
 
 class PreferenceIn(BaseModel):
@@ -418,4 +427,129 @@ def delete_ride_usual(
         conn.commit()
     if not deleted:
         raise HTTPException(404, f"no ride usual named {name!r}")
+    return {"deleted": True, "name": name}
+
+
+# ---------------------------------------------------------------------------
+# Ride specs — many per account, addressed by name (sql/080)
+# ---------------------------------------------------------------------------
+# A spec is a rider's "ideal scooter": kind of device, required features,
+# minimum quality, minimum battery, and — the field that makes it a spec
+# rather than a filter — which of those are MUST rather than PREFER
+# (ALONG_THE_WAY_PLAN.md §5.1). The trip search reads it; this module stores
+# it.
+#
+# THIS IS THE THIRD COPY of the same four handlers, and that is worth saying
+# out loud rather than letting a reader discover it. Saved map settings,
+# Usuals and specs have identical cardinality (many per account, one per
+# name), so they get identical treatment: the same 16 KB blob cap, the same
+# 1–64 character names, the same 404-on-a-name-that-isn't-yours, the same 409
+# at the cap that still lets you edit what you already have. A third copy is
+# normally where a family gets factored into one parameterised set, and the
+# only reason it isn't done here is that doing so would rewrite two endpoints
+# that currently work in a change whose point is to add a third. If a FOURTH
+# named kind ever arrives, factor it then — the shared parts are the SELECT
+# bodies, and `_enforce_named_cap` is already the shared part that mattered.
+#
+# THE BLOB STAYS OPAQUE HERE, exactly as it does for a Usual, and for a
+# sharper version of the same reason. `POST /api/v1/trip/candidates` validates
+# the spec's shape strictly, because it has to: it disqualifies vehicles
+# against it. This module awards nothing and gates nothing, so validating here
+# would only mean an API deploy standing in front of every new client-side
+# requirement — and would make a rider's already-saved spec un-editable the
+# day the vocabulary changes.
+@router.get("/api/v1/profile/ride-specs")
+def list_ride_specs(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT name, settings, created_at, updated_at
+                FROM user_preferences
+                WHERE account_id = %s AND kind = %s
+                ORDER BY updated_at DESC
+                """,
+                (user.account_id, _SPEC_KIND),
+            )
+            rows = cur.fetchall()
+    return {"ride_specs": [_row(*r) for r in rows]}
+
+
+@router.get("/api/v1/profile/ride-specs/{name}")
+def get_ride_spec(
+    name: str = Path(..., min_length=1, max_length=MAX_NAME_LENGTH),
+    user: SessionUser = Depends(require_session),
+) -> dict[str, Any]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT name, settings, created_at, updated_at
+                FROM user_preferences
+                WHERE account_id = %s AND kind = %s AND name = %s
+                """,
+                (user.account_id, _SPEC_KIND, name),
+            )
+            row = cur.fetchone()
+    if row is None:
+        raise HTTPException(404, f"no ride spec named {name!r}")
+    return _row(*row)
+
+
+@router.put("/api/v1/profile/ride-specs/{name}")
+def put_ride_spec(
+    name: str = Path(..., min_length=1, max_length=MAX_NAME_LENGTH),
+    user: SessionUser = Depends(require_session),
+    payload: PreferenceIn = Body(...),
+) -> dict[str, Any]:
+    """Create or replace one named spec.
+
+    The kind is what keeps this out of both other namespaces: the ON CONFLICT
+    predicate names sql/080's partial unique index, so the (account,
+    'commute') row this touches is a different row from the saved map setting
+    AND from the Usual the same rider may also call 'commute'.
+    """
+    blob = _serialize(payload.settings)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            _enforce_named_cap(
+                cur,
+                account_id=user.account_id,
+                kind=_SPEC_KIND,
+                name=name,
+                cap=MAX_RIDE_SPECS,
+                plural="saved ride specs",
+            )
+
+            cur.execute(
+                """
+                INSERT INTO user_preferences (account_id, kind, name, settings)
+                VALUES (%s, %s, %s, %s::jsonb)
+                ON CONFLICT (account_id, name) WHERE kind = 'ride_spec'
+                DO UPDATE SET settings = EXCLUDED.settings, updated_at = NOW()
+                RETURNING name, settings, created_at, updated_at
+                """,
+                (user.account_id, _SPEC_KIND, name, blob),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return _row(*row)
+
+
+@router.delete("/api/v1/profile/ride-specs/{name}")
+def delete_ride_spec(
+    name: str = Path(..., min_length=1, max_length=MAX_NAME_LENGTH),
+    user: SessionUser = Depends(require_session),
+) -> dict[str, Any]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM user_preferences "
+                "WHERE account_id = %s AND kind = %s AND name = %s",
+                (user.account_id, _SPEC_KIND, name),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+    if not deleted:
+        raise HTTPException(404, f"no ride spec named {name!r}")
     return {"deleted": True, "name": name}

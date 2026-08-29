@@ -1862,6 +1862,60 @@ API has heard of still round-trips. Usuals and saved map settings are
 separate namespaces — the same rider may hold a map setting **and** a Usual
 both called `commute`.
 
+### Ride specs — your "ideal scooter"
+
+A **spec** is what a rider is willing to ride: kind of device, required
+features, minimum quality, minimum battery — plus the field that makes it a
+spec rather than a map filter, `must`, which names the requirements that are
+**hard**. Everything not in `must` is a preference: it moves the ranking, and
+it is relaxed in a published order before the app reports that nothing
+matches.
+
+Same store and therefore the same rules as the two kinds above
+(`user_preferences`, kind `ride_spec`, `sql/080`): **opaque JSON** this API
+never reads inside, `PUT` replaces wholesale, names are 1–64 characters, max
+16 KB per blob. Max **5 specs** per rider — fewer than the ten Usuals get,
+because a spec is picked at the top of a trip from a short list.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /api/v1/profile/ride-specs` | `{ "ride_specs": [ { "name": "commuter", "settings": {…}, "created_at": …, "updated_at": … } ] }`, most recently updated first. |
+| `GET /api/v1/profile/ride-specs/{name}` | One spec. `404` if that name isn't yours. |
+| `PUT /api/v1/profile/ride-specs/{name}` | `{ "settings": { … } }` — creates or replaces. `409` at the 5-spec cap (you can still overwrite specs you already have), `413` over 16 KB, `422` on a name longer than 64 characters. |
+| `DELETE /api/v1/profile/ride-specs/{name}` | `404` if absent. → `{ "deleted": true, "name": "commuter" }` |
+
+The blob the frontend stores looks like this. **Nothing here is validated by
+this endpoint** — the shape is documented so clients agree with each other,
+not because the API enforces it:
+
+```json
+{
+  "label": "Commuter",
+  "models": ["cosmo", "rover"],
+  "features": ["basket"],
+  "min_battery": 40,
+  "min_quality": "no-risk",
+  "must_reach": true,
+  "max_walk_minutes": 12,
+  "must": ["features", "must_reach"]
+}
+```
+
+`"models": null` means any model. A required feature must be **confirmed**
+true — `device_features` serializes an unconfirmed feature as `null`, and a
+filter reads `null` and `false` identically, so "must have a basket" means
+somebody has stood at the scooter and said so.
+
+The strict shape check lives in the trip search, which is the endpoint that
+disqualifies vehicles against a spec and therefore has to understand it. That
+split is deliberate and is the same one the Usuals follow: validating here
+would put an API deploy in front of every new client-side requirement, and
+would make an already-saved spec un-editable on the day the vocabulary
+changes.
+
+All three named kinds are separate namespaces — the same rider may hold a map
+setting, a Usual **and** a spec all called `commute`.
+
 ---
 
 ## Rider reports

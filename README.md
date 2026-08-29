@@ -441,6 +441,10 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `GET /api/v1/profile/ride-usuals/{name}` | One saved Usual |
 | `PUT /api/v1/profile/ride-usuals/{name}` | Create or replace a named Usual (opaque JSON blob: `ride_options` + `label`); 10 per account |
 | `DELETE /api/v1/profile/ride-usuals/{name}` | Delete a named Usual |
+| `GET /api/v1/profile/ride-specs` | Every saved ride spec ("ideal scooter") for the caller |
+| `GET /api/v1/profile/ride-specs/{name}` | One saved spec |
+| `PUT /api/v1/profile/ride-specs/{name}` | Create or replace a named spec (opaque JSON blob: requirements + which are `must`); 5 per account |
+| `DELETE /api/v1/profile/ride-specs/{name}` | Delete a named spec |
 | `GET /api/v1/emoji-nouns` | Full emoji → noun-word list, for building a username picker |
 | `GET /api/v1/emoji-nouns/search?q=…` | Partial word match on the emoji-noun list |
 | `GET /api/v1/adjectives` | Full curated adjective list |
