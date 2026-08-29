@@ -1892,6 +1892,19 @@ street-canyon GPS is routinely 20–30 m out, and those errors do not cancel.
 **Your position is not stored.** The check runs at write time and the
 coordinates are discarded.
 
+**`vehicle_identifier` is optional — the scan is the identity.** The same rule
+`POST /api/v1/reports/device-features` follows: a rider keeping a scooter from
+the My Scooters panel has the camera open on one they never tapped on the map,
+and the identifier is a salted hash the client cannot compute. Send it if you
+have it; leave it out and the sticker decides.
+
+When you *do* send it, it has to agree with the sticker — a mismatch is a
+`400`, not a re-target. That differs from a features report on purpose: there,
+the answers describe the scooter the rider was standing at, so the scan
+outvotes the tap and the data is saved against the right vehicle. Here there
+is nothing to salvage, and quietly keeping a different scooter would be the
+API deciding which one somebody meant.
+
 ### The withholding
 
 **A favourite's position is not returned while the vehicle is in a rental.**
@@ -1912,7 +1925,7 @@ with a cached value.
 | Endpoint | Notes |
 |---|---|
 | `GET /api/v1/profile/favorite-devices` | `{ "favorite_devices": [...], "max_favorites": 10 }`, newest first. |
-| `POST /api/v1/profile/favorite-devices` | `{ "vehicle_identifier", "qr_raw_value", "lat", "lng", "nickname"? }` → `201`. Re-keeping one you already have is also `201`, with `already_favorited: true` and a refreshed `verified_at`. |
+| `POST /api/v1/profile/favorite-devices` | `{ "qr_raw_value", "lat", "lng", "vehicle_identifier"?, "nickname"? }` → `201`. Re-keeping one you already have is also `201`, with `already_favorited: true` and a refreshed `verified_at`. |
 | `PATCH /api/v1/profile/favorite-devices/{vehicle_identifier}` | `{ "nickname"?, "notify_on_available"? }`. An empty-string nickname clears it; an absent one leaves it. No re-scan needed. |
 | `DELETE /api/v1/profile/favorite-devices/{vehicle_identifier}` | `404` if it was not yours. → `{ "deleted": true, "vehicle_identifier": … }` |
 
