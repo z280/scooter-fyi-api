@@ -37,6 +37,11 @@ from src import api_favorites
 from src.accounts import SessionUser, require_session
 from src.identity import hash_plate
 
+#: The fixture clock, frozen — and the handler is made to read it too (see
+#: the `store` fixture's monkeypatch of `api_favorites._now`). The first
+#: version of this file froze only the fixture side, so "seen an hour ago"
+#: meant an hour before a date in the past, and every feed-absence test
+#: drifted into `gone` as the calendar moved past it. Both sides or neither.
 _NOW = datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 _USER = SessionUser(
     account_id=1, email="rider@example.com", scopes=("rider",),
@@ -216,6 +221,11 @@ def store(monkeypatch) -> _FakeStore:
 
     monkeypatch.setattr(api_favorites, "connection", _fake_connection)
     monkeypatch.setattr(api_favorites, "enforce", lambda cur, **kw: None)
+    # The handler's clock, frozen to the fixture's. Without this the
+    # feed-absence tests below compare a fixed timestamp against the real
+    # date and every one of them reads `gone` on any day but the one this
+    # file was written.
+    monkeypatch.setattr(api_favorites, "_now", lambda: _NOW)
 
     def _credit(cur, *, account_id, vehicle_identifier, lat, lng):
         if vehicle_identifier in st.points_awarded:
