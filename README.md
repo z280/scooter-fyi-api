@@ -441,6 +441,10 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `GET /api/v1/profile/ride-usuals/{name}` | One saved Usual |
 | `PUT /api/v1/profile/ride-usuals/{name}` | Create or replace a named Usual (opaque JSON blob: `ride_options` + `label`); 10 per account |
 | `DELETE /api/v1/profile/ride-usuals/{name}` | Delete a named Usual |
+| `GET /api/v1/profile/favorite-devices` | Vehicles the caller keeps, with live state; position withheld while in use |
+| `POST /api/v1/profile/favorite-devices` | Keep a vehicle — needs a valid QR scan **and** a fix within 75 m of it; the scan is the identity, so `vehicle_identifier` is optional; 10 per account |
+| `PATCH /api/v1/profile/favorite-devices/{vehicle_identifier}` | Rename, or turn the availability alert on/off |
+| `DELETE /api/v1/profile/favorite-devices/{vehicle_identifier}` | Let one go |
 | `GET /api/v1/emoji-nouns` | Full emoji → noun-word list, for building a username picker |
 | `GET /api/v1/emoji-nouns/search?q=…` | Partial word match on the emoji-noun list |
 | `GET /api/v1/adjectives` | Full curated adjective list |

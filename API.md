@@ -1864,6 +1864,125 @@ both called `commute`.
 
 ---
 
+## My Scooters
+
+Vehicles a rider has **kept** after proving at the kerb that they were
+standing at one. Ten per account. Session-authed throughout; there is no
+anonymous form, because there is no anonymous account to hang one on.
+
+A favourite is **not a claim and not a reservation**. Nothing here stops
+anybody riding anything — that is as true of My Scooters as it is of dibs.
+
+### The gate
+
+Keeping a vehicle needs **both**:
+
+1. a `qr_raw_value` that validates for that `vehicle_identifier` — the same
+   check `POST /api/v1/devices/qr-scan` makes; and
+2. a fix within **75 m** of where the fleet last saw the vehicle.
+
+The second is not redundant. The scan proves the caller **has the plate** — it
+hashes the plate out of the payload and compares — and nothing in the scan
+endpoint has ever compared the submitted position to anything. That is fine
+for a points bonus and not fine for a feature whose premise is "you were
+there". 75 m is the radius the in-app "Unlock in Veo" gate already uses, and
+it is generous on purpose: a GBFS position is up to two minutes stale and
+street-canyon GPS is routinely 20–30 m out, and those errors do not cancel.
+
+**Your position is not stored.** The check runs at write time and the
+coordinates are discarded.
+
+**`vehicle_identifier` is optional — the scan is the identity.** The same rule
+`POST /api/v1/reports/device-features` follows: a rider keeping a scooter from
+the My Scooters panel has the camera open on one they never tapped on the map,
+and the identifier is a salted hash the client cannot compute. Send it if you
+have it; leave it out and the sticker decides.
+
+When you *do* send it, it has to agree with the sticker — a mismatch is a
+`400`, not a re-target. That differs from a features report on purpose: there,
+the answers describe the scooter the rider was standing at, so the scan
+outvotes the tap and the data is saved against the right vehicle. Here there
+is nothing to salvage, and quietly keeping a different scooter would be the
+API deciding which one somebody meant.
+
+### The withholding
+
+**A favourite's position is not returned while the vehicle is in a rental.**
+Neither is its battery or its range — a charge falling five points every ten
+minutes is a coarse track of the same journey.
+
+Veo keeps rented vehicles in the feed for the whole rental, broadcasting a
+live moving position, and `/api/v1/devices/current` publishes that today. So
+the capability is already public. What a favourite would add is a **one-tap,
+persistent, targeted** subscription to one vehicle somebody physically located
+— which is the difference between a public dataset and a tool for following a
+person. Parked position, yes. Moving position, no.
+
+`position_withheld` is always present, and is `true` rather than the field
+simply being missing, so a client cannot read absence as a bug and "fix" it
+with a cached value.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /api/v1/profile/favorite-devices` | `{ "favorite_devices": [...], "max_favorites": 10 }`, newest first. |
+| `POST /api/v1/profile/favorite-devices` | `{ "qr_raw_value", "lat", "lng", "vehicle_identifier"?, "nickname"? }` → `201`. Re-keeping one you already have is also `201`, with `already_favorited: true` and a refreshed `verified_at`. |
+| `PATCH /api/v1/profile/favorite-devices/{vehicle_identifier}` | `{ "nickname"?, "notify_on_available"? }`. An empty-string nickname clears it; an absent one leaves it. No re-scan needed. |
+| `DELETE /api/v1/profile/favorite-devices/{vehicle_identifier}` | `404` if it was not yours. → `{ "deleted": true, "vehicle_identifier": … }` |
+
+One entry in the list:
+
+```json
+{
+  "vehicle_identifier": "8c4a1f0d2e9b7a35",
+  "nickname": "My Rover",
+  "state": "available",
+  "position_withheld": false,
+  "notify_on_available": false,
+  "verified_at": "2026-08-29T12:00:00+00:00",
+  "created_at": "2026-08-20T09:14:00+00:00",
+  "last_seen_at": "2026-08-29T11:58:00+00:00",
+  "vehicle_model_name": "Cosmo",
+  "vehicle_use_type": "sitting",
+  "lat": 39.7392, "lon": -104.9903,
+  "battery_percent": 71,
+  "current_range_meters": 12000
+}
+```
+
+`state` is one of:
+
+| State | Meaning | Position? |
+|---|---|---|
+| `available` | In the feed, rentable | yes |
+| `unavailable` | In the feed but out of service, or absent for under 12 hours | yes |
+| `in_use` | Somebody is riding it (`is_reserved`, or a rental open in `device_state`) | **withheld** |
+| `gone` | Not seen for 12 hours or more, or no longer known at all | **withheld** — the last position we have is stale enough that publishing it would be a claim we cannot make |
+
+`in_use` is tested **before** out-of-service, unlike the map's own
+`hideUnavailable`, which collapses the two. Both hide the vehicle, but only
+one of them is a person riding, and "out of service" is the wrong thing to
+tell a rider about a scooter somebody is on.
+
+### Errors
+
+| Code | `detail.error` | When |
+|---|---|---|
+| `400` | `qr_mismatch` | The payload does not hash to that vehicle |
+| `400` | `unknown_device` | No vehicle with that identifier |
+| `400` | `nothing_to_change` | A `PATCH` with neither field |
+| `403` | `too_far_from_device` | Carries `meters_away` and `meters_allowed`. Also returned when we have **no** recent position for the vehicle — otherwise "we don't know where it is" would be the reliable way past the gate |
+| `404` | `not_favorited` | `PATCH`/`DELETE` on one that is not yours |
+| `409` | `favorite_limit_reached` | Carries `max_favorites`. Re-verifying one you already keep still works at the cap |
+
+### Points
+
+Keeping a vehicle runs the same `qr_scan` award path the scan endpoint does:
+once per `(account, vehicle)`, advisory-locked. Keeping one you have never
+scanned pays 100; keeping one you have pays nothing. There is no way to
+double-pay by favouriting something you already scanned.
+
+---
+
 ## Rider reports
 
 ### `POST /api/v1/reports/device`
