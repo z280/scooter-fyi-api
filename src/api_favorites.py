@@ -96,6 +96,20 @@ GONE_AFTER_HOURS = 12
 _LIMIT_FAVORITE_WRITES = (20, 3600)
 
 
+def _now() -> datetime:
+    """The clock, behind one indirection so a test can freeze it.
+
+    `GONE_AFTER_HOURS` is the only rule here that compares a stored timestamp
+    to the present, and a test that fixes its fixture timestamps while the
+    handler reads the real clock is a test that passes on the day it was
+    written and fails later — which is exactly what happened to the first
+    version of tests/test_favorite_devices.py when this container's clock
+    moved three days forward mid-session. One indirection makes "an hour ago"
+    mean an hour ago, whatever day it is.
+    """
+    return datetime.now(timezone.utc)
+
+
 class FavoriteIn(BaseModel):
     """The scan itself, not a claim to have done one.
 
@@ -271,7 +285,7 @@ def list_favorites(user: SessionUser = Depends(require_session)) -> dict[str, An
     "fixes" by falling back to a cached value, which is exactly the behaviour
     the rule exists to prevent. A named flag has to be argued with.
     """
-    now = datetime.now(timezone.utc)
+    now = _now()
     with connection() as conn:
         with conn.cursor() as cur:
             rows = _rows_for(cur, user.account_id)
@@ -310,7 +324,7 @@ def add_favorite(
             raise HTTPException(400, {"error": "qr_mismatch", "detail": str(e)})
     vehicle_identifier = payload.vehicle_identifier or scanned
 
-    now = datetime.now(timezone.utc)
+    now = _now()
     with connection() as conn:
         with conn.cursor() as cur:
             enforce(cur, bucket="favorite_write_account",
@@ -431,7 +445,7 @@ def patch_favorite(
     distinction matters because "" and None mean different things to a rider
     who has just deleted the text in a box.
     """
-    now = datetime.now(timezone.utc)
+    now = _now()
     sets: list[str] = []
     params: list[Any] = []
     if payload.nickname is not None:
