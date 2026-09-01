@@ -63,6 +63,15 @@ ALLOWED_EVENTS: frozenset[str] = frozenset(
         # features
         "control_change",
         "filter_preset",
+        # My Scooters (sql/081). favorite_added carries WHICH entry point —
+        # the Tools panel's button or the device popup's star — and whether
+        # the scooter was already kept; the ratio of those answers is what
+        # says whether the popup star is pulling its weight. Never a
+        # vehicle_identifier: attaching a device to a session is the one
+        # thing this system is built not to do.
+        "favorite_added",
+        "favorite_removed",
+        "favorite_notify",
         "area_filter",
         "geocode_search",
         "hex_tool",
