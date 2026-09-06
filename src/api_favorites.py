@@ -263,8 +263,8 @@ def _favorite_payload(row: tuple, now: datetime) -> dict[str, Any]:
         "notify_on_available": bool(notify),
         "verified_at": verified_at.isoformat() if verified_at else None,
         "created_at": created_at.isoformat() if created_at else None,
-        "last_seen_at": (last_seen_at or last_observed_at).isoformat()
-        if (last_seen_at or last_observed_at) else None,
+        "last_seen_at": (last_observed_at or last_seen_at).isoformat()
+        if (last_observed_at or last_seen_at) else None,
         "vehicle_model_name": model_name,
         "vehicle_use_type": use_type,
     }
@@ -303,7 +303,7 @@ def add_favorite(
     """Keep a vehicle. Requires a QR payload that validates for it AND a fix
     within FAVORITE_PROXIMITY_METERS of where the fleet last saw it.
 
-    Re-keeping one you already have is a 200, not a 409: it refreshes
+    Re-keeping one you already have is a 201, not a 409: it refreshes
     `verified_at` and returns the row. A rider standing at their own scooter
     pressing the button again has not made a mistake.
     """
@@ -354,7 +354,9 @@ def add_favorite(
                     403,
                     {"error": "too_far_from_device",
                      "detail": "we have no recent position for this vehicle, "
-                               "so we can't tell you're standing at it"},
+                               "so we can't tell you're standing at it",
+                     "meters_away": None,
+                     "meters_allowed": FAVORITE_PROXIMITY_METERS},
                 )
             metres = distance_meters(
                 payload.lat, payload.lng, float(device_lat), float(device_lon)

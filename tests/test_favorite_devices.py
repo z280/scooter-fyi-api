@@ -301,7 +301,10 @@ def test_a_vehicle_with_no_known_position_cannot_be_kept(client, store):
     store.device[_VID]["current_lon"] = None
     r = client.post("/api/v1/profile/favorite-devices", json=_body())
     assert r.status_code == 403
-    assert r.json()["detail"]["error"] == "too_far_from_device"
+    detail = r.json()["detail"]
+    assert detail["error"] == "too_far_from_device"
+    assert detail["meters_away"] is None
+    assert detail["meters_allowed"] == api_favorites.FAVORITE_PROXIMITY_METERS
     assert store.rows == {}
 
 
@@ -364,6 +367,13 @@ def test_a_parked_favorite_reports_its_position(client, store):
     assert row["position_withheld"] is False
     assert row["lat"] == pytest.approx(_DEVICE_POS[0])
     assert row["battery_percent"] is not None
+
+
+def test_last_seen_prefers_live_device_state_when_present(client, store):
+    store.seed(_VID, last_seen_at=_NOW - timedelta(days=2))
+    store.device[_VID]["last_observed_at"] = _NOW - timedelta(minutes=5)
+    row = _first(client)
+    assert row["last_seen_at"] == (_NOW - timedelta(minutes=5)).isoformat()
 
 
 def test_an_in_use_favorite_reports_no_position_at_all(client, store):
