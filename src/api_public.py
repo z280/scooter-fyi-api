@@ -508,8 +508,12 @@ def _devices_current_impl(
     features = []
     for r in rows:
         number_failed_starts = int(r[22]) if r[22] is not None else None
-        # One battery read per device: the reliability floor, the wire field
-        # and the usable-range estimate must all cite the same number.
+        # Derived once so the reliability floor, the wire field and the
+        # usable-range estimate all cite the same number rather than three
+        # independent lookups of the same range. compute_quality_designation
+        # still derives its own from current_range_meters internally — same
+        # input, same LUT, same answer — so this is about one shared value
+        # here, not about the call count across quality.py.
         battery_percent = compute_battery_percent(r[8])
         dstat = dwell_stats.get(r[5])
         is_dwell_outlier = bool(dstat and dstat.is_outlier)

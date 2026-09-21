@@ -245,6 +245,30 @@ def test_reliability_ok_when_under_dwell_floor_end_to_end(_fake_db, monkeypatch)
     assert props["reliability_tier"] == "ok"
 
 
+# ---------- unknown via the sub-10% battery floor (end-to-end) --------------
+# The unit tests in test_quality.py call compute_reliability_tier directly;
+# these run the real handler, so a battery_percent= argument dropped at the
+# api_public.py call site fails here rather than shipping.
+def test_reliability_unknown_via_low_battery_end_to_end(_fake_db, monkeypatch):
+    """4103 m is the LUT's 9% rung: a clean, never-idle, zero-failed-start
+    device that would otherwise be "ok" reads "unknown" on charge alone."""
+    row = _ROW[:8] + (4103,) + _ROW[9:]
+    monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
+    props = _call()["features"][0]["properties"]
+    assert props["battery_percent"] == 9
+    assert props["reliability_tier"] == "unknown"
+
+
+def test_reliability_ok_at_the_battery_floor_end_to_end(_fake_db, monkeypatch):
+    """4489 m is the next rung up, exactly 10% — confirms the boundary is the
+    thing gating the test above, not merely having a low range value."""
+    row = _ROW[:8] + (4489,) + _ROW[9:]
+    monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
+    props = _call()["features"][0]["properties"]
+    assert props["battery_percent"] == 10
+    assert props["reliability_tier"] == "ok"
+
+
 def test_battery_percent_edge_cases():
     assert compute_battery_percent(None) is None
     assert compute_battery_percent(0) == 0        # bottom of the LUT
