@@ -66,6 +66,7 @@ evaluated in order (first match wins):
               | dwell-outlier vs peers AND dwell ≥ 48h
     unknown   : device never state-tracked (no plate → both inputs None)
               | quality_designation == "N/A"     (disabled/reserved/rangeless)
+              | battery_percent < 10              (near-empty; see below)
               | number_failed_starts == 1         (uncorroborated by dwell)
               | dwell ≥ 2 × peer-median dwell     (softer, earlier-warning
                                                     version of the dwell-
@@ -73,6 +74,15 @@ evaluated in order (first match wins):
                                                     the ratio, no percentile)
                 AND dwell ≥ min(36h, 16 × peer-median dwell)   (patience floor)
     ok        : everything else
+
+Battery is otherwise absent from this field by design — "will it unlock?"
+and "how far will it get me?" are different questions, and the second one
+already has `quality_designation` and `battery_percent` to answer it. The
+sub-10% floor is the one exception, and it is not a range judgement: rider
+reports are consistent that a near-empty scooter often will not start or
+is pulled for swap mid-walk, so "ok" there is a promise the data cannot
+keep. It demotes to "unknown" rather than "high_risk" — the evidence says
+"do not call this a clean bill of health", not "this one is broken".
 
 A single failed start no longer stays "ok" — it now reads "unknown" rather
 than a clean bill of health, since one bike_id rotation could still be a
@@ -195,6 +205,10 @@ _RELIABILITY_UNKNOWN_DWELL_MULT = 2.0    # dwell ≥ this × peer median → unk
 # sleepy one be judged on its own baseline. See module docstring.
 _RELIABILITY_UNKNOWN_FLOOR_HOURS = 36.0
 _RELIABILITY_UNKNOWN_FLOOR_MULT = 16.0
+# Battery floor: below this SoC a device can no longer be called "ok". Rider
+# reports say a near-empty scooter frequently refuses to start or gets pulled
+# for a battery swap mid-walk, so the clean-bill-of-health label is withheld.
+_RELIABILITY_MIN_BATTERY_PCT = 10
 
 # Dwell-outlier thresholds (see module docstring).
 _DWELL_OUTLIER_MIN_PEERS = 5       # below this, widen the ring / fall back
@@ -507,6 +521,7 @@ def compute_reliability_tier(
     has_negative_report: bool,
     is_dwell_outlier: bool = False,
     peer_median_dwell_hours: float | None = None,
+    battery_percent: int | None = None,
     now: datetime | None = None,
 ) -> str:
     """Return "ok", "unknown", or "high_risk". Rules in module docstring."""
@@ -530,6 +545,11 @@ def compute_reliability_tier(
         return "unknown"  # never state-tracked (upstream payload had no plate)
     if quality_designation == "N/A":
         return "unknown"
+    if (
+        battery_percent is not None
+        and battery_percent < _RELIABILITY_MIN_BATTERY_PCT
+    ):
+        return "unknown"  # near-empty: may not start, may be pulled for a swap
     if fs == 1:
         return "unknown"  # uncorroborated by dwell, but no longer a clean "ok"
     if (

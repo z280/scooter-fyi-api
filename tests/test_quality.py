@@ -365,6 +365,60 @@ def test_reliability_zero_peer_median_does_not_false_positive():
     assert out == "ok"
 
 
+# ---------- Reliability: the sub-10% battery floor --------------------------
+# A near-empty scooter loses the "ok" label: rider reports say it often
+# refuses to start, or gets swapped out while the rider is still walking.
+# It demotes to "unknown", never "high_risk" — that would assert a failure
+# nobody has observed on this specific vehicle.
+
+
+def test_reliability_battery_at_floor_stays_ok():
+    """Exactly 10% is still ok — the rule is *below* 10."""
+    out = compute_reliability_tier(**{**_REL_BASE, "battery_percent": 10})
+    assert out == "ok"
+
+
+def test_reliability_battery_under_floor_is_unknown():
+    out = compute_reliability_tier(**{**_REL_BASE, "battery_percent": 9})
+    assert out == "unknown"
+
+
+def test_reliability_battery_empty_is_unknown_not_high_risk():
+    out = compute_reliability_tier(**{**_REL_BASE, "battery_percent": 0})
+    assert out == "unknown"
+
+
+def test_reliability_missing_battery_has_no_effect():
+    """None (no range data / pedal bike) leaves the verdict to the other
+    rules — it must not be read as 0%."""
+    out = compute_reliability_tier(**{**_REL_BASE, "battery_percent": None})
+    assert out == "ok"
+
+
+def test_reliability_battery_floor_does_not_mask_high_risk():
+    """A near-empty scooter that ALSO has real failure evidence still reads
+    high_risk — the floor sits below the high-risk checks, not above them."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "battery_percent": 2,
+        "number_failed_starts": 2,
+    })
+    assert out == "high_risk"
+
+
+def test_reliability_battery_floor_is_independent_of_quality():
+    """quality_designation drops to "poor" from dwell demerits on a healthy
+    battery too, so the floor must key off battery_percent itself."""
+    ok = compute_reliability_tier(**{
+        **_REL_BASE, "quality_designation": "poor", "battery_percent": 80,
+    })
+    assert ok == "ok"
+    low = compute_reliability_tier(**{
+        **_REL_BASE, "quality_designation": "great", "battery_percent": 3,
+    })
+    assert low == "unknown"
+
+
 def test_reliability_missing_peer_median_has_no_effect():
     """Sparse peer sets (None) never trigger the ratio rule."""
     out = compute_reliability_tier(**{

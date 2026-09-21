@@ -508,6 +508,9 @@ def _devices_current_impl(
     features = []
     for r in rows:
         number_failed_starts = int(r[22]) if r[22] is not None else None
+        # One battery read per device: the reliability floor, the wire field
+        # and the usable-range estimate must all cite the same number.
+        battery_percent = compute_battery_percent(r[8])
         dstat = dwell_stats.get(r[5])
         is_dwell_outlier = bool(dstat and dstat.is_outlier)
         quality = compute_quality_designation(
@@ -526,6 +529,7 @@ def _devices_current_impl(
             has_negative_report=bool(r[20]),
             is_dwell_outlier=is_dwell_outlier,
             peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
+            battery_percent=battery_percent,
         )
         properties: dict[str, Any] = {
             "device_id": r[0],
@@ -535,13 +539,13 @@ def _devices_current_impl(
             "is_disabled": r[6],
             "is_reserved": r[7],
             "current_range_meters": r[8],
-            "battery_percent": compute_battery_percent(r[8]),
+            "battery_percent": battery_percent,
             # A distance is the question a rider actually has; the percentage
             # is the least trustworthy number the feed publishes. See
             # battery_model.OBSERVED_METERS_PER_SOC_POINT - measured from the
             # fleet running itself flat, not inverted out of the regression.
             "estimated_range_meters": battery_model.usable_range_meters(
-                compute_battery_percent(r[8])),
+                battery_percent),
             # How much to trust that charge. The reported range is frozen while
             # a vehicle sits (99.4% of parked 2-minute steps show no change at
             # all), so a long-parked scooter reads optimistically and the
