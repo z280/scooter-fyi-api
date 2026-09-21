@@ -254,7 +254,10 @@ def test_reliability_failure_signals_beat_na():
 
 
 def test_reliability_poor_quality_alone_stays_ok():
-    """Low battery is not an unlock-failure signal — range never demotes."""
+    """quality_designation is not a battery reading and never stands in for
+    one. It falls to "poor" from dwell demerits and failed starts on a full
+    battery too, so the sub-10% floor keys off battery_percent instead —
+    see test_reliability_battery_floor_is_independent_of_quality."""
     out = compute_reliability_tier(**{**_REL_BASE, "quality_designation": "poor"})
     assert out == "ok"
 

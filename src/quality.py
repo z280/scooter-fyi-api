@@ -84,6 +84,14 @@ is pulled for swap mid-walk, so "ok" there is a promise the data cannot
 keep. It demotes to "unknown" rather than "high_risk" — the evidence says
 "do not call this a clean bill of health", not "this one is broken".
 
+Deliberately NOT gated on form_factor. Pedal-only bikes have no battery,
+so compute_battery_percent returns None for them and the floor never
+fires; the only non-scooters it reaches are e-bikes, which need the same
+charge to unlock and the same assist to be worth walking to, and which a
+rebalancer pulls for a swap on the same schedule. Two vehicles both
+reading 4% getting different verdicts would be the harder thing to
+explain.
+
 A single failed start no longer stays "ok" — it now reads "unknown" rather
 than a clean bill of health, since one bike_id rotation could still be a
 rebalancing scan rather than confirmed evidence of a rider failure. Two or
@@ -461,6 +469,12 @@ def compute_quality_designation(
 #                    so it stays as its own field - but it is largely built
 #                    FROM dwell and failed starts, so folding it in would
 #                    double-count.
+#                    NOTE: those three rates were measured BEFORE the sub-10%
+#                    battery floor moved near-empty vehicles from ok to
+#                    unknown. The conclusion (separates, but double-counts)
+#                    is unaffected - the floor adds an input rather than
+#                    removing one - but both populations shifted, so re-run
+#                    the split before quoting the numbers again.
 #   cell-rel. dwell  REJECTED. Correcting it so a van collection censors
 #                    rather than counts as demand halved its persistence
 #                    (r=+0.149 -> +0.074 on identical runs).
