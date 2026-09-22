@@ -182,6 +182,7 @@ def h3_aggregates(
             is_dwell_outlier=is_outlier,
             now=snapshot_time,
         )
+        battery = compute_battery_percent(range_m)
         tier = compute_reliability_tier(
             number_failed_starts=fs,
             first_observed_at_location=first_obs,
@@ -189,12 +190,12 @@ def h3_aggregates(
             has_negative_report=bool(has_neg),
             is_dwell_outlier=is_outlier,
             peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
+            battery_percent=battery,
             now=snapshot_time,
         )
         if tier == "high_risk":
             acc.high_risk += 1
 
-        battery = compute_battery_percent(range_m)
         if battery is not None:
             acc.battery_sum += battery
             acc.battery_n += 1

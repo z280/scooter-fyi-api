@@ -254,7 +254,10 @@ def test_reliability_failure_signals_beat_na():
 
 
 def test_reliability_poor_quality_alone_stays_ok():
-    """Low battery is not an unlock-failure signal — range never demotes."""
+    """quality_designation is not a battery reading and never stands in for
+    one. It falls to "poor" from dwell demerits and failed starts on a full
+    battery too, so the sub-10% floor keys off battery_percent instead —
+    see test_reliability_battery_floor_is_independent_of_quality."""
     out = compute_reliability_tier(**{**_REL_BASE, "quality_designation": "poor"})
     assert out == "ok"
 
@@ -363,6 +366,60 @@ def test_reliability_zero_peer_median_does_not_false_positive():
     """A peer median of exactly 0h must not make every dwell an 'outlier'."""
     out = compute_reliability_tier(**{**_REL_BASE, "peer_median_dwell_hours": 0.0})
     assert out == "ok"
+
+
+# ---------- Reliability: the sub-10% battery floor --------------------------
+# A near-empty scooter loses the "ok" label: rider reports say it often
+# refuses to start, or gets swapped out while the rider is still walking.
+# It demotes to "unknown", never "high_risk" — that would assert a failure
+# nobody has observed on this specific vehicle.
+
+
+def test_reliability_battery_at_floor_stays_ok():
+    """Exactly 10% is still ok — the rule is *below* 10."""
+    out = compute_reliability_tier(**{**_REL_BASE, "battery_percent": 10})
+    assert out == "ok"
+
+
+def test_reliability_battery_under_floor_is_unknown():
+    out = compute_reliability_tier(**{**_REL_BASE, "battery_percent": 9})
+    assert out == "unknown"
+
+
+def test_reliability_battery_empty_is_unknown_not_high_risk():
+    out = compute_reliability_tier(**{**_REL_BASE, "battery_percent": 0})
+    assert out == "unknown"
+
+
+def test_reliability_missing_battery_has_no_effect():
+    """None (no range data / pedal bike) leaves the verdict to the other
+    rules — it must not be read as 0%."""
+    out = compute_reliability_tier(**{**_REL_BASE, "battery_percent": None})
+    assert out == "ok"
+
+
+def test_reliability_battery_floor_does_not_mask_high_risk():
+    """A near-empty scooter that ALSO has real failure evidence still reads
+    high_risk — the floor sits below the high-risk checks, not above them."""
+    out = compute_reliability_tier(**{
+        **_REL_BASE,
+        "battery_percent": 2,
+        "number_failed_starts": 2,
+    })
+    assert out == "high_risk"
+
+
+def test_reliability_battery_floor_is_independent_of_quality():
+    """quality_designation drops to "poor" from dwell demerits on a healthy
+    battery too, so the floor must key off battery_percent itself."""
+    ok = compute_reliability_tier(**{
+        **_REL_BASE, "quality_designation": "poor", "battery_percent": 80,
+    })
+    assert ok == "ok"
+    low = compute_reliability_tier(**{
+        **_REL_BASE, "quality_designation": "great", "battery_percent": 3,
+    })
+    assert low == "unknown"
 
 
 def test_reliability_missing_peer_median_has_no_effect():

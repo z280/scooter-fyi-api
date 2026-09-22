@@ -34,12 +34,24 @@ devices endpoint:
 - `reliability_tier: "ok" | "unknown" | "high_risk"` (or 0/1/2), derived
   from: `number_failed_starts` (recent window), dwell time from
   `first_observed_at_location`, `quality_designation`,
-  `has_negative_report`, and (once §4 ships) crowdsourced reports.
+  `has_negative_report`, `battery_percent`, and (once §4 ships)
+  crowdsourced reports.
+- **Battery floor (added 2026-09).** Below 10% SoC the tier may not read
+  `ok`. Rider reports say a near-empty vehicle often refuses to start, or
+  gets pulled for a battery swap while somebody is walking to it, so the
+  clean bill of health is withheld. It demotes to `unknown`, never
+  `high_risk` — that would assert a failure nobody observed on the
+  specific vehicle. This is the *only* way battery enters the tier; how
+  far a charge gets you stays `quality_designation`'s question.
 - Also expose the raw inputs publicly if there's no objection:
   `number_failed_starts`, `first_observed_at_location`. The frontend can
   then explain the tier ("idle 4 days · 2 failed starts") instead of
   showing an opaque grade.
 - Document the tier formula in the repo so the audit stays reproducible.
+  The list above is the design-time input set and has been added to since
+  (the 2026-07 peer-relative dwell workstream, the battery floor above);
+  `compute_reliability_tier` in `src/quality.py` is authoritative, with
+  the `reliability_tier` row in API.md as its public statement.
 
 ---
 
@@ -345,7 +357,7 @@ By early August there will be a full month. Then:
 | Item | Status |
 |---|---|
 | §1.1 plate promotion | **Reverted.** Shipped in PR #8, then rolled back — `vehicle_plate` is no longer exposed on the public `/api/v1/devices/current`; it stays private-only (`/api/v1/private/*`). Any frontend "Unlock in Veo" deep link must source the plate from an authenticated endpoint or Veo's own GBFS `rental_uris`. |
-| §1.2 reliability tier + raw fields | Implemented (PR #8). Formula documented in `src/quality.py` and API.md. |
+| §1.2 reliability tier + raw fields | Implemented (PR #8). Formula documented in `src/quality.py` and API.md. Recalibrated 2026-07 (72h ghost rule, peer-relative dwell outliers, the `unknown` patience floor) and again 2026-09 (the sub-10% battery floor). |
 | §2.1–§2.4 accounts, sessions, profile | Implemented (PR #9): `src/accounts.py`, `src/api_auth.py`, `src/api_profile.py`, `sql/012`. |
 | §2.5 GitHub OAuth retirement | **Done** — the GitHub "elevated map" OAuth flow (`map_auth.py`, `map_auth_dep.py`, the `scripts/client/` drop-ins, the `/admin` Map-tokens view, and the `api_tokens` table) is removed. The `/api/v1/private/*` endpoints it gated now require the Google `admin` session scope (`require_admin`). NOTE: the *operator* `/admin` panel keeps its own separate GitHub OAuth (`auth.py`) — that was never part of §2. Deploy prereq: `ADMIN_EMAILS` must be set so an admin session can actually be minted, else the private endpoints are unreachable. |
 | §3 reports + aggregates | Implemented (PR #9): `src/api_frontend_reports.py`, `src/receipts.py`, `src/geo.py`, `sql/013`. Device reports feed `has_negative_report`/`reliability_tier`. |
