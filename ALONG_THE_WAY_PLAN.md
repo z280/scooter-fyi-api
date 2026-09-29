@@ -42,7 +42,7 @@ one appears, the battery is draining faster than estimated — it re-solves the
 rest of the route, tells them once, and lets them overrule it from plans it
 has already worked out.
 
-Seven parts, in the order they matter:
+Eight parts, in the order they matter:
 
 1. **The ideal scooter.** Kind of device, required features, minimum quality,
    minimum battery — stated once, as requirements rather than as map filters,
@@ -70,8 +70,13 @@ Seven parts, in the order they matter:
    No endpoint, no migration — just the friction between "the map" and "a
    ride" taken out.
 7. **The walkthrough.** The intro tour is switched off right now because it
-   describes an app that moved. Last, deliberately: a tour is a description,
-   and you write the description once the thing has stopped changing.
+   describes an app that moved. A tour is a description, and you write the
+   description once the thing has stopped changing.
+8. **The receipt.** Veo is obliged to discount any trip starting or ending in
+   an Equity Area, and nobody checks. A rider drops in a receipt, learns
+   whether they were charged correctly, and gets a complaint ready to send —
+   and, with consent, the answers aggregate into the one question nobody can
+   currently answer: *is the discount actually being applied?*
 
 ### What already exists (and is therefore not in scope to invent)
 
@@ -183,7 +188,7 @@ route that no longer makes sense.
 
 **Trip plan** — the live document tying a spec, a destination, the remaining
 legs, the current claim, the backup plans and the re-solve history together.
-Phase 3 keeps it in the browser; Phase 8 asks whether it should live on the
+Phase 3 keeps it in the browser; Phase 9 asks whether it should live on the
 server.
 
 **Favourite / My Scooters** — a specific vehicle a rider has kept, after
@@ -206,7 +211,7 @@ reservation, and not a subscription to where it goes.
 | Does a re-solve auto-claim, or ask? | **REVISED (rev 3) — always auto-claim, always say so, always let the rider overrule it** from backups already computed. The envelope is withdrawn. | The reasoning was right and did not go far enough: the rider is *riding*, not walking. A question they cannot safely read is never the safer default, so there is no bound at which asking becomes correct. §7.1. |
 | Does the swap raise a second notification after "it's gone"? | **No — one message, or two, never both.** | `dibs-notify.ts` caps itself at four alerts per claim on purpose. A swap that buzzes twice in three seconds spends the budget that protects "RUN!". |
 | Does the certificate change? | **It gains a chain link** (`replaces_dibs_id`), nothing else. | The certificate is an assertion about one vehicle at one time. A swap makes a *new* claim; it does not extend the old one. |
-| Persist the trip plan server-side in v1? | **No.** Phase 3 is client-only. | A live position + destination stored server-side is a new retention rule (three-address rule, §12) and a much larger privacy conversation than the feature needs to prove itself. |
+| Persist the trip plan server-side in v1? | **No.** Phase 3 is client-only. | A live position + destination stored server-side is a new retention rule (three-address rule, §13) and a much larger privacy conversation than the feature needs to prove itself. |
 | Proactive "upgrade" offers (a better vehicle appears mid-trip)? | **REVISED (rev 3) — not a separate phase. It is one trigger among several** on the same re-solve path (§7.2), and it is safe because the rider can always overrule it. | Rev 2 made it optional Phase 3b because an app that renegotiates unprompted is one you stop trusting. What makes it trustworthy is the undo, not the gate — and once the plan is live for other reasons, gating this one costs a branch and buys nothing. |
 | **What does a QR scan actually prove?** | **NEW — plate knowledge, not presence.** So favouriting requires a valid scan **and** a GPS fix within **75 m** of the device's last known position. | `src/qr.py:validate_scan` checks `hash_plate(payload) == vehicle_identifier`. That proves the scanner has the plate; nothing in `api_qr.py` or `credit_qr_scan_points` compares the submitted `lat`/`lng` to anything. 75 m is the radius the "Unlock in Veo" gate already uses for "physically at the scooter". |
 | **Can you watch a favourite move?** | **NEW — no. Position is withheld while `is_reserved` is true.** | See §8.4. This is the single most important rule in Phase 4 and the one most likely to be lost in implementation. |
@@ -230,10 +235,11 @@ Each phase is independently mergeable and useful on its own.
 | **3 — The living plan** | Dibs on the next vehicle while riding to it; the plan re-solves on any disruption, says so once, and offers the backups | `sql/083` (`replaces_dibs_id`), `replaces` on `POST /dibs`, time-to-arrival claim bound | `trip-plan.ts`, `arrival-panel.ts` re-solve face, backups sheet, `dibs-notify.ts` 5th alert |
 | **4 — My Scooters** | Keep a vehicle you scanned; find it again; be told when it's free | `sql/081` ✅, `/api/v1/profile/favorite-devices`, availability watch | `my-scooters.ts`, popup action, map layer |
 | **5a — Start in an Equity Area** | "Walk 2 min further, save $1.80" | equity flag + cost on candidates | `equity-savings.ts`, candidate chips |
-| **5b — Stopover** | Break the trip at an Equity Area when the arithmetic says to | `src/equity_savings.py`, stopover search | two-leg cost UI |
+| **5b — Equity hand-off** | Hand off inside an Equity Area when the arithmetic says to — **not a separate search**, just an equity-priced leg in the Phase 2 planner (§9) | `src/equity_savings.py` as a cost term | equity chip on the plan card |
 | **6 — One app, one mode** | The seams between "the map" and "ride mode" close; entering a ride stops being a mode change | — (frontend-only) | `#mode-switch` seam removed, one model filter, the spec carried into the HUD |
 | **7 — The walkthrough** | A first-time rider is shown the app that actually exists, and the tour auto-shows again | — (frontend-only) | `onboarding.ts` rewritten against the home bar, `ONBOARDING_AUTOSHOW` back on |
-| **8 — Pocket-proof** *(not committed)* | Swap works with the app closed | server-side trip plan + `ride_watch`-style job + Web Push / SMS | service worker |
+| **8 — The receipt** | Was this trip charged per Exhibit C? Complaint ready to send — and, consented, an evidence pile that can answer whether the discount is applied at all | receipt submissions migration, aggregate endpoint, three-address rule in full | on-device OCR, confirm-what-we-read, copy-the-complaint |
+| **9 — Pocket-proof** *(not committed)* | Re-solve works with the app closed | server-side trip plan + `ride_watch`-style job + Web Push / SMS | service worker |
 
 **Phase 4 has no dependency on 1–3** — it needs only the QR scanner, which
 already exists — and could ship at any point after Phase 1. It is listed here
@@ -249,6 +255,10 @@ program is named for.
 because renegotiating a plan unprompted felt untrustworthy; under §7.1 every
 re-solve is announced and reversible, so an upgrade is just one more trigger
 on a path that already exists.
+
+**Phase 8 takes the number Pocket-proof used to have**, and Pocket-proof moves
+to 9. Pocket-proof is explicitly *not committed*; the receipt is. A phase
+somebody intends to build outranks one nobody has decided on.
 
 **Phases 6 and 7 are in this order and at this end for one reason.** Phase 7
 rewrites a tour that *describes the UI*; Phase 6 *changes the UI*. Writing the
@@ -957,6 +967,21 @@ and stay quiet.
 start a new one there. Both legs then start-or-end in an Equity Area, so both
 are discounted — at the cost of a second unlock and the restart.
 
+**REVISION 3 MERGED THE STOPOVER INTO THE HAND-OFF.** Revisions 1–2 designed
+5b as a second mechanism — its own search, its own card, its own "restart
+faff" cost. Once a trip can hand off (§6), **an Equity Area stopover simply IS
+a hand-off whose pickup was chosen for the discount**: same legs, same second
+unlock, same re-rent exposure. So there is no separate stopover search. The
+arithmetic below becomes a **term in the generalised cost** — an Equity Area
+changes the per-minute rate of any leg starting or ending inside one — and the
+plan search finds equity hand-offs for free, ranked against every other plan.
+
+One caveat in §9.2 stops being a caveat as a result. "Show whether another
+vehicle meeting the spec is standing in that Equity Area before advising the
+split" was listed as the honest mitigation for the two-rental risk; under the
+merged model it is automatic, because a plan is built out of vehicles that
+actually exist.
+
 Break-even, with `t` the riding minutes and `d` the minutes added by the
 detour and the restart faff:
 
@@ -1238,7 +1263,168 @@ longer exists.
 
 ---
 
-## 12. House duties this program owes
+## 12. Phase 8 — The receipt
+
+### 12.1 Why this is the most "this app" feature in the program
+
+Exhibit A §5.2 obliges Veo to discount **any trip that starts or ends within a
+designated Equity Area**. Not on request, not on enrolment — "shall". Exhibit
+C prices it at $1 + 13¢/min. `config.ts` already says what the gap is:
+
+> *"the rider does not opt in, does not enroll, and does not have to know it
+> exists… Putting it in the picker would frame an automatic entitlement as an
+> option you have to know to select — which is the failure mode this whole app
+> exists to correct."*
+
+And the app already tells riders to screenshot the receipt if they do not see
+the discount (`EQUITY_DISCOUNT_NOTICE`) — then does nothing with the
+screenshot. This phase closes that loop, and it does two jobs at once:
+
+1. **For one rider:** was this trip charged correctly, and if not, here is the
+   complaint, ready to send.
+2. **For everybody:** *is Veo actually applying the discount?* Thousands of
+   individual "was I charged right" answers aggregate into the one question
+   nobody can currently answer, and the answer is a far stronger lever with
+   DOTI than any single complaint.
+
+### 12.2 The architecture decision that makes this safe
+
+**The image never leaves the device.** OCR runs on-device, the rider confirms
+what was read, and **only the confirmed fields upload**. The evidence pile
+needs numbers, not photographs.
+
+That is the whole privacy argument, and it should be stated to riders in those
+words. "We store photos of your account and your receipts" and "we store
+figures you checked yourself" are different products, and only the second one
+is worth building.
+
+If on-device OCR cannot be made accurate enough to be worth shipping, the
+fallback is **not** "upload the image to the API" — it is **manual entry**,
+which §12.3 requires anyway.
+
+### 12.3 Account confirmation, and the least data that does the job
+
+A complaint needs to credibly assert *"I am this account"*, and the evidence
+pile needs a receipt to be attributable enough to be worth counting.
+
+Two routes, equally supported — **manual entry is never the degraded path**:
+
+- a screenshot of the Veo app's profile section, read on-device;
+- typing the account identifier in.
+
+**We keep the account identifier and nothing else.** A profile screen carries
+a name, an email, a phone number and possibly payment details; none of those
+are needed to ask whether a trip was priced per Exhibit C. The extractor
+takes the identifier, the UI shows the rider exactly what was taken, and the
+rest is discarded with the image. This is the `favorite_devices` precedent
+from §8 — *"the cheapest privacy decision available is not to have the data"* —
+applied to a much more sensitive screen.
+
+**Never store payment details, ever, even when the rider hands them to us.** A
+screenshot containing a card fragment is discarded like the rest of the image;
+the extractor must not have a field for it to land in.
+
+### 12.4 The pipeline, and the limit nobody should discover late
+
+```
+screenshot (or typing) → on-device extract → RIDER CONFIRMS → verdict → [complaint] [pile]
+```
+
+Fields: trip start, end, duration, amount charged, the rate lines (unlock and
+per-minute), and start/end location **when the receipt shows them**.
+
+**The limit:** many receipts show time and money but no geography. The Equity
+Area question is geographic, so without locations we cannot answer it from the
+receipt alone. Two honest resolutions, in order:
+
+1. **Match the receipt to the rider's own tracked ride by time.** If they
+   tracked it in the app, we have the geometry already and the check is exact.
+2. **If there is no tracked ride, say so.** We can still check the arithmetic
+   (does unlock + per-min × minutes equal the total?) but not the entitlement.
+   "We cannot tell from this receipt" is a frequent and correct answer, and a
+   feature that guesses instead is one that sends riders to lose arguments.
+
+### 12.5 The bar for saying somebody was overcharged
+
+All three, or we do not make the claim:
+
+- the trip **demonstrably** starts or ends inside an Equity Area polygon
+  (`equity-areas.ts`'s bundled geometry, already how the on-screen indicator
+  works);
+- the charged rate **demonstrably** is not $1 + 13¢/min;
+- the rider has **confirmed** the extracted figures.
+
+Below that bar the verdict is *"we cannot tell"*, and the UI says why. A false
+accusation is worse than silence here: it costs a rider their time and their
+credibility, and it costs this project the only thing that makes the evidence
+pile worth anything.
+
+**VeoPlus stays unmodelled**, per §9.2.3: whether the Pass waives the Equity
+Area's $1 unlock is not stated in Exhibit C. A receipt that differs only by
+that unlock is *"we cannot tell"*, not an overcharge.
+
+### 12.6 The complaint
+
+One tap copies a prefilled email to the clipboard. **The rider sends it, from
+their own address.** The app never sends it.
+
+That is not a limitation to route around, it is the design: sending it would
+mean this project making a contractual assertion on somebody's behalf, about a
+contract it is not party to, from an address they do not control. Copy-to-
+clipboard is the correct ceiling.
+
+The body states the trip, the charge, the expected charge under Exhibit C, and
+cites Exhibit A §5.2 — facts and a contract reference, no adjectives. It is a
+billing query, not an accusation, because at the single-receipt level an
+overcharge is indistinguishable from a bug.
+
+**Recipient:** `support@veoride.zendesk.com`. It is a Zendesk queue, which is
+worth knowing for two reasons: a ticket gets a reference number the rider can
+quote later, and a queue tends to answer templates better than prose — so the
+body leads with the trip, the charge and the expected charge, and puts the
+contract citation under them rather than opening with it.
+
+Store the address in **one place** (`config.ts`'s contact block, beside the
+rate plans it will be quoted next to), never inlined in the template string.
+Support addresses move, and a copy button that silently yields a dead
+recipient is worse than one that is missing.
+
+### 12.7 The evidence pile
+
+New stored data, so it comes with the full house treatment (§13).
+
+- **Consent is explicit, per submission, and revocable.** A rider checking
+  their own receipt contributes nothing by default. Contributing is a separate
+  deliberate act, and withdrawing must actually remove the row and recompute
+  the aggregate — a consent you cannot withdraw is not one.
+- **The pile stores what the question needs and no more.** "How often is the
+  discount applied?" needs the date, the area, the charged rate and the
+  expected rate. It does not need the account identifier, the exact
+  coordinates, or the time of day to the minute.
+- **The account link is kept only for as long as the rider needs it** to see
+  and withdraw their own submissions; the aggregate reads de-identified rows.
+- **New migration**, and therefore the three-address rule in full: `src/cli.py`
+  (retention sweep and de-identification), `src/api_meta.py:_PRIVACY`, and
+  `privacy_policy.html`, in the same PR.
+
+**What the aggregate may claim.** "The Equity Area rate was not applied on N of
+M qualifying trips riders submitted" — a factual statement with its own
+denominator, and a self-selected sample that must be described as one. Never
+"Veo is stealing from poor people", however tempting the number. The strength
+of this evidence is entirely that it is boring and checkable.
+
+### 12.8 What this must never do
+
+- Never send the email.
+- Never upload the image.
+- Never store payment details, even when they are handed to us.
+- Never accuse on an unconfirmed read.
+- Never publish a rider-identifiable receipt.
+- Never present a self-selected sample as a census.
+
+---
+
+## 13. House duties this program owes
 
 Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 
@@ -1258,7 +1444,7 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   a durable, account-linked record of *which specific vehicles a named person
   has physically stood at*, which is a stronger statement than anything else
   in the database. Deciding not to store the scan position (§3) is what keeps
-  it from being stronger still. Phase 8, if it ever stores a live rider
+  it from being stronger still. Phase 9, if it ever stores a live rider
   position, is a much bigger version of this conversation and should not be
   started casually.
 - **Telemetry allowlist is mirrored by hand** in two repos —
@@ -1267,8 +1453,9 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   `trip_candidates`, `trip_swap`, `trip_swap_offer`, `trip_exhausted`,
   `spec_applied_to_map`, `spec_saved_from_map`, `favorite_added`,
   `favorite_removed`, `favorite_available_alert`, `equity_savings_shown`,
-  `equity_savings_taken`) must land in both, in the same PR, and carry no free
-  text — the existing contract is a fixed name plus enumerated props. **No
+  `equity_savings_taken`, `receipt_checked`, `receipt_verdict`,
+  `receipt_complaint_copied`, `receipt_contributed`) must land in both, in the
+  same PR, and carry no free text — the existing contract is a fixed name plus enumerated props. **No
   `vehicle_identifier` in any of them**: that would attach a device to a
   session in the one system deliberately built to hold no persistent
   identifier.
@@ -1278,6 +1465,13 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   `credit_points()`, and the sweeping unit test.
 - **Tests:** fake-cursor unit tests by default; `*_pg.py` are integration tests
   gated on `VEO_TEST_PG_DSN`; one test file per module.
+- **Phase 8 owes the most of any phase here.** It is the only one adding a new
+  stored data category, and the most sensitive one in the program: the
+  three-address rule in full (`src/cli.py` for the retention sweep and
+  de-identification, `src/api_meta.py:_PRIVACY`, `privacy_policy.html`),
+  plus a consent record that withdrawal actually honours. Its telemetry must
+  carry **no receipt contents and no amounts** — a verdict enum and a boolean
+  are the whole budget.
 - **Frontend-only phases still owe the docs.** Phases 6 and 7 add no endpoint
   and no field, so most of the list above does not apply — but a deleted
   surface is a documentation change too. Anything §10 removes (`#mode-switch`,
@@ -1287,13 +1481,13 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 
 ---
 
-## 13. Risks, in the order they are likely to bite
+## 14. Risks, in the order they are likely to bite
 
 | # | Risk | Mitigation |
 |---|---|---|
 | 1 | **A favourite becomes a way to follow a person.** In-use vehicles broadcast a live moving position on a public endpoint; a targeted subscription to one is a different thing from a public map. | §8.4: position withheld server-side whenever `is_reserved`, an explicit `position_withheld` flag so nobody "fixes" it later, no location in the availability alert, a 10-favourite cap, and the QR gate on top. Write the rule into the endpoint's docstring the way `sql/076` writes down what dibs is not. |
 | 2 | **The QR gate proves less than it looks like it proves.** `validate_scan` is a plate-knowledge check; nothing today compares position. | §8.2: require the 75 m proximity check as well, and say in the code comment why the scan alone is not enough — otherwise the next feature to reuse the gate inherits the wrong assumption. |
-| 3 | **The phone is in a pocket and the tab is throttled.** The whole re-solve runs client-side in Phase 3. | Rev 3 makes this *less* pressing than rev 2 assumed: a rider mid-hand-off is riding, and a phone mounted for navigation has the tab in front. It still bites for the pocket case — say so in the UI. Phase 8 (server-side plan + Web Push, or SMS via `comms.py`) is the real fix. |
+| 3 | **The phone is in a pocket and the tab is throttled.** The whole re-solve runs client-side in Phase 3. | Rev 3 makes this *less* pressing than rev 2 assumed: a rider mid-hand-off is riding, and a phone mounted for navigation has the tab in front. It still bites for the pocket case — say so in the UI. Phase 9 (server-side plan + Web Push, or SMS via `comms.py`) is the real fix. |
 | 4 | **Auto-dibs makes dibs worse for everyone.** Dibs' own rules exist to stop hoarding; a feature that claims automatically is exactly the pressure they were written against, and rev 3's unbounded chaining makes a plan want to claim *more* vehicles. | A plan holds **at most one claim at a time** — release before claim, always, however many hops it intends (§7.3). Watch the ratio of claims to rides in telemetry, and be willing to turn auto-claim off. |
 | 5 | **Valhalla has no matrix, or its matrix disagrees with its routes.** Now MORE load-bearing than in rev 2: the scooter-to-scooter relation is N×N, and a fan-out over N² pairs is not viable. | Verify against the deployed image **before** building the endpoint. Without a matrix, this phase drops to **one hand-off maximum** and a bipartite search — still useful, but say so rather than discovering it late. §6.2. |
 | 6 | **The plan search is expensive and rate-limited**, and rev 3's second matrix call is N×(N+1) rather than N×1. | Still two calls per search. N is pruned hard and deliberately: non-`risk` only (rule 1), first hop inside the walk cap, and the `P`/`D` bbox. The client's straight-line tier carries the interactive list; the server call is reserved for the moment a decision is made. |
@@ -1302,13 +1496,16 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 | 9 | **The map bridge desynchronizes.** A filter set that still claims to be "my ideal scooter" after the rider changed it is a lie the UI is telling. | §5.5's attach/detach rule, and the lossy direction stated on the toggle rather than discovered. |
 | 10 | **Availability alerts become a firehose.** A popular scooter turns over several times a day. | One alert per favourite per 6 hours, none 22:00–07:00 Denver, opt-in per favourite and off by default. |
 | 11 | **Equity advice that costs money.** Wrong tier, unmodelled Pass, a discount Veo does not apply. | Never for Access; price the worse VeoPlus reading; carry the screenshot caveat at the point of advice; never advise a split whose saving is under $0.50. |
-| 14 | **The free-minutes estimate is wrong and the rider is billed.** Rides taken outside this app are invisible to it (§6.3.1). | The figure is a *ceiling* on what is left and is labelled as one, the rider can correct it before planning, and no plan is ever described as "free" on the strength of our estimate alone. |
+| 15 | **OCR misreads a receipt and we accuse somebody wrongly.** Receipt formats change without notice, and a misread total is a rider sent to lose an argument. | The rider confirms every extracted figure over their own screenshot before anything is copied or submitted, and §12.5's three-part bar means "we cannot tell" is a frequent, designed answer rather than a failure. |
+| 16 | **The evidence pile becomes a movement record.** Receipts are time, place and money tied to an account — stronger than anything else this program stores. | The image never leaves the device (§12.2); only confirmed fields upload. The pile stores the date, area and rates, not coordinates or the account identifier; the account link lives only as long as the rider needs it to withdraw. Consent is per-submission and withdrawal actually deletes. |
+| 17 | **The aggregate gets overstated.** A self-selected sample of receipts from an app whose users already suspect they were overcharged is not a census of Denver. | The claim is always "N of M trips riders submitted", with its denominator attached and its self-selection named. Never a fraud accusation, whatever the number says. The evidence is worth something precisely because it is boring and checkable. |
+| 18 | **The free-minutes estimate is wrong and the rider is billed.** Rides taken outside this app are invisible to it (§6.3.1). | The figure is a *ceiling* on what is left and is labelled as one, the rider can correct it before planning, and no plan is ever described as "free" on the strength of our estimate alone. |
 | 12 | **Notification fatigue kills the alert that matters**, and rev 3 announces EVERY re-solve rather than only the ones outside an envelope. | Re-solve messages *replace* `taken`, never stack. One-tick hold, same four-per-claim ceiling. A re-solve that changes nothing the rider would act on is not announced at all — "we checked and the plan stands" is not news. |
 | 13 | **`recommend.ts` and the new scorer disagree in front of the rider.** | They answer different questions and may differ in order. They share disqualification predicates and must never differ on what is rideable. Consider folding the drawer onto the corridor scorer once Phase 2 is proven. |
 
 ---
 
-## 14. What "done" looks like per phase
+## 15. What "done" looks like per phase
 
 - **1.** A rider can write down what they like to ride, name it, have it on
   their other phone — and see only those on the map with one tap, with the
@@ -1328,9 +1525,10 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   the API will answer, see where it is while somebody is riding it.
 - **5a.** A rider who would save real money by starting inside an Equity Area
   is told, in dollars, next to the extra walking minutes it costs.
-- **5b.** A long trip that already crosses an Equity Area offers the split,
-  with the second unlock, the re-rent risk, and the screenshot caveat all on
-  the same card as the saving.
+- **5b.** A long trip that already crosses an Equity Area surfaces a hand-off
+  inside it **in the ordinary plan list** — not on a special card — with the
+  second unlock priced, the re-rent risk stated, and the screenshot caveat
+  attached to the saving.
 - **6.** `#mode-switch` is gone from `index.html` and nothing clicks a hidden
   element to start a ride; one model filter governs the map, with one meaning
   for an empty selection; a rider with an attached spec opens the ride
@@ -1340,3 +1538,9 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   them, its last screen hands them to "where are you going?", and
   `ONBOARDING_AUTOSHOW` is `true` — with a test that fails if a screen starts
   describing a control that no longer exists.
+- **8.** A rider drops in a receipt for a trip that started in an Equity Area,
+  is told in plain terms what they were charged and what Exhibit C says they
+  should have been, and copies a complaint in one tap — with the image never
+  having left their phone. A rider whose receipt cannot answer the question is
+  told that, rather than guessed at. And the consented submissions can say, with
+  a denominator attached, how often the discount was applied at all.
