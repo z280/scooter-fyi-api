@@ -723,10 +723,19 @@ Secret and redeploying.
 - **Archive**: the 48-hour job is idempotent — it only truncates after
   R2 returns HTTP 200. If R2 is unreachable, `raw_telemetry_points`
   just keeps growing until the next attempt.
-- **Schema changes**: drop a new `sql/00N_*.sql` file. `src/pg.py`
+- **Schema changes**: drop a new `sql/NNN_*.sql` file. `src/pg.py`
   applies anything not in `schema_migrations` at boot. All migrations
   use `CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS` for
   belt-and-suspenders re-runnability.
+- **Picking a migration number**: the highest number in `sql/` plus one,
+  three digits, zero-padded — and check open PRs first, because two
+  branches written in parallel will both pick the same "next" number
+  (that is how `061` and `069` each ended up with two files). When
+  several branches are in flight at once, reserve a number for each up
+  front. `tests/test_migration_numbering.py` fails on a new duplicate. If
+  one slips through, renumber the file that has **not** merged; never
+  rename one that has shipped — `schema_migrations` is keyed on filename,
+  so a renamed file runs again on every database that already applied it.
 
 ## Resource ceilings
 
