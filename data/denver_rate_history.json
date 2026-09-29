@@ -115,8 +115,8 @@
           "unlock_cents": 0,
           "per_min_cents": 15,
           "free_minutes_per_day": 60,
-          "cited": false,
-          "_note": "Renamed from 'Equity program'. It is a RIDER TIER and was sharing a name with the geographic Equity Area discount below, which is a different Exhibit C row -- the collision is how a rider concludes they are already getting the area discount. The key stays 'equity' because it is the rate_plan enum value in PUT /api/v1/profile and riders have it stored. cited=false: Exhibit C states a 0.19/min CAP on additional time for this tier, not the 15/min rate below, which comes from Veo's own program materials and sits under that cap."
+          "cited": true,
+          "_note": "Renamed from 'Equity program'. It is a RIDER TIER and was sharing a name with the geographic Equity Area discount below, which is a different Exhibit C row -- the collision is how a rider concludes they are already getting the area discount. The key stays 'equity' because it is the rate_plan enum value in PUT /api/v1/profile and riders have it stored. Exhibit C states only a 0.19/min CAP on additional time for this tier; the 15/min rate charged under that cap is cited to Veo's own Denver page. CITATION (accessed 2026-09-29): Veo Micromobility, 'Denver | Veo Micromobility', https://www.veoride.com/denver/ (no page date shown) -- 'Members receive 60 free minutes of riding per day with no limit on the number of rides you can take.' / 'After the daily 60 free minutes are used, rides continue with no unlock fee at $0.15 per minute.' Corroborated by Denver Gazette, 'Scoot, there it is: Veo rolls onto Denver streets', 2026-05-01 (updated 2026-05-04), https://www.denvergazette.com/2026/05/01/scoot-there-it-is-veo-rolls-onto-denver-streets/ -- 'After the daily 60 free minutes are used, rides continue at 15 cents per minute with no unlock fee.' This is the operator's published rate, not a contract term: Veo may change it anywhere under the Exhibit C cap without an amendment, so re-check the page before relying on it for a dated comparison."
         },
         {
           "key": "equity_area",

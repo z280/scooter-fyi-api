@@ -20,6 +20,15 @@
 -- from device_history (src/equity_backfill.py). A NULL reads as "not
 -- reprocessed yet", which is exactly true, and AVG() skips it -- so a
 -- partially-reprocessed day cannot quietly average a hole as a zero.
+--
+-- The sitting/standing columns (total_/percent_all_/percent_{sitting,
+-- standing}_equity and their avg_* daily counterparts) STAY NULL on
+-- reprocessed days (2026-05-31 .. 2026-08-23; live from 2026-08-24):
+-- src/equity_backfill.py does not rebuild the split
+-- (device_history.vehicle_use_type is only populated on stops recorded
+-- from ~2026-07-05). NULL there means unmeasured, not zero, and must not
+-- be derived from form_factor. (Comment-only addition; the runner tracks
+-- migrations by filename, so this does not re-run.)
 
 ALTER TABLE snapshot_metadata_core
     ADD COLUMN IF NOT EXISTS total_devices_equity             INTEGER,

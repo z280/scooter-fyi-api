@@ -338,3 +338,115 @@ def test_official_layer_is_configured():
     layer = eb.official_layer()
     assert layer.region_type == eb.OFFICIAL_GROUP
     assert layer.file.endswith("equity.geojson")
+
+
+# ---------------------------------------------------------------------------
+# Dry run — the validation door must never write
+# ---------------------------------------------------------------------------
+def _patch_io_forbidding_writes(monkeypatch, snapshots, stops):
+    """Like _patch_io, but every write path raises: a dry run that reaches
+    one fails the test rather than being counted."""
+    def _boom(*_a, **_k):
+        raise AssertionError("dry run attempted a write")
+
+    monkeypatch.setattr(eb, "_load_snapshots", lambda s, e: snapshots)
+    monkeypatch.setattr(eb, "_load_stops", lambda s, e: stops)
+    monkeypatch.setattr(eb, "tag_equity_membership", lambda st: list(st))
+    monkeypatch.setattr(eb, "_write_metrics", _boom)
+    monkeypatch.setattr(eb.daily_sla, "compute_for_date", _boom)
+    monkeypatch.setattr(eb, "connection", _boom)
+    monkeypatch.setattr(eb.daily_sla, "connection", _boom)
+
+
+def test_dry_run_writes_nothing_and_reports_the_day(monkeypatch):
+    t1 = T0 + timedelta(minutes=2)
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None, in_equity=i < 4) for i in range(10)]
+    stops.append(_stop("late", t1, None, in_equity=True))  # present only at t1
+    _patch_io_forbidding_writes(
+        monkeypatch, [_snapshot(T0, recorded=10), _snapshot(t1, recorded=11)], stops,
+    )
+    r = eb.reprocess_date(date(2026, 8, 10), dry_run=True)
+    assert r.dry_run is True
+    assert r.snapshots_written == 0
+    assert r.snapshots_passing_gate == 2
+    # 4/10 = 40.00 and 5/11 = 45.45 → plain mean, as daily_sla's AVG().
+    assert r.avg_percent_all_devices_equity == pytest.approx((40.0 + 45.45) / 2)
+    assert r.compliance_equity_pass is True
+    assert [s["outcome"] for s in r.snapshots] == ["passes_gate", "passes_gate"]
+    assert [s["reconstructed_fleet"] for s in r.snapshots] == [10, 11]
+    assert r.snapshots[1]["metrics"]["percent_all_devices_equity"] == 45.45
+
+
+def test_dry_run_reports_fidelity_for_snapshots_the_gate_rejects(monkeypatch):
+    """Validation needs to see what the gate threw away — including its
+    fidelity and what it would have said — without that ever reaching the
+    day average."""
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None, in_equity=i < 4) for i in range(20)]
+    _patch_io_forbidding_writes(monkeypatch, [_snapshot(T0, recorded=10)], stops)
+    r = eb.reprocess_date(date(2026, 8, 10), dry_run=True)
+    assert r.snapshots_skipped_low_fidelity == 1
+    assert r.snapshots_passing_gate == 0
+    assert r.avg_percent_all_devices_equity is None      # unmeasured, not 0
+    assert r.compliance_equity_pass is None              # unmeasured ≠ failed
+    (s,) = r.snapshots
+    assert s["outcome"] == "skipped_low_fidelity"
+    assert s["fidelity"] == 2.0
+    assert s["metrics"]["percent_all_devices_equity"] == 20.0
+
+
+def test_dry_run_summary_is_json_safe_with_snapshots(monkeypatch):
+    import json
+
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None, in_equity=i < 4) for i in range(10)]
+    _patch_io_forbidding_writes(monkeypatch, [_snapshot(T0, recorded=10)], stops)
+    d = eb.reprocess_date(date(2026, 8, 10), dry_run=True).as_dict(include_snapshots=True)
+    back = json.loads(json.dumps(d))
+    assert back["dry_run"] is True
+    assert back["snapshots"][0]["fidelity"] == 1.0
+
+
+def test_default_summary_omits_per_snapshot_detail(monkeypatch):
+    """The job_runs summary for the nightly sweep stays compact."""
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None) for i in range(10)]
+    _patch_io(monkeypatch, [_snapshot(T0, recorded=10)], stops)
+    assert "snapshots" not in eb.reprocess_date(date(2026, 8, 10)).as_dict()
+
+
+def test_reprocess_range_threads_dry_run(monkeypatch):
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        eb, "reprocess_date",
+        lambda d, **kw: seen.append(kw["dry_run"]) or eb.DayResult(sla_date=d),
+    )
+    eb.reprocess_range(date(2026, 8, 9), date(2026, 8, 10), dry_run=True)
+    assert seen == [True, True]
+
+
+def test_cli_dry_run_flag_reaches_the_module_and_skips_the_ledger(monkeypatch, capsys):
+    """`equity_backfill --dry-run` threads dry_run through, prints JSON,
+    and — like every sub-argument command — never opens a job_runs row."""
+    import json
+    from src import cli
+
+    calls: list[dict] = []
+
+    def _fake_range(start, end, **kw):
+        calls.append(kw)
+        return [eb.DayResult(sla_date=start, dry_run=kw["dry_run"])]
+
+    monkeypatch.setattr(cli.equity_backfill, "reprocess_range", _fake_range)
+    monkeypatch.setattr(
+        cli.job_runs, "start",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("ledger touched")),
+    )
+    monkeypatch.setattr(cli, "sentry_init", lambda: None)
+    assert cli.main(["equity_backfill", "2026-08-09", "--dry-run"]) == 0
+    assert calls == [{"window_only": True, "dry_run": True}]
+    line = capsys.readouterr().out.strip()
+    assert json.loads(line)["dry_run"] is True
+
+
+def test_cli_rejects_unknown_flags(capsys):
+    from src import cli
+
+    assert cli.equity_backfill_cli(["2026-08-09", "--dryrun"]) == 2
