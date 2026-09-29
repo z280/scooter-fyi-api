@@ -44,19 +44,38 @@ def _device(lat_lon=_ORIGIN, *, is_reserved=None, device_id="bike-1") -> TaggedD
 
 
 class _FakeCursor:
+    """Answers the reads update_for_cycle makes, by statement:
+
+    * the device_state SELECT: the one `state` row (or none);
+    * sql/083's open-stop probe (only issued for a vehicle last seen long
+      ago): `state["has_open_stop"]`, default True;
+    * sql/083's absence_window read of snapshot_metadata_core: no observed
+      cycles, so the sweep is a no-op here (tests/test_device_state_absence.py
+      covers it).
+    """
+
+    rowcount = 0
+
     def __init__(self, state: dict | None):
         self.state = state
         self.calls: list[tuple[str, str, list]] = []  # (kind, sql, params)
+        self._last_sql = ""
 
     # -- recording ----------------------------------------------------------
     def execute(self, sql, params=()):
-        self.calls.append(("execute", " ".join(sql.split()), [params]))
+        self._last_sql = " ".join(sql.split())
+        self.calls.append(("execute", self._last_sql, [params]))
 
     def executemany(self, sql, seq):
-        self.calls.append(("executemany", " ".join(sql.split()), list(seq)))
+        self._last_sql = " ".join(sql.split())
+        self.calls.append(("executemany", self._last_sql, list(seq)))
 
     def fetchall(self):
         if self.state is None:
+            return []
+        if "FROM device_history" in self._last_sql:
+            return [(_VID,)] if self.state.get("has_open_stop", True) else []
+        if "FROM snapshot_metadata_core" in self._last_sql:
             return []
         return [(
             _VID,
@@ -67,6 +86,7 @@ class _FakeCursor:
             self.state["number_failed_starts"],
             self.state["first_ever_observed_at"],
             self.state["rental_started_at"],
+            self.state.get("last_observed_at", _T0 - timedelta(minutes=2)),
         )]
 
     def fetchone(self):

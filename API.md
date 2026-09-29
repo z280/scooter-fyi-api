@@ -2432,7 +2432,7 @@ deliberately withholds.
 |---|---|
 | `GET /api/v1/private/devices/lookup?plate=&vehicle_identifier=` | Resolve a plate ↔ identifier either direction, plus the current state row. Supply exactly one param. |
 | `GET /api/v1/private/devices/lookup-batch?plates=a,b,c` | Comma-separated plates → max observed range per plate. |
-| `GET /api/v1/private/devices/{vehicle_identifier}/history?since=&until=&limit=` | Time-ordered position-stop history for one scooter. `since` defaults to 7 days ago, `until` to now, `limit` 1–10000 (default 2000). |
+| `GET /api/v1/private/devices/{vehicle_identifier}/history?since=&until=&limit=` | Time-ordered position-stop history for one scooter. `since` defaults to 7 days ago, `until` to now, `limit` 1–10000 (default 2000). Each stop carries `departure_reason`: `moved` (seen elsewhere, or unlocked), `absent` (out of the feed longer than the absence threshold; `departed_at` is the last time it was seen there), or `null` (still open, or closed before sql/083 was deployed, when every close was a move). |
 | `GET /api/v1/private/devices/max-ranges?form_factor=&limit=` | Devices sorted by highest-ever observed range. `limit` 1–20000 (default 5000). |
 | `GET /api/v1/private/trips/daily?date=YYYY-MM-DD&limit=` | Daily trip/popularity rollup for one Denver-local date. `limit` 1–5000 (default 100). |
 | `GET /api/v1/private/area-leaders` | Full, unfiltered §11 area-leader report: every stored rank 1-3 per cell with real account ids, points, and `first_point_at` tie-break provenance -- no privacy filtering (that layer belongs only to the public `/api/v1/leaderboard/map`). |

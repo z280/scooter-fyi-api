@@ -64,6 +64,22 @@ Two known gaps, both handled explicitly rather than papered over:
    extent ghosts are distributed like the live fleet, and the gate bounds
    what is left.
 
+   Update, sql/083: the description of (2) above is now history. Two
+   corrections to it. A vehicle that comes back somewhere else closed its
+   stop at the moment it came back, so the stop still counted it as parked
+   for the whole absence; temporary absences were ghosts too. And the
+   permanent ones were not rare: by 2026-09 they were 6% of the
+   reconstructed fleet, and every snapshot from 2026-09-12 on failed the
+   gate. src/device_state.py now ends a stop when its vehicle has been out
+   of the feed past ABSENT_STOP_AFTER, stamping departed_at with the last
+   time it was seen and `departure_reason = 'absent'`. The absence therefore
+   drops out of the intervals read here, whether or not the vehicle ever
+   comes back. `python -m src.cli close_ghost_stops` closed the backlog under
+   the same rule, but it can only see vehicles that are still absent. A
+   temporary absence recorded before sql/083, which ended in a return, stays
+   in history as part of a stop, so days before that deploy keep some upward
+   bias. The gate is unchanged and still the control.
+
 WHAT IT WRITES ----------------------------------------------------------
 The `*_equity` columns on `snapshot_metadata_core` (sql/079), then
 `daily_sla.compute_for_date()` for the day, which re-averages the window
