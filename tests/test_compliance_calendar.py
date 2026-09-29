@@ -2,8 +2,8 @@
 
 The calendar's whole job is to be honest about days it has nothing for, so
 that is what this covers: every day of every requested month is present,
-and the four states a day can be in (`pass`, `fail`, `no_data`, `pending`)
-are kept distinct rather than collapsing into "not green".
+and the five states a day can be in (`pass`, `fail`, `no_data`, `pending`,
+`unmeasurable`) are kept distinct rather than collapsing into "not green".
 
 Postgres is faked: the handler runs one parameterised SELECT, so a cursor
 that records the query and returns canned rows exercises the real month
@@ -103,9 +103,10 @@ def _freeze_today(monkeypatch, d: date):
     monkeypatch.setattr(api_public, "datetime", _DT)
 
 
-# A stored row: (sla_date, avg_percent, pass_flag, snapshot_count)
-def _row(d, pct, passed, n=90):
-    return (d, pct, passed, n)
+# A stored row: (sla_date, avg_percent, pass_flag, snapshot_count,
+# unmeasurable_reason) — the SELECT's column order.
+def _row(d, pct, passed, n=90, reason=None):
+    return (d, pct, passed, n, reason)
 
 
 def test_returns_the_current_and_prior_month_by_default(monkeypatch):
@@ -262,3 +263,77 @@ def test_the_response_is_briefly_cacheable(monkeypatch):
     _freeze_today(monkeypatch, date(2026, 8, 21))
     _call()
     assert _LAST_RESPONSE[0].headers["Cache-Control"] == "public, max-age=300"
+
+
+# ---------------------------------------------------------------------------
+# unmeasurable (sql/084)
+# ---------------------------------------------------------------------------
+def test_a_day_the_job_could_not_measure_is_unmeasurable_not_pending(monkeypatch):
+    """2026-08-09/10: snapshots exist, every one failed the reconstruction
+    fidelity gate, so the average is NULL for good. `pending` promises a
+    number that is never coming; `fail` would accuse Veo of a miss nobody
+    measured. The stored verdict makes it its own status."""
+    _patch_db(monkeypatch, [
+        _row(date(2026, 8, 9), None, None, n=91, reason="low_fidelity"),
+        _row(date(2026, 8, 10), None, None, n=93, reason="no_history"),
+        _row(date(2026, 8, 11), None, None, n=91),
+    ])
+    _freeze_today(monkeypatch, date(2026, 9, 29))
+    out = _call(month="2026-08", count=1)
+    days = {d["date"]: d for d in out["months"][0]["days"]}
+    assert days["2026-08-09"]["status"] == "unmeasurable"
+    assert days["2026-08-10"]["status"] == "unmeasurable"
+    # No verdict stored: still just not reprocessed yet.
+    assert days["2026-08-11"]["status"] == "pending"
+    # No figure is invented, and the day's snapshots are still reported.
+    assert days["2026-08-09"]["percent"] is None
+    assert days["2026-08-09"]["snapshot_count"] == 91
+    # Unmeasurable is not a verdict on Veo either way.
+    assert out["months"][0]["pass_days"] == 0
+    assert out["months"][0]["fail_days"] == 0
+
+
+def test_a_stored_figure_beats_a_stale_verdict(monkeypatch):
+    """daily_sla clears the verdict when it writes a figure; the calendar
+    ALSO lets the figure win, so a verdict that somehow survived can never
+    hide a real pass or fail."""
+    _patch_db(monkeypatch, [
+        _row(date(2026, 8, 9), 31.0, True, reason="low_fidelity"),
+        _row(date(2026, 8, 10), 12.0, False, reason="low_fidelity"),
+    ])
+    _freeze_today(monkeypatch, date(2026, 9, 29))
+    days = {d["date"]: d for d in _call(month="2026-08", count=1)["months"][0]["days"]}
+    assert days["2026-08-09"]["status"] == "pass"
+    assert days["2026-08-10"]["status"] == "fail"
+
+
+def test_the_official_map_reads_its_verdict_column(monkeypatch):
+    cur = _patch_db(monkeypatch, [])
+    _freeze_today(monkeypatch, date(2026, 8, 21))
+    _call(group="equity")
+    assert "equity_unmeasurable_reason" in cur.executed[0][0]
+
+
+def test_live_recorded_maps_can_never_be_unmeasurable(monkeypatch):
+    """v1/v2 were recorded live and are never reconstructed, so they have
+    no verdict column: the query selects a typed NULL in its place (rather
+    than borrowing the official map's) and a NULL average stays pending."""
+    for group in ("v1", "v2"):
+        cur = _patch_db(monkeypatch, [_row(date(2026, 8, 9), None, None)])
+        _freeze_today(monkeypatch, date(2026, 8, 21))
+        out = _call(group=group, month="2026-08", count=1)
+        sql = cur.executed[0][0]
+        assert "unmeasurable_reason" not in sql
+        assert "NULL::TEXT" in sql
+        assert out["months"][0]["days"][8]["status"] == "pending"
+
+
+def test_status_precedence_covers_every_documented_value():
+    """The five values API.md documents, and the order they are decided in."""
+    status = api_public._calendar_status
+    assert status(None) == "no_data"
+    assert status({"pass": True, "unmeasurable_reason": None}) == "pass"
+    assert status({"pass": False, "unmeasurable_reason": None}) == "fail"
+    assert status({"pass": None, "unmeasurable_reason": None}) == "pending"
+    assert status({"pass": None, "unmeasurable_reason": "low_fidelity"}) == "unmeasurable"
+    assert status({"pass": True, "unmeasurable_reason": "low_fidelity"}) == "pass"

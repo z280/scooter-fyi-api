@@ -21,7 +21,13 @@ from datetime import date as date_cls, datetime, time, timedelta, timezone
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from .equity_groups import COMPLIANCE_GROUPS, compliance_pass_column, core_metric_columns
+from .equity_groups import (
+    COMPLIANCE_GROUPS,
+    REPROCESSED_GROUPS,
+    compliance_pass_column,
+    core_metric_columns,
+    unmeasurable_reason_column,
+)
 from .pg import connection
 from .sentry import capture_exception
 
@@ -59,6 +65,28 @@ _AVG_FIELDS = tuple(core_metric_columns())
 
 def _avg_select_list() -> str:
     return ", ".join(f"AVG({f})::NUMERIC AS avg_{f}" for f in _AVG_FIELDS)
+
+
+def _clear_unmeasurable_clause() -> str:
+    """SET fragment that drops a stored "unmeasurable" verdict (sql/084)
+    the moment this upsert produces a real figure for that group.
+
+    The verdict is written by src/equity_backfill.py when a reprocess
+    rejects every snapshot; nothing else would ever unset it. Clearing it
+    here — in the one writer of the averages — means a row can never carry
+    both a figure and a claim that the figure could not be measured, and a
+    later run that DOES measure the day supersedes the verdict with no extra
+    step. A NULL average leaves the verdict exactly as it was: re-averaging
+    a day that is still unmeasurable must not demote it back to "pending".
+    """
+    parts = []
+    for g in REPROCESSED_GROUPS:
+        col = unmeasurable_reason_column(g)
+        parts.append(
+            f"{col} = CASE WHEN EXCLUDED.avg_percent_all_devices_{g} IS NULL "
+            f"THEN daily_sla_compliance.{col} ELSE NULL END"
+        )
+    return "".join(f", {p}" for p in parts)
 
 
 def compute_for_date(d: date_cls) -> dict:
@@ -109,7 +137,7 @@ def compute_for_date(d: date_cls) -> dict:
     placeholders = ", ".join(f"%({c})s" for c in insert_cols)
     set_clause = ", ".join(
         f"{c} = EXCLUDED.{c}" for c in insert_cols if c != "sla_date"
-    ) + ", computed_at = NOW()"
+    ) + ", computed_at = NOW()" + _clear_unmeasurable_clause()
 
     with connection() as conn:
         with conn.cursor() as cur:

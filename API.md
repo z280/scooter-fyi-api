@@ -1241,6 +1241,8 @@ Most recent daily 6 AM – 9 AM Denver SLA window. **This is the contractually-c
 >
 > **Days that predate the map return `null` there.** The `*_equity` columns did not exist when those snapshots were recorded, so they are backfilled by a nightly job that reconstructs each cycle's fleet from `device_history` (`python -m src.cli reprocess_equity_compliance`). A `null` means "not reprocessed yet", not "zero" — treat it as pending, the way `/api/v1/compliance/calendar` does.
 >
+> **…unless `equity_unmeasurable_reason` is set.** When the reprocessing job has tried a day and **none** of its 6–9 AM snapshots could be reconstructed reliably enough to use (see the field reference below), it records why here and the average stays `null` for good. That day is *unmeasurable*, not pending and not failed — `/api/v1/compliance/calendar` reports it as `status: "unmeasurable"`. 2026-08-09 and 2026-08-10 are the known cases.
+>
 > **Reprocessed days carry NULL in the equity sitting/standing split.** For the `equity` group, days rebuilt from `device_history` by the reprocessing job (the backfill era, 2026-05-31 → 2026-08-23 as of 2026-09-29, **except 2026-08-09 and 2026-08-10**, which failed the fidelity gate on every snapshot and were not rebuilt at all — they have no equity figure) have `null` in `total_sitting_equity`, `total_standing_equity`, `percent_all_sitting_equity`, `percent_all_standing_equity`, `percent_sitting_equity`, `percent_standing_equity` and their daily `avg_*` counterparts (`avg_percent_all_sitting_equity`, `avg_percent_all_standing_equity`, `avg_percent_sitting_equity`, `avg_percent_standing_equity`, `avg_total_sitting_equity`, `avg_total_standing_equity`). The reprocessing job does not rebuild that split (see `src/equity_backfill.py`; `device_history.vehicle_use_type` is only populated on stops recorded from ≈ 2026-07-05, so windows before then could not be rebuilt at all), so **`null` there means unmeasured, not zero**, and it is deliberately not derived from `form_factor`. The bike/scooter split and `percent_all_devices_equity` ARE rebuilt. Days computed live (the pipeline started writing `*_equity` at 2026-08-23 22:04 UTC, so 2026-08-24 onward) carry the full split.
 
 **Request:**
@@ -1286,6 +1288,7 @@ GET /api/v1/compliance/daily/latest
   "avg_percent_bikes_equity": 66.86,
   "avg_percent_scooters_equity": 33.14,
   "compliance_equity_pass": true,
+  "equity_unmeasurable_reason": null,
   "compliance_v1_pass": false,
   "compliance_v2_pass": false,
   "avg_total_devices_er1": 1189.44,
@@ -1303,7 +1306,7 @@ GET /api/v1/compliance/daily/latest
 
 **Response 200 (pending):** No daily row computed yet (first run pending, or pipeline just deployed). Returns the same shape with every field nulled and `snapshot_count: 0`, so the gauge can render a "pending" state without special-casing a non-2xx status. The `avg_*` and `compliance_*` fields are `null` (not absent), matching the field reference below.
 ```json
-{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_equity": null, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null, including er1..er6 … */ "compliance_equity_pass": null, "compliance_v1_pass": null, "compliance_v2_pass": null, "computed_at": null }
+{ "sla_date": null, "window_start_ts": null, "window_end_ts": null, "snapshot_count": 0, "avg_percent_all_devices_equity": null, "avg_percent_all_devices_v1": null, /* … all other avg_* fields null, including er1..er6 … */ "compliance_equity_pass": null, "compliance_v1_pass": null, "compliance_v2_pass": null, "equity_unmeasurable_reason": null, "computed_at": null }
 ```
 
 #### Field reference
@@ -1315,7 +1318,8 @@ GET /api/v1/compliance/daily/latest
 | `window_end_ts` | string \| null | 9:00 AM Denver expressed as UTC. `null` in the pending response. |
 | `snapshot_count` | int | Number of cycles whose `snapshot_time` fell inside the window. Typically 18 (3 hours × 6 cycles/hour). Lower values indicate cycle misses; 0 means no data. |
 | `avg_*` fields | float \| null | Arithmetic mean of the corresponding `snapshot_metadata_core` field across all snapshots in the window, **for every tracked group** (`v1`, `v2`, `er1`–`er6` — see [Tracked equity groups](#tracked-equity-groups-v1-v2-er1er6)). Null when `snapshot_count == 0`. |
-| `compliance_equity_pass` | bool \| null | `avg_percent_all_devices_equity >= 30`, against the official map. **The SLA boolean.** Null when no data — including on days that predate the map and have not been reprocessed yet. |
+| `compliance_equity_pass` | bool \| null | `avg_percent_all_devices_equity >= 30`, against the official map. **The SLA boolean.** Null when no data — including on days that predate the map and have not been reprocessed yet, and on unmeasurable days (next row). |
+| `equity_unmeasurable_reason` | string \| null | Set only when the reprocessing job concluded the day **cannot** be measured against the official map: the day has snapshots in the window, but not one survived the reconstruction fidelity check (reconstructed fleet within ±10% of the fleet the cycle recorded). `"low_fidelity"` — snapshots were reconstructed and every one failed that check. `"no_history"` — none could be reconstructed or checked at all (no stop history, or no recorded fleet). When set, `avg_percent_all_devices_equity` and `compliance_equity_pass` are `null` — **unmeasured, not failed**. It is never set on a day with a live or reprocessed figure, and it is cleared if a later run does produce one. Only the official map has this field: `v1`/`v2` were recorded live and are never reconstructed. |
 | `compliance_v1_pass` | bool \| null | `avg_percent_all_devices_v1 >= 30`. Was the primary SLA boolean; retained as history. Null when no data. |
 | `compliance_v2_pass` | bool \| null | Same for v2. The contractually-binding map (v1 vs v2) is being confirmed with DOTI; track both for now. |
 | `computed_at` | string \| null | UTC timestamp of when this row was computed. `null` in the pending response. |
@@ -1388,6 +1392,11 @@ That density is the point. "The job never computed this day" and "this day faile
 | `fail` | It did not |
 | `no_data` | No `daily_sla_compliance` row for that day at all |
 | `pending` | A row exists, but this group's average is `null`. For `equity` that means the day predates the official map and the reprocessing job hasn't reached it yet — **not** a failure |
+| `unmeasurable` | A row exists, this group's average is `null`, **and** the reprocessing job has concluded it cannot produce one: the day's window had snapshots, but none could be reconstructed reliably enough to judge (the row's `equity_unmeasurable_reason` — see [`/compliance/daily/latest`](#get-apiv1compliancedailylatest)). The day is over and data exists; it just can't be measured defensibly. **Not** a failure, and not a pending promise of a number either. `equity` only — `v1`/`v2` never return it. `percent` is `null`; such days count in neither `pass_days` nor `fail_days` |
+
+Precedence, per day: no row → `no_data`; a stored pass/fail flag → `pass`/`fail` (a figure always wins); a stored unmeasurable verdict → `unmeasurable`; otherwise `pending`.
+
+**`status` is an open set.** `unmeasurable` was added in 2026-09 without a version bump, and a future value may be too. Render a value you don't recognise as neutral — "no verdict" — and **never** as `fail`.
 
 **Query parameters:**
 
@@ -3905,6 +3914,7 @@ brotli for clients that prefer it.
 - **Field names in `snapshot_metadata_core`** are stable — these are the 22 RFP-mandated metrics and won't be renamed.
 - **`region_name` strings** are stable per layer. Adding a new neighborhood (rare — last city update was years ago) would add a key; existing keys won't move.
 - **New optional fields** may be added to responses without notice. Clients should ignore unknown fields, not error.
+- **Enumerated strings may gain values** (e.g. the compliance calendar's `status` gained `unmeasurable`). Treat an unrecognised value as neutral/unknown — for anything compliance-related, never as a failure.
 - **Breaking changes** (removed fields, renamed endpoints) will go through a versioned path (`/api/v2/...`) with the previous version kept live for at least 90 days.
 - **Update cadence** may shift from 10 minutes to faster as we tune, but never slower than 15 minutes.
 

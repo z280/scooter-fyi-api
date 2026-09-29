@@ -143,3 +143,24 @@ def core_metric_columns(groups: tuple[str, ...] = TRACKED_GROUPS) -> list[str]:
 
 def compliance_pass_column(group: str) -> str:
     return f"compliance_{group}_pass"
+
+
+#: The compliance groups whose history can be REBUILT after the fact
+#: (src/equity_backfill.py), and so the only ones a day can end up
+#: UNMEASURABLE for: the rebuild can conclude that no snapshot is defensible
+#: and say so, where a live-recorded group (v1, v2) either has its average
+#: or has no data. A group added here needs its `<g>_unmeasurable_reason`
+#: column (sql/084 adds `equity`'s) before anything reads it.
+REPROCESSED_GROUPS: tuple[str, ...] = (OFFICIAL_GROUP,)
+
+#: The verdicts `<g>_unmeasurable_reason` may hold (sql/084's CHECK):
+#:   low_fidelity — every snapshot that could be reconstructed fell outside
+#:                  the fidelity gate
+#:   no_history   — no snapshot could be reconstructed or checked at all
+UNMEASURABLE_REASONS: tuple[str, ...] = ("low_fidelity", "no_history")
+
+
+def unmeasurable_reason_column(group: str) -> str | None:
+    """`daily_sla_compliance` column holding why `group`'s figure for a day
+    could not be measured, or None for a group that is never reprocessed."""
+    return f"{group}_unmeasurable_reason" if group in REPROCESSED_GROUPS else None

@@ -175,9 +175,18 @@ def test_full_day_bounds_survive_the_spring_forward_day():
 # ---------------------------------------------------------------------------
 # The fidelity gate
 # ---------------------------------------------------------------------------
-def _patch_io(monkeypatch, snapshots, stops, sla_row=None):
-    """Replace every Postgres touch in reprocess_date; collect the writes."""
+#: Verdicts `_record_unmeasurable` was asked to store, as (date, reason),
+#: for the test that last called `_patch_io`.
+VERDICTS: list[tuple] = []
+
+
+def _patch_io(monkeypatch, snapshots, stops, sla_row=None, verdict_stored=True):
+    """Replace every Postgres touch in reprocess_date; collect the writes.
+
+    `verdict_stored` is what the fake `_record_unmeasurable` reports: False
+    stands in for "no SLA row" or "the row already has a live figure"."""
     written: list[tuple] = []
+    VERDICTS.clear()
     monkeypatch.setattr(eb, "_load_snapshots", lambda s, e: snapshots)
     monkeypatch.setattr(eb, "_load_stops", lambda s, e: stops)
     monkeypatch.setattr(eb, "tag_equity_membership", lambda st: list(st))
@@ -186,6 +195,10 @@ def _patch_io(monkeypatch, snapshots, stops, sla_row=None):
     )
     monkeypatch.setattr(
         eb.daily_sla, "compute_for_date", lambda d: sla_row or {}
+    )
+    monkeypatch.setattr(
+        eb, "_record_unmeasurable",
+        lambda d, reason: (VERDICTS.append((d, reason)), verdict_stored)[1],
     )
     return written
 
@@ -262,9 +275,11 @@ def test_a_snapshot_with_no_recorded_denominator_is_not_written(monkeypatch):
     assert written == []
 
 
-def test_a_day_with_no_reconstructable_history_leaves_the_sla_row_alone(monkeypatch):
-    """No writes means no reason to re-average — and re-running daily_sla
-    on a day we changed nothing about would just churn computed_at."""
+def test_a_day_with_no_reconstructable_history_is_not_re_averaged(monkeypatch):
+    """No snapshot writes means no reason to re-average — and re-running
+    daily_sla on a day whose averages we changed nothing about would just
+    churn computed_at. (The day's one write is its unmeasurable verdict;
+    see the sql/084 tests below.)"""
     called: list[date] = []
     _patch_io(monkeypatch, [_snapshot(T0, recorded=10)], [])
     monkeypatch.setattr(
@@ -562,3 +577,205 @@ def test_empty_dry_run_reports_zero_snapshots_averaged(monkeypatch):
     assert res.snapshots_considered == 0
     assert res.snapshots_averaged == 0
     assert res.as_dict()["snapshots_averaged"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The "cannot be measured" verdict (sql/084)
+# ---------------------------------------------------------------------------
+def _result(considered, low=0, no_history=0):
+    return eb.DayResult(
+        sla_date=date(2026, 8, 9),
+        snapshots_considered=considered,
+        snapshots_skipped_low_fidelity=low,
+        snapshots_skipped_no_history=no_history,
+    )
+
+
+def test_verdict_every_snapshot_failed_the_gate():
+    """The 2026-08-09 shape: 91 snapshots, 91 rejected."""
+    assert eb.unmeasurable_verdict(_result(91, low=91)) == "low_fidelity"
+
+
+def test_verdict_nothing_could_be_reconstructed_or_checked():
+    assert eb.unmeasurable_verdict(_result(91, no_history=91)) == "no_history"
+
+
+def test_verdict_a_mix_with_no_survivor_is_low_fidelity():
+    """Some snapshots were reconstructed and rejected, the rest had nothing
+    to reconstruct from: the reconstruction that DID run failed, so that is
+    the reason worth reporting."""
+    assert eb.unmeasurable_verdict(_result(91, low=3, no_history=88)) == "low_fidelity"
+
+
+def test_verdict_one_survivor_means_the_day_was_measured():
+    """08-08 had 10 of 91 pass and its stored figure rests on those ten.
+    Thin, but measured — not unmeasurable."""
+    assert eb.unmeasurable_verdict(_result(91, low=81)) is None
+
+
+def test_verdict_no_snapshots_is_empty_not_unmeasurable():
+    """Unmeasurable means data existed and could not be judged. A day with
+    no snapshots is a different fact (no_data / pending)."""
+    assert eb.unmeasurable_verdict(_result(0)) is None
+
+
+def test_a_day_where_every_snapshot_fails_is_recorded_unmeasurable(monkeypatch):
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None) for i in range(20)]
+    written = _patch_io(
+        monkeypatch,
+        [_snapshot(T0, recorded=10), _snapshot(T0 + timedelta(minutes=2), recorded=10)],
+        stops,
+    )
+    called: list[date] = []
+    monkeypatch.setattr(eb.daily_sla, "compute_for_date", lambda d: called.append(d) or {})
+    r = eb.reprocess_date(date(2026, 8, 9))
+    assert r.snapshots_skipped_low_fidelity == 2
+    assert r.unmeasurable_reason == "low_fidelity"
+    assert r.unmeasurable_recorded is True
+    assert VERDICTS == [(date(2026, 8, 9), "low_fidelity")]
+    # The verdict is the ONLY write: no metrics, no re-average, no figure.
+    assert written == []
+    assert called == []
+    assert r.avg_percent_all_devices_equity is None
+    assert r.compliance_equity_pass is None
+
+
+def test_a_day_with_snapshots_but_no_history_is_recorded_no_history(monkeypatch):
+    _patch_io(monkeypatch, [_snapshot(T0, recorded=10)], [])
+    r = eb.reprocess_date(date(2026, 8, 9))
+    assert r.unmeasurable_reason == "no_history"
+    assert VERDICTS == [(date(2026, 8, 9), "no_history")]
+
+
+def test_a_measured_day_records_no_verdict(monkeypatch):
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None, in_equity=i < 4) for i in range(10)]
+    _patch_io(
+        monkeypatch, [_snapshot(T0, recorded=10)], stops,
+        sla_row={"avg_percent_all_devices_equity": 40.0, "compliance_equity_pass": False},
+    )
+    r = eb.reprocess_date(date(2026, 8, 9))
+    assert r.snapshots_written == 1
+    assert r.unmeasurable_reason is None
+    assert r.unmeasurable_recorded is False
+    assert VERDICTS == []
+
+
+def test_a_day_with_no_snapshots_records_no_verdict(monkeypatch):
+    _patch_io(monkeypatch, [], [])
+    r = eb.reprocess_date(date(2026, 8, 9))
+    assert r.unmeasurable_reason is None
+    assert VERDICTS == []
+
+
+def test_a_full_day_run_never_records_a_verdict(monkeypatch):
+    """The SLA average is over 6-9 AM. A --full-day run's counts include
+    snapshots outside that window, so they cannot speak for it."""
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None) for i in range(20)]
+    _patch_io(monkeypatch, [_snapshot(T0, recorded=10)], stops)
+    r = eb.reprocess_date(date(2026, 8, 9), window_only=False)
+    assert r.snapshots_skipped_low_fidelity == 1
+    assert r.unmeasurable_reason is None
+    assert VERDICTS == []
+
+
+def test_a_verdict_the_row_refused_is_reported_as_not_recorded(monkeypatch):
+    """No SLA row, or a row holding a live figure: `_record_unmeasurable`'s
+    guard leaves it alone, and the result says so rather than claiming it."""
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None) for i in range(20)]
+    _patch_io(monkeypatch, [_snapshot(T0, recorded=10)], stops, verdict_stored=False)
+    r = eb.reprocess_date(date(2026, 9, 15))
+    assert r.unmeasurable_reason == "low_fidelity"
+    assert r.unmeasurable_recorded is False
+    d = r.as_dict()
+    assert d["unmeasurable_reason"] == "low_fidelity"
+    assert d["unmeasurable_recorded"] is False
+
+
+def test_the_verdict_column_is_the_one_the_registry_names():
+    """The calendar and daily_sla's clearing clause find the column through
+    equity_groups; this writer spells it out. They must be the same."""
+    from src.equity_groups import unmeasurable_reason_column
+
+    assert eb.UNMEASURABLE_REASON_COLUMN == unmeasurable_reason_column(eb.OFFICIAL_GROUP)
+
+
+def test_record_unmeasurable_never_overwrites_a_figure_or_creates_a_row(monkeypatch):
+    """The guard lives in the SQL, so check the SQL: UPDATE (never INSERT),
+    keyed by date, only where the equity average is still NULL."""
+    from contextlib import contextmanager
+
+    seen: list[tuple] = []
+
+    class _Cur:
+        rowcount = 1
+
+        def execute(self, sql, params):
+            seen.append((" ".join(sql.split()), params))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+    @contextmanager
+    def _connection():
+        yield _Conn()
+
+    monkeypatch.setattr(eb, "connection", _connection)
+    assert eb._record_unmeasurable(date(2026, 8, 9), "low_fidelity") is True
+    ((sql, params),) = seen
+    assert sql.startswith("UPDATE daily_sla_compliance SET equity_unmeasurable_reason = %s")
+    assert "WHERE sla_date = %s AND avg_percent_all_devices_equity IS NULL" in sql
+    assert "INSERT" not in sql
+    assert params == ("low_fidelity", date(2026, 8, 9))
+
+
+def test_backlog_summary_lists_the_unmeasurable_days(monkeypatch):
+    monkeypatch.setattr(
+        eb, "days_needing_reprocess",
+        lambda lookback_days: [date(2026, 8, 9), date(2026, 8, 11)],
+    )
+
+    def _fake(d, **_kw):
+        r = eb.DayResult(sla_date=d, snapshots_considered=91)
+        if d == date(2026, 8, 9):
+            r.snapshots_skipped_low_fidelity = 91
+            r.unmeasurable_reason = "low_fidelity"
+            r.unmeasurable_recorded = True
+        else:
+            r.snapshots_written = 89
+        return r
+
+    monkeypatch.setattr(eb, "reprocess_date", _fake)
+    out = eb.run_backlog()
+    assert out["days_unmeasurable"] == ["2026-08-09"]
+    assert out["days_reprocessed"] == 2
+
+
+def test_a_dry_run_reports_the_verdict_and_records_nothing(monkeypatch):
+    """The post-deploy check for 2026-08-09/10: `--dry-run` shows the
+    verdict a real run would store, and — like every dry run — stores
+    nothing (every write path, `connection` included, raises here)."""
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None) for i in range(20)]
+    _patch_io_forbidding_writes(monkeypatch, [_snapshot(T0, recorded=10)], stops)
+    r = eb.reprocess_date(date(2026, 8, 9), dry_run=True)
+    assert r.unmeasurable_reason == "low_fidelity"
+    assert r.unmeasurable_recorded is False
+    d = r.as_dict(include_snapshots=True)
+    assert d["unmeasurable_reason"] == "low_fidelity"
+    assert d["unmeasurable_recorded"] is False
+
+
+def test_a_full_day_dry_run_reaches_no_verdict(monkeypatch):
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None) for i in range(20)]
+    _patch_io_forbidding_writes(monkeypatch, [_snapshot(T0, recorded=10)], stops)
+    r = eb.reprocess_date(date(2026, 8, 9), dry_run=True, window_only=False)
+    assert r.unmeasurable_reason is None

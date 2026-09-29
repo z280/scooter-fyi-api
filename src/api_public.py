@@ -20,7 +20,13 @@ from .api_frontend_reports import reliability_report_type_sql
 from .device_features import STATUS_NEEDS_CONFIRMED as FEATURE_STATUS_NEEDS_CONFIRMED
 from .daily_sla import COMPLIANCE_THRESHOLD as SLA_THRESHOLD, DENVER_TZ, _AVG_FIELDS
 from .dwell_stats import stats_for_cycle
-from .equity_groups import COMPLIANCE_GROUPS, OFFICIAL_GROUP, compliance_pass_column
+from .equity_groups import (
+    COMPLIANCE_GROUPS,
+    OFFICIAL_GROUP,
+    REPROCESSED_GROUPS,
+    compliance_pass_column,
+    unmeasurable_reason_column,
+)
 from .pg import connection
 from . import battery_model, vehicle_identity
 from .quality import (
@@ -32,6 +38,10 @@ from .quality import (
 )
 
 _COMPLIANCE_PASS_COLUMNS = tuple(compliance_pass_column(g) for g in COMPLIANCE_GROUPS)
+#: sql/084's verdict columns — one per group that can be reprocessed.
+_UNMEASURABLE_REASON_COLUMNS = tuple(
+    unmeasurable_reason_column(g) for g in REPROCESSED_GROUPS
+)
 
 log = logging.getLogger(__name__)
 
@@ -798,6 +808,11 @@ def _daily_row_to_dict(cur, row) -> dict[str, Any]:
             d[desc.name] = v.isoformat()
         elif v is None:
             d[desc.name] = None
+        elif isinstance(v, str):
+            # TEXT (e.g. equity_unmeasurable_reason) is already JSON-safe;
+            # don't let the float() below turn a numeric-looking code into
+            # a number.
+            d[desc.name] = v
         else:
             # NUMERIC comes back as Decimal — make it JSON-safe
             try:
@@ -835,6 +850,8 @@ def _empty_daily_payload() -> dict[str, Any]:
     for f in _AVG_FIELDS:
         payload[f"avg_{f}"] = None
     for k in _COMPLIANCE_PASS_COLUMNS:
+        payload[k] = None
+    for k in _UNMEASURABLE_REASON_COLUMNS:
         payload[k] = None
     payload["computed_at"] = None
     return payload
@@ -940,6 +957,27 @@ def _prev_month(year: int, month: int) -> tuple[int, int]:
     return (year - 1, 12) if month == 1 else (year, month - 1)
 
 
+def _calendar_status(row: dict[str, Any] | None) -> str:
+    """One calendar day's status from its (possibly absent) SLA row.
+
+    Precedence is the point: a stored pass/fail flag always wins, so a
+    stale verdict can never hide a real figure (daily_sla clears the
+    verdict when it writes one anyway — this is the second lock). Only a
+    row with NO figure is then split into "the job concluded it cannot be
+    measured" and "not reprocessed yet".
+    """
+    if row is None:
+        return "no_data"
+    if row["pass"] is not None:
+        return "pass" if row["pass"] else "fail"
+    if row.get("unmeasurable_reason"):
+        return "unmeasurable"
+    # A stored row whose average for THIS group is NULL. For the official
+    # map that means the day predates it and the reprocessing job has not
+    # reached it yet — a real, nameable state, not an error.
+    return "pending"
+
+
 @router.get("/api/v1/compliance/calendar")
 def compliance_calendar(
     response: Response,
@@ -975,6 +1013,18 @@ def compliance_calendar(
         "pending" — a row exists but this group's average is NULL, which
                     for the official map means the day predates it and has
                     not been reprocessed yet (src/equity_backfill.py)
+        "unmeasurable" — a row exists, this group's average is NULL, AND
+                    the reprocessing job concluded it cannot produce one:
+                    the day had snapshots, but none survived the fidelity
+                    gate (sql/084's `<group>_unmeasurable_reason`). Only
+                    reprocessed groups (REPROCESSED_GROUPS: the official
+                    map) can be in it; v1/v2 were recorded live. Closer to
+                    no_data than to fail — nobody could measure the day,
+                    which says nothing about whether Veo met the target.
+
+    The verdict is read from the row, never re-derived here: deciding it
+    means a device_history scan and a spatial join, which is the nightly
+    job's work, not a page view's.
 
     `count` walks BACKWARDS from `month`, so the default `count=2` is
     exactly "this month and last" — the two the compliance calendar shows.
@@ -1008,11 +1058,15 @@ def compliance_calendar(
 
     pct_col = f"avg_percent_all_devices_{group}"
     pass_col = compliance_pass_column(group)
+    # A group that is never reprocessed has no verdict column; select a
+    # typed NULL so the row shape (and the status logic) is the same for all.
+    reason_col = unmeasurable_reason_column(group) or "NULL::TEXT"
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT sla_date, {pct_col}, {pass_col}, snapshot_count
+                SELECT sla_date, {pct_col}, {pass_col}, snapshot_count,
+                       {reason_col}
                 FROM daily_sla_compliance
                 WHERE sla_date >= %s AND sla_date <= %s
                 """,
@@ -1023,6 +1077,7 @@ def compliance_calendar(
                     "percent": None if r[1] is None else float(r[1]),
                     "pass": None if r[2] is None else bool(r[2]),
                     "snapshot_count": int(r[3] or 0),
+                    "unmeasurable_reason": r[4],
                 }
                 for r in cur.fetchall()
             }
@@ -1034,16 +1089,7 @@ def compliance_calendar(
         d = first
         while d <= last:
             row = by_date.get(d)
-            if row is None:
-                status = "no_data"
-            elif row["pass"] is None:
-                # A stored row whose average for THIS group is NULL. For the
-                # official map that means the day predates it and the
-                # reprocessing job has not reached it yet — a real, nameable
-                # state, not an error.
-                status = "pending"
-            else:
-                status = "pass" if row["pass"] else "fail"
+            status = _calendar_status(row)
             days.append({
                 "date": d.isoformat(),
                 "status": status,
