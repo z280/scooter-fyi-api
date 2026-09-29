@@ -1,8 +1,14 @@
 # Atlanta — what it would actually take
 
-Status: **assessment**, nothing here is built. Written against `main` at
-`sql/079`. Parent doc: [`MULTI_TENANCY_PLAN.md`](MULTI_TENANCY_PLAN.md),
-whose three-axis framing (city / provider / deployment) this doc assumes.
+Status: **assessment**, nothing here is built. Feeds probed live
+2026-08-29; rebased and re-verified against `main` at `sql/081` on
+2026-09-29.
+
+Parent doc: [`MULTI_TENANCY_PLAN.md`](MULTI_TENANCY_PLAN.md), whose
+three-axis framing (city / provider / deployment) this doc assumes.
+Frontend lane: `denver-scooter-fyi/docs/ATLANTA_PLAN.md`.
+Sibling program: [`ALONG_THE_WAY_PLAN.md`](ALONG_THE_WAY_PLAN.md) — see §2e,
+which is the part of this doc most likely to matter to roadmap decisions.
 
 Atlanta was proposed with two operator feeds — Bird and Lime. Both were
 probed live on 2026-08-29; every number below is measured, not estimated.
@@ -282,9 +288,9 @@ The parent plan's `stable_vehicle_id` capability flag (§7a) is what makes
 this shippable rather than embarrassing: one flag gates the second list, the
 frontend hides those surfaces wholesale, and the UI says why. The
 alternative — a map where every popup is empty — is worse than not shipping
-Atlanta. In the frontend that flag reaches **37 of 101 non-test modules**
-(`ride-*`, `dibs*`, `qr-*`, `device-*`, `reports`, `recommend`, `track-*`),
-which is the real size of item 4 in §5.
+Atlanta. In the frontend that flag reaches **38 of 103 non-test modules**
+(`ride-*`, `dibs*`, `qr-*`, `device-*`, `track-*`, `reports`, `recommend`,
+`arrival-panel`, `my-scooters`), which is the real size of item 4 in §5.
 
 ### 2b. Ride mode is not actually lost — and this is the important finding
 
@@ -307,8 +313,8 @@ record it, and keep it. What they lose is the *anchor*: the app can't say
 
 There is exactly one gap, and it is small and named: **off-feed rides award
 no points.** `points.py:38` says so outright — `_RIDE_SOURCE_TABLES` lists
-`rides`, but "off-feed rides award nothing today (src/api_rides.py awards no
-points)". Every points hook is wired to `tracked_rides`. So in Atlanta today
+`rides`, but "off-feed rides award nothing today (src/api_rides.py awards
+no points anywhere, deliberately)". Every points hook is wired to `tracked_rides`. So in Atlanta today
 riders would ride, and the ledger would stay at zero, and the whole
 progression/lexicon/royalty layer would be inert.
 
@@ -322,8 +328,10 @@ before Phase 4, not during.
 What stays genuinely gone in Atlanta, with no off-feed equivalent: dibs
 (you cannot call dibs on a vehicle you cannot name), QR scan bonuses, device
 photos, device features, per-device reports and recommendations, reliability
-tiers, failed-start detection, and the battery model. Dwell is not on this
-list — see §2c.
+tiers, failed-start detection, the battery model, and **My Scooters**
+(`sql/081`, `api_favorites.py`), whose gate is a validated QR payload
+carrying the plate — the one thing neither Atlanta operator publishes.
+Dwell is not on this list — see §2c.
 
 ### 2c. Dwell is the exception, and Lime supports it
 
@@ -417,6 +425,40 @@ vehicles' history, reports and photos — the same corruption
 `MULTI_TENANCY_PLAN.md` §5 warns about from hash collisions, arrived at
 deliberately instead of by accident. If per-vehicle intelligence in Atlanta
 ever matters, the route is an MDS agreement with ATLDOT, not GBFS scraping.
+
+### 2e. Atlanta diverges from the roadmap, not just from today's product
+
+`ALONG_THE_WAY_PLAN.md` landed on `main` after this assessment was first
+written, and it changes the strategic reading enough to be worth its own
+section.
+
+It is the master program doc — the five-part thing the project is actually
+building next. Scored against the capability line in §2a:
+
+| Along the Way phase | Atlanta |
+|---|---|
+| 1. The ideal scooter (requirements → map filter) | **works** — quality/battery/type are per-snapshot fields |
+| 2. The corridor search (rank by whole-trip time) | **works** — routing over anonymous positions |
+| 3. Claim and swap (dibs, watch, re-claim) | **dead** — dibs and `ride_watch` both need identity |
+| 4. My Scooters (keep a scanned vehicle) | **dead** — gated on a QR payload carrying the plate |
+| 5. Cost-aware routing through Equity Areas | **partial** — the routing works; the *cost* half needs prices, and Atlanta has none (§3d) |
+
+So two of five phases land whole, one lands halved, and two cannot be built
+at all. Phase 4's gate is the sharpest version of the problem in the whole
+repo: `api_favorites.py`'s premise is *"you physically stood at this vehicle
+and scanned its sticker"*, proven by hashing the plate out of the QR payload.
+Atlanta has no plates, so there is nothing to hash and nothing to stand at.
+
+**The implication is about sequencing, not feasibility.** Every phase of
+Along the Way that Atlanta cannot run is a phase whose Denver implementation
+will accumulate `vehicle_identifier` assumptions for as long as it is built
+without a second city in view. Phase 1 of `MULTI_TENANCY_PLAN.md` exists to
+stop exactly that, and it is still unbuilt. The cost of deferring it is not
+constant — it grows with every identity-gated feature that ships first.
+
+That is an argument for doing the parent plan's Phase 1 *alongside* Along
+the Way rather than after it, and it is not an argument for starting Atlanta
+early. It is cheaper to keep a seam open than to cut one later.
 
 ---
 
