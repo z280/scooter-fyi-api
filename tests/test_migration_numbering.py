@@ -17,6 +17,8 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+import pytest
+
 SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 
 # The two pairs that shipped before this guard existed. They stay, and they
@@ -33,8 +35,14 @@ _HISTORICAL_DUPLICATES: dict[int, frozenset[str]] = {
 }
 
 # Three digits, zero-padded, so the lexicographic sort run_migrations does
-# is also numeric order.
-_NAME = re.compile(r"^(\d{3})_[a-z0-9_]+\.sql$")
+# is also numeric order; then one or more lower_snake words, each starting
+# with a letter -- no empty word (`__`, a trailing `_`), no all-digit or
+# digit-led word, no capitals. Every file on main when this was tightened
+# already conformed, so there is no historical exception to carry.
+_NAME = re.compile(r"^\d{3}_[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*\.sql$")
+# The number alone, read from ANY file -- a malformed name must still count
+# toward duplicate detection, not slip past it by failing the name check.
+_NUMBER = re.compile(r"^(\d+)_")
 
 
 def _migrations() -> list[str]:
@@ -45,14 +53,43 @@ def test_every_migration_is_named_nnn_description():
     bad = [n for n in _migrations() if not _NAME.match(n)]
     assert not bad, (
         f"{bad}: name migrations NNN_lower_snake.sql -- a three-digit, "
-        "zero-padded prefix keeps string order equal to numeric order"
+        "zero-padded prefix keeps string order equal to numeric order, and "
+        "the description is lowercase words joined by single underscores"
     )
+
+
+@pytest.mark.parametrize("name", [
+    "085_drop_ruling_alpha.sql",
+    "061_telemetry.sql",
+    "044_royalty_titles_and_ruling_colors.sql",
+    "048_h3_r8_area_leaders.sql",    # digits INSIDE a word are fine
+    "064_reclassify_type5_as_rover.sql",
+])
+def test_the_name_rule_accepts_lower_snake(name):
+    assert _NAME.match(name)
+
+
+@pytest.mark.parametrize("name", [
+    "086_bad__name.sql",             # empty word
+    "086_bad_.sql",                  # trailing underscore
+    "086__bad.sql",                  # leading underscore
+    "086_123.sql",                   # all-digit word
+    "086_bad_2nd_try.sql",           # digit-led word
+    "086_Bad_name.sql",              # uppercase
+    "086_bad-name.sql",              # hyphen
+    "86_bad_name.sql",               # unpadded number
+    "0860_bad_name.sql",             # four digits
+    "086_.sql",                      # no description
+    "086_bad_name.SQL",              # extension case
+])
+def test_the_name_rule_rejects_anything_else(name):
+    assert not _NAME.match(name)
 
 
 def test_no_two_migrations_share_a_number():
     by_number: dict[int, set[str]] = defaultdict(set)
     for name in _migrations():
-        m = _NAME.match(name)
+        m = _NUMBER.match(name)
         if m:
             by_number[int(m.group(1))].add(name)
 

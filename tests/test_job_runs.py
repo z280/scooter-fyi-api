@@ -15,6 +15,7 @@ Two properties matter more than the rest and get the most attention here:
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -380,27 +381,52 @@ def test_the_retired_recompute_area_leaders_alias_is_gone():
     assert cli.main(["recompute_area_leaders"]) == 2
 
 
-def test_a_stale_line_for_a_retired_command_is_flagged_not_fatal(monkeypatch):
-    """If an environment's crontab (the state copy is seeded once and then
-    hand-edited, so it can lag the image) still schedules the retired name,
-    /admin/scheduler must still render and must say what is wrong with that
-    row — scheduled, never run, not a known command — rather than 500."""
+_RETIRED_LINE = "15 9 * * 1 cd /app && python -m src.cli recompute_area_leaders\n"
+
+
+def _operations_row(monkeypatch, command: str, crontab: str, runs: list) -> str:
+    """Render /admin/scheduler with the given crontab and ledger, and return
+    the Operations-table row for `command` (fails if there is none)."""
     from src import api_admin
 
+    monkeypatch.setattr(api_admin.job_runs, "latest_per_command", lambda: runs)
+    monkeypatch.setattr(api_admin.job_runs, "recent", lambda limit=50: runs)
+    monkeypatch.setattr(api_admin, "_read_active_crontab", lambda: (crontab, "(test)"))
+    html = api_admin.scheduler_status(None, user={"login": "tester"}).body.decode()
+    ops = html.split("<h2>Operations</h2>")[1].split("<h2>Recent runs")[0]
+    rows = [r for r in re.findall(r"<tr>.*?</tr>", ops, flags=re.DOTALL)
+            if f"<code>{command}</code>" in r]
+    assert len(rows) == 1, f"expected exactly one Operations row for {command}"
+    return rows[0]
+
+
+def test_a_stale_line_for_a_retired_command_is_flagged_not_fatal(monkeypatch):
+    """If an environment's crontab (the state copy is seeded once and then
+    hand-edited, so it can lag the image) still schedules the retired name
+    and the ledger holds nothing for it -- production's case: no run under
+    that name inside job_runs' 30-day retention -- /admin/scheduler must
+    still render, and that row must read scheduled / never run / not a known
+    command, rather than 500."""
+    row = _operations_row(monkeypatch, "recompute_area_leaders", _RETIRED_LINE, runs=[])
+    assert "<code>15 9 * * 1</code>" in row, "scheduled"
+    assert "never" in row, "never run"
+    assert "not a known command" in row
+    assert "not scheduled" not in row
+
+
+def test_a_retired_command_with_a_leftover_run_is_still_flagged(monkeypatch):
+    """The transitional case: the alias ran (successfully) before it was
+    retired, and the stale line has only been failing its usage check
+    since -- which records no run. The row keeps showing that last real
+    run, and still says the name is no longer a command."""
     old_run = {"command": "recompute_area_leaders",
                "started_at": datetime.now(timezone.utc) - timedelta(days=3),
                "finished_at": datetime.now(timezone.utc) - timedelta(days=3),
                "status": "ok", "duration_ms": 4_000, "summary": None, "error": None}
-    monkeypatch.setattr(api_admin.job_runs, "latest_per_command", lambda: [old_run])
-    monkeypatch.setattr(api_admin.job_runs, "recent", lambda limit=50: [old_run])
-    monkeypatch.setattr(
-        api_admin, "_read_active_crontab",
-        lambda: ("15 9 * * 1 cd /app && python -m src.cli recompute_area_leaders\n", "(test)"),
-    )
-    html = api_admin.scheduler_status(None, user={"login": "tester"}).body.decode()
-    ops = html.split("<h2>Operations</h2>")[1].split("<h2>Recent runs")[0]
-    assert "recompute_area_leaders" in ops
-    assert "not a known command" in ops
+    row = _operations_row(monkeypatch, "recompute_area_leaders", _RETIRED_LINE, runs=[old_run])
+    assert "<code>15 9 * * 1</code>" in row
+    assert "never" not in row
+    assert "not a known command" in row
 
 
 def test_prune_does_not_swallow_its_own_failure(monkeypatch):
