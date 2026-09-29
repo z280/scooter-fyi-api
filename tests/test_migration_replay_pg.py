@@ -262,3 +262,49 @@ def test_the_backfill_never_overwrites_a_measured_distance(pg_conn):
             (ride_id,),
         )
         assert cur.fetchone() == (4321.0, "waypoints")
+
+
+def _dropped_attribute_slots(conn) -> dict[str, int]:
+    """table -> how many of its column slots are dropped-column tombstones.
+    Postgres never reclaims a dropped column's attnum short of a table
+    rewrite, and a table has 1600 of them in total."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.relname, COUNT(*)
+              FROM pg_attribute a
+              JOIN pg_class c ON c.oid = a.attrelid
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = current_schema()
+               AND c.relkind IN ('r', 'p')
+               AND a.attisdropped
+             GROUP BY c.relname
+            """
+        )
+        return dict(cur.fetchall())
+
+
+def test_replaying_every_migration_burns_no_column_slots(pg_conn):
+    """sql/060 used to DROP and re-ADD two generated columns on every run,
+    so each whole-directory replay (one per _pg test) leaked two `accounts`
+    attnums until a long session died on `tables can have at most 1600
+    columns`. Any file pair that drops a column a later replay re-adds has
+    the same leak — sql/085 dropping ruling_alpha while sql/044 still
+    created it would have been one. A replay must leave every table's
+    tombstone count exactly where it found it."""
+    before = _dropped_attribute_slots(pg_conn)
+    _apply_all(pg_conn)
+    _apply_all(pg_conn)
+    assert _dropped_attribute_slots(pg_conn) == before
+
+
+def test_ruling_alpha_stays_dropped_after_a_replay(pg_conn):
+    """sql/085 dropped it; sql/044 must not bring it back on a replay."""
+    _apply_all(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'accounts' "
+            "AND column_name = 'ruling_alpha'"
+        )
+        assert cur.fetchone() is None

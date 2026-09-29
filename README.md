@@ -425,7 +425,7 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `GET /api/v1/auth/session` | Session introspection for UI state |
 | `POST /api/v1/auth/signout` | Revoke the presented token |
 | `GET /api/v1/profile` | Full rider profile incl. server-computed badges/public username/`display_name` |
-| `PUT /api/v1/profile` | Partial update of `rate_plan`/`theme`/`favorites`/`email`/`phone_number`/`show_public_username`/`show_in_leaderboards`/`home_lat`/`home_lng`/`work_lat`/`work_lng`/`royalty_title`/`ruling_color`/`ruling_border_color`/`ruling_alpha` |
+| `PUT /api/v1/profile` | Partial update of `rate_plan`/`theme`/`favorites`/`email`/`phone_number`/`show_public_username`/`show_in_leaderboards`/`home_lat`/`home_lng`/`work_lat`/`work_lng`/`royalty_title`/`ruling_color`/`ruling_border_color` |
 | `POST /api/v1/profile/username/regenerate` | Re-roll your public username to a new random adjective+emoji pair |
 | `PUT /api/v1/profile/username` | Choose a specific adjective and/or emoji (partial update) |
 | `POST /api/v1/profile/phone/code` | Text a code to prove you answer your listed number |

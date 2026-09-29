@@ -1,0 +1,22 @@
+-- Drop accounts.ruling_alpha: the per-rider territory fill opacity.
+--
+-- sql/044 added it so a rider could choose how strongly their hexagons
+-- were filled. The frontend stopped honouring it — every claimed hexagon
+-- now renders at one constant fill opacity, so a cell's shade says who
+-- holds it and nothing about how loudly they asked to be seen — and the
+-- slider that wrote it is gone. Nothing has read it since; the API only
+-- still carried it on /leaderboard/map, /leaderboard/regional and
+-- /profile. Those fields go in the same change as this file.
+--
+-- The column's CHECK (accounts_ruling_alpha_range) goes with it.
+--
+-- REPLAY SAFETY
+-- -------------
+-- One idempotent statement, nothing else. sql/060 is the cautionary tale:
+-- an unconditional DROP + ADD on every run burned `accounts` column slots
+-- each time the _pg test fixtures replayed the whole directory, because
+-- Postgres never reclaims a dropped column's attnum. A drop only burns a
+-- slot if something re-adds the column on the next replay, which is why
+-- sql/044 no longer creates it at all (see the note there): on a fresh or
+-- replayed database this is a no-op, and on production it runs once.
+ALTER TABLE accounts DROP COLUMN IF EXISTS ruling_alpha;

@@ -53,14 +53,12 @@ aggregate counts with no identity attached (a number reveals nobody), and
 they count EVERY earner in the cell, not only the eligible top 3.
 
 Colors are live-joined from the same row. The pair is coherent by
-``accounts_ruling_colors_coherent`` (sql/044) — both NULL or both set —
-but ``ruling_alpha`` carries ``NOT NULL DEFAULT 0.60``, so an account with
-no claimed pair still has a non-null alpha in its row. This handler NULLs
-``ruling_alpha`` whenever the color pair is NULL; forwarding the column
-default would leak a meaningless number as if it were a real fill opacity.
-(The frontend ignores the field entirely and paints every claimed hexagon
-at one constant opacity — but that is its decision, not a licence for this
-layer to send nonsense.)
+``accounts_ruling_colors_coherent`` (sql/044) — both NULL or both set — and
+``_leader_entry`` still nulls the border whenever the fill is NULL, so a
+half-set pair can never reach a client even if that constraint were
+loosened. There is no opacity field: every claimed hexagon renders at one
+constant fill opacity the frontend chooses, and the per-rider opacity
+column that used to ride along here was dropped by sql/085.
 
 No ``royalty_title`` field: ``display_name`` already composes it
 (sql/044's generated column, restyled by sql/060: the title, a space,
@@ -128,36 +126,30 @@ def _leader_entry(
     points: int,
     ruling_color: str | None,
     ruling_border_color: str | None,
-    ruling_alpha,
 ) -> dict[str, Any]:
     """The unclaimed-pair rule: ruling_color/ruling_border_color are
-    both-or-neither (accounts_ruling_colors_coherent), but ruling_alpha
-    carries a NOT NULL DEFAULT — so when the pair is NULL, alpha is
-    explicitly nulled here too rather than forwarding the column default."""
+    both-or-neither (accounts_ruling_colors_coherent), and an unclaimed fill
+    nulls the border here too, so the pair a client sees is always whole."""
     if ruling_color is None:
         ruling_border_color = None
-        alpha_out = None
-    else:
-        alpha_out = float(ruling_alpha) if ruling_alpha is not None else None
     return {
         "display_name": display_name,
         "points": int(points),
         "ruling_color": ruling_color,
         "ruling_border_color": ruling_border_color,
-        "ruling_alpha": alpha_out,
     }
 
 
 def _fetch_accounts(cur, account_ids: list[int]) -> dict[int, tuple]:
     """account_id -> (display_name, show_in_leaderboards, show_public_username,
-    ruling_color, ruling_border_color, ruling_alpha). One query for the whole
-    payload's cast, not one per entry."""
+    ruling_color, ruling_border_color). One query for the whole payload's
+    cast, not one per entry."""
     if not account_ids:
         return {}
     cur.execute(
         """
         SELECT id, display_name, show_in_leaderboards, show_public_username,
-               ruling_color, ruling_border_color, ruling_alpha
+               ruling_color, ruling_border_color
         FROM accounts
         WHERE id = ANY(%s)
         """,
@@ -174,10 +166,10 @@ def _eligible_entry(account_id: int, points: int, accounts_by_id: dict[int, tupl
     if acct is None:
         return None
     (display_name, show_in_leaderboards, show_public_username,
-     ruling_color, ruling_border_color, ruling_alpha) = acct
+     ruling_color, ruling_border_color) = acct
     if not _is_eligible(display_name, show_in_leaderboards, show_public_username):
         return None
-    return _leader_entry(display_name, points, ruling_color, ruling_border_color, ruling_alpha)
+    return _leader_entry(display_name, points, ruling_color, ruling_border_color)
 
 
 def _build_cells(

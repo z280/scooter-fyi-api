@@ -31,11 +31,17 @@
 -- distinct claims rather than the 128 a unique fill alone would allow.
 -- Riders may share a fill or share a border, just not both.
 --
--- ALPHA governs the FILL only; the border renders opaque. A border whose
--- whole job is separating adjacent territories should not be able to fade
--- out. The 0.10 floor is for the same reason — a fully transparent
--- territory is an invisible one, and opting out of the map already has a
--- home in accounts.show_in_leaderboards.
+-- NO PER-RIDER OPACITY (edited after the fact). This file originally also
+-- added `ruling_alpha NUMERIC(3,2) NOT NULL DEFAULT 0.60` with CHECK
+-- accounts_ruling_alpha_range (0.10-1.00): a rider-chosen fill opacity.
+-- The frontend replaced it with one constant opacity for every territory,
+-- and sql/085 drops the column. The ADD was removed from this file in the
+-- same change, because leaving it would make every whole-directory replay
+-- (the _pg test fixtures do one per test) re-add the column here and drop
+-- it again in 085 -- burning an `accounts` attnum each time, the exact
+-- slot leak sql/060 records. Production applied this file long ago and
+-- never re-runs it (schema_migrations), so the edit only changes what a
+-- fresh or replayed database builds: no ruling_alpha, as after 085.
 
 CREATE TABLE IF NOT EXISTS royalty_titles (
     title       TEXT PRIMARY KEY,
@@ -216,10 +222,7 @@ ON CONFLICT (hex) DO NOTHING;
 ALTER TABLE accounts
     ADD COLUMN IF NOT EXISTS royalty_title       TEXT REFERENCES royalty_titles(title),
     ADD COLUMN IF NOT EXISTS ruling_color        TEXT REFERENCES ruling_colors(hex),
-    ADD COLUMN IF NOT EXISTS ruling_border_color TEXT REFERENCES ruling_colors(hex),
-    ADD COLUMN IF NOT EXISTS ruling_alpha        NUMERIC(3,2) NOT NULL DEFAULT 0.60
-        CONSTRAINT accounts_ruling_alpha_range
-        CHECK (ruling_alpha BETWEEN 0.10 AND 1.00);
+    ADD COLUMN IF NOT EXISTS ruling_border_color TEXT REFERENCES ruling_colors(hex);
 
 -- Fill and border are set together or not at all, and must differ: a
 -- border the same colour as its fill is not a border, and would silently

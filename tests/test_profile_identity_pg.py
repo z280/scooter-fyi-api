@@ -177,12 +177,11 @@ def test_an_unknown_title_is_refused(pg_conn):
 def test_colours_round_trip(pg_conn):
     c, _ = _client(pg_conn)
     r = c.put("/api/v1/profile", json={
-        "ruling_color": _RED, "ruling_border_color": _BLUE, "ruling_alpha": 0.4,
+        "ruling_color": _RED, "ruling_border_color": _BLUE,
     })
     assert r.status_code == 200, r.text
     body = r.json()
     assert (body["ruling_color"], body["ruling_border_color"]) == (_RED, _BLUE)
-    assert body["ruling_alpha"] == pytest.approx(0.4)
 
 
 def test_a_claimed_pair_is_409_for_everyone_else(pg_conn):
@@ -220,7 +219,7 @@ def test_re_saving_your_own_pair_is_not_a_conflict(pg_conn):
     c, _ = _client(pg_conn)
     c.put("/api/v1/profile", json={"ruling_color": _RED, "ruling_border_color": _BLUE})
     assert c.put("/api/v1/profile", json={
-        "ruling_color": _RED, "ruling_border_color": _BLUE, "ruling_alpha": 0.9,
+        "ruling_color": _RED, "ruling_border_color": _BLUE,
     }).status_code == 200
 
 
@@ -266,10 +265,20 @@ def test_a_colour_outside_the_palette_is_refused(pg_conn):
     assert "available colours" in r.json()["detail"]
 
 
-@pytest.mark.parametrize("alpha", [0.0, 0.05, 1.5])
-def test_alpha_outside_the_range_is_refused(pg_conn, alpha):
+@pytest.mark.parametrize("alpha", [0.0, 0.6, 1.5, None])
+def test_a_stale_client_sending_ruling_alpha_is_ignored_not_refused(pg_conn, alpha):
+    """sql/085 dropped the per-rider fill opacity. A client built before
+    that may still send the field; it is an unknown key now, so it is
+    ignored (200) rather than refused, and it is never echoed back."""
     c, _ = _client(pg_conn)
-    assert c.put("/api/v1/profile", json={"ruling_alpha": alpha}).status_code == 422
+    r = c.put("/api/v1/profile", json={
+        "ruling_color": _RED, "ruling_border_color": _BLUE, "ruling_alpha": alpha,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["ruling_color"], body["ruling_border_color"]) == (_RED, _BLUE)
+    assert "ruling_alpha" not in body
+    assert "ruling_alpha" not in c.get("/api/v1/profile").json()
 
 
 # ---------------------------------------------------------------------------
