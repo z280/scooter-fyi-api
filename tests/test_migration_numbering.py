@@ -46,7 +46,13 @@ _NUMBER = re.compile(r"^(\d+)_")
 
 
 def _migrations() -> list[str]:
-    return sorted(p.name for p in SQL_DIR.glob("*.sql"))
+    # Case-insensitive on the suffix, deliberately wider than the runner's
+    # own `glob("*.sql")`: a `086_x.SQL` would be silently skipped by
+    # src/pg.py, so it has to reach _NAME here and fail loudly instead.
+    return sorted(
+        p.name for p in SQL_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() == ".sql"
+    )
 
 
 def test_every_migration_is_named_nnn_description():
