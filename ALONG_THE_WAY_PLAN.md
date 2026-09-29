@@ -42,7 +42,7 @@ one appears, the battery is draining faster than estimated — it re-solves the
 rest of the route, tells them once, and lets them overrule it from plans it
 has already worked out.
 
-Eight parts, in the order they matter:
+Ten parts, in the order they matter:
 
 1. **The ideal scooter.** Kind of device, required features, minimum quality,
    minimum battery — stated once, as requirements rather than as map filters,
@@ -77,6 +77,14 @@ Eight parts, in the order they matter:
    whether they were charged correctly, and gets a complaint ready to send —
    and, with consent, the answers aggregate into the one question nobody can
    currently answer: *is the discount actually being applied?*
+9. **Reaching the rider.** A plan that changes while the phone is in a pocket
+   is a plan the rider never hears about. Opted-in SMS for the two things
+   worth interrupting someone for, a live check of the handful of vehicles a
+   plan actually depends on, and a link that puts them back where they were —
+   after signing in again if they have to.
+10. **Advocacy.** A rider sending a complaint can ask for somebody in their
+    corner. `advocacy@weseeyouveo.com` goes on the CC if they tick the box,
+    and replies into a case only ever happen when the case asks for them.
 
 ### What already exists (and is therefore not in scope to invent)
 
@@ -211,7 +219,7 @@ reservation, and not a subscription to where it goes.
 | Does a re-solve auto-claim, or ask? | **REVISED (rev 3) — always auto-claim, always say so, always let the rider overrule it** from backups already computed. The envelope is withdrawn. | The reasoning was right and did not go far enough: the rider is *riding*, not walking. A question they cannot safely read is never the safer default, so there is no bound at which asking becomes correct. §7.1. |
 | Does the swap raise a second notification after "it's gone"? | **No — one message, or two, never both.** | `dibs-notify.ts` caps itself at four alerts per claim on purpose. A swap that buzzes twice in three seconds spends the budget that protects "RUN!". |
 | Does the certificate change? | **It gains a chain link** (`replaces_dibs_id`), nothing else. | The certificate is an assertion about one vehicle at one time. A swap makes a *new* claim; it does not extend the old one. |
-| Persist the trip plan server-side in v1? | **No.** Phase 3 is client-only. | A live position + destination stored server-side is a new retention rule (three-address rule, §13) and a much larger privacy conversation than the feature needs to prove itself. |
+| Persist the trip plan server-side in v1? | **No.** Phase 3 is client-only. | A live position + destination stored server-side is a new retention rule (three-address rule, §15) and a much larger privacy conversation than the feature needs to prove itself. |
 | Proactive "upgrade" offers (a better vehicle appears mid-trip)? | **REVISED (rev 3) — not a separate phase. It is one trigger among several** on the same re-solve path (§7.2), and it is safe because the rider can always overrule it. | Rev 2 made it optional Phase 3b because an app that renegotiates unprompted is one you stop trusting. What makes it trustworthy is the undo, not the gate — and once the plan is live for other reasons, gating this one costs a branch and buys nothing. |
 | **What does a QR scan actually prove?** | **NEW — plate knowledge, not presence.** So favouriting requires a valid scan **and** a GPS fix within **75 m** of the device's last known position. | `src/qr.py:validate_scan` checks `hash_plate(payload) == vehicle_identifier`. That proves the scanner has the plate; nothing in `api_qr.py` or `credit_qr_scan_points` compares the submitted `lat`/`lng` to anything. 75 m is the radius the "Unlock in Veo" gate already uses for "physically at the scooter". |
 | **Can you watch a favourite move?** | **NEW — no. Position is withheld while `is_reserved` is true.** | See §8.4. This is the single most important rule in Phase 4 and the one most likely to be lost in implementation. |
@@ -239,7 +247,8 @@ Each phase is independently mergeable and useful on its own.
 | **6 — One app, one mode** | The seams between "the map" and "ride mode" close; entering a ride stops being a mode change | — (frontend-only) | `#mode-switch` seam removed, one model filter, the spec carried into the HUD |
 | **7 — The walkthrough** | A first-time rider is shown the app that actually exists, and the tour auto-shows again | — (frontend-only) | `onboarding.ts` rewritten against the home bar, `ONBOARDING_AUTOSHOW` back on |
 | **8 — The receipt** | Was this trip charged per Exhibit C? Complaint ready to send — and, consented, an evidence pile that can answer whether the discount is applied at all | receipt submissions migration, aggregate endpoint, three-address rule in full | on-device OCR, confirm-what-we-read, copy-the-complaint |
-| **9 — Pocket-proof** *(not committed)* | Re-solve works with the app closed | server-side trip plan + `ride_watch`-style job + Web Push / SMS | service worker |
+| **9 — Reaching the rider** | Opted-in SMS when the plan changes under you; 20-second checks on plan-critical vehicles; a resume link that survives losing your session | trip-alert consent, server-side plan, targeted upstream check, `comms.py` | alert opt-in, resume deep link, foreground-bounded checking |
+| **10 — Advocacy** | Opt-in CC to `advocacy@weseeyouveo.com`, a review portal, and replies into a case **only when invited** by `@WSYV` / `@advocacy` | inbound mail pipeline, mention detection, operator SMS | the CC tick, per complaint |
 
 **Phase 4 has no dependency on 1–3** — it needs only the QR scanner, which
 already exists — and could ship at any point after Phase 1. It is listed here
@@ -256,9 +265,14 @@ because renegotiating a plan unprompted felt untrustworthy; under §7.1 every
 re-solve is announced and reversible, so an upgrade is just one more trigger
 on a path that already exists.
 
-**Phase 8 takes the number Pocket-proof used to have**, and Pocket-proof moves
-to 9. Pocket-proof is explicitly *not committed*; the receipt is. A phase
-somebody intends to build outranks one nobody has decided on.
+**Phase 9 was "Pocket-proof" and is now committed.** The name described the
+problem and dodged the mechanism; the mechanism is SMS, and most of it already
+exists (§13.1). Phase 10 is new.
+
+**Phases 8, 9 and 10 are the three that add stored data** — receipt
+submissions, a live trip plan, and an advocacy mailbox. Between them they more
+than double this program's privacy surface, and each carries the three-address
+rule in full.
 
 **Phases 6 and 7 are in this order and at this end for one reason.** Phase 7
 rewrites a tour that *describes the UI*; Phase 6 *changes the UI*. Writing the
@@ -1391,7 +1405,7 @@ recipient is worse than one that is missing.
 
 ### 12.7 The evidence pile
 
-New stored data, so it comes with the full house treatment (§13).
+New stored data, so it comes with the full house treatment (§15).
 
 - **Consent is explicit, per submission, and revocable.** A rider checking
   their own receipt contributes nothing by default. Contributing is a separate
@@ -1424,7 +1438,226 @@ of this evidence is entirely that it is boring and checkable.
 
 ---
 
-## 13. House duties this program owes
+## 13. Phase 9 — Reaching the rider
+
+**Formerly "Pocket-proof", and now committed.** The name was right about the
+problem and coy about the mechanism: the mechanism is SMS.
+
+### 13.1 Most of this already exists, which is why it is now affordable
+
+| Piece | Status |
+|---|---|
+| Outbound SMS with **consent (STOP), brand prefix, quota, fallback** | `src/comms.py`, shipped |
+| Inbound replies, claim-on-poll + ack | `comms.py:poll_replies` / `ack_reply`, shipped |
+| **Verified** phone numbers on the profile | `POST /api/v1/profile/phone/{code,verify}` → `phone_verified`, shipped |
+| "A profile carries an email, a phone, or both" | `accounts_email_or_phone_required`, `sql/025` |
+| Deep-link entry with a reauth path | the `?ml=` magic-link flow, `main.ts:633` |
+| Watching a claimed vehicle, with reasons | `device-watch.ts`, shipped |
+
+So "encourage adding a phone number" is **a prompt, not a build**. What is
+genuinely new is consent, the rapid check, and the resume link.
+
+### 13.2 A number given for sign-in is not consent to be texted about scooters
+
+`comms.py` honours STOP across every application on the shared number, which
+is the legal floor and not the whole duty. A rider who typed their number to
+receive a **sign-in code** has not agreed to receive **trip alerts**, and
+treating those as one consent is how an app becomes something people block.
+
+So: a separate, explicit, revocable opt-in for trip alerts, stored
+per-account, asked **at the moment it is useful** — when a rider starts a
+hand-off plan — and never as a wall in front of the feature. Declining is a
+first-class answer that costs the rider nothing but the texts.
+
+The opt-in copy states what will be sent, roughly how often, that message and
+data rates apply, and how to stop. Standard practice, and cheap.
+
+**A plan never requires SMS.** The whole feature works with it off; SMS is the
+channel that survives the screen going dark, not a dependency.
+
+### 13.3 What earns a text, and what does not
+
+Risk 12 is the one to respect here: `dibs-notify.ts` caps itself at four
+alerts per claim *on purpose*, and a re-solve that buzzes for every trigger in
+§7.2 spends the budget that protects the message that matters.
+
+**SMS is strictly narrower than the in-app notice.** It is for what you would
+want to be interrupted for:
+
+| Event | In-app | SMS |
+|---|---|---|
+| Your pickup is gone; you have been moved | yes | **yes** |
+| The plan changed where you are going | yes | **yes** |
+| A better option appeared and we took it | yes | no |
+| Re-solved, nothing you would act on changed | no | no |
+| Plan complete | yes | no |
+
+Hard ceiling per trip, on top of the existing per-claim ceiling. A text that
+says "we checked and it is fine" is not reassurance, it is attrition.
+
+### 13.4 The rapid check — narrow, not fast
+
+The ask was "fire calls up to every 20s instead of 2m". The measurement says
+do something better and cheaper, because **the bottleneck is not the polling
+rate**:
+
+- **Upstream is always current.** `crontab` records it: *"the upstream feed is
+  generated per-request (`last_updated` stamps at fetch time, `ttl=0`), so any
+  cadence returns current fleet state."*
+- **Our ingest is every 2 minutes**, and that is where the staleness lives.
+- **The client already polls every 90 seconds** (`REFRESH_MS = 90_000`) —
+  i.e. *already faster than the data behind it moves.*
+
+So a 20-second global poll would re-read the same two-minute-old cycle six
+times: **six times the load, zero extra freshness.** It is not a small
+inefficiency, it is the entire cost with none of the benefit.
+
+**What actually delivers 20-second news:** an active plan depends on a handful
+of vehicles — the pickup and its backups, one to five of them — so check
+*those*, live, against upstream, bypassing the ingest cycle entirely. Upstream
+being per-request means that returns genuinely current state.
+
+```
+                 fleet (≈3000)          plan-critical (1–5)
+ingest cycle     every 2 min            —
+targeted check   —                      every 20 s, while a plan is live
+```
+
+Narrow and frequent beats broad and frequent by three orders of magnitude, and
+it is the only version of this that is honest about where the latency was.
+
+**Do not change the global ingest cadence to achieve this.** The crontab is
+explicit that the live schedule is an admin-editable copy
+(`/admin/scheduler/edit`), and that cadence is shared with the compliance
+audit's trip-duration resolution. This feature does not get to retune the
+audit.
+
+Bounds: only while a plan is live and the app is foregrounded, stopping on
+completion, abandonment or backgrounding; and rate-limited per account, not
+just per IP — an account is the thing that has one trip.
+
+### 13.5 The resume link: a reference, never a credential
+
+Every alert carries a link that puts the rider back where they were —
+including, as asked, after re-authenticating.
+
+**The link carries a plan reference. It does not carry a session.** An SMS
+renders on a lock screen, survives in carrier logs, gets screenshotted and
+lands on shared handsets; a URL that *is* a credential in that channel is a
+credential you have published. So:
+
+- session alive → the plan resumes;
+- session gone → normal sign-in, **then** the plan resumes.
+
+That is exactly the behaviour asked for, and it is also the safe one — a
+pleasant coincidence worth writing down so nobody later "simplifies" it into a
+token.
+
+The `?ml=` flow is the precedent, including the question `main.ts:636` already
+asks about whether a deep link belongs to the person holding it.
+
+### 13.6 The server-side plan, and the retention conversation it opens
+
+For an alert to fire with the tab closed, the plan must live somewhere that is
+not the tab. That means **storing a live destination and a rider's progress
+toward it** — the thing §15 warns is *"a much bigger version of this
+conversation"*.
+
+It is now committed, so the conversation happens rather than being deferred:
+
+- Store the **plan**, not a track: the legs, the current claim, the backups.
+  Not a breadcrumb trail of where the rider has been.
+- **Delete on completion or abandonment**, with a short hard ceiling
+  regardless — a plan is worth minutes, not days, and `pending-trip.ts`
+  already argues exactly this for the client-side intent.
+- Three-address rule in full: `src/cli.py`, `api_meta.py:_PRIVACY`,
+  `privacy_policy.html`.
+
+### 13.7 Tests
+
+- A rider with `phone_verified` but no trip-alert opt-in gets **no** SMS.
+- STOP, then a re-solve: no send is attempted, and the 409 is not an error
+  path the rider ever sees.
+- The per-trip SMS ceiling holds across a plan that re-solves many times.
+- A re-solve that changes nothing actionable sends nothing on either channel.
+- The resume link with a dead session lands on sign-in and **then** the plan.
+- The resume link carries no token that grants access on its own — asserted,
+  not assumed.
+- The targeted check covers only plan-critical vehicles, and stops on
+  completion, abandonment and backgrounding.
+
+---
+
+## 14. Phase 10 — Advocacy
+
+Phase 8 hands a rider a complaint. This is what happens when they want
+somebody in their corner while they send it.
+
+### 14.1 The CC, and what consenting to it actually discloses
+
+The complaint email (§12.6) offers an opt-in CC to
+**`advocacy@weseeyouveo.com`**.
+
+**This is a disclosure to a third party, and a different one from the evidence
+pile.** The pile takes de-identified figures; a CC'd email carries the rider's
+own words, their account identifier, their trip times and their email address,
+into a mailbox a person reads. Consenting to one is not consenting to the
+other, and the UI must not imply it is.
+
+So it is its own tick, defaulted **off**, with a plain statement of what the
+CC sees. And it is per-complaint: a rider who wanted backup last week has not
+volunteered for it forever.
+
+### 14.2 The portal
+
+A review surface for the advocacy mailbox: complaints in, their verdicts,
+their outcomes. Its value is the pattern — the same area, the same rate, the
+same month — which is the evidence pile's question asked with names attached
+for the cases where a rider explicitly asked for help.
+
+Access is operator-only, the same posture as `/admin/*`.
+
+### 14.3 The reply rule: invited, never uninvited
+
+**No reply is sent into a case unless the case mentions `@WSYV` or
+`@advocacy`.**
+
+This is the right rule and worth stating the reason, because it will be
+tempting to relax it: an advocacy organisation that inserts itself into every
+case becomes a nuisance and spends the standing it needs for the cases that
+matter. One that appears only when invited is a resource. It also keeps the
+rider's complaint **the rider's** — they asked Veo a question, and a third
+party answering over their shoulder takes the case away from them.
+
+The invitation can come from either side: a rider who asks for help, or a Veo
+agent who brings them in. Both are invitations; neither is assumed.
+
+**New work:** detecting the mention means reading the advocacy mailbox, and
+there is no inbound-email pipeline today. `comms.py` has reply routing for
+**SMS** (`poll_replies` / `ack_reply`), which is the shape to copy but not the
+transport.
+
+### 14.4 The alert
+
+When a case mentions `@WSYV` or `@advocacy`, the operator gets a text, through
+`comms.py` like everything else. Somebody asked for help; that is worth an
+interruption in a way almost nothing else in this program is.
+
+### 14.5 What this must never do
+
+- Never CC without a per-complaint opt-in.
+- Never reply into a case uninvited, whatever the pattern in the portal says.
+- Never quote one rider's complaint to another, or in public, without
+  separate and specific permission.
+- Never present the portal's cases as a sample of anything — they are the
+  complaints of people who asked for help, which is the most self-selected
+  set in the whole program.
+- Never let the advocacy relationship become a condition of the tool. The
+  receipt checker works identically with the CC off.
+
+---
+
+## 15. House duties this program owes
 
 Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 
@@ -1454,8 +1687,9 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   `spec_applied_to_map`, `spec_saved_from_map`, `favorite_added`,
   `favorite_removed`, `favorite_available_alert`, `equity_savings_shown`,
   `equity_savings_taken`, `receipt_checked`, `receipt_verdict`,
-  `receipt_complaint_copied`, `receipt_contributed`) must land in both, in the
-  same PR, and carry no free text — the existing contract is a fixed name plus enumerated props. **No
+  `receipt_complaint_copied`, `receipt_contributed`, `trip_alert_opt_in`,
+  `trip_alert_sent`, `resume_link_used`, `advocacy_cc_added`) must land in
+  both, in the same PR, and carry no free text — the existing contract is a fixed name plus enumerated props. **No
   `vehicle_identifier` in any of them**: that would attach a device to a
   session in the one system deliberately built to hold no persistent
   identifier.
@@ -1465,6 +1699,14 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   `credit_points()`, and the sweeping unit test.
 - **Tests:** fake-cursor unit tests by default; `*_pg.py` are integration tests
   gated on `VEO_TEST_PG_DSN`; one test file per module.
+- **Phases 8, 9 and 10 each add a stored data category**, which is three more
+  than the rest of the program combined. Phase 9's is the live trip plan (a
+  destination and progress toward it — delete on completion, short hard
+  ceiling regardless), Phase 10's is an advocacy mailbox holding riders' own
+  words. Each needs `src/cli.py`, `api_meta.py:_PRIVACY` and
+  `privacy_policy.html` in the same PR, and Phase 9 additionally needs a
+  **consent record** for trip alerts that is separate from the phone number
+  itself and independently revocable.
 - **Phase 8 owes the most of any phase here.** It is the only one adding a new
   stored data category, and the most sensitive one in the program: the
   three-address rule in full (`src/cli.py` for the retention sweep and
@@ -1481,13 +1723,13 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 
 ---
 
-## 14. Risks, in the order they are likely to bite
+## 16. Risks, in the order they are likely to bite
 
 | # | Risk | Mitigation |
 |---|---|---|
 | 1 | **A favourite becomes a way to follow a person.** In-use vehicles broadcast a live moving position on a public endpoint; a targeted subscription to one is a different thing from a public map. | §8.4: position withheld server-side whenever `is_reserved`, an explicit `position_withheld` flag so nobody "fixes" it later, no location in the availability alert, a 10-favourite cap, and the QR gate on top. Write the rule into the endpoint's docstring the way `sql/076` writes down what dibs is not. |
 | 2 | **The QR gate proves less than it looks like it proves.** `validate_scan` is a plate-knowledge check; nothing today compares position. | §8.2: require the 75 m proximity check as well, and say in the code comment why the scan alone is not enough — otherwise the next feature to reuse the gate inherits the wrong assumption. |
-| 3 | **The phone is in a pocket and the tab is throttled.** The whole re-solve runs client-side in Phase 3. | Rev 3 makes this *less* pressing than rev 2 assumed: a rider mid-hand-off is riding, and a phone mounted for navigation has the tab in front. It still bites for the pocket case — say so in the UI. Phase 9 (server-side plan + Web Push, or SMS via `comms.py`) is the real fix. |
+| 3 | **The phone is in a pocket and the tab is throttled.** The whole re-solve runs client-side in Phase 3. | Rev 3 makes this *less* pressing than rev 2 assumed: a rider mid-hand-off is riding, and a phone mounted for navigation has the tab in front. It still bites for the pocket case — say so in the UI. Phase 9 (§13) is the committed fix: opted-in SMS through `comms.py`, which already carries consent, quota and reply routing. |
 | 4 | **Auto-dibs makes dibs worse for everyone.** Dibs' own rules exist to stop hoarding; a feature that claims automatically is exactly the pressure they were written against, and rev 3's unbounded chaining makes a plan want to claim *more* vehicles. | A plan holds **at most one claim at a time** — release before claim, always, however many hops it intends (§7.3). Watch the ratio of claims to rides in telemetry, and be willing to turn auto-claim off. |
 | 5 | **Valhalla has no matrix, or its matrix disagrees with its routes.** Now MORE load-bearing than in rev 2: the scooter-to-scooter relation is N×N, and a fan-out over N² pairs is not viable. | Verify against the deployed image **before** building the endpoint. Without a matrix, this phase drops to **one hand-off maximum** and a bipartite search — still useful, but say so rather than discovering it late. §6.2. |
 | 6 | **The plan search is expensive and rate-limited**, and rev 3's second matrix call is N×(N+1) rather than N×1. | Still two calls per search. N is pruned hard and deliberately: non-`risk` only (rule 1), first hop inside the walk cap, and the `P`/`D` bbox. The client's straight-line tier carries the interactive list; the server call is reserved for the moment a decision is made. |
@@ -1496,6 +1738,10 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 | 9 | **The map bridge desynchronizes.** A filter set that still claims to be "my ideal scooter" after the rider changed it is a lie the UI is telling. | §5.5's attach/detach rule, and the lossy direction stated on the toggle rather than discovered. |
 | 10 | **Availability alerts become a firehose.** A popular scooter turns over several times a day. | One alert per favourite per 6 hours, none 22:00–07:00 Denver, opt-in per favourite and off by default. |
 | 11 | **Equity advice that costs money.** Wrong tier, unmodelled Pass, a discount Veo does not apply. | Never for Access; price the worse VeoPlus reading; carry the screenshot caveat at the point of advice; never advise a split whose saving is under $0.50. |
+| 19 | **SMS becomes the thing people block.** A living plan re-solves on five triggers; texting each one spends the budget that protects the message that matters, and `dibs-notify.ts` caps at four alerts per claim *on purpose*. | SMS is strictly narrower than the in-app notice (§13.3): two events earn a text, a hard per-trip ceiling sits on top of the per-claim one, and "we checked and it is fine" is never sent. Consent is separate from the sign-in number and revocable. |
+| 20 | **The resume link becomes a credential in a channel we do not control.** An SMS renders on a lock screen, persists in carrier logs, gets screenshotted, lands on shared handsets. | The link carries a plan reference and never a session (§13.5). A dead session means signing in and *then* resuming — asserted in tests, not assumed, because this is precisely the thing a later refactor "simplifies". |
+| 21 | **Rapid checking buys load instead of freshness.** The client already polls every 90s against an ingest that runs every 2 min, so a faster global poll re-reads the same cycle. | Check *narrowly*, not *fast*: 1–5 plan-critical vehicles live against upstream (which is per-request and always current), leaving the global cadence — shared with the compliance audit — alone. §13.4. |
+| 22 | **Advocacy inserts itself and loses its standing.** An organisation that answers every case is a nuisance; the cases where it matters are the ones where it is invited. | No reply into a case without `@WSYV` or `@advocacy` in it (§14.3), whatever the portal's pattern suggests. The rider's complaint stays the rider's. |
 | 15 | **OCR misreads a receipt and we accuse somebody wrongly.** Receipt formats change without notice, and a misread total is a rider sent to lose an argument. | The rider confirms every extracted figure over their own screenshot before anything is copied or submitted, and §12.5's three-part bar means "we cannot tell" is a frequent, designed answer rather than a failure. |
 | 16 | **The evidence pile becomes a movement record.** Receipts are time, place and money tied to an account — stronger than anything else this program stores. | The image never leaves the device (§12.2); only confirmed fields upload. The pile stores the date, area and rates, not coordinates or the account identifier; the account link lives only as long as the rider needs it to withdraw. Consent is per-submission and withdrawal actually deletes. |
 | 17 | **The aggregate gets overstated.** A self-selected sample of receipts from an app whose users already suspect they were overcharged is not a census of Denver. | The claim is always "N of M trips riders submitted", with its denominator attached and its self-selection named. Never a fraud accusation, whatever the number says. The evidence is worth something precisely because it is boring and checkable. |
@@ -1505,7 +1751,7 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 
 ---
 
-## 15. What "done" looks like per phase
+## 17. What "done" looks like per phase
 
 - **1.** A rider can write down what they like to ride, name it, have it on
   their other phone — and see only those on the map with one tap, with the
@@ -1538,6 +1784,15 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   them, its last screen hands them to "where are you going?", and
   `ONBOARDING_AUTOSHOW` is `true` — with a test that fails if a screen starts
   describing a control that no longer exists.
+- **9.** A rider whose pickup is taken while their phone is in their pocket
+  gets one text, taps it, and is back in the plan — signing in again first if
+  their session died. A rider who never opted in gets the same re-solve and no
+  text. The plan-critical vehicles are checked every 20 seconds and the fleet
+  cadence is untouched.
+- **10.** A rider can send their complaint with `advocacy@weseeyouveo.com` on
+  the CC because they ticked a box for that complaint, and the advocacy side
+  stays silent in the case until somebody writes `@WSYV` — at which point the
+  operator gets a text.
 - **8.** A rider drops in a receipt for a trip that started in an Equity Area,
   is told in plain terms what they were charged and what Exhibit C says they
   should have been, and copies a complaint in one tap — with the image never
