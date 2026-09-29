@@ -270,9 +270,10 @@ def test_the_response_is_briefly_cacheable(monkeypatch):
 # ---------------------------------------------------------------------------
 def test_a_day_the_job_could_not_measure_is_unmeasurable_not_pending(monkeypatch):
     """2026-08-09/10: snapshots exist, every one failed the reconstruction
-    fidelity gate, so the average is NULL for good. `pending` promises a
-    number that is never coming; `fail` would accuse Veo of a miss nobody
-    measured. The stored verdict makes it its own status."""
+    fidelity gate, so the latest attempt could defend no figure. `pending`
+    would say no attempt has been made; `fail` would accuse Veo of a miss
+    nobody measured. The stored verdict makes it its own status, until a
+    later successful reconstruction supersedes it."""
     _patch_db(monkeypatch, [
         _row(date(2026, 8, 9), None, None, n=91, reason="low_fidelity"),
         _row(date(2026, 8, 10), None, None, n=93, reason="no_history"),

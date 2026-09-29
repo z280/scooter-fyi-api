@@ -963,8 +963,8 @@ def _calendar_status(row: dict[str, Any] | None) -> str:
     Precedence is the point: a stored pass/fail flag always wins, so a
     stale verdict can never hide a real figure (daily_sla clears the
     verdict when it writes one anyway — this is the second lock). Only a
-    row with NO figure is then split into "the job concluded it cannot be
-    measured" and "not reprocessed yet".
+    row with NO figure is then split into "the job's latest attempt could
+    not measure it" and "not reprocessed yet".
     """
     if row is None:
         return "no_data"
@@ -1014,9 +1014,11 @@ def compliance_calendar(
                     for the official map means the day predates it and has
                     not been reprocessed yet (src/equity_backfill.py)
         "unmeasurable" — a row exists, this group's average is NULL, AND
-                    the reprocessing job concluded it cannot produce one:
-                    the day had snapshots, but none survived the fidelity
-                    gate (sql/084's `<group>_unmeasurable_reason`). Only
+                    the reprocessing job's latest attempt could not
+                    produce one: the day had snapshots, but none survived
+                    the fidelity gate (sql/084's `<group>_unmeasurable_reason`).
+                    The current verdict, not a permanent one — a later
+                    successful reconstruction replaces it with pass/fail. Only
                     reprocessed groups (REPROCESSED_GROUPS: the official
                     map) can be in it; v1/v2 were recorded live. Closer to
                     no_data than to fail — nobody could measure the day,

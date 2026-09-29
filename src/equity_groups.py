@@ -147,9 +147,9 @@ def compliance_pass_column(group: str) -> str:
 
 #: The compliance groups whose history can be REBUILT after the fact
 #: (src/equity_backfill.py), and so the only ones a day can end up
-#: UNMEASURABLE for: the rebuild can conclude that no snapshot is defensible
-#: and say so, where a live-recorded group (v1, v2) either has its average
-#: or has no data. A group added here needs its `<g>_unmeasurable_reason`
+#: UNMEASURABLE for: a rebuild can find that no snapshot is defensible and
+#: say so (until a later rebuild succeeds), where a live-recorded group
+#: (v1, v2) either has its average or has no data. A group added here needs its `<g>_unmeasurable_reason`
 #: column (sql/084 adds `equity`'s) before anything reads it.
 REPROCESSED_GROUPS: tuple[str, ...] = (OFFICIAL_GROUP,)
 

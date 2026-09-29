@@ -91,20 +91,25 @@ already holds a value. Nothing in this module writes the job_runs ledger either 
 commands in src/cli.py are recorded there, and `equity_backfill` is a
 sub-argument command.
 
-WHEN THE ANSWER IS "CANNOT BE MEASURED" ---------------------------------
+WHEN THE ANSWER IS "COULD NOT BE MEASURED" ------------------------------
 If a day HAS 6-9 AM snapshots but not one of them survives — every
 reconstruction fell outside the fidelity gate, or none could be
 reconstructed or checked at all — nothing is written and the equity
 average stays NULL. On its own that NULL is indistinguishable from "not
-reprocessed yet", and the calendar would show the day as `pending` forever
-(2026-08-09 and 2026-08-10 are the cases that forced this: 91/91 and 93/93
-snapshots at fidelity 1.11-1.15).
+reprocessed yet", and the calendar would keep showing the day as `pending`
+after it had been attempted — indefinitely, once the day ages out of the
+nightly lookback (2026-08-09 and 2026-08-10 are the cases that forced this:
+91/91 and 93/93 snapshots at fidelity 1.11-1.15).
 
-So the job records the conclusion it reached:
+So the job records the verdict its latest attempt reached:
 `daily_sla_compliance.equity_unmeasurable_reason` (sql/084), `low_fidelity`
 or `no_history` (see `unmeasurable_verdict`). The calendar reads it as the
-status `unmeasurable` — closed, data present, no defensible figure; not a
-failure. The verdict is only ever written onto a row whose equity average
+status `unmeasurable` — the day is over and has data, but no figure the
+latest attempt could defend; not a failure. It is a current verdict, not a
+permanent one: the nightly sweep keeps retrying the day inside its lookback
+(see `days_needing_reprocess`), a manual run can retry any day, and a
+successful attempt supersedes it. The verdict is only ever written onto a
+row whose equity average
 is still NULL, so it can never contradict a live figure, and
 `daily_sla.compute_for_date` clears it whenever it produces a figure, so a
 later run that CAN measure the day supersedes it. Only window-only runs
@@ -454,7 +459,7 @@ def _write_metrics(rows: list[tuple[Any, dict[str, Any]]]) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The "cannot be measured" verdict
+# The "could not be measured" verdict
 # ---------------------------------------------------------------------------
 #: sql/084's verdict column for the official map. Spelled out like
 #: REBUILT_COLUMNS above; tests pin it to

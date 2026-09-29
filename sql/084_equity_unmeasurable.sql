@@ -1,22 +1,30 @@
--- A day whose Equity Area figure could not be measured defensibly, recorded
--- as such instead of reading as "not reprocessed yet" forever.
+-- A day whose Equity Area figure the latest reconstruction could not
+-- measure defensibly, recorded as such instead of reading as "not
+-- reprocessed yet" indefinitely.
 --
 -- THE GAP THIS CLOSES. Days that predate the official map (sql/079) carry a
 -- NULL `avg_percent_all_devices_equity` until src/equity_backfill.py
 -- rebuilds them from device_history, and /api/v1/compliance/calendar shows a
--- NULL as `pending`. But the rebuild can also CONCLUDE that a day cannot be
--- measured: every 6-9 AM snapshot failed the reconstruction fidelity gate
+-- NULL as `pending`. But a rebuild can also run and FAIL to measure a day:
+-- every 6-9 AM snapshot failed the reconstruction fidelity gate
 -- (reconstructed fleet vs the fleet the cycle recorded, ±10%), or none had
 -- history or a recorded fleet to check against. 2026-08-09 and 2026-08-10
 -- are exactly that — 91/91 and 93/93 snapshots rejected at fidelity
 -- 1.11–1.15. The job then writes nothing, the average stays NULL, and the
--- day would be `pending` for good: a promise of a number that is never
--- coming.
+-- day reads `pending` — "not attempted yet" — when it has been attempted;
+-- once outside the nightly job's 14-day lookback it is not attempted again
+-- unless someone runs the backfill by hand.
 --
 -- WHY A STORED VERDICT, NOT A REQUEST-TIME ONE. Reconstructing a day takes a
 -- device_history scan and a DuckDB spatial join; the calendar must not do
--- that per request. The job that reaches the conclusion records it here, and
--- the calendar reads it. NULL = no verdict (measured, or not yet attempted).
+-- that per request. The job records the outcome of its latest attempt here,
+-- and the calendar reads it. NULL = no verdict (measured, or not yet
+-- attempted).
+--
+-- A CURRENT VERDICT, NOT A PERMANENT ONE. It says what the latest
+-- reconstruction could defend, nothing more: the nightly sweep retries these
+-- days while they are inside its lookback, a manual run can retry any day,
+-- and the first attempt that produces a figure clears it (below).
 --
 -- WHO SETS AND CLEARS IT.
 --   * set:   src/equity_backfill.py, when a window-only reprocess of a day

@@ -580,7 +580,7 @@ def test_empty_dry_run_reports_zero_snapshots_averaged(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The "cannot be measured" verdict (sql/084)
+# The "could not be measured" verdict (sql/084)
 # ---------------------------------------------------------------------------
 def _result(considered, low=0, no_history=0):
     return eb.DayResult(
