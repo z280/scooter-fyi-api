@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from decimal import Decimal
 from datetime import date as date_cls, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -524,7 +525,14 @@ def reprocess_date(
         ]
         result.snapshots_averaged = len(pcts)
         if pcts:
-            avg = sum(pcts) / len(pcts)
+            # Exact decimal mean, as PostgreSQL's AVG() over NUMERIC(5,2)
+            # computes it, then float() and compare — the same steps
+            # daily_sla takes. A binary-float mean can land a hair under the
+            # threshold (six 32.05s and one 17.70 average exactly 30.00 but
+            # sum to 29.999999999999996 in float) and flip pass to fail.
+            # Each value is already rounded to 2dp by _pct, so str() of it
+            # is exact.
+            avg = float(sum(Decimal(str(p)) for p in pcts) / len(pcts))
             result.avg_percent_all_devices_equity = avg
             result.compliance_equity_pass = avg >= daily_sla.COMPLIANCE_THRESHOLD
         log.info("equity reprocess %s (dry run, nothing written): %r", d, result.as_dict())

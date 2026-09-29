@@ -513,3 +513,42 @@ def test_cli_rejects_unknown_flags(capsys):
     from src import cli
 
     assert cli.equity_backfill_cli(["2026-08-09", "--dryrun"]) == 2
+
+
+@pytest.mark.parametrize("shares", [
+    # Both average to exactly 30.00. Which one a binary-float mean gets wrong
+    # depends on the Python version: 3.12+ sum() is compensated and trips on
+    # the first (29.999999999999996); 3.11's naive sum, which production
+    # runs, trips on the second.
+    [32.05] * 6 + [17.70],
+    [30.04] * 6 + [29.76],
+])
+def test_dry_run_average_is_exact_at_the_compliance_threshold(monkeypatch, shares):
+    """A day averaging exactly 30.00 passes: PostgreSQL's AVG() over
+    NUMERIC(5,2) is exact and daily_sla compares float(avg) >= 30.0. A
+    binary-float mean can land a hair under and report a failure the write
+    path would never store."""
+    from src.daily_sla import window_for_date
+
+    d = date(2026, 8, 10)
+    w_start, _ = window_for_date(d)
+    times = [w_start + timedelta(minutes=10 * i) for i in range(len(shares))]
+    stops = [_stop(f"v{i}", w_start - timedelta(hours=1), None, in_equity=i < 3) for i in range(10)]
+    snaps = [_snapshot(t, recorded=10) for t in times]
+    _patch_io_forbidding_writes(monkeypatch, snaps, stops)
+
+    it = iter(shares)
+    real_rebuild = eb.rebuild_metrics
+
+    def _fixed_share(fleet):
+        m = real_rebuild(fleet)
+        m["percent_all_devices_equity"] = next(it)
+        return m
+
+    monkeypatch.setattr(eb, "rebuild_metrics", _fixed_share)
+
+    res = eb.reprocess_date(d, dry_run=True)
+
+    assert res.snapshots_averaged == len(shares)
+    assert res.avg_percent_all_devices_equity == 30.0
+    assert res.compliance_equity_pass is True
