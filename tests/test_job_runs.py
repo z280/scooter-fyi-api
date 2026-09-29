@@ -368,6 +368,41 @@ def test_a_manual_command_appears_once_somebody_actually_runs_it(monkeypatch):
     assert "not scheduled" in ops
 
 
+def test_the_retired_recompute_area_leaders_alias_is_gone():
+    """`recompute_area_leaders` was kept as an alias of
+    `refresh_area_universe` while the live (admin-editable) crontab still
+    used the old name. Production's crontab switched long enough ago that
+    job_runs' 30-day retention holds no row under the old name either, so
+    the alias is retired: invoking it is a usage error like any unknown
+    command, and records no run."""
+    assert "recompute_area_leaders" not in cli.COMMANDS
+    assert "refresh_area_universe" in cli.COMMANDS
+    assert cli.main(["recompute_area_leaders"]) == 2
+
+
+def test_a_stale_line_for_a_retired_command_is_flagged_not_fatal(monkeypatch):
+    """If an environment's crontab (the state copy is seeded once and then
+    hand-edited, so it can lag the image) still schedules the retired name,
+    /admin/scheduler must still render and must say what is wrong with that
+    row — scheduled, never run, not a known command — rather than 500."""
+    from src import api_admin
+
+    old_run = {"command": "recompute_area_leaders",
+               "started_at": datetime.now(timezone.utc) - timedelta(days=3),
+               "finished_at": datetime.now(timezone.utc) - timedelta(days=3),
+               "status": "ok", "duration_ms": 4_000, "summary": None, "error": None}
+    monkeypatch.setattr(api_admin.job_runs, "latest_per_command", lambda: [old_run])
+    monkeypatch.setattr(api_admin.job_runs, "recent", lambda limit=50: [old_run])
+    monkeypatch.setattr(
+        api_admin, "_read_active_crontab",
+        lambda: ("15 9 * * 1 cd /app && python -m src.cli recompute_area_leaders\n", "(test)"),
+    )
+    html = api_admin.scheduler_status(None, user={"login": "tester"}).body.decode()
+    ops = html.split("<h2>Operations</h2>")[1].split("<h2>Recent runs")[0]
+    assert "recompute_area_leaders" in ops
+    assert "not a known command" in ops
+
+
 def test_prune_does_not_swallow_its_own_failure(monkeypatch):
     """The docstring rule is specific: start/finish swallow because they are
     bookkeeping attached to another job. prune IS a job — if it cannot

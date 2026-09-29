@@ -31,7 +31,7 @@
 # flushed to R2 after 24 hours.
 #
 # 9:40 AM, deliberately AFTER the 9:00 daily_sla / daily_trips pair and the
-# 9:15 area-leader recompute: it re-averages daily_sla rows that the 9:00
+# Monday 9:15 cell-universe refresh: it re-averages daily_sla rows that the 9:00
 # job may have only just written, so running first would just make it
 # re-run them tomorrow.
 #
@@ -186,7 +186,7 @@
 # User-analytics daily rollup (sql/061 / src/analytics.py): recomputes
 # YESTERDAY's telemetry_daily + request_metrics_daily (Denver calendar day,
 # same convention as daily_trips). 9:20 keeps it clear of the 9:00
-# sla/trips pair and the 9:15 area-leader recompute — same morning rollup
+# sla/trips pair and the Monday 9:15 cell-universe refresh — same morning rollup
 # family, its own slot. Idempotent delete-and-reinsert per day.
 20 9 * * * cd /app && python -m src.cli rollup_analytics
 
