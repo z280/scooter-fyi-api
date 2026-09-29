@@ -552,3 +552,13 @@ def test_dry_run_average_is_exact_at_the_compliance_threshold(monkeypatch, share
     assert res.snapshots_averaged == len(shares)
     assert res.avg_percent_all_devices_equity == 30.0
     assert res.compliance_equity_pass is True
+
+
+def test_empty_dry_run_reports_zero_snapshots_averaged(monkeypatch):
+    """A dry run over a day with no snapshots returns early; the count it
+    rests on is 0, not None (None means "not a dry run")."""
+    _patch_io_forbidding_writes(monkeypatch, [], [])
+    res = eb.reprocess_date(date(2026, 8, 10), dry_run=True)
+    assert res.snapshots_considered == 0
+    assert res.snapshots_averaged == 0
+    assert res.as_dict()["snapshots_averaged"] == 0

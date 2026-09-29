@@ -446,7 +446,12 @@ def reprocess_date(
     the in-memory day average over gate-passing snapshots instead.
     """
     start, end = _bounds(d, window_only)
-    result = DayResult(sla_date=d, dry_run=dry_run)
+    result = DayResult(
+        sla_date=d, dry_run=dry_run,
+        # 0, not None, for a dry run that returns early with no snapshots:
+        # None is reserved for non-dry runs (see DayResult).
+        snapshots_averaged=0 if dry_run else None,
+    )
 
     snapshots = _load_snapshots(start, end)
     result.snapshots_considered = len(snapshots)
