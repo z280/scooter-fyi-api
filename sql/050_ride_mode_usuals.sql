@@ -1,5 +1,13 @@
 -- Ride Mode "Usuals": a rider's saved ride-options presets.
 --
+-- SUPERSEDED IN PART: the constraints this file rewrites still carry the
+-- `find_ride_pref` kind forward, and sql/082 RETIRES it. Everything below
+-- still runs — it is the history that produced today's table, and a replay
+-- must arrive at the same place — but that kind is gone by the end of the
+-- sequence. sql/082 also inverts this file's ordering rule, and its header
+-- explains why: adding a kind widens `name_matches_kind` FIRST, removing one
+-- must delete the rows first and narrow that TOTAL rule LAST.
+--
 -- Screen 2 of the ride wizard (RIDE_MODE_OVERHAUL_PLAN §1.2) is eight
 -- toggles the same rider sets the same way every morning. A "Usual" is one
 -- saved answer to that screen, picked from Screen 2.5 and applied wholesale.

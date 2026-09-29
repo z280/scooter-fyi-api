@@ -111,15 +111,15 @@ _PRIVACY = {
         {
             "data": "user_preferences",
             "retention": "until you delete them",
-            "detail": "Rider-owned preference blobs: named map settings, the "
-                      "find-ride preference, ride-mode 'Usuals' (saved "
+            "detail": "Rider-owned preference blobs: named map settings, "
+                      "ride-mode 'Usuals' (saved "
                       "ride-option presets), and ride specs (your saved "
                       "'ideal scooter' — which models, features, battery and "
                       "quality you will ride). Opaque client-owned JSON, "
                       "stored verbatim, never read into analytics or any "
                       "aggregate, and never visible to another account. "
                       "DELETE /api/v1/profile/map-settings/:name, "
-                      "/find-ride-pref, /ride-usuals/:name and "
+                      "/ride-usuals/:name and "
                       "/ride-specs/:name are immediate hard deletes, and "
                       "every row cascades when the account is deleted.",
         },

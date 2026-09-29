@@ -281,7 +281,6 @@ def test_replaying_the_migrations_over_a_stored_usual_is_a_no_op(pg_conn):
         for kind, name in (
             ("saved_map_settings", "after-replay"),
             ("ride_mode_usual", "after-replay"),
-            ("find_ride_pref", None),
         ):
             cur.execute(
                 "INSERT INTO user_preferences (account_id, kind, name) VALUES (%s, %s, %s)",

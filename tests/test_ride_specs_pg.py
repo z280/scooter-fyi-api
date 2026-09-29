@@ -56,13 +56,13 @@ _SPEC_BLOB = {
     "must": ["features", "must_reach"],
 }
 
-#: Every kind the table permits after sql/080, with the name each requires.
+#: Every kind the table permits after sql/082 retired find_ride_pref,
+#: with the name each requires — all three are named now.
 #: One list, used by the replay test to prove no kind was quietly dropped.
 _ALL_KINDS = (
     ("saved_map_settings", "after-replay"),
     ("ride_mode_usual", "after-replay"),
     ("ride_spec", "after-replay"),
-    ("find_ride_pref", None),
 )
 
 
