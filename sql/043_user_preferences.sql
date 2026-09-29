@@ -1,6 +1,12 @@
 -- Rider-owned preference blobs: named "saved map settings" (many per
 -- account) and a single "find ride" preference.
 --
+-- SUPERSEDED IN PART: the `find_ride_pref` kind is RETIRED by sql/082.
+-- Everything below still runs — it is the history that produced today's
+-- table, and a replay must arrive at the same place — but that kind is
+-- removed again later in the sequence. See sql/082's header for why: it
+-- meant exactly what `ride_spec` means, and nothing was ever built on it.
+--
 -- ONE TABLE, TWO KINDS, rather than two tables or two JSONB columns on
 -- accounts. The two things are the same shape — an account, an opaque
 -- client-owned blob, timestamps — and differ only in their CARDINALITY.

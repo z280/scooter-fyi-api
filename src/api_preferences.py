@@ -1,12 +1,9 @@
-"""Rider preference blobs (sql/043_user_preferences.sql, sql/050_ride_mode_usuals.sql).
+"""Rider preference blobs (sql/043, sql/050, sql/080, sql/082).
 
     GET    /api/v1/profile/map-settings           every saved setting
     GET    /api/v1/profile/map-settings/{name}    one, by name
     PUT    /api/v1/profile/map-settings/{name}    create or replace
     DELETE /api/v1/profile/map-settings/{name}
-    GET    /api/v1/profile/find-ride-pref         null when never set
-    PUT    /api/v1/profile/find-ride-pref         create or replace
-    DELETE /api/v1/profile/find-ride-pref
     GET    /api/v1/profile/ride-usuals            every saved Usual
     GET    /api/v1/profile/ride-usuals/{name}     one, by name
     PUT    /api/v1/profile/ride-usuals/{name}     create or replace
@@ -15,6 +12,25 @@
     GET    /api/v1/profile/ride-specs/{name}      one, by name
     PUT    /api/v1/profile/ride-specs/{name}      create or replace
     DELETE /api/v1/profile/ride-specs/{name}
+
+THREE KINDS, THREE QUESTIONS. They look alike — all named, all capped, all
+storing an opaque blob — so the thing worth knowing up front is that they
+answer questions a rider would never confuse:
+
+    saved_map_settings   what do I want to LOOK AT?   (map filters, overlays)
+    ride_spec            what will I RIDE?            (model, equipment,
+                                                       battery, quality)
+    ride_mode_usual      how should the ride SCREEN   (cost HUD, speedometer,
+                         behave while I ride?          navigation, tracking)
+
+A rider can hold all three under the name 'commute' without collision, and
+each is reached through its own endpoints. The one thing that does NOT
+distinguish them is their shape, which is why this comment exists.
+
+A fourth kind, `find_ride_pref`, was retired in sql/082. It was reserved for
+"the rider's saved answer to what they want when finding a ride" — which is
+what `ride_spec` turned out to be — and nothing ever implemented it. If you
+are here because you found a reference to it, that is the whole story.
 
 `settings` is an opaque, client-owned JSON object. This module never reads
 inside it, never merges it, and never validates its shape: it is the
@@ -40,7 +56,6 @@ import json
 import logging
 from typing import Any
 
-import psycopg
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 
@@ -66,7 +81,6 @@ MAX_BLOB_BYTES = 16 * 1024
 MAX_NAME_LENGTH = 64  # mirrors user_preferences_name_length
 
 _MAP_KIND = "saved_map_settings"
-_FIND_RIDE_KIND = "find_ride_pref"
 _USUAL_KIND = "ride_mode_usual"
 _SPEC_KIND = "ride_spec"
 
@@ -240,75 +254,6 @@ def delete_map_setting(
     if not deleted:
         raise HTTPException(404, f"no saved map setting named {name!r}")
     return {"deleted": True, "name": name}
-
-
-# ---------------------------------------------------------------------------
-# Find-ride preference — at most one per account
-# ---------------------------------------------------------------------------
-@router.get("/api/v1/profile/find-ride-pref")
-def get_find_ride_pref(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
-    """`find_ride_pref: null` means the rider has never set one.
-
-    Deliberately not an empty object: the frontend has to be able to tell
-    "no preference expressed" from "expressed, and empty" — see sql/043's
-    header on why no account is seeded with a default.
-    """
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT name, settings, created_at, updated_at
-                FROM user_preferences
-                WHERE account_id = %s AND kind = %s
-                """,
-                (user.account_id, _FIND_RIDE_KIND),
-            )
-            row = cur.fetchone()
-    return {"find_ride_pref": _row(*row) if row else None}
-
-
-@router.put("/api/v1/profile/find-ride-pref")
-def put_find_ride_pref(
-    user: SessionUser = Depends(require_session),
-    payload: PreferenceIn = Body(...),
-) -> dict[str, Any]:
-    blob = _serialize(payload.settings)
-    with connection() as conn:
-        with conn.cursor() as cur:
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO user_preferences (account_id, kind, name, settings)
-                    VALUES (%s, %s, NULL, %s::jsonb)
-                    ON CONFLICT (account_id) WHERE kind = 'find_ride_pref'
-                    DO UPDATE SET settings = EXCLUDED.settings, updated_at = NOW()
-                    RETURNING name, settings, created_at, updated_at
-                    """,
-                    (user.account_id, _FIND_RIDE_KIND, blob),
-                )
-            except psycopg.errors.ForeignKeyViolation:
-                raise HTTPException(401, "account no longer exists")
-            row = cur.fetchone()
-        conn.commit()
-    return {"find_ride_pref": _row(*row)}
-
-
-@router.delete("/api/v1/profile/find-ride-pref")
-def delete_find_ride_pref(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
-    """Idempotent: deleting an absent preference is not an error.
-
-    Unlike a named map setting — where a 404 tells the caller they got the
-    name wrong — there is only one of these, so "it isn't there" is the
-    state the caller asked for.
-    """
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM user_preferences WHERE account_id = %s AND kind = %s",
-                (user.account_id, _FIND_RIDE_KIND),
-            )
-        conn.commit()
-    return {"deleted": True}
 
 
 # ---------------------------------------------------------------------------

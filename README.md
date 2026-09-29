@@ -179,7 +179,7 @@ agent process).
 │   ├── api_profile.py           rider profile GET/PUT + public-username endpoints
 │   ├── api_lexicon.py           emoji-noun / adjective list + search endpoints
 │   ├── api_preferences.py       rider-owned opaque preference blobs: saved map settings,
-│   │                            the find-ride preference, ride-mode "Usuals"
+│   │                            ride-mode "Usuals"
 │   ├── api_route.py             GET /api/v1/route (+ /profiles) — Valhalla proxy, shade
 │   │                            re-ranking, battery estimate, turn-by-turn maneuvers
 │   ├── api_geocode.py           GET /api/v1/geocode/search — proxy over the
@@ -434,9 +434,6 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `GET /api/v1/profile/map-settings/{name}` | One saved map setting |
 | `PUT /api/v1/profile/map-settings/{name}` | Create or replace a named map setting (opaque JSON blob) |
 | `DELETE /api/v1/profile/map-settings/{name}` | Delete a named map setting |
-| `GET /api/v1/profile/find-ride-pref` | The caller's find-ride preference, or `null` if never set |
-| `PUT /api/v1/profile/find-ride-pref` | Create or replace the find-ride preference (at most one per rider) |
-| `DELETE /api/v1/profile/find-ride-pref` | Clear the find-ride preference (idempotent) |
 | `GET /api/v1/profile/ride-usuals` | Every saved ride-mode "Usual" (options preset) for the caller |
 | `GET /api/v1/profile/ride-usuals/{name}` | One saved Usual |
 | `PUT /api/v1/profile/ride-usuals/{name}` | Create or replace a named Usual (opaque JSON blob: `ride_options` + `label`); 10 per account |

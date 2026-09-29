@@ -25,7 +25,7 @@ it — and when somebody takes it out from under them, finds the next one
 **along the route to their destination**, claims that instead, and tells them
 without the rider having to take the phone out of their pocket.
 
-Five parts, in the order they matter:
+Seven parts, in the order they matter:
 
 1. **The ideal scooter.** Kind of device, required features, minimum quality,
    minimum battery — stated once, as requirements rather than as map filters,
@@ -45,6 +45,15 @@ Five parts, in the order they matter:
    it (§3, §8.4).
 5. **Cost.** Later and separately: route the trip to cost less, by starting it
    inside an Equity Area, or by breaking it at one.
+6. **One app, one mode.** The four parts above all add surface. This one
+   removes it: the leftover scaffolding of the old mode bar, a second model
+   filter that means the opposite of the first, a spec the ride screen never
+   reads, and every question still asked per ride whose answer never changes.
+   No endpoint, no migration — just the friction between "the map" and "a
+   ride" taken out.
+7. **The walkthrough.** The intro tour is switched off right now because it
+   describes an app that moved. Last, deliberately: a tour is a description,
+   and you write the description once the thing has stopped changing.
 
 ### What already exists (and is therefore not in scope to invent)
 
@@ -87,6 +96,42 @@ requirements for a vehicle, with each requirement marked **must** or
 A filter hides; a spec disqualifies and ranks. They are different objects with
 a one-tap bridge between them (§5.5).
 
+### The four things that sound alike, and the one question each answers
+
+This program adds a *spec*, and the app already had *filters*, *presets* and
+*Usuals*. Four nouns, all of them some flavour of "what I want", and the only
+reliable way to tell them apart is by the question each one answers:
+
+| | The question | Where it lives | Scope |
+|---|---|---|---|
+| **Filters** | what is drawn on the map *right now*? | the Filters drawer, in memory | this session |
+| **Preset** | a filter set worth reusing | `filter-presets.ts`, `localStorage` | this browser |
+| **Spec** | what will I **ride**? | `user_preferences` kind `ride_spec` | the account |
+| **Usual** | how should the ride **screen** behave while I ride? | `user_preferences` kind `ride_mode_usual` | the account |
+
+Two things follow that are worth saying out loud, because getting either
+backwards is how this vocabulary rots:
+
+1. **A preset is not a small spec.** A preset has no `must`, no relaxation
+   order and no opinion about whether a vehicle is acceptable — it is a
+   remembered *view*. Promoting one to a spec is the map bridge (§5.5), and
+   it is lossy in the stated direction.
+2. **A Usual is not a spec for the screen.** It never mentions a vehicle. The
+   spec chooses the scooter; the Usual dresses the screen you look at once
+   you are on it. They are stored apart because riders change them on
+   different occasions — the spec when their needs change, the Usual when
+   their habits do.
+
+**The retired fifth.** `user_preferences` carried a kind called
+`find_ride_pref` from `sql/043`: a single unnamed blob meaning "what am I
+willing to ride". That is exactly what `ride_spec` means, and nothing was
+ever built on it — three endpoints, no caller, in either repo. Keeping it
+would have left the table with two answers to one question and no rule for
+which one wins. It is **retired in `sql/082`**, rows and all, and its
+endpoints are gone rather than deprecated. Phase 1 therefore ships with
+`user_preferences` holding exactly three kinds, each answering a different
+question.
+
 **Corridor** — the set of vehicles worth considering for a trip from `P` to
 `D`: reachable on foot within the walk cap, and not so far off the line that
 riding from them is worse than walking.
@@ -103,7 +148,7 @@ remaining candidate, re-searched from the rider's current position.
 
 **Trip plan** — the live document tying a spec, a destination, a current
 target, its claim, and the swap history together. Phase 3 keeps it in the
-browser; Phase 6 asks whether it should live on the server.
+browser; Phase 8 asks whether it should live on the server.
 
 **Favourite / My Scooters** — a specific vehicle a rider has kept, after
 proving at the kerb that they were standing at it. Not a claim, not a
@@ -122,12 +167,14 @@ reservation, and not a subscription to where it goes.
 | Does a swap auto-claim, or ask? | **Auto-claim inside a defined envelope, ask outside it.** See §7.3. | The rider is walking with the phone away. A question they cannot see is not a safer default than an action they can undo in one tap. |
 | Does the swap raise a second notification after "it's gone"? | **No — one message, or two, never both.** | `dibs-notify.ts` caps itself at four alerts per claim on purpose. A swap that buzzes twice in three seconds spends the budget that protects "RUN!". |
 | Does the certificate change? | **It gains a chain link** (`replaces_dibs_id`), nothing else. | The certificate is an assertion about one vehicle at one time. A swap makes a *new* claim; it does not extend the old one. |
-| Persist the trip plan server-side in v1? | **No.** Phase 3 is client-only. | A live position + destination stored server-side is a new retention rule (three-address rule, §10) and a much larger privacy conversation than the feature needs to prove itself. |
+| Persist the trip plan server-side in v1? | **No.** Phase 3 is client-only. | A live position + destination stored server-side is a new retention rule (three-address rule, §12) and a much larger privacy conversation than the feature needs to prove itself. |
 | Proactive "upgrade" offers (a better vehicle appears mid-walk)? | **Behind a gate, in Phase 3b, off by default.** | The feature is named "upgrades" and the machinery is identical, but an app that renegotiates the plan while you walk is an app you stop trusting. |
 | **What does a QR scan actually prove?** | **NEW — plate knowledge, not presence.** So favouriting requires a valid scan **and** a GPS fix within **75 m** of the device's last known position. | `src/qr.py:validate_scan` checks `hash_plate(payload) == vehicle_identifier`. That proves the scanner has the plate; nothing in `api_qr.py` or `credit_qr_scan_points` compares the submitted `lat`/`lng` to anything. 75 m is the radius the "Unlock in Veo" gate already uses for "physically at the scooter". |
 | **Can you watch a favourite move?** | **NEW — no. Position is withheld while `is_reserved` is true.** | See §8.4. This is the single most important rule in Phase 4 and the one most likely to be lost in implementation. |
 | **Do we store where the rider was standing when they favourited?** | **NEW — no.** Check the 75 m at write time, then discard the fix. | Storing it buys nothing any feature reads, and every stored position is a retention obligation across three files. The cheapest privacy decision available is not to have the data. |
 | **How many favourites?** | **NEW — 10 per account.** | A rider with fifty kept scooters is not keeping favourites, they are running a tracker. Ten is more than anyone needs and few enough to be a list rather than a search. |
+| **Two account-level "what I want to ride" objects?** | **NEW — no. `find_ride_pref` is retired in `sql/082`**, rows, endpoints and all. `ride_spec` is the one answer. | They meant the same thing. A table with two answers to one question and no rule for which wins is a bug waiting for its first caller — and `find_ride_pref` never had one, in either repo, so retiring it costs nothing and deleting the ambiguity is the whole point. |
+| **Do Phases 6 and 7 go before the feature phases?** | **NEW — no, they go last, in that order.** | Phase 7 writes a description of the UI; Phase 6 changes the UI. Doing either earlier means doing it twice, and a walkthrough that is wrong on the day it ships teaches a new rider things they have to unlearn. |
 | Equity stopover for the `equity` (Access) rate plan? | **Never offered.** | Access is 60 free min/day then 15¢/min with no unlock. The Equity Area rate is $1 + 13¢/min. Whether the two interact is *not stated anywhere in the contract we have* (`config.ts`'s own note), and the plausible readings include ones where the advice costs the rider money. |
 
 ---
@@ -140,12 +187,14 @@ Each phase is independently mergeable and useful on its own.
 |---|---|---|---|
 | **1 — The ideal scooter** | Requirements stated once, saved to the account, synced, and **applied to the map in one tap** | `sql/080`, `/api/v1/profile/ride-specs` | `ride-spec.ts`, spec sheet, the map bridge |
 | **2 — Along the way** | Corridor ranking; "best vehicle for *this trip*" replaces "nearest vehicle" | `valhalla.matrix()`, `src/trip_candidates.py`, `POST /api/v1/trip/candidates` | `along-the-way.ts`, wired into the home bar's plan flow |
-| **3 — Claim & swap** | Auto-dibs, loss detection → replacement → one message | `sql/081` (`replaces_dibs_id`), `replaces` on `POST /dibs` | `trip-plan.ts`, `arrival-panel.ts` swap face, `dibs-notify.ts` 5th alert |
+| **3 — Claim & swap** | Auto-dibs, loss detection → replacement → one message | `sql/083` (`replaces_dibs_id`), `replaces` on `POST /dibs` | `trip-plan.ts`, `arrival-panel.ts` swap face, `dibs-notify.ts` 5th alert |
 | **3b — Upgrades** *(optional)* | Mid-walk offer when a materially better vehicle appears | — | gate in `trip-plan.ts` |
-| **4 — My Scooters** | Keep a vehicle you scanned; find it again; be told when it's free | `sql/082`, `/api/v1/profile/favorite-devices`, availability watch | `my-scooters.ts`, popup action, map layer |
+| **4 — My Scooters** | Keep a vehicle you scanned; find it again; be told when it's free | `sql/081` ✅, `/api/v1/profile/favorite-devices`, availability watch | `my-scooters.ts`, popup action, map layer |
 | **5a — Start in an Equity Area** | "Walk 2 min further, save $1.80" | equity flag + cost on candidates | `equity-savings.ts`, candidate chips |
 | **5b — Stopover** | Break the trip at an Equity Area when the arithmetic says to | `src/equity_savings.py`, stopover search | two-leg cost UI |
-| **6 — Pocket-proof** *(not committed)* | Swap works with the app closed | server-side trip plan + `ride_watch`-style job + Web Push / SMS | service worker |
+| **6 — One app, one mode** | The seams between "the map" and "ride mode" close; entering a ride stops being a mode change | — (frontend-only) | `#mode-switch` seam removed, one model filter, the spec carried into the HUD |
+| **7 — The walkthrough** | A first-time rider is shown the app that actually exists, and the tour auto-shows again | — (frontend-only) | `onboarding.ts` rewritten against the home bar, `ONBOARDING_AUTOSHOW` back on |
+| **8 — Pocket-proof** *(not committed)* | Swap works with the app closed | server-side trip plan + `ride_watch`-style job + Web Push / SMS | service worker |
 
 **Phase 4 has no dependency on 1–3** — it needs only the QR scanner, which
 already exists — and could ship at any point after Phase 1. It is listed here
@@ -156,6 +205,15 @@ quickly, **Phase 4 is the cheapest useful thing in this document.**
 
 Phases 1, 2 and 4 are all useful without Phase 3. Phase 3 is the feature the
 program is named for.
+
+**Phases 6 and 7 are in this order and at this end for one reason.** Phase 7
+rewrites a tour that *describes the UI*; Phase 6 *changes the UI*. Writing the
+tour first would mean writing it twice, and shipping a tour that is wrong on
+the day it lands is worse than shipping no tour — it is the first thing a new
+rider sees, and everything it teaches wrongly they have to unlearn. So the UI
+stops moving, then the tour describes it. Phase 6 is also the only phase with
+no API lane at all: it closes seams inside the frontend and adds no endpoint,
+no migration and no stored field.
 
 ---
 
@@ -203,8 +261,10 @@ Every response says what it relaxed. Every swap card shows it.
 
 ### 5.3 API — `sql/080_ride_specs.sql`
 
-Next free migration number is **080** (highest on `main` is `079`; note `069`
-is used twice already — do not add a third).
+Next free migration number is **083**. `080` is this phase's `ride_specs`,
+`081` is Phase 4's `favorite_devices`, and `082` retires `find_ride_pref`
+(§2) — all three are on `main` or in flight. Note `069` is used twice
+already; do not add a third.
 
 `user_preferences.kind` carries a named CHECK constraint listing the allowed
 kinds. Extend it with the **exact guarded shape `sql/050` established** — read
@@ -214,6 +274,7 @@ anywhere (house rule; silently skipped when the column exists).
 
 ```
 kind IN ('saved_map_settings', 'find_ride_pref', 'ride_mode_usual', 'ride_spec')
+-- …and then sql/082 dropped 'find_ride_pref' again, see below
 ```
 
 Plus a partial unique index on `(account_id, name) WHERE kind = 'ride_spec'`
@@ -492,7 +553,7 @@ two-swap budget above is what bounds it; it is a product rule, not a
 consequence of the dibs rules, and it belongs in `trip-plan.ts` where it can
 be seen.
 
-### 7.4 API — `sql/081_dibs_swap_chain.sql` and `POST /api/v1/dibs`
+### 7.4 API — `sql/083_dibs_swap_chain.sql` and `POST /api/v1/dibs`
 
 ```sql
 ALTER TABLE dibs
@@ -613,7 +674,7 @@ Worth noting as a hardening opportunity while this is being built: the
 existing `POST /api/v1/devices/qr-scan` could take the same proximity check.
 Out of scope here, but it is the same three lines.
 
-### 8.3 `sql/082_favorite_devices.sql`
+### 8.3 `sql/081_favorite_devices.sql`
 
 ```sql
 CREATE TABLE IF NOT EXISTS favorite_devices (
@@ -891,7 +952,216 @@ new geometry — which is the whole reason this phase is small.
 
 ---
 
-## 10. House duties this program owes
+## 10. Phase 6 — One app, one mode
+
+Frontend-only. No endpoint, no migration, no stored field. This phase is
+about **friction that has no feature behind it**: the places where the app
+still asks the rider to be in a mode.
+
+### 10.1 What is already done, so this phase does not redo it
+
+Most of the mode teardown has happened, and `wireModes()` in `main.ts` is
+unusually honest about it. **ONE MAP:** finding a ride no longer wipes the
+rider's filters, forces `hideUnavailable`, clears the choropleth, hides
+drawer tabs or fetches a lean payload — which also killed the "merely
+visiting Find wheels destroyed my analysis setup" bug and the entire
+snapshot/restore dance it needed. **NO ANALYSIS MODE:** the third mode is
+gone, because there were never three things to be in; Equity Compliance is
+now a named button in the Tools drawer rather than a side effect. The bottom
+of the screen asks "where are you going?" (`home-bar.ts`) instead of asking
+the rider to classify themselves, and the destination they type is handed
+to the wizard through `pending-trip.ts` so Screen 3 opens pre-filled rather
+than asking twice.
+
+**So the remaining friction is not "the app has modes". It is that the
+scaffolding of the old modes is still standing, and it still costs.** Four
+seams, in the order they bite.
+
+### 10.2 Seam 1 — the hidden mode bar
+
+`index.html` still carries `#mode-switch` with two `hidden` buttons, and the
+home bar enters a ride by **synthetically clicking one of them**. The comment
+in the markup is candid about why — every mode preset was wired to those
+buttons by `wireModes()`, and clicking them was how the entry point moved
+without re-deriving the behaviour.
+
+That was the right call for the move. It is the wrong thing to leave:
+
+- Entering the app's main flow runs through an element the rider cannot see,
+  cannot reach, and which exists only to be clicked by code.
+- It keeps "mode" alive as a concept in the source long after it died in the
+  UI, so every new contributor learns it before learning it is gone.
+- It is already load-bearing in places that have nothing to do with modes —
+  `wireFreshnessCollapse()` had to be told to lift `#home-bar` rather than
+  `#mode-switch`, and `install-prompt.ts` carries the same note. Two files
+  already know about the seam. A third will get it wrong.
+
+**The work:** move what `wireModes()` does for `data-mode="ride"` and
+`data-mode="riding"` into two named functions the home bar calls directly,
+delete the `#mode-switch` element, and delete the `setActive`/`aria-pressed`
+bookkeeping that has had nothing to display since the bar went `hidden`.
+
+Two known knots, neither of which this phase may paper over:
+
+- `resetIconography` and `setSelect` are kept alive by bare `void` statements
+  because deleting them makes whole drawer branches unreachable to the
+  compiler. `wireModes()` says so in a comment. That is a real pre-existing
+  knot; untangling it is **its own change**, and this phase must either do it
+  properly or leave the `void`s exactly where they are with the comment
+  intact. Quietly deleting them to make a diff look tidier is how drawer
+  state loses its only writers.
+- The HUD's exit path hands the bar back to whichever mode was active before.
+  With no bar, "before" has to become an explicit piece of state rather than
+  an implicit one, or closing the HUD lands the rider nowhere.
+
+### 10.3 Seam 2 — two model filters that disagree about the empty set
+
+`devices.ts` carries `rideModelFilter` (the HUD's "Show" pills) **alongside**
+the Filters drawer's own `models`. They are different fields with different
+semantics, and the difference is the dangerous kind:
+
+| | `null` means | empty set means |
+|---|---|---|
+| Filters drawer `models` | show every model | show every model |
+| `rideModelFilter` | no ride filter at all | **show none** |
+
+Both are documented, both are correct in isolation, and one map applies both.
+A rider who deselects every pill while riding sees an empty map; a rider who
+deselects every model in the drawer sees the whole fleet. Same gesture,
+opposite outcome, and nothing in the UI distinguishes them.
+
+**The work:** one model-filter concept over the map, with one meaning for the
+empty set, and the HUD pills expressed in terms of it. If the ride surface
+genuinely needs "show none" — and it may, since the pills are a live HUD
+control rather than a search — then it needs to be a *named* state ("hide all
+scooters") rather than an empty selection that means the opposite of what the
+same empty selection means one drawer away.
+
+### 10.4 Seam 3 — the spec does not follow the rider into the ride
+
+Phase 1 lets a rider say, once and on their account, what they are willing to
+ride. The ride HUD does not know it. Its "Show" pills are set from
+`rideModelFilterFor()` and the ride's own options, with no reference to the
+attached spec (§5.5). So a rider who has said "only Cosmos, must have a
+basket" gets a HUD showing everything, and has to say it again in pills.
+
+This is the same mistake `ride-preflight.ts` was built to fix one screen
+earlier — its header names re-asking a question the rider already answered as
+"the single loudest piece of friction left in the flow" — and the same fix
+applies: read the answer that already exists.
+
+**The work:** when a spec is attached, the ride surface opens honouring it,
+and says which spec it is honouring. The rider can still change the pills —
+that detaches, exactly as §5.5's attach/detach rule already specifies for the
+map — but they start from what they already told us.
+
+### 10.5 Seam 4 — one vocabulary, two flows
+
+There are two ways into a ride, and they ask different questions:
+
+- **The wizard** (`ride-modal.ts`, Screens 1–6): who you are, where you are,
+  which scooter, then a linear flow. Right when the rider opens 🧭 with
+  nothing in mind.
+- **The pre-flight** (`ride-preflight.ts`): two toggles and sometimes one
+  either/or, then straight in. Right when the rider is already standing at a
+  scooter with its popup open.
+
+Both are correct, and this phase does **not** merge them — the two situations
+really are different, and collapsing them would recreate the friction the
+pre-flight exists to remove. What it fixes is that they must not drift into
+two vocabularies for the same settings. `ride-preflight.ts` already holds the
+line ("this module does not invent a parallel settings vocabulary"), and
+`track-preference.ts` is the precedent for the other direction: a question
+that was asked every ride turned out to have the same answer every time, so
+it left the survey and became one standing setting in Settings → Local Data.
+
+**The work:** audit every question either flow asks against that test — *is
+the answer per-ride, or is it standing?* — and move the standing ones out.
+Two are already named as suspects by the code that owns them. The naming
+collision `ride-settings.ts` documents is in scope too: `RideOptions.theme`
+is the **route-preview basemap flavour**, not the app's theme, which is why
+that panel deliberately has no Theme row. Rename the field rather than keep
+explaining it.
+
+### 10.6 What this phase must not do
+
+- **No new stored field.** Nothing here is a retention question, and it must
+  not become one.
+- **No re-litigating ONE MAP.** Entering a ride flow still changes nothing
+  about the map the rider set up. Every seam above is closed by *deleting*
+  mode machinery, never by adding a preset back.
+- **No default on the wheels toggle.** `home-bar.ts` states why neither
+  option is preselected, and "reducing friction" is exactly the argument that
+  would undo it. An unanswered question is honest; a wrong default is not.
+
+---
+
+## 11. Phase 7 — The walkthrough, restored
+
+The seven-screen intro tour (`onboarding.ts`) still exists, is still
+replayable from the About drawer, and **does not auto-show**:
+`ONBOARDING_AUTOSHOW = false` in `main.ts`, with a comment saying it is off
+"while the tour is rewritten". This phase is that rewrite.
+
+### 11.1 Why it is last
+
+The tour's job is to describe the app. An app that is still moving cannot be
+described — and a tour that confidently describes the wrong app is worse than
+no tour, because it is the first thing a new rider sees and it teaches them
+things they then have to unlearn. That is the reasoning already written at
+the call site, and it is why this phase sits behind Phase 6 rather than in
+front of it.
+
+### 11.2 What is actually broken
+
+Two different kinds of wrong, and they need different fixes:
+
+**The CTA is broken, mechanically.** `onStartExploring` finishes the tour by
+clicking `#mode-switch .mode-btn[data-mode="ride"]` — an element that is
+`hidden` today and, after Phase 6, will not exist. The tour's final promise,
+"start exploring", is a click into the seam Phase 6 deletes. It also switches
+the legend on and fires the one-time "tap any scooter" nudge, both of which
+are still fine.
+
+**Two of the seven screens describe a UI that moved.** Screen `ride-mode`
+sells "Ride Mode" as a place you go, which is the mode vocabulary the app has
+spent several PRs removing; screen `models` promises "save your favorite
+combos and reuse them in one tap", which is presets — true, but now sitting
+next to specs, and the tour is where a rider would form their idea of the
+difference. The other five (`welcome`, `features`, `rideability`, `routing`,
+`contribute`, `territory`) describe things that still exist and still work.
+
+### 11.3 The rule
+
+**The tour describes the app; the app does not chase the tour.** If a screen
+is wrong, the screen changes. The one thing this phase may never do is add or
+keep a surface in the app because the walkthrough mentions it. `ONBOARDING_SCREENS`
+is exported precisely so a "what does the tour promise" audit can read the
+copy without opening the overlay — this phase is the first such audit, and it
+should leave a test behind that fails when a screen names a control that no
+longer exists.
+
+### 11.4 What ships
+
+- The CTA lands on the home bar's "where are you going?" question rather than
+  clicking a deleted element.
+- The `ride-mode` screen is rewritten around what the rider actually gets —
+  a landscape dashboard while riding — with no claim that it is a mode they
+  switch into.
+- The `models` screen distinguishes a saved *view* from a saved *spec* in one
+  sentence, using §2's vocabulary, and points at the one-tap bridge.
+- Whatever Phase 1 and Phase 4 put in front of riders earns a screen or a
+  sentence: a rider who never learns that "my ideal scooter" or "My Scooters"
+  exist has them only by accident.
+- `ONBOARDING_AUTOSHOW` goes back to `true`. That is the deliverable; the
+  rewrite is what earns it. Turning it on was always one line — the reason it
+  is one line is so this phase is a decision, not a revert.
+- Still replayable from About, still once per browser, still skippable on
+  every screen.
+
+---
+
+## 12. House duties this program owes
 
 Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 
@@ -904,14 +1174,14 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   EXISTS` — use the guarded named-constraint shape from `sql/040`–`042` and
   `sql/050`. `tests/test_migration_replay_pg.py` must keep passing.
 - **Three-address rule** (`src/api_meta.py` header): any new stored field is a
-  retention rule. Both `sql/081` (`release_reason`, `replaces_dibs_id`) and
-  **`sql/082` in full** need `src/cli.py` (cleanup/de-id), `src/api_meta.py:
+  retention rule. Both `sql/083` (`release_reason`, `replaces_dibs_id`) and
+  **`sql/081` in full** need `src/cli.py` (cleanup/de-id), `src/api_meta.py:
   _PRIVACY`, and `src/templates/legal/privacy_policy.html` updated
   **together**. `favorite_devices` is the more consequential of the two: it is
   a durable, account-linked record of *which specific vehicles a named person
   has physically stood at*, which is a stronger statement than anything else
   in the database. Deciding not to store the scan position (§3) is what keeps
-  it from being stronger still. Phase 6, if it ever stores a live rider
+  it from being stronger still. Phase 8, if it ever stores a live rider
   position, is a much bigger version of this conversation and should not be
   started casually.
 - **Telemetry allowlist is mirrored by hand** in two repos —
@@ -931,16 +1201,22 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   `credit_points()`, and the sweeping unit test.
 - **Tests:** fake-cursor unit tests by default; `*_pg.py` are integration tests
   gated on `VEO_TEST_PG_DSN`; one test file per module.
+- **Frontend-only phases still owe the docs.** Phases 6 and 7 add no endpoint
+  and no field, so most of the list above does not apply — but a deleted
+  surface is a documentation change too. Anything §10 removes (`#mode-switch`,
+  a filter semantic, a per-ride question that becomes a standing setting) must
+  leave the module header that explained it updated rather than orphaned, and
+  §11 owes the tour audit a test rather than a promise.
 
 ---
 
-## 11. Risks, in the order they are likely to bite
+## 13. Risks, in the order they are likely to bite
 
 | # | Risk | Mitigation |
 |---|---|---|
 | 1 | **A favourite becomes a way to follow a person.** In-use vehicles broadcast a live moving position on a public endpoint; a targeted subscription to one is a different thing from a public map. | §8.4: position withheld server-side whenever `is_reserved`, an explicit `position_withheld` flag so nobody "fixes" it later, no location in the availability alert, a 10-favourite cap, and the QR gate on top. Write the rule into the endpoint's docstring the way `sql/076` writes down what dibs is not. |
 | 2 | **The QR gate proves less than it looks like it proves.** `validate_scan` is a plate-knowledge check; nothing today compares position. | §8.2: require the 75 m proximity check as well, and say in the code comment why the scan alone is not enough — otherwise the next feature to reuse the gate inherits the wrong assumption. |
-| 3 | **The phone is in a pocket and the tab is throttled.** The whole swap runs client-side in Phase 3. | Ship Phase 3 knowing it: the feature works while the app is open, which is the case for a rider actively walking with the arrival panel up. Say so in the UI. Phase 6 (server-side plan + Web Push, or SMS via `comms.py`, which already has consent and quota) is the real fix and should be scoped on Phase 3's measured swap rate. |
+| 3 | **The phone is in a pocket and the tab is throttled.** The whole swap runs client-side in Phase 3. | Ship Phase 3 knowing it: the feature works while the app is open, which is the case for a rider actively walking with the arrival panel up. Say so in the UI. Phase 8 (server-side plan + Web Push, or SMS via `comms.py`, which already has consent and quota) is the real fix and should be scoped on Phase 3's measured swap rate. |
 | 4 | **Auto-dibs makes dibs worse for everyone.** Dibs' own rules exist to stop hoarding; a feature that claims automatically is exactly the pressure they were written against. | The swap always releases before it claims, so a trip holds at most one claim ever. The two-swap budget bounds the total. Watch the ratio of claims to rides in telemetry, and be willing to turn auto-claim off. |
 | 5 | **Valhalla has no matrix, or its matrix disagrees with its routes.** The two-call design is load-bearing for Phase 2's cost. | Verify against the deployed image **before** building the endpoint. Fallback is the 4-worker `ThreadPoolExecutor` fan-out already used by `_score_alternates`, with `limit` cut to 3. |
 | 6 | **The corridor search is expensive and rate-limited.** | Two Valhalla calls per search, `limit ≤ 5`, the client's straight-line tier carrying the interactive list, and the server call reserved for the moment a decision is made. |
@@ -954,7 +1230,7 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 
 ---
 
-## 12. What "done" looks like per phase
+## 14. What "done" looks like per phase
 
 - **1.** A rider can write down what they like to ride, name it, have it on
   their other phone — and see only those on the map with one tap, with the
@@ -974,3 +1250,12 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 - **5b.** A long trip that already crosses an Equity Area offers the split,
   with the second unlock, the re-rent risk, and the screenshot caveat all on
   the same card as the saving.
+- **6.** `#mode-switch` is gone from `index.html` and nothing clicks a hidden
+  element to start a ride; one model filter governs the map, with one meaning
+  for an empty selection; a rider with an attached spec opens the ride
+  surface already honouring it; and no question is asked per ride whose
+  answer never changes.
+- **7.** A first-time visitor sees a tour that describes the app in front of
+  them, its last screen hands them to "where are you going?", and
+  `ONBOARDING_AUTOSHOW` is `true` — with a test that fails if a screen starts
+  describing a control that no longer exists.

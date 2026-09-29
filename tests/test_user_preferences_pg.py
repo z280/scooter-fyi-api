@@ -13,7 +13,6 @@ NEVER point that at production: the fixture executes every migration.
 
 from __future__ import annotations
 
-import json
 import os
 import uuid
 from contextlib import contextmanager
@@ -170,71 +169,47 @@ def test_saved_setting_cap_still_allows_overwriting_an_existing_one(pg_conn, mon
     assert r.json()["settings"] == {"v": 99}
 
 
-# ---------------------------------------------------------------------------
-# find_ride_pref — at most one
-# ---------------------------------------------------------------------------
-def test_find_ride_pref_is_null_until_set(pg_conn):
-    """null, not {} — the frontend must be able to tell 'never chose' from
-    'chose nothing'. See sql/043's header."""
-    c = _client(pg_conn, _account(pg_conn))
-    assert c.get("/api/v1/profile/find-ride-pref").json()["find_ride_pref"] is None
+def test_every_surviving_kind_requires_a_name(pg_conn):
+    """`name_matches_kind` is a TOTAL rule: it enumerates every kind and says
+    whether that kind is named. Retiring `find_ride_pref` in sql/082 removed
+    the last nameless one, so the rule now reads "all three are named" — and
+    a nameless row of any kind is a CheckViolation, not a default.
 
-
-def test_find_ride_pref_replaces_rather_than_accumulating(pg_conn):
+    Worth pinning precisely because the rule is now uniform: uniformity is
+    easy to mistake for absence, and someone could delete the constraint
+    believing it no longer distinguishes anything."""
     account_id = _account(pg_conn)
-    c = _client(pg_conn, account_id)
-    c.put("/api/v1/profile/find-ride-pref", json={"settings": {"radius_m": 400}})
-    c.put("/api/v1/profile/find-ride-pref", json={"settings": {"radius_m": 900}})
-
-    assert c.get("/api/v1/profile/find-ride-pref").json()["find_ride_pref"]["settings"] == {
-        "radius_m": 900
-    }
-    with pg_conn.cursor() as cur:
-        cur.execute(
-            "SELECT COUNT(*) FROM user_preferences "
-            "WHERE account_id = %s AND kind = 'find_ride_pref'",
-            (account_id,),
-        )
-        assert cur.fetchone()[0] == 1
-
-
-def test_the_database_itself_refuses_a_second_find_ride_pref(pg_conn):
-    """The at-most-one rule is the partial unique index, not app code — so
-    a writer that bypasses the API cannot create a second one either."""
-    account_id = _account(pg_conn)
-    with pg_conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO user_preferences (account_id, kind, settings) "
-            "VALUES (%s, 'find_ride_pref', %s::jsonb)",
-            (account_id, json.dumps({"a": 1})),
-        )
-        with pytest.raises(psycopg.errors.UniqueViolation):
-            cur.execute(
-                "INSERT INTO user_preferences (account_id, kind, settings) "
-                "VALUES (%s, 'find_ride_pref', %s::jsonb)",
-                (account_id, json.dumps({"a": 2})),
-            )
-    pg_conn.rollback()
-
-
-def test_find_ride_pref_delete_is_idempotent(pg_conn):
-    c = _client(pg_conn, _account(pg_conn))
-    assert c.delete("/api/v1/profile/find-ride-pref").status_code == 200
-    c.put("/api/v1/profile/find-ride-pref", json={"settings": {"x": 1}})
-    assert c.delete("/api/v1/profile/find-ride-pref").status_code == 200
-    assert c.get("/api/v1/profile/find-ride-pref").json()["find_ride_pref"] is None
-
-
-def test_kind_and_name_must_agree(pg_conn):
-    """A named find_ride_pref, or an unnamed map setting, are both
-    nonsense and the CHECK says so."""
-    account_id = _account(pg_conn)
-    for kind, name in (("find_ride_pref", "oops"), ("saved_map_settings", None)):
+    for kind in ("saved_map_settings", "ride_mode_usual", "ride_spec"):
         with pg_conn.cursor() as cur:
             with pytest.raises(psycopg.errors.CheckViolation):
                 cur.execute(
-                    "INSERT INTO user_preferences (account_id, kind, name) VALUES (%s, %s, %s)",
-                    (account_id, kind, name),
+                    "INSERT INTO user_preferences (account_id, kind, name) VALUES (%s, %s, NULL)",
+                    (account_id, kind),
+                )
+        pg_conn.rollback()
+
+
+def test_the_retired_kind_cannot_come_back(pg_conn):
+    """sql/082 narrowed `kind_allowed`. A stray writer — or a rolled-back
+    deploy still running the old code — cannot resurrect the kind.
+
+    THE NAMELESS ROW IS THE ONE THAT PROVES IT. A *named* find_ride_pref was
+    already illegal before sql/082, because `name_matches_kind` required that
+    kind to be nameless — so asserting on it would pass with or without the
+    migration and prove nothing. `(find_ride_pref, NULL)` is the shape that
+    used to be the legal one, and it is the only insert whose refusal can
+    only be coming from the narrowed `kind_allowed`.
+
+    Both shapes are asserted anyway: "the kind is gone" means gone in every
+    spelling, and the nameless case carries the load."""
+    account_id = _account(pg_conn)
+    for name in (None, "anything"):
+        with pg_conn.cursor() as cur:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                cur.execute(
+                    "INSERT INTO user_preferences (account_id, kind, name) "
+                    "VALUES (%s, 'find_ride_pref', %s)",
+                    (account_id, name),
                 )
         pg_conn.rollback()
 
@@ -243,7 +218,7 @@ def test_preferences_are_deleted_with_the_account(pg_conn):
     account_id = _account(pg_conn)
     c = _client(pg_conn, account_id)
     c.put("/api/v1/profile/map-settings/home", json={"settings": {}})
-    c.put("/api/v1/profile/find-ride-pref", json={"settings": {}})
+    c.put("/api/v1/profile/ride-specs/commuter", json={"settings": {}})
     with pg_conn.cursor() as cur:
         cur.execute("DELETE FROM accounts WHERE id = %s", (account_id,))
         cur.execute("SELECT COUNT(*) FROM user_preferences WHERE account_id = %s", (account_id,))

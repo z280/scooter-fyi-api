@@ -1853,11 +1853,35 @@ account holds one.
 | `409` | that exact (fill, border) pair is already claimed |
 | `422` | `ruling_alpha` outside 0.10–1.00 |
 
-### Saved map settings & find-ride preference
+### Rider preferences — three kinds, three questions
 
-Two rider-owned stores of **opaque JSON**. The API never reads inside the
+Three kinds share one table (`user_preferences`) and one set of rules, and
+each has a section below. The thing worth fixing in your head first is that
+they answer questions a rider would never confuse:
+
+| Kind | The question it answers | Cap |
+|---|---|---|
+| `saved_map_settings` | what do I want to **look at**? (map filters, overlays) | 50 |
+| `ride_spec` | what will I **ride**? (model, equipment, battery, quality) | 5 |
+| `ride_mode_usual` | how should the ride **screen** behave while I ride? (cost HUD, speedometer, navigation, tracking) | 10 |
+
+Every kind is **named**, and the names are scoped per kind, so one rider can
+hold a map setting, a spec and a Usual all called `commute` without
+collision. All three store **opaque JSON**: the API never reads inside the
 blob, never merges it, and never validates its shape — `PUT` replaces
-wholesale. Max 16 KB per blob; max 50 saved map settings per rider.
+wholesale, max 16 KB per blob, names are 1–64 characters.
+
+The caps differ because the acts differ. You look at many maps; you ride one
+scooter. A spec is picked from a short list at the top of a trip, so five is
+a menu and fifty would be a search problem.
+
+> A fourth kind, `find_ride_pref`, existed in `sql/043` and was retired in
+> `sql/082`. It meant exactly what `ride_spec` means — "what am I willing to
+> ride" — but as a single unnamed blob, and nothing was ever built on it. Its
+> three endpoints (`GET`/`PUT`/`DELETE /api/v1/profile/find-ride-pref`) are
+> **gone**, not deprecated: they return `404`. No client called them.
+
+### Saved map settings
 
 | Endpoint | Notes |
 |---|---|
@@ -1865,22 +1889,19 @@ wholesale. Max 16 KB per blob; max 50 saved map settings per rider.
 | `GET /api/v1/profile/map-settings/{name}` | One setting. `404` if that name isn't yours. |
 | `PUT /api/v1/profile/map-settings/{name}` | `{ "settings": { … } }` — creates or replaces. `409` at the 50-setting cap (you can still overwrite settings you already have), `413` over 16 KB. |
 | `DELETE /api/v1/profile/map-settings/{name}` | `404` if absent. |
-| `GET /api/v1/profile/find-ride-pref` | `{ "find_ride_pref": null }` until you set one. **`null` means never set** — distinct from an empty object you chose. |
-| `PUT /api/v1/profile/find-ride-pref` | `{ "settings": { … } }` — at most one per rider; a second PUT replaces the first. |
-| `DELETE /api/v1/profile/find-ride-pref` | Idempotent — deleting an absent preference returns `200`, since there is only one and "gone" is the state you asked for. |
 
-Names are 1–64 characters and scoped to you: two riders can both have a
+Names are scoped to you as well as to the kind: two riders can both have a
 setting called `commute`.
 
 ### Ride Mode Usuals
 
 A **Usual** is a saved answer to the ride wizard's options screen — the
 frontend's `ride_options` object plus a display `label` — applied wholesale
-from the Usuals picker (Screen 2.5). Same store as the saved map settings
-above (`user_preferences`, kind `ride_mode_usual`, `sql/050`) and therefore
-the same rules: **opaque JSON** the API never reads inside, `PUT` replaces
-wholesale, names are 1–64 characters, max 16 KB per blob. Max **10 Usuals**
-per rider.
+from the Usuals picker (Screen 2.5). Kind `ride_mode_usual` (`sql/050`),
+under the shared rules above. Max **10 Usuals** per rider.
+
+A Usual is **not** a spec. It says nothing about which scooter you want; it
+says how the screen should behave once you are on one.
 
 | Endpoint | Notes |
 |---|---|
@@ -1892,9 +1913,7 @@ per rider.
 The `settings` blob is **not** validated here even though its shape is
 known: `ride_options` is checked when it is used to start a ride
 (`POST /api/v1/tracked-rides`), so a Usual saved by a newer client than the
-API has heard of still round-trips. Usuals and saved map settings are
-separate namespaces — the same rider may hold a map setting **and** a Usual
-both called `commute`.
+API has heard of still round-trips.
 
 ### Ride specs — your "ideal scooter"
 
@@ -1905,11 +1924,8 @@ spec rather than a map filter, `must`, which names the requirements that are
 it is relaxed in a published order before the app reports that nothing
 matches.
 
-Same store and therefore the same rules as the two kinds above
-(`user_preferences`, kind `ride_spec`, `sql/080`): **opaque JSON** this API
-never reads inside, `PUT` replaces wholesale, names are 1–64 characters, max
-16 KB per blob. Max **5 specs** per rider — fewer than the ten Usuals get,
-because a spec is picked at the top of a trip from a short list.
+Kind `ride_spec` (`sql/080`), under the shared rules above. Max **5 specs**
+per rider.
 
 | Endpoint | Notes |
 |---|---|
@@ -1947,8 +1963,10 @@ would put an API deploy in front of every new client-side requirement, and
 would make an already-saved spec un-editable on the day the vocabulary
 changes.
 
-All three named kinds are separate namespaces — the same rider may hold a map
-setting, a Usual **and** a spec all called `commute`.
+A spec and a Usual are the two halves of one ride: the spec chooses the
+scooter, the Usual dresses the screen. They are stored apart because you
+change them on different occasions — the spec when your needs change, the
+Usual when your habits do.
 
 ---
 
