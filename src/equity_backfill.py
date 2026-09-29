@@ -81,9 +81,11 @@ snapshot UPDATE, no daily_sla upsert. It exists to validate the
 reconstruction against days the live pipeline already measured — running
 the write path over such a day would overwrite a live figure with a
 reconstructed one. The result carries one record per snapshot (recorded
-vs reconstructed fleet, fidelity, gate outcome, rebuilt metrics) and the
-day average over the gate-passing snapshots, computed in memory the same
-way daily_sla does (a plain mean, NULLs skipped). Nothing in this module
+vs reconstructed fleet, fidelity, gate outcome, and rebuilt metrics —
+None only when there is no reconstructed fleet) and the day average over
+the gate-passing snapshots inside the 6-9 AM SLA window (even with
+`window_only=False`), computed in memory the same way daily_sla does (a
+plain mean, NULLs skipped). Nothing in this module
 writes the job_runs ledger either path: only the zero-arg scheduled
 commands in src/cli.py are recorded there, and `equity_backfill` is a
 sub-argument command.
@@ -191,6 +193,10 @@ class DayResult:
     #: been written.
     dry_run: bool = False
     snapshots_passing_gate: int = 0
+    #: Dry run only: how many gate-passing snapshots INSIDE the 6-9 AM SLA
+    #: window the day average rests on (with --full-day, fewer than
+    #: `snapshots_passing_gate`). None when not a dry run.
+    snapshots_averaged: int | None = None
     #: Per-snapshot detail, populated only by a dry run (it is the whole
     #: point of one, and too bulky for the job_runs summary otherwise).
     snapshots: list[dict[str, Any]] = field(default_factory=list)
@@ -202,6 +208,7 @@ class DayResult:
             "dry_run": self.dry_run,
             "snapshots_considered": self.snapshots_considered,
             "snapshots_passing_gate": self.snapshots_passing_gate,
+            "snapshots_averaged": self.snapshots_averaged,
             "snapshots_written": self.snapshots_written,
             "snapshots_skipped_low_fidelity": self.snapshots_skipped_low_fidelity,
             "snapshots_skipped_no_history": self.snapshots_skipped_no_history,
@@ -452,6 +459,7 @@ def reprocess_date(
     )
 
     pending: list[tuple[Any, dict[str, Any]]] = []
+    pending_times: list[datetime] = []
     for snap in snapshots:
         recorded = snap["total_devices_denver"]
         fleet = fleet_at(stops, snap["snapshot_time"])
@@ -462,7 +470,14 @@ def reprocess_date(
             "reconstructed_fleet": len(fleet),
             "fidelity": (len(fleet) / recorded) if (fleet and recorded) else None,
         }
+        # Built for every snapshot that HAS a reconstructed fleet, before any
+        # skip: a validation run wants to see what each gate threw away, not
+        # only what it kept. An empty fleet has nothing to rebuild, so its
+        # `metrics` is None — the key is present on every dry-run record
+        # either way, so the JSON shape does not depend on the outcome.
+        metrics = rebuild_metrics(fleet) if fleet else None
         if dry_run:
+            detail["metrics"] = metrics
             result.snapshots.append(detail)
         if not fleet:
             result.snapshots_skipped_no_history += 1
@@ -476,11 +491,6 @@ def reprocess_date(
             detail["outcome"] = "skipped_no_recorded_fleet"
             continue
         fidelity = len(fleet) / recorded
-        metrics = rebuild_metrics(fleet)
-        if dry_run:
-            # Reported for skipped snapshots too: a validation run wants to
-            # see what the gate threw away, not only what it kept.
-            detail["metrics"] = metrics
         if abs(fidelity - 1.0) > max_drift:
             result.snapshots_skipped_low_fidelity += 1
             detail["outcome"] = "skipped_low_fidelity"
@@ -488,20 +498,27 @@ def reprocess_date(
         detail["outcome"] = "passes_gate"
         result.fidelity.append(fidelity)
         pending.append((snap["cycle_id"], metrics))
+        pending_times.append(snap["snapshot_time"])
 
     result.snapshots_passing_gate = len(pending)
 
     if dry_run:
-        # Same arithmetic as daily_sla's AVG() over the window: a plain
-        # mean of the per-snapshot percentages, NULLs skipped. Only the
-        # gate-passing snapshots count — exactly the ones a real run would
-        # write — so this is the reconstructed-only figure, never a blend
-        # with whatever live values the day already holds.
+        # Predicts what the write path would store: daily_sla's AVG() over
+        # the contractual 6-9 AM window ONLY, even when `--full-day` loaded
+        # (and reports per-snapshot detail for) the whole day — averaging 24
+        # hours would label a different number as the SLA figure. Same
+        # arithmetic: a plain mean, NULLs skipped. Only gate-passing
+        # snapshots count — exactly the ones a real run would write — so
+        # this is the reconstructed-only figure, never a blend with
+        # whatever live values the day already holds.
+        win_start, win_end = daily_sla.window_for_date(d)
         pcts = [
             m["percent_all_devices_equity"]
-            for _, m in pending
-            if m["percent_all_devices_equity"] is not None
+            for (_, m), t in zip(pending, pending_times)
+            if win_start <= t < win_end
+            and m["percent_all_devices_equity"] is not None
         ]
+        result.snapshots_averaged = len(pcts)
         if pcts:
             avg = sum(pcts) / len(pcts)
             result.avg_percent_all_devices_equity = avg

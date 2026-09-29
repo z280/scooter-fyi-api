@@ -394,6 +394,69 @@ def test_dry_run_reports_fidelity_for_snapshots_the_gate_rejects(monkeypatch):
     assert s["metrics"]["percent_all_devices_equity"] == 20.0
 
 
+def test_full_day_dry_run_averages_only_the_sla_window(monkeypatch):
+    """`--full-day --dry-run` reports every snapshot of the day, but its day
+    average must be what the write path's daily_sla would store: the 6-9 AM
+    window only. Snapshots outside the window are given a very different
+    equity share so a 24-hour average could not pass by coincidence."""
+    from src.daily_sla import window_for_date
+
+    d = date(2026, 8, 10)
+    w_start, w_end = window_for_date(d)
+    t_night = w_start - timedelta(hours=4)          # 02:00 Denver
+    t_in1, t_in2 = w_start + timedelta(minutes=10), w_start + timedelta(minutes=70)
+    t_evening = w_end + timedelta(hours=9)          # 18:00 Denver
+
+    base = T0 - timedelta(days=1)
+    # 10 vehicles all day; 4 in equity until the window closes, then 9.
+    stops = [_stop(f"v{i}", base, w_end, in_equity=i < 4) for i in range(10)]
+    stops += [_stop(f"v{i}", w_end, None, in_equity=i < 9) for i in range(10)]
+    snaps = [_snapshot(t, recorded=10) for t in (t_night, t_in1, t_in2, t_evening)]
+
+    def _snapshots_in(start, end):
+        return [s for s in snaps if start <= s["snapshot_time"] < end]
+
+    _patch_io_forbidding_writes(monkeypatch, snaps, stops)
+    monkeypatch.setattr(eb, "_load_snapshots", _snapshots_in)
+
+    full = eb.reprocess_date(d, window_only=False, dry_run=True)
+    window = eb.reprocess_date(d, window_only=True, dry_run=True)
+
+    assert full.snapshots_considered == 4 and full.snapshots_passing_gate == 4
+    assert [s["metrics"]["percent_all_devices_equity"] for s in full.snapshots] == [
+        40.0, 40.0, 40.0, 90.0,
+    ]
+    assert full.snapshots_averaged == window.snapshots_averaged == 2
+    assert full.avg_percent_all_devices_equity == window.avg_percent_all_devices_equity == 40.0
+    assert full.compliance_equity_pass is window.compliance_equity_pass is True
+
+
+def test_dry_run_attaches_metrics_to_every_reconstructable_snapshot(monkeypatch):
+    """A snapshot skipped for having no recorded denominator still HAS a
+    reconstructed fleet, so its rebuilt metrics are reported; only a
+    snapshot with nothing reconstructed carries `metrics: None`. The key
+    is present on every record, whatever the outcome."""
+    t_empty = T0 - timedelta(hours=2)               # before any stop arrives
+    stops = [_stop(f"v{i}", T0 - timedelta(hours=1), None, in_equity=i < 3) for i in range(10)]
+    _patch_io_forbidding_writes(
+        monkeypatch,
+        [_snapshot(t_empty, recorded=10), _snapshot(T0, recorded=None)],
+        stops,
+    )
+    r = eb.reprocess_date(date(2026, 8, 10), dry_run=True)
+    empty, unverifiable = r.snapshots
+    assert all("metrics" in s for s in r.snapshots)
+    assert empty["outcome"] == "skipped_no_history"
+    assert empty["metrics"] is None
+    assert unverifiable["outcome"] == "skipped_no_recorded_fleet"
+    assert unverifiable["fidelity"] is None
+    assert unverifiable["metrics"]["percent_all_devices_equity"] == 30.0
+    # Neither is written or averaged.
+    assert r.snapshots_passing_gate == 0
+    assert r.avg_percent_all_devices_equity is None
+    assert r.compliance_equity_pass is None
+
+
 def test_dry_run_summary_is_json_safe_with_snapshots(monkeypatch):
     import json
 

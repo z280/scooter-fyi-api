@@ -1019,8 +1019,11 @@ def equity_backfill_cli(sub_args: list[str]) -> int:
     no write at all (no snapshot UPDATE, no daily_sla upsert; this command
     never writes the job_runs ledger either way). Each day is printed as
     one JSON line including every snapshot's recorded vs reconstructed
-    fleet, fidelity and rebuilt metrics — the tool for checking the
-    reconstruction against days the live pipeline already measured.
+    fleet, fidelity and rebuilt metrics (`null` only when nothing could be
+    reconstructed) — the tool for checking the reconstruction against days
+    the live pipeline already measured. The day's average is always over
+    the 6-9 AM SLA window, as the write path's daily_sla would store it,
+    even with `--full-day`.
     """
     usage = "usage: python -m src.cli equity_backfill <start> [end] [--full-day] [--dry-run]"
     flags = {a for a in sub_args if a.startswith("--")}
