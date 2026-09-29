@@ -107,11 +107,14 @@ Available commands:
     admin             Manage the admin allowlist:
                       `admin (list | add <email> | remove <email>)`.
     equity_backfill   Reprocess an explicit date range:
-                      `equity_backfill <start> [end] [--full-day]`.
+                      `equity_backfill <start> [end] [--full-day] [--dry-run]`.
+                      `--dry-run` writes nothing and prints per-snapshot
+                      fidelity and rebuilt metrics as JSON lines.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
@@ -1001,7 +1004,7 @@ def admin_cli(sub_args: list[str]) -> int:
 
 
 def equity_backfill_cli(sub_args: list[str]) -> int:
-    """`python -m src.cli equity_backfill <start> [end] [--full-day]` —
+    """`python -m src.cli equity_backfill <start> [end] [--full-day] [--dry-run]` —
     reprocess an explicit Denver-local date range against the city's
     official Equity Area map.
 
@@ -1011,11 +1014,24 @@ def equity_backfill_cli(sub_args: list[str]) -> int:
     `--full-day` rebuilds every snapshot of the day rather than only the
     6-9 AM window the SLA averages — ~8x the work, and only worth it if
     something wants the whole series.
+
+    `--dry-run` runs the same reconstruction and fidelity gate but performs
+    no write at all (no snapshot UPDATE, no daily_sla upsert; this command
+    never writes the job_runs ledger either way). Each day is printed as
+    one JSON line including every snapshot's recorded vs reconstructed
+    fleet, fidelity and rebuilt metrics (`null` only when nothing could be
+    reconstructed) — the tool for checking the reconstruction against days
+    the live pipeline already measured. The day's average is always over
+    the 6-9 AM SLA window (as daily_sla averages), even with `--full-day`,
+    and covers ONLY gate-passing reconstructions. It is a reconstructed-only
+    figure, not a prediction of the stored SLA row: a real write keeps any
+    existing value on a gate-rejected snapshot in the window, and
+    daily_sla's AVG() would include it.
     """
-    usage = "usage: python -m src.cli equity_backfill <start> [end] [--full-day]"
+    usage = "usage: python -m src.cli equity_backfill <start> [end] [--full-day] [--dry-run]"
     flags = {a for a in sub_args if a.startswith("--")}
     dates = [a for a in sub_args if not a.startswith("--")]
-    unknown = flags - {"--full-day"}
+    unknown = flags - {"--full-day", "--dry-run"}
     if unknown or not 1 <= len(dates) <= 2:
         print(usage, file=sys.stderr)
         return 2
@@ -1029,11 +1045,15 @@ def equity_backfill_cli(sub_args: list[str]) -> int:
         print("error: end < start", file=sys.stderr)
         return 2
 
+    dry_run = "--dry-run" in flags
     results = equity_backfill.reprocess_range(
-        start, end, window_only="--full-day" not in flags
+        start, end, window_only="--full-day" not in flags, dry_run=dry_run,
     )
     for r in results:
-        print(r.as_dict())
+        if dry_run:
+            print(json.dumps(r.as_dict(include_snapshots=True), default=str))
+        else:
+            print(r.as_dict())
     return 0
 
 
