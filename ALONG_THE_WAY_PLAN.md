@@ -5,7 +5,19 @@ Planned 2026-08-29 against `main` (3e0236d). Branch:
 **Revision 2** — scope expanded: the spec becomes a rider-facing "ideal
 scooter" that applies to the map in one tap (§5.5), and **My Scooters**
 (favourite individual vehicles, gated behind a QR scan) joins as Phase 4 (§8).
-Changed decisions are marked **REVISED** in §3.
+
+**Revision 3 — Phases 2 and 3 were built on a misreading, and are rewritten.**
+Revisions 1–2 had the rider *walking* to the scooter that matched their spec.
+The original ask was "plan to **ride** to a device that meets their
+specifications": you walk a few seconds onto whatever is near, ride it toward
+your destination, and **hand off** to the one you wanted at a point already on
+your way. §6 and §7 are new; §6.0 states the correction. Revision 3 also
+adds three product rules that were missing — likely-rideable always, cost and
+time on every plan, and the Access Program's free-minute budget — and folds
+optional Phase 3b into the one re-solve path. Phases 1, 4 and 5 are unchanged
+and Phase 1 has since shipped.
+
+Changed decisions are marked **REVISED** in §3; new ones are marked **NEW**.
 
 This is the **master** document for the program: the vision, the vocabulary,
 the decisions, the phasing, and the risks. The second half is the **API lane**
@@ -13,17 +25,22 @@ the decisions, the phasing, and the risks. The second half is the **API lane**
 `denver-scooter-fyi/docs/ALONG_THE_WAY_PLAN.md` — a companion, not a
 duplicate; where the two must agree, this file is the one that is right.
 
-Nothing here is built yet. This is a plan to be argued with.
+**Phase 1 shipped** (API #92, frontend #82) and **Phase 4 shipped** (#90).
+The rest is a plan to be argued with.
 
 ---
 
 ## 1. What we are building
 
 A rider says **what they like to ride** and **where they are going**. The app
-finds the vehicle that gets them there best, claims dibs on it, walks them to
-it — and when somebody takes it out from under them, finds the next one
-**along the route to their destination**, claims that instead, and tells them
-without the rider having to take the phone out of their pocket.
+plans the trip that gets them there best — which is usually *not* a long walk
+to the perfect scooter, but a short walk onto whatever is closest, a ride
+toward the destination, and a **hand-off to the scooter they actually wanted
+at a point already on their way**. It claims dibs on that pickup while they
+ride toward it, and when the plan is disrupted — the pickup is taken, a better
+one appears, the battery is draining faster than estimated — it re-solves the
+rest of the route, tells them once, and lets them overrule it from plans it
+has already worked out.
 
 Seven parts, in the order they matter:
 
@@ -31,14 +48,15 @@ Seven parts, in the order they matter:
    minimum battery — stated once, as requirements rather than as map filters,
    and applied to the map in one tap whenever the rider wants to *look* at
    only the ones that qualify.
-2. **The corridor search.** Rank candidates by *how long the whole trip
-   takes* — walk to the vehicle **plus** ride to the destination — not by how
-   far the vehicle is from the rider. That single change is what "along the
-   way" means: a scooter 500 m further *towards* where you are going beats one
-   300 m in the wrong direction.
-3. **The swap.** Dibs on the chosen vehicle; watch it; when it goes, release,
-   re-search from where the rider is *now*, claim the replacement, and say so
-   in one message.
+2. **The hand-off plan.** The trip is multi-leg: walk a few seconds onto
+   whatever is near and rideable, ride it toward the destination, pick up the
+   scooter that matches the spec **en route**, ride that the rest of the way.
+   The good scooter is a waypoint, not a walk target. Ranked by whole-trip
+   generalised cost — time *and* money, including every unlock.
+3. **The living plan.** Dibs on the next vehicle while riding toward it, and a
+   plan that re-solves itself whenever reality moves: the pickup taken, a
+   better option appearing, the battery short, the rider behind schedule. It
+   acts, says so once, and offers the runners-up it had already computed.
 4. **My Scooters.** A rider who has physically stood at a vehicle and scanned
    its QR code can keep it — name it, find it again later, be told when it is
    free. Gated on the scan, and deliberately blind while somebody is riding
@@ -132,23 +150,41 @@ endpoints are gone rather than deprecated. Phase 1 therefore ships with
 `user_preferences` holding exactly three kinds, each answering a different
 question.
 
-**Corridor** — the set of vehicles worth considering for a trip from `P` to
-`D`: reachable on foot within the walk cap, and not so far off the line that
-riding from them is worse than walking.
+**Hand-off** — ending one rental and starting another mid-trip, at a vehicle
+that was already on the route. The move this whole program is named for.
+Costs an unlock (free on three of the five tiers, §6.3) and a minute or two of
+overhead, and buys the rest of the trip on a better scooter.
 
-**Trip cost** (the ranking scalar, not money) — `walk_seconds(P→v) +
-ride_seconds(v→D)`, plus penalties. The whole ranking is this number.
+**Plan** — a sequence of legs: `walk → ride → [hand-off → ride]* → walk`. The
+unit the trip search returns and the unit the rider chooses between. A
+single-vehicle trip is a plan with one ride leg, competing in the same list.
+
+**Pickup** — a vehicle a plan hands off *to*. It is claimed while the rider
+rides toward it, which is what makes the plan trustworthy.
+
+*(**Corridor** was revision 2's word for a walking catchment around the
+straight line. It is retired with the misreading that produced it — see
+§6.0.)*
+
+**Generalised cost** (the ranking scalar) — every leg's seconds, plus money
+converted to seconds, plus preference penalties. One scale for time, money and
+taste, so there is no weight to tune. Money is genuinely in it: an unlock fee
+is why a hand-off might not be worth taking.
 
 **Claim** — one dibs row. Twenty-five minutes at the outside, per `sql/076`
 and `dibs.ts`. Not a reservation, not a hold, and this program must never
 describe it as one.
 
-**Swap** — releasing a claim on a vehicle that is gone and claiming the best
-remaining candidate, re-searched from the rider's current position.
+**Re-solve** — recomputing the *remaining* legs from where the rider is now,
+and moving the claim to whatever the new plan needs. Triggered by anything
+that invalidates the plan, of which "somebody took it" is only one (§7.2).
+Never recomputes just the next vehicle: that is what strands a rider on a
+route that no longer makes sense.
 
-**Trip plan** — the live document tying a spec, a destination, a current
-target, its claim, and the swap history together. Phase 3 keeps it in the
-browser; Phase 8 asks whether it should live on the server.
+**Trip plan** — the live document tying a spec, a destination, the remaining
+legs, the current claim, the backup plans and the re-solve history together.
+Phase 3 keeps it in the browser; Phase 8 asks whether it should live on the
+server.
 
 **Favourite / My Scooters** — a specific vehicle a rider has kept, after
 proving at the kerb that they were standing at it. Not a claim, not a
@@ -160,21 +196,25 @@ reservation, and not a subscription to where it goes.
 
 | Question | Decision | Why |
 |---|---|---|
-| Rank by walk distance, or by whole-trip time? | **Whole-trip time.** `walk(P→v) + ride(v→D)`. | It is the definition of "along the way", and it subsumes the reach question for free — a vehicle that cannot reach `D` has no finite ride leg. |
+| Rank by walk distance, or by whole-trip time? | **REVISED (rev 3) — by whole-trip GENERALISED COST over a multi-leg plan**: every leg's seconds, plus money, plus preference penalties. | Whole-trip time was right and the *trip* was wrong: rev 1–2 modelled one walk and one ride. A plan can hand off, so the scalar has to price an unlock as well as a minute. See §6.0. |
+| **Does the rider walk to the scooter that matches their spec?** | **NEW (rev 3) — no. They ride to it.** A short walk onto whatever is near, then a hand-off to the spec-matching vehicle at a point already on the route. | This is the correction that produced revision 3. The original ask said "plan to **ride** to a device that meets their specifications"; rev 1–2 read "ride" as "walk" and built a feature whose answer to "the good one is 14 minutes away" was "then walk 14 minutes". |
+| **May a `risk`-tier vehicle appear in a plan?** | **NEW (rev 3) — no, with one narrow escape.** Only when there is no non-risky vehicle within a 5-minute walk, and then the app says that is why. | Rev 2 priced it as a +6-minute penalty, which lets a planner sell the platform's whole proposition for four saved minutes. Rideability is the product. |
+| **How many hand-offs may a plan have?** | **NEW (rev 3) — unbounded, limited by cost and time**, never by a hop counter. | The money term limits it by itself, and does so correctly per tier: a `resident` rider pays $1 a hop and will rarely see two; an Access or Pass rider pays nothing and should not be stopped by an arbitrary constant. §6.3. |
 | One endpoint for "find me one" and "find me another"? | **One.** `POST /api/v1/trip/candidates` with an `exclude` list. | A replacement search is the first search from a new position with one vehicle struck out. Two endpoints would be the same code twice, drifting. |
-| Route every candidate? | **No.** Two Valhalla *matrix* calls rank the whole corridor exactly; a full route is computed only for what the rider is actually shown. | Routing 40 candidates individually is 40 calls against an endpoint rate-limited at 30/min. `sources_to_targets` is one call for many pairs. |
+| Route every candidate? | **No.** Two Valhalla *matrix* calls rank every leg of every plan exactly; a full route is computed only for what the rider is actually shown. | Routing 40 candidates individually is 40 calls against an endpoint rate-limited at 30/min. `sources_to_targets` is one call for many pairs. |
 | Is the spec a new kind of saved filter preset? | **REVISED — still a separate object, but with a first-class two-way bridge to the map filters.** See §5.5. | The reasons for separateness hold (presets are localStorage-only, carry map-only state, and have no place for must/prefer). But "these are my requirements" and "show me only those" are the same thought ten seconds apart, and making the rider re-enter it in a second UI was the wrong call. The bridge is one tap each way and lossy in one stated direction. |
-| Does a swap auto-claim, or ask? | **Auto-claim inside a defined envelope, ask outside it.** See §7.3. | The rider is walking with the phone away. A question they cannot see is not a safer default than an action they can undo in one tap. |
+| Does a re-solve auto-claim, or ask? | **REVISED (rev 3) — always auto-claim, always say so, always let the rider overrule it** from backups already computed. The envelope is withdrawn. | The reasoning was right and did not go far enough: the rider is *riding*, not walking. A question they cannot safely read is never the safer default, so there is no bound at which asking becomes correct. §7.1. |
 | Does the swap raise a second notification after "it's gone"? | **No — one message, or two, never both.** | `dibs-notify.ts` caps itself at four alerts per claim on purpose. A swap that buzzes twice in three seconds spends the budget that protects "RUN!". |
 | Does the certificate change? | **It gains a chain link** (`replaces_dibs_id`), nothing else. | The certificate is an assertion about one vehicle at one time. A swap makes a *new* claim; it does not extend the old one. |
 | Persist the trip plan server-side in v1? | **No.** Phase 3 is client-only. | A live position + destination stored server-side is a new retention rule (three-address rule, §12) and a much larger privacy conversation than the feature needs to prove itself. |
-| Proactive "upgrade" offers (a better vehicle appears mid-walk)? | **Behind a gate, in Phase 3b, off by default.** | The feature is named "upgrades" and the machinery is identical, but an app that renegotiates the plan while you walk is an app you stop trusting. |
+| Proactive "upgrade" offers (a better vehicle appears mid-trip)? | **REVISED (rev 3) — not a separate phase. It is one trigger among several** on the same re-solve path (§7.2), and it is safe because the rider can always overrule it. | Rev 2 made it optional Phase 3b because an app that renegotiates unprompted is one you stop trusting. What makes it trustworthy is the undo, not the gate — and once the plan is live for other reasons, gating this one costs a branch and buys nothing. |
 | **What does a QR scan actually prove?** | **NEW — plate knowledge, not presence.** So favouriting requires a valid scan **and** a GPS fix within **75 m** of the device's last known position. | `src/qr.py:validate_scan` checks `hash_plate(payload) == vehicle_identifier`. That proves the scanner has the plate; nothing in `api_qr.py` or `credit_qr_scan_points` compares the submitted `lat`/`lng` to anything. 75 m is the radius the "Unlock in Veo" gate already uses for "physically at the scooter". |
 | **Can you watch a favourite move?** | **NEW — no. Position is withheld while `is_reserved` is true.** | See §8.4. This is the single most important rule in Phase 4 and the one most likely to be lost in implementation. |
 | **Do we store where the rider was standing when they favourited?** | **NEW — no.** Check the 75 m at write time, then discard the fix. | Storing it buys nothing any feature reads, and every stored position is a retention obligation across three files. The cheapest privacy decision available is not to have the data. |
 | **How many favourites?** | **NEW — 10 per account.** | A rider with fifty kept scooters is not keeping favourites, they are running a tracker. Ten is more than anyone needs and few enough to be a list rather than a search. |
 | **Two account-level "what I want to ride" objects?** | **NEW — no. `find_ride_pref` is retired in `sql/082`**, rows, endpoints and all. `ride_spec` is the one answer. | They meant the same thing. A table with two answers to one question and no rule for which wins is a bug waiting for its first caller — and `find_ride_pref` never had one, in either repo, so retiring it costs nothing and deleting the ambiguity is the whole point. |
 | **Do Phases 6 and 7 go before the feature phases?** | **NEW — no, they go last, in that order.** | Phase 7 writes a description of the UI; Phase 6 changes the UI. Doing either earlier means doing it twice, and a walkthrough that is wrong on the day it ships teaches a new rider things they have to unlearn. |
+| **Do we model the Access Program's free minutes?** | **NEW (rev 3) — yes: estimate from tracked rides, label the direction of the error, and let the rider correct it.** §6.3.1. | Assuming the free hour is spent is right for a live ticker and wrong for planning — it prices a free trip as a paid one and talks the rider out of the hand-off they should take. |
 | Equity stopover for the `equity` (Access) rate plan? | **Never offered.** | Access is 60 free min/day then 15¢/min with no unlock. The Equity Area rate is $1 + 13¢/min. Whether the two interact is *not stated anywhere in the contract we have* (`config.ts`'s own note), and the plausible readings include ones where the advice costs the rider money. |
 
 ---
@@ -186,9 +226,8 @@ Each phase is independently mergeable and useful on its own.
 | Phase | Ships | API lane | Frontend lane |
 |---|---|---|---|
 | **1 — The ideal scooter** | Requirements stated once, saved to the account, synced, and **applied to the map in one tap** | `sql/080`, `/api/v1/profile/ride-specs` | `ride-spec.ts`, spec sheet, the map bridge |
-| **2 — Along the way** | Corridor ranking; "best vehicle for *this trip*" replaces "nearest vehicle" | `valhalla.matrix()`, `src/trip_candidates.py`, `POST /api/v1/trip/candidates` | `along-the-way.ts`, wired into the home bar's plan flow |
-| **3 — Claim & swap** | Auto-dibs, loss detection → replacement → one message | `sql/083` (`replaces_dibs_id`), `replaces` on `POST /dibs` | `trip-plan.ts`, `arrival-panel.ts` swap face, `dibs-notify.ts` 5th alert |
-| **3b — Upgrades** *(optional)* | Mid-walk offer when a materially better vehicle appears | — | gate in `trip-plan.ts` |
+| **2 — The hand-off plan** | Multi-leg plans: ride a near vehicle, pick up the one you wanted en route. Ranked by time **and** money, every unlock priced | `valhalla.matrix()`, `src/trip_plans.py`, `POST /api/v1/trip/candidates` | `along-the-way.ts`, free-minutes control, wired into the home bar's plan flow |
+| **3 — The living plan** | Dibs on the next vehicle while riding to it; the plan re-solves on any disruption, says so once, and offers the backups | `sql/083` (`replaces_dibs_id`), `replaces` on `POST /dibs`, time-to-arrival claim bound | `trip-plan.ts`, `arrival-panel.ts` re-solve face, backups sheet, `dibs-notify.ts` 5th alert |
 | **4 — My Scooters** | Keep a vehicle you scanned; find it again; be told when it's free | `sql/081` ✅, `/api/v1/profile/favorite-devices`, availability watch | `my-scooters.ts`, popup action, map layer |
 | **5a — Start in an Equity Area** | "Walk 2 min further, save $1.80" | equity flag + cost on candidates | `equity-savings.ts`, candidate chips |
 | **5b — Stopover** | Break the trip at an Equity Area when the arithmetic says to | `src/equity_savings.py`, stopover search | two-leg cost UI |
@@ -198,13 +237,18 @@ Each phase is independently mergeable and useful on its own.
 
 **Phase 4 has no dependency on 1–3** — it needs only the QR scanner, which
 already exists — and could ship at any point after Phase 1. It is listed here
-rather than first because it pays off most once the corridor scorer exists to
+rather than first because it pays off most once the plan search exists to
 prefer a rider's own scooters (§8.6), and because Phase 1's spec panel is the
 drawer it naturally lives beside. If the goal is something in riders' hands
 quickly, **Phase 4 is the cheapest useful thing in this document.**
 
 Phases 1, 2 and 4 are all useful without Phase 3. Phase 3 is the feature the
 program is named for.
+
+**Phase 3b is gone** (rev 3). Mid-trip "upgrade" offers were an optional phase
+because renegotiating a plan unprompted felt untrustworthy; under §7.1 every
+re-solve is announced and reversible, so an upgrade is just one more trigger
+on a path that already exists.
 
 **Phases 6 and 7 are in this order and at this end for one reason.** Phase 7
 rewrites a tour that *describes the UI*; Phase 6 *changes the UI*. Writing the
@@ -354,9 +398,168 @@ specs coexist, and a rider who never opens the spec sheet sees no difference.
 
 ---
 
-## 6. Phase 2 — The corridor search
+## 6. Phase 2 — The hand-off plan
 
-### 6.1 `POST /api/v1/trip/candidates`
+### 6.0 What this phase is, and the misreading it corrects
+
+**Revision 3 rewrites this phase and §7 completely.** Revisions 1–2 had the
+rider *walking* to the vehicle that matched their spec, and ranked candidates
+by `walk(P→v) + ride(v→D)`. That was a misreading of the original ask —
+"plan to **ride** to a device that meets their specifications" — and it
+produced a feature whose answer to "the good scooter is 14 minutes away" was
+"then walk 14 minutes".
+
+The real shape:
+
+```
+        90 s walk        6 min ride          9 min ride       1 min walk
+ you ──────────────▶ ASTRO ──────────▶ COSMO (your spec) ──────────▶ door
+                   (whatever's near)   (picked up EN ROUTE)
+```
+
+You walk a few seconds to whatever is closest and acceptable, ride it toward
+where you are going, and **hand off** to the scooter you actually wanted at a
+point that is already on your way. The spec-matching vehicle is a **waypoint
+on the route**, not a walk target. Walking appears only twice and is short
+both times: onto the first vehicle, and off the last one to the door.
+
+That is what "along the way" was always supposed to mean. The word
+**corridor** is retired with the misreading — it described a walking catchment,
+and this is a route with pickups on it.
+
+### 6.1 The five rules this phase obeys
+
+These come from the product owner and override anything inherited from
+revisions 1–2.
+
+1. **Likely-rideable, always.** A `risk`-tier vehicle is **not offered**, at
+   any leg of any plan. The single exception: when there is genuinely no
+   non-risky vehicle within a **5-minute walk**, the app may offer one, and
+   says plainly that it is doing so because there is nothing else nearby.
+   This is not a ranking penalty — revision 2 had it as "+6 minutes" and that
+   was wrong. Rideability is the reason this platform exists, and a planner
+   that routes somebody onto a scooter we have flagged as risky to save them
+   four minutes has sold the whole proposition for four minutes.
+2. **Always show estimated cost AND time, including startup costs.** Every
+   plan, every leg, every time. A hand-off's entire case is that an extra
+   unlock is worth it, and that case cannot be made without the number.
+3. **Chaining is unbounded, limited by cost and time** — never by a hop
+   counter. §6.4 shows why the money term does the limiting by itself.
+4. **Be sensitive to the free-unlock tiers**, and to the Access Program's
+   free-minute budget in particular. §6.3.
+5. **On a disruption, resolve it automatically, say so, and let the rider
+   overrule you** from the backup plans already computed. §7.
+
+### 6.2 The search: a graph, and it is small
+
+Nodes are the origin `P`, the destination `D`, and the candidate vehicles.
+Edges are legs:
+
+| Edge | Mode | How it is measured |
+|---|---|---|
+| `P → Sᵢ` | walk | one pedestrian matrix, 1 source × N targets |
+| `Sᵢ → Sⱼ` | ride | the bicycle matrix below |
+| `Sᵢ → D` | ride | folded into the same bicycle matrix, as one extra target |
+| `Sₗₐₛₜ → D` | walk | the final few metres; straight-line is fine |
+
+So it is still **two Valhalla calls**, as revision 2 promised — but the second
+one is now `N sources × (N+1) targets` rather than `N × 1`. That is the real
+cost of this design and the plan should not pretend otherwise.
+
+**What keeps N small** — and all three of these are rules we wanted anyway:
+
+- **Rule 1 prunes hardest.** Only non-`risk` vehicles are nodes at all.
+- **The first hop must be a short walk.** Only vehicles inside the walk cap
+  can be `S₁`, which is a handful, not the fleet. Note what the spec's
+  `max_walk_minutes` now MEANS: it bounds the walk onto the **first** vehicle,
+  not a walk to the vehicle the rider wanted. Its default of 12 minutes was
+  chosen under the old reading and is now generous for what it governs —
+  worth revisiting once there is real usage, not before.
+- **The bbox** is the envelope of `P` and `D`, expanded by the walk cap. A
+  vehicle behind the rider and off the line is not a node.
+
+With N pruned to ~30, the bicycle matrix is under a thousand pairs — one call
+— and the route is then a **shortest path** over that graph. Dijkstra, on a
+graph this size, is microseconds.
+
+**Prerequisite, unchanged and now more load-bearing:** verify the deployed
+Valhalla serves `/sources_to_targets` and honours the same costing options as
+`/route`, **before** building this. `src/valhalla.py` has no matrix helper
+today; adding `valhalla.matrix(sources, targets, costing_options)` is the
+single largest efficiency decision in the program and should land as its own
+small, tested PR. If the matrix is not there, the fallback is the
+`ThreadPoolExecutor` fan-out `_score_alternates` already uses — but note that
+a fan-out over N² pairs is not viable, so without a matrix this phase must
+drop to **one hand-off maximum** and a bipartite search rather than a graph.
+
+### 6.3 The money term, and why Access is the tier this feature is for
+
+Edge cost is not seconds. It is **generalised cost**: seconds, plus money
+converted to seconds, plus preference penalties. One scale, as before.
+
+The per-hop money cost, across the tiers `config.ts` already models:
+
+| Tier | Unlock | Cost of one extra hop |
+|---|---|---|
+| `equity` (Access) | $0 | **nothing** |
+| `resident_plus`, `visitor_plus` (Pass) | $0 | **nothing** |
+| `resident` | $1 | $1 + tax, per hop |
+| `visitor` | $1 | $1 + tax, per hop |
+
+**Three of the five tiers pay nothing to hand off.** That is why rule 3 needs
+no hop counter: the money term limits chaining by itself, and for the tiers
+where hopping is free it correctly declines to limit it at all. A `resident`
+rider will rarely see a plan with two hops in it, and will not need to be told
+why.
+
+**The Access Program's free hour is a CLIFF, not a slope.** 60 free minutes a
+day, then 15¢/min with no unlock. So today's 58th minute is free and the 62nd
+costs money. For a rider near the end of that hour a faster route is worth
+disproportionately more than it is to anybody else, and a planner that prices
+minutes linearly misses this completely.
+
+Handling it without breaking the shortest-path search: **inside the free hour
+every edge's money term is zero**, and past it the term is linear — both
+Dijkstra-safe. Only a trip that *crosses* the boundary mid-ride has a cost
+that depends on the path so far. Solve those by running the search twice, once
+under each regime, and taking the cheaper; do not state-augment the graph for
+a case this rare.
+
+#### 6.3.1 "How many free minutes have I got left?"
+
+`config.ts` carries the honest admission that makes this necessary:
+
+> *"the ticker can't know how much of today's free hour is left, so it prices
+> minutes beyond 60 and labels the estimate accordingly"*
+
+Assuming the free hour is **gone** is the right pessimism for a live cost
+ticker. It is the **worst possible assumption for planning**, because it
+prices a free trip as a paid one and talks the rider out of the hand-off they
+should have taken. So, three parts:
+
+1. **Estimate** today's used minutes from the rider's own tracked rides.
+   `billableMinutes(elapsedMs)` already exists; sum today's.
+2. **Label it an estimate, and be specific about the direction of the
+   error.** Rides taken outside this app are invisible to it, so our figure is
+   a **floor** on minutes used and a **ceiling** on minutes remaining. Never
+   present it as authoritative — a rider who trusts "you have 30 minutes left"
+   and gets billed has been lied to by a number we invented.
+3. **Let the rider correct it while planning.** One control — *"I've got about
+   N free minutes left"* — overriding the estimate for this trip. This is also
+   the honest resolution of (2): the rider is the only party who actually
+   knows, and asking is cheaper and truer than inferring harder.
+
+**Untouched by any of this:** the standing decision never to offer an Equity
+**Area** stopover to an Access rider (§3). That is about the *geographic*
+discount, whose interaction with the Access tier is genuinely unstated in the
+contract. The tier's own pricing, which is what this section models, is stated
+plainly in Exhibit C.
+
+### 6.4 `POST /api/v1/trip/candidates` → plans, not vehicles
+
+The response is a ranked list of **plans**. A plan is a sequence of legs; the
+single-vehicle trip is simply a plan with one ride leg, and it competes in the
+same list rather than being a separate concept.
 
 ```jsonc
 // request
@@ -364,264 +567,138 @@ specs coexist, and a rider who never opens the spec sheet sees no difference.
   "from": { "lat": 39.7392, "lon": -104.9903 },
   "to":   { "lat": 39.7508, "lon": -104.9966 },
   "spec": { /* §5.1 */ },
-  "exclude": ["<vehicle_identifier>", "..."],   // struck out this trip
-  "limit": 5,                                    // hard-capped at 5
-  "geometry": true                               // full routed legs for the top result only
+  "exclude": ["<vehicle_identifier>", "..."],
+  "rate_plan": "equity",
+  "free_minutes_remaining": 30,   // the rider's own answer; null = estimate it
+  "limit": 4,                     // plans returned, hard-capped
+  "geometry": true                // routed geometry for the top plan only
 }
 ```
 
 ```jsonc
 // response
 {
-  "candidates": [{
-    "vehicle_identifier": "…", "device_id": "…", "name": "Lunar 🐸 928",
-    "model": "cosmo", "battery_percent": 71, "reliability_tier": "ok",
-    "device_features": { "basket": true, "bell": null, … },
-    "lat": …, "lon": …,
-    "walk":  { "seconds": 214, "meters": 268, "geometry": {…} },
-    "ride":  { "seconds": 486, "meters": 1904, "profile": "safe",
-               "arrival_percent": 58, "arrival_percent_low": 49,
-               "will_make_it": true, "geometry": {…} },
-    "trip_seconds": 700,
+  "plans": [{
+    "plan_id": "…",
+    "legs": [
+      { "mode": "walk", "seconds": 92,  "meters": 118 },
+      { "mode": "ride", "seconds": 361, "meters": 1804, "vehicle": { /* … */ },
+        "unlock_cents": 0, "minute_cents": 0, "free_minutes_used": 7 },
+      { "mode": "ride", "seconds": 540, "meters": 2700, "vehicle": { /* … */ },
+        "unlock_cents": 0, "minute_cents": 0, "free_minutes_used": 9 },
+      { "mode": "walk", "seconds": 60,  "meters": 78 }
+    ],
+    "total_seconds": 1053,
+    "estimated_cents": 0,
+    "estimated_cents_is_estimate": true,
+    "free_minutes_after": 14,
+    "hand_offs": 1,
     "relaxed": [],
-    "dibs": null,
-    "favorite": { "nickname": "My Rover" },       // Phase 4; null otherwise
-    "equity": { "starts_in_area": false, "ends_in_area": true,
-                "estimated_cents": 224 }
+    "why": "Picks up the Cosmo you wanted at 16th & Blake, already on your way."
   }],
-  "relaxed": [],            // ladder rungs used to fill the list at all
+  "backups": [ /* the runners-up, kept alive for §7 */ ],
   "considered": 37,
+  "risk_tier_offered": false,     // true only under rule 1's 5-minute escape
   "beta_warning": "…"
 }
 ```
 
-**POST, not GET.** The spec is a structured object with three arrays. Encoding
-it into a query string is how the fourth serialization of the rider's
-requirements gets invented, and the first one to drift silently.
+**POST, not GET** — unchanged, and now overdetermined: the spec is a
+structured object and the request carries a rate plan and a free-minute
+figure too.
 
-Rate-limited on the same IP bucket as `/route` (`_limit_route_ip`, 30/min): it
-is a routing endpoint wearing a different hat, and it must not be a way around
-the routing budget.
+Rate-limited on the same IP bucket as `/route` (`_limit_route_ip`, 30/min).
 
-**`max_walk_minutes` is clamped to 15 when the caller says auto-dibs is on**,
-because `DIBS_MAX_WALK_MINUTES = 15` already makes a claim beyond that void
-(`dibs.ts`). Offering a candidate that cannot legally be claimed is offering
-the rider a plan the next screen refuses. The response echoes the clamp.
+**`backups` is not padding.** §7 needs the runners-up to already exist at the
+moment something goes wrong, because the rider is *riding* and a search that
+starts when the problem is noticed is a search that finishes too late to be
+useful.
 
-The `favorite` block is populated only for a session-authed caller, and only
-from that caller's own favourites. It never says a vehicle is *somebody
-else's* favourite — that is a fact about a person, not about a scooter.
+### 6.5 The client's cheap tier
 
-### 6.2 How it runs — three stages, two Valhalla calls
+`along-the-way.ts` runs the same generalised-cost search with straight lines
+and no network, over the unfiltered fleet the map already holds
+(`devices.allFeatures()`, never `visibleFeatures()` — a rider's leftover map
+filters are a view, not a statement of what they will ride). It renders the
+list instantly; the server tier corrects it with routed legs at the moment a
+decision is made, never on a refresh tick.
 
-1. **Prefilter, in SQL.** Current cycle's devices, `bbox` = the envelope of
-   `from` and `to` expanded by the walk cap, minus `exclude`, minus reserved /
-   disabled, with the spec's hard predicates pushed down (`battery_percent >=`,
-   model, `reliability_tier`, `device_features ->> …`). Cheap, indexed, and it
-   is what keeps the matrix small.
-2. **Rank on the straight-line proxy.** `walk` at pedestrian pace and `ride`
-   at the fleet speed, both through **`DETOUR_FACTOR = 1.35`** — the ratio
-   `reach.ts` already carries, measured against donated tracks. Keep the top
-   `3 × limit`.
-3. **Measure exactly, with two matrix calls.**
-   - one pedestrian `sources_to_targets`: rider → every survivor;
-   - one bicycle `sources_to_targets`: every survivor → destination.
+The reconciliation rules survive revision 2 intact, because they were never
+about walking:
 
-   Two HTTP calls, whatever the candidate count. Then a full `route()` for the
-   winner's geometry only, when `geometry: true`.
-
-**`src/valhalla.py` has no matrix helper today** — `route`,
-`trace_attributes`, `status`, and the trip accessors. Adding
-`valhalla.matrix(sources, targets, costing_options)` over
-`/sources_to_targets` is the single largest efficiency decision in this
-program and should land as its own small, tested PR ahead of the endpoint.
-**Prerequisite to verify before committing to this design:** that the deployed
-Valhalla image serves `/sources_to_targets` and that the matrix honours the
-same costing options as `route` — if it does not, fall back to the
-`ThreadPoolExecutor` fan-out `_score_alternates` already uses, capped at 4
-workers, with `limit` dropped to 3.
-
-**Known, acceptable inaccuracy.** The matrix returns a duration under the
-default costing; the route the rider is eventually *shown* comes from
-`/route`, which re-ranks alternates by bikeway share and may pick a different
-road. So the ranking number and the displayed ETA can disagree by a few
-percent. That is fine, and better than the alternative (routing everything),
-but it must be true in one direction only: the displayed ETA is the honest
-one, and where they differ the response carries the routed figure, not the
-matrix figure, for whatever it actually routed.
-
-### 6.3 Scoring
-
-```
-trip_seconds = walk_seconds + ride_seconds
-score        = trip_seconds
-             + penalty_quality        (risk tier, failed starts, negative reports)
-             + penalty_preference     (each unmet PREFERRED spec item)
-             - bonus_favorite         (Phase 4, §8.6)
-             - bonus_equity           (Phase 5a, in seconds-equivalent of money saved)
-```
-
-Everything is in **seconds**, including the money and the sentiment, so there
-is exactly one scale and no weight-tuning folklore. `recommend.ts`'s current
-normalized-score approach (`PRIORITY_WEIGHT = 15`, `OTHER_WEIGHT = 0.5`) stays
-where it is — that drawer answers "which of these is best from here", a
-different question — but the two must not disagree about which vehicle is
-*unrideable*, so the disqualification predicates are shared, not
-reimplemented.
-
-Penalties are minutes a rider would plausibly trade. Starting figures, to be
-argued with and then measured: `risk` tier +6 min (or disqualify under
-`ok-only`), each failed start +90 s, unmet preferred feature +2 min, unknown
-model +30 s.
-
-### 6.4 The client's cheap tier
-
-`along-the-way.ts` runs the *same* ranking with straight lines and no network,
-over whatever the map already has. It is what renders the list instantly, and
-what keeps working offline and past the rate limit. The server endpoint then
-corrects it. Both must agree on **disqualification** (a vehicle the client
-struck out must not reappear from the server); they are allowed to disagree on
-**order**, which is what the correction is for.
+1. They may disagree on **order**. That is what the correction is for.
+2. They may not disagree on **disqualification**. A vehicle the client struck
+   out never reappears from the server.
+3. Where they disagree on a **duration or a price**, the routed figure is
+   shown. Never an average, and never the cheap one beside the expensive one.
+4. A failed or rate-limited call degrades to the client tier with a visible
+   "estimated" label, and never blocks the list.
 
 ---
 
-## 7. Phase 3 — Claim and swap
+## 7. Phase 3 — The living plan
 
-### 7.1 The state machine (`trip-plan.ts`, frontend)
+### 7.1 One rule, replacing the auto-accept envelope
 
-```
-      ┌──────────┐  candidate chosen   ┌──────────┐   arrived
-      │ SEARCHING├────────────────────►│ CLAIMED  ├──────────────► HANDED OFF
-      └────▲─────┘   + dibs registered └────┬─────┘               (ride mode)
-           │                                │ device-watch: gone
-           │  replacement found             ▼
-      ┌────┴─────┐                     ┌──────────┐
-      │RECLAIMING│◄────────────────────┤   LOST   │
-      └────┬─────┘                     └──────────┘
-           │ nothing meets the spec, even relaxed
-           ▼
-       EXHAUSTED  (hand back the map, say what was tried)
-```
+Revision 2 had an "auto-accept envelope": claim automatically inside defined
+bounds, ask the rider outside them. **That is withdrawn.** The rider is on a
+moving scooter. A question they cannot safely read is not a safer default than
+an action they can undo at the next light.
 
-Held in memory, not persisted — the same reasoning `pending-trip.ts` records
-for itself, and for the same reason: a trip plan resurrected tomorrow is a bug
-nobody reports. `pending-trip.ts` stays what it is (a one-shot intent from the
-home bar); `trip-plan.ts` is what that intent becomes once a vehicle is
-chosen.
+So, whenever the plan is disrupted:
 
-### 7.2 The swap, step by step
+1. **Resolve it automatically.** Re-solve from where the rider is now, claim
+   what the new plan needs, release what it does not.
+2. **Tell them, once.** What changed, and what the plan is now.
+3. **Let them overrule it**, with the alternatives already on hand — the
+   `backups` §6.4 returned. One tap to see them, one to take one.
 
-On `onGone(reason)`:
+No envelope, no branch, no "was this change big enough to ask about". Always
+act, always say, always reversible.
 
-1. Add the lost vehicle to `exclude`. It is excluded for the rest of the trip,
-   even if it reappears — a scooter that went and came back within four
-   minutes is one somebody is riding in a circle, or a feed artefact, and
-   either way it has already cost this rider a walk.
-2. **Release the claim before claiming anything** —
-   `POST /api/v1/dibs/{id}/release`. Order is load-bearing:
-   `DIBS_MAX_CONCURRENT = 3` counts the rider's *other* claims too, so a
-   claim-then-release swap can be refused at the ceiling by its own
-   predecessor.
-3. Re-search from the rider's **current** position — not the origin. They have
-   been walking; the corridor has moved.
-4. Decide: auto-claim, or ask (§7.3).
-5. Claim with `replaces: <old_dibs_id>` (§7.4).
-6. Fire **one** message.
+### 7.2 What counts as a disruption
 
-### 7.3 The auto-accept envelope
+The plan is **live**, and "somebody took your scooter" is no longer a special
+case — it is one entry in a list:
 
-Auto-claim only when **all** of these hold:
+- the vehicle you are heading for is taken, disabled, or vanishes from the feed;
+- a materially better plan appears (this is revision 2's "upgrade", and it is
+  no longer a separate optional Phase 3b — it is the same code path);
+- your battery is draining faster than the estimate and the current leg will
+  not reach its hand-off;
+- you fall far enough behind the plan's timings that its dibs will expire;
+- you take a different turn and the remaining legs no longer fit.
 
-- every **must** in the spec is met, with nothing relaxed;
-- `trip_seconds` is no more than **5 minutes** worse than the plan it replaces;
-- the routed walk is within `DIBS_MAX_WALK_MINUTES`;
-- this is at most the rider's **second** swap on this trip.
+Each re-solves the **remaining** route, not just the next vehicle. Re-solving
+only the next vehicle is what leaves a rider on a route that no longer makes
+sense — the failure mode that made "a plan plus a rescue" the wrong shape.
 
-Otherwise: notify, and show the best candidate **pre-selected** with one tap
-to accept and one to open the list. A third loss is not a fourth swap — it is
-a sign the search is wrong for this corridor, and the app should say so rather
-than march the rider to a fourth kerb.
+### 7.3 Dibs, and why riding changes it
 
-Every auto-swap is undoable for as long as it is on screen, and every swap
-card names what changed: *"Cosmo → Astro. No basket (you preferred one).
-3 min further."*
+Dibs goes on the **next** vehicle in the plan, claimed while the rider is
+riding toward it. That is the mechanism that makes a hand-off trustworthy: the
+Cosmo at 16th & Blake is still there when you arrive because you claimed it
+six minutes ago.
 
-**Two ceilings that are easy to conflate.** `DIBS_MAX_TOTAL_MS` (25 min) is
-per *claim*, and a fresh claim gets a fresh window. The **trip** has no such
-cap today, so a twice-swapped rider can spend 40 minutes not riding. The
-two-swap budget above is what bounds it; it is a product rule, not a
-consequence of the dibs rules, and it belongs in `trip-plan.ts` where it can
-be seen.
+Two consequences the existing dibs rules do not cover:
 
-### 7.4 API — `sql/083_dibs_swap_chain.sql` and `POST /api/v1/dibs`
+- **`DIBS_MAX_WALK_MINUTES = 15` is the wrong constraint for a ridden
+  approach.** It exists to stop somebody claiming a vehicle they cannot reach
+  in time. Riding reaches perhaps four times as far inside the same 25-minute
+  window (`sql/076`), so the constraint must become a **time-to-arrival** one
+  computed from the actual leg, not a walk-minutes constant.
+- **A plan holds at most one claim at a time**, exactly as revision 2's swap
+  rule required. Release before claiming, always. A chained plan does not get
+  to hold three scooters hostage because it intends to visit them.
 
-```sql
-ALTER TABLE dibs
-    ADD COLUMN IF NOT EXISTS replaces_dibs_id TEXT REFERENCES dibs(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS release_reason   TEXT;   -- 'taken' | 'swapped' | 'rider' | NULL
-```
+### 7.4 What this must never claim
 
-`POST /api/v1/dibs` accepts an optional `replaces`. When present, the handler
-**releases the named claim and inserts the new one in one transaction** —
-`expires_at = NOW(), release_reason = 'swapped'` on the old row, exactly the
-release semantics `dibs_release` already uses (expire, never delete: the row
-is evidence behind a certificate somebody may already have been shown). One
-transaction, because a swap that half-applies leaves a rider holding two
-claims or none, and both are worse than the failure.
-
-What this buys, beyond tidiness:
-
-- The certificate page can say *"the second scooter on this trip"* — which is
-  a better story than the first one, and the certificate is a front door.
-- It is the **only** way to answer "does the swap actually work?" — how often
-  a claim is taken, how often a replacement is found, how much worse it was.
-  Without the link, a swap is indistinguishable from a rider who changed their
-  mind.
-
-`release_reason` is free text validated in `src/api_dibs.py`, per the house
-convention `sql/043` and `sql/077` both follow (no enums in the schema).
-
-### 7.5 Notifications — the fifth alert, and the one it replaces
-
-`dibs-notify.ts` fires four alerts, at most once each, and its own header
-records why there are not five: *"a phone that buzzes five times in twenty-five
-minutes about a scooter is a phone that gets its notifications turned off."*
-
-So the swap does not add a fifth buzz to the four. It **replaces** `taken`
-when a replacement is in hand:
-
-- replacement found, auto-accepted → `swapped`, and `taken` never fires;
-- replacement found, needs a decision → `swap_offer`, and `taken` never fires;
-- nothing found → `taken` fires as it does today, and the app hands back the
-  map with the search it tried.
-
-Implementation note: the loss and the replacement resolve on different ticks
-(the search is a network call). Hold `taken` for **one tick** when a search is
-in flight, then fire whichever is true. A one-tick delay is invisible; two
-buzzes are not.
-
-Draft copy, in the voice of the existing four:
-
-- `swapped` — `🔁 Someone took Lunar 🐸 928. You're on Cosmic 🦊 214 now — 3 min from you, still gets you there.`
-- `swap_offer` — `🔁 Lunar 🐸 928 is gone. Nearest match that fits: Cosmic 🦊 214, 6 min. Tap to take it.`
-
-### 7.6 Phase 3b — the "upgrade", off by default
-
-Same corridor search, run on a slow cadence while walking, offering a swap
-*before* anything is lost. Gated hard, or it is nagging:
-
-- only when the current target **fails a must** the new one meets (its battery
-  dropped below the floor, a report just landed against it), **or** the new one
-  saves ≥ 5 minutes of trip;
-- at most **once** per trip;
-- never after arrival;
-- never within 90 s of a previous card.
-
-This is the sub-feature the program is named after, and also the one most
-likely to be wrong. It ships last, off, and behind telemetry that can answer
-whether anyone accepts it.
+Unchanged and still binding: a claim is **dibs**, not a reservation and not a
+hold. A hand-off plan makes that vocabulary more tempting to break, not less,
+because the plan *sounds* like a booking. It is not one.
 
 ---
+
 
 ## 8. Phase 4 — My Scooters
 
@@ -811,7 +888,7 @@ button again has not made a mistake).
 
 ### 8.6 What favourites do elsewhere
 
-- **Corridor ranking (§6.3).** `bonus_favorite` — a modest one. Starting
+- **Plan ranking (§6.3).** `bonus_favorite` — a modest one. Starting
   figure: **90 seconds**, i.e. a rider will walk about a minute and a half
   further for a scooter they already like. Big enough to break a tie, small
   enough that it never beats a genuinely better trip. It is a preference, not
@@ -1216,16 +1293,17 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 |---|---|---|
 | 1 | **A favourite becomes a way to follow a person.** In-use vehicles broadcast a live moving position on a public endpoint; a targeted subscription to one is a different thing from a public map. | §8.4: position withheld server-side whenever `is_reserved`, an explicit `position_withheld` flag so nobody "fixes" it later, no location in the availability alert, a 10-favourite cap, and the QR gate on top. Write the rule into the endpoint's docstring the way `sql/076` writes down what dibs is not. |
 | 2 | **The QR gate proves less than it looks like it proves.** `validate_scan` is a plate-knowledge check; nothing today compares position. | §8.2: require the 75 m proximity check as well, and say in the code comment why the scan alone is not enough — otherwise the next feature to reuse the gate inherits the wrong assumption. |
-| 3 | **The phone is in a pocket and the tab is throttled.** The whole swap runs client-side in Phase 3. | Ship Phase 3 knowing it: the feature works while the app is open, which is the case for a rider actively walking with the arrival panel up. Say so in the UI. Phase 8 (server-side plan + Web Push, or SMS via `comms.py`, which already has consent and quota) is the real fix and should be scoped on Phase 3's measured swap rate. |
-| 4 | **Auto-dibs makes dibs worse for everyone.** Dibs' own rules exist to stop hoarding; a feature that claims automatically is exactly the pressure they were written against. | The swap always releases before it claims, so a trip holds at most one claim ever. The two-swap budget bounds the total. Watch the ratio of claims to rides in telemetry, and be willing to turn auto-claim off. |
-| 5 | **Valhalla has no matrix, or its matrix disagrees with its routes.** The two-call design is load-bearing for Phase 2's cost. | Verify against the deployed image **before** building the endpoint. Fallback is the 4-worker `ThreadPoolExecutor` fan-out already used by `_score_alternates`, with `limit` cut to 3. |
-| 6 | **The corridor search is expensive and rate-limited.** | Two Valhalla calls per search, `limit ≤ 5`, the client's straight-line tier carrying the interactive list, and the server call reserved for the moment a decision is made. |
-| 7 | **A swap chain walks somebody in a circle.** | Re-search from current position, permanent `exclude`, and the two-swap budget. Telemetry on total walk metres per trip is the check. |
+| 3 | **The phone is in a pocket and the tab is throttled.** The whole re-solve runs client-side in Phase 3. | Rev 3 makes this *less* pressing than rev 2 assumed: a rider mid-hand-off is riding, and a phone mounted for navigation has the tab in front. It still bites for the pocket case — say so in the UI. Phase 8 (server-side plan + Web Push, or SMS via `comms.py`) is the real fix. |
+| 4 | **Auto-dibs makes dibs worse for everyone.** Dibs' own rules exist to stop hoarding; a feature that claims automatically is exactly the pressure they were written against, and rev 3's unbounded chaining makes a plan want to claim *more* vehicles. | A plan holds **at most one claim at a time** — release before claim, always, however many hops it intends (§7.3). Watch the ratio of claims to rides in telemetry, and be willing to turn auto-claim off. |
+| 5 | **Valhalla has no matrix, or its matrix disagrees with its routes.** Now MORE load-bearing than in rev 2: the scooter-to-scooter relation is N×N, and a fan-out over N² pairs is not viable. | Verify against the deployed image **before** building the endpoint. Without a matrix, this phase drops to **one hand-off maximum** and a bipartite search — still useful, but say so rather than discovering it late. §6.2. |
+| 6 | **The plan search is expensive and rate-limited**, and rev 3's second matrix call is N×(N+1) rather than N×1. | Still two calls per search. N is pruned hard and deliberately: non-`risk` only (rule 1), first hop inside the walk cap, and the `P`/`D` bbox. The client's straight-line tier carries the interactive list; the server call is reserved for the moment a decision is made. |
+| 7 | **A re-solve chain sends somebody in a circle**, and rev 3 removed the hop counter that used to bound it. | Re-solve from current position, permanent `exclude`, and generalised cost that must strictly improve to be adopted. Telemetry on total legs and total minutes per trip is the check — a plan that keeps re-solving is a bug, not a feature. |
 | 8 | **Spec too tight = nothing found**, and "no scooters match" reads as "no scooters". | The published relaxation ladder, `relaxed` on every response, and an EXHAUSTED state that says what was tried and offers the one-tap loosening. |
 | 9 | **The map bridge desynchronizes.** A filter set that still claims to be "my ideal scooter" after the rider changed it is a lie the UI is telling. | §5.5's attach/detach rule, and the lossy direction stated on the toggle rather than discovered. |
 | 10 | **Availability alerts become a firehose.** A popular scooter turns over several times a day. | One alert per favourite per 6 hours, none 22:00–07:00 Denver, opt-in per favourite and off by default. |
 | 11 | **Equity advice that costs money.** Wrong tier, unmodelled Pass, a discount Veo does not apply. | Never for Access; price the worse VeoPlus reading; carry the screenshot caveat at the point of advice; never advise a split whose saving is under $0.50. |
-| 12 | **Notification fatigue kills the alert that matters.** | Swap messages *replace* `taken`, never stack with it. One-tick hold. Same four-per-claim ceiling. Availability alerts are a separate, capped, opt-in channel. |
+| 14 | **The free-minutes estimate is wrong and the rider is billed.** Rides taken outside this app are invisible to it (§6.3.1). | The figure is a *ceiling* on what is left and is labelled as one, the rider can correct it before planning, and no plan is ever described as "free" on the strength of our estimate alone. |
+| 12 | **Notification fatigue kills the alert that matters**, and rev 3 announces EVERY re-solve rather than only the ones outside an envelope. | Re-solve messages *replace* `taken`, never stack. One-tick hold, same four-per-claim ceiling. A re-solve that changes nothing the rider would act on is not announced at all — "we checked and the plan stands" is not news. |
 | 13 | **`recommend.ts` and the new scorer disagree in front of the rider.** | They answer different questions and may differ in order. They share disqualification predicates and must never differ on what is rideable. Consider folding the drawer onto the corridor scorer once Phase 2 is proven. |
 
 ---
@@ -1235,13 +1313,16 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 - **1.** A rider can write down what they like to ride, name it, have it on
   their other phone — and see only those on the map with one tap, with the
   drawer honest about the fact that it is showing them as requirements.
-- **2.** Planning a trip returns vehicles ranked by when they will get you
-  there, and the list changes correctly when you change the destination — a
-  scooter behind you drops down it.
-- **3.** A rider walks to a scooter, somebody takes it, and before they notice
-  they are walking to a different one, told once, with the difference named.
-  The dibs chain in the database can say how often that happened and whether
-  it worked.
+- **2.** Planning a trip returns *plans*, not vehicles: a rider whose ideal
+  scooter is 14 minutes' walk away is offered a 90-second walk, a short ride
+  and a hand-off to it, with the time and the cost of both unlocks on the
+  card. No plan contains a `risk`-tier vehicle unless there was nothing
+  non-risky within a 5-minute walk, and it says so when there wasn't.
+- **3.** A rider riding toward a pickup loses it to somebody else, and before
+  they have to think about it the remaining route is re-solved, the new claim
+  is placed, and one message says what changed — with the runners-up one tap
+  away if they disagree. The dibs chain in the database can say how often that
+  happened and whether the rider accepted it.
 - **4.** A rider standing at a scooter can keep it in two taps, find it again
   a week later, and be told when it comes free — and cannot, by any request
   the API will answer, see where it is while somebody is riding it.
