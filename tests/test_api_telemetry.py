@@ -231,3 +231,70 @@ def test_wrong_schema_version_dropped(monkeypatch):
         "/api/v1/telemetry/events", json=body
     ).status_code == 204
     assert not calls
+
+
+# Frontend events the allowlist used to drop on the floor (owner decision:
+# collect all eight). `active_vehicle` is deliberately absent — the frontend
+# is deleting it.
+_NEWLY_COLLECTED = (
+    "dibs", "home_bar", "arrival_panel", "about_founder_open",
+    "device_gone", "dibs_alert", "recenter", "ride_mode_free",
+)
+
+
+def test_newly_collected_events_are_allowlisted():
+    assert set(_NEWLY_COLLECTED) <= api_telemetry.ALLOWED_EVENTS
+    assert "active_vehicle" not in api_telemetry.ALLOWED_EVENTS
+
+
+def test_newly_collected_events_are_stored(monkeypatch):
+    calls, _ = _install(monkeypatch)
+    r = _client().post(
+        "/api/v1/telemetry/events",
+        json=_batch([_event(n, action="x") for n in _NEWLY_COLLECTED]),
+    )
+    assert r.status_code == 204
+    [rows] = _inserted_rows(calls)
+    assert [row[1] for row in rows] == list(_NEWLY_COLLECTED)
+
+
+def test_drop_log_names_the_dropped_events(monkeypatch, caplog):
+    _install(monkeypatch)
+    caplog.set_level("INFO", logger=api_telemetry.__name__)
+    _client().post(
+        "/api/v1/telemetry/events",
+        json=_batch([
+            _event("page_load"),
+            _event("active_vehicle"),
+            _event("active_vehicle"),
+            _event("brand_new"),
+        ]),
+    )
+    [msg] = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage()]
+    assert "dropped 3 event(s)" in msg
+    # deduplicated, in first-seen order
+    assert msg.endswith(": active_vehicle, brand_new")
+
+
+def test_drop_log_sanitizes_client_supplied_names(monkeypatch, caplog):
+    _install(monkeypatch)
+    caplog.set_level("INFO", logger=api_telemetry.__name__)
+    hostile = "evil\nFAKE LOG LINE\x1b[31m" + "x" * 500
+    _client().post(
+        "/api/v1/telemetry/events",
+        json=_batch([_event(hostile), {"n": 42}, "not-an-object"]),
+    )
+    [msg] = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage()]
+    assert "\n" not in msg and "\x1b" not in msg
+    # truncated: nowhere near the 500-char payload
+    assert len(msg) < 200
+    assert "evil?FAKE?LOG?LINE?" in msg
+    assert "<non-string-name>" in msg and "<non-object>" in msg
+
+
+def test_drop_log_caps_name_count():
+    names = [f"n{i}" for i in range(25)]
+    out = api_telemetry._dropped_summary(names)
+    assert out.startswith("n0, n1,")
+    assert out.endswith(f"(+{25 - api_telemetry._DROP_LOG_MAX_NAMES} more)")
+    assert "n10" not in out.split(" (+")[0].split(", ")

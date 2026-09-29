@@ -183,6 +183,52 @@ def test_dwell_evidence_fields_passed_through(_fake_db):
     assert props["dwell_peer_median_hours"] == 6.0  # rounded to 1 dp
 
 
+def _with_percentile(monkeypatch, fraction):
+    monkeypatch.setattr(
+        api_public, "stats_for_cycle",
+        lambda cycle_id, snapshot_time: {
+            "8c4a1f0d2e9b7a35": DwellPeerStats(
+                dwell_hours=31.0, percentile=fraction, peer_median_hours=6.0,
+                peer_count=200, is_outlier=False,
+            )
+        },
+    )
+
+
+@pytest.mark.parametrize("fraction, wire", [
+    (0.895, 89),      # round() used to ship 90 here -> client-only outlier
+    (0.8999, 89),
+    (179 / 200, 89),  # 0.895 as an actual k/n
+    (9 / 10, 90),
+    (27 / 30, 90),
+    (0.964, 96),
+    (1.0, 100),
+    (0.0, 0),
+])
+def test_dwell_percentile_hood_is_floored_on_the_wire(
+        _fake_db, monkeypatch, fraction, wire):
+    """The wire value must satisfy `>= 90` exactly when the server's
+    unrounded `>= 0.90` outlier gate does — so it is floored, not rounded."""
+    _with_percentile(monkeypatch, fraction)
+    props = _call()["features"][0]["properties"]
+    assert props["dwell_percentile_hood"] == wire
+    assert isinstance(props["dwell_percentile_hood"], int)
+    assert (props["dwell_percentile_hood"] >= 90) == (fraction >= 0.90)
+
+
+def test_dwell_tiers_use_snapshot_time_not_wall_clock(_fake_db, monkeypatch):
+    """Parked 1 h before the snapshot. _SNAP is in the past, so a tier
+    computed against wall-clock now would see days of dwell (high_risk,
+    quality knocked to poor) while parked_hours in the SAME object said 1.0.
+    Every dwell-derived field must read the one snapshot_time clock."""
+    row = _ROW[:23] + (_SNAP - timedelta(hours=1),) + _ROW[24:]
+    monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
+    props = _call()["features"][0]["properties"]
+    assert props["parked_hours"] == 1.0
+    assert props["quality_designation"] == "great"
+    assert props["reliability_tier"] == "ok"
+
+
 # ---------- unknown via peer-median dwell ratio (end-to-end, not just the
 # compute_reliability_tier unit tests in test_quality.py) ---------------------
 def test_reliability_unknown_via_dwell_ratio_end_to_end(_fake_db, monkeypatch):
@@ -191,8 +237,9 @@ def test_reliability_unknown_via_dwell_ratio_end_to_end(_fake_db, monkeypatch):
     floor and should surface as "unknown" through the real handler —
     exercises the peer_median_dwell_hours wiring at the api_public.py call
     site, not compute_reliability_tier in isolation."""
-    now = datetime.now(timezone.utc)
-    row = _ROW[:23] + (now - timedelta(hours=40),) + _ROW[24:]
+    # Anchored to the cycle's snapshot_time: the handler measures dwell
+    # from there, not from the wall clock.
+    row = _ROW[:23] + (_SNAP - timedelta(hours=40),) + _ROW[24:]
     monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
     monkeypatch.setattr(
         api_public, "stats_for_cycle",
@@ -210,8 +257,9 @@ def test_reliability_unknown_via_dwell_ratio_end_to_end(_fake_db, monkeypatch):
 def test_reliability_ok_when_under_dwell_ratio_end_to_end(_fake_db, monkeypatch):
     """Same 40h dwell, but a 22h peer median keeps the ratio under 2x —
     confirms it's the ratio gating this, not merely having peer stats at all."""
-    now = datetime.now(timezone.utc)
-    row = _ROW[:23] + (now - timedelta(hours=40),) + _ROW[24:]
+    # Anchored to the cycle's snapshot_time: the handler measures dwell
+    # from there, not from the wall clock.
+    row = _ROW[:23] + (_SNAP - timedelta(hours=40),) + _ROW[24:]
     monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
     monkeypatch.setattr(
         api_public, "stats_for_cycle",
@@ -229,8 +277,9 @@ def test_reliability_ok_when_under_dwell_ratio_end_to_end(_fake_db, monkeypatch)
 def test_reliability_ok_when_under_dwell_floor_end_to_end(_fake_db, monkeypatch):
     """10h dwell at 2.5x a 4h median used to read "unknown"; the patience
     floor (36h here) now keeps it "ok"."""
-    now = datetime.now(timezone.utc)
-    row = _ROW[:23] + (now - timedelta(hours=10),) + _ROW[24:]
+    # Anchored to the cycle's snapshot_time: the handler measures dwell
+    # from there, not from the wall clock.
+    row = _ROW[:23] + (_SNAP - timedelta(hours=10),) + _ROW[24:]
     monkeypatch.setattr("tests.test_api_devices_payload._ROW", row)
     monkeypatch.setattr(
         api_public, "stats_for_cycle",

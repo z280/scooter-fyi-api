@@ -24,6 +24,7 @@ from .equity_groups import COMPLIANCE_GROUPS, OFFICIAL_GROUP, compliance_pass_co
 from .pg import connection
 from . import battery_model, vehicle_identity
 from .quality import (
+    dwell_percentile_wire,
     smart_ride_grade,
     compute_battery_percent,
     compute_quality_designation,
@@ -251,8 +252,10 @@ _RANK_FIELDS = (
 )
 
 # Conservative client-side cache: the underlying cycle only changes every
-# ~10 min, but has_negative_report / dwell drift within a cycle. Pair with
-# the cycle-keyed ETag for cheap 304 revalidation on the 90 s poll loop.
+# ~10 min, but has_negative_report and the device_state-backed fields can
+# drift within a cycle (see the ETag comment below). Dwell-derived fields do
+# not: they are anchored to snapshot_time. Pair with the cycle-keyed ETag
+# for cheap 304 revalidation on the 90 s poll loop.
 _DEVICES_CACHE_HEADER = "public, max-age=30"
 
 
@@ -357,10 +360,19 @@ def _devices_current_impl(
                     raise HTTPException(400, detail=f"bbox parse error: {e}")
 
             # Weak, cycle-keyed ETag: the 90 s poll loop revalidates for
-            # free until a new cycle lands (~every 10 min). Weak because
-            # has_negative_report drift within a cycle — a 304 defers that
-            # by at most one cycle. The ETag must vary with EVERY input that
-            # changes the body: the include tokens AND the filters
+            # free until a new cycle lands (~every 10 min). Weak because the
+            # body is not a pure function of the cycle: has_negative_report
+            # uses a wall-clock NOW() - 24h window and sees reports filed
+            # mid-cycle, and the device_state columns (failed starts, dwell
+            # start, rental outcomes/grade, confirmed features) are joined
+            # live — the next cycle's ingest updates them a little before
+            # that cycle is marked complete, and feature confirmations land
+            # any time. A 304 defers any of that by at most one cycle. The
+            # dwell/battery tiers themselves no longer drift: quality,
+            # reliability, parked_hours and battery_reading all read
+            # snapshot_time, not the wall clock.
+            # The ETag must vary with EVERY input that changes the body: the
+            # include tokens AND the filters
             # (form_factor / spatial_status / include_outliers / bbox), or a
             # client reusing a tag across filtered requests gets a 304 for a
             # different representation.
@@ -502,7 +514,10 @@ def _devices_current_impl(
     # time. See src/vehicle_identity.py for the full reasoning.
     # One clock for the whole payload: staleness computed per row against
     # datetime.now() would drift across a 9,000-device response and make two
-    # devices parked at the same instant disagree.
+    # devices parked at the same instant disagree. It is the cycle's
+    # snapshot_time — the anchor dwell_stats uses too — so parked_hours,
+    # battery_reading, quality_designation and reliability_tier all measure
+    # dwell from the same instant, and none of them move within a cycle.
     now_utc = snapshot_time or datetime.now(timezone.utc)
 
     features = []
@@ -525,6 +540,11 @@ def _devices_current_impl(
             first_observed_at_location=r[23],
             has_negative_report=bool(r[20]),
             is_dwell_outlier=is_dwell_outlier,
+            # The payload's one clock (see now_utc above) — the same instant
+            # parked_hours and battery_reading use, and the same one
+            # /api/v1/h3/aggregates passes. Without it these tiers read
+            # wall-clock now while parked_hours in the same object did not.
+            now=now_utc,
         )
         reliability = compute_reliability_tier(
             number_failed_starts=number_failed_starts,
@@ -534,6 +554,7 @@ def _devices_current_impl(
             is_dwell_outlier=is_dwell_outlier,
             peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
             battery_percent=battery_percent,
+            now=now_utc,
         )
         properties: dict[str, Any] = {
             "device_id": r[0],
@@ -580,11 +601,10 @@ def _devices_current_impl(
             # plate itself in free_bike_status, keyed by the same bike_id we
             # emit as device_id. The raw plate is still admin-only, below.
             "plate_suffix": vehicle_identity.plate_suffix(r[26]),
-            "dwell_percentile_hood": (
-                round(dstat.percentile * 100)
-                if dstat and dstat.percentile is not None
-                else None
-            ),
+            # Floored, not rounded: wire >= 90 must agree exactly with the
+            # server's unrounded >= 0.90 outlier gate (quality.py).
+            "dwell_percentile_hood": dwell_percentile_wire(
+                dstat.percentile if dstat else None),
             "dwell_peer_median_hours": (
                 round(dstat.peer_median_hours, 1)
                 if dstat and dstat.peer_median_hours is not None
