@@ -155,7 +155,9 @@ _MONITOR_INGEST = {
     "recovery_threshold": 1,
 }
 _MONITOR_DAILY_SLA = {
-    "schedule": {"type": "crontab", "value": "0 9 * * *"},
+    # Mirrors the crontab's `2 9 * * *` (09:02, after the window's last
+    # cycle has had time to land -- see the comment there).
+    "schedule": {"type": "crontab", "value": "2 9 * * *"},
     "timezone": "America/Denver",
     "checkin_margin": 10,
     "max_runtime": 5,

@@ -13,13 +13,38 @@
 # cadence in prod = edit /admin/scheduler/edit to match.
 */2 * * * * cd /app && python -m src.cli ingest_cycle
 
-# Daily SLA window: 9:00 AM Denver, DST-aware. Computes the 6-9 AM window
-# that just closed. Idempotent via ON CONFLICT.
-0 9 * * * cd /app && python -m src.cli daily_sla
+# One extra ingest at 06:05, five minutes into the 6-9 AM SLA window. Its
+# reason, from the operator's note in the live crontab: "belt-and-suspenders
+# ... in case the 6:00 firing was eaten by a deploy / container restart".
+# That most likely dates from the */10 cadence, when a lost 06:00 left the
+# window empty until 06:10; at */2 the 06:02 firing already covers it, so
+# today this is largely redundant. Kept because production runs it (synced
+# from the live crontab 2026-09-29). Two things that note did not say: it
+# is its own line, so supercronic's per-line no-overlap rule does not stop
+# it running alongside the 06:04 cycle (they overlap by ~45 s); and the
+# "staleness check will no-op" it relied on never trips on this feed (it is
+# generated per request), so it writes a real snapshot every morning -- one
+# extra sample in that day's window average, not a no-op.
+5 6 * * * cd /app && python -m src.cli ingest_cycle
 
-# Daily trip/popularity rollup: same 9:00 AM slot, but rolls up
-# YESTERDAY's full calendar day (today isn't over yet). Separate command
-# from daily_sla so a failure in one doesn't block or mask the other.
+# Daily SLA window: 09:02 Denver, DST-aware. Computes the 6-9 AM window
+# that just closed. Idempotent via ON CONFLICT.
+#
+# Why :02 rather than :00 was never written down: the operator edit that
+# introduced it (in the live crontab since at least 2026-07-07) says only
+# "9:02". What the two minutes buy, whatever the original reason: the
+# window is snapshot_time >= 06:00 AND < 09:00 (src/daily_sla.py), and a
+# cycle stamps snapshot_time when it STARTS but writes the row when it
+# finishes. The 08:58 cycle, the last one inside the window, lands at about
+# 08:59:45 (Sept 2026) and ~2% of cycles run past two minutes, so a 09:00:00
+# run has seconds to spare where 09:02 has two minutes. Synced from the live
+# crontab 2026-09-29.
+2 9 * * * cd /app && python -m src.cli daily_sla
+
+# Daily trip/popularity rollup: 9:00 AM, but rolls up YESTERDAY's full
+# calendar day (today isn't over yet), so it has no window edge to wait
+# for. Separate command from daily_sla so a failure in one doesn't block or
+# mask the other.
 0 9 * * * cd /app && python -m src.cli daily_trips
 
 # Equity Area compliance reprocessing (sql/079 / src/equity_backfill.py).
@@ -30,10 +55,10 @@
 # durable record of where the fleet was, now that raw_telemetry_points is
 # flushed to R2 after 24 hours.
 #
-# 9:40 AM, deliberately AFTER the 9:00 daily_sla / daily_trips pair and the
-# Monday 9:15 cell-universe refresh: it re-averages daily_sla rows that the 9:00
-# job may have only just written, so running first would just make it
-# re-run them tomorrow.
+# 9:40 AM, deliberately AFTER the 9:00 daily_trips / 9:02 daily_sla pair
+# and the Monday 9:15 cell-universe refresh: it re-averages daily_sla rows
+# that the 9:02 job may have only just written, so running first would just
+# make it re-run them tomorrow.
 #
 # Self-limiting and idempotent: it only picks up days whose SLA row still
 # has no equity figure, within a 14-day lookback, so steady state is a
@@ -161,8 +186,8 @@
 # this list with whatever has points in the window anyway — so a cell that
 # saw its first device on Tuesday still renders on Tuesday, not next Monday.
 #
-# Monday 09:15 keeps the old slot's reasoning: the 9:00 AM Denver rollups
-# (daily_sla/daily_trips) are above, and :15 keeps this off their seq-scan
+# Monday 09:15 keeps the old slot's reasoning: the 9:00/9:02 AM Denver
+# rollups (daily_trips/daily_sla) are above, and :15 keeps this off their seq-scan
 # I/O rather than contending for the same few seconds.
 15 9 * * 1 cd /app && python -m src.cli refresh_area_universe
 
@@ -185,9 +210,9 @@
 
 # User-analytics daily rollup (sql/061 / src/analytics.py): recomputes
 # YESTERDAY's telemetry_daily + request_metrics_daily (Denver calendar day,
-# same convention as daily_trips). 9:20 keeps it clear of the 9:00
-# sla/trips pair and the Monday 9:15 cell-universe refresh — same morning rollup
-# family, its own slot. Idempotent delete-and-reinsert per day.
+# same convention as daily_trips). 9:20 keeps it clear of the 9:00/9:02
+# trips/sla pair and the Monday 9:15 cell-universe refresh — same morning
+# rollup family, its own slot. Idempotent delete-and-reinsert per day.
 20 9 * * * cd /app && python -m src.cli rollup_analytics
 
 # User-analytics retention (privacy policy / src/api_meta.py _PRIVACY):

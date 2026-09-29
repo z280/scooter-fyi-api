@@ -1232,7 +1232,7 @@ GET /api/v1/equity-estimate?ranks=1,2
 
 ### `GET /api/v1/compliance/daily/latest`
 
-Most recent daily 6 AM – 9 AM Denver SLA window. **This is the contractually-correct compliance metric per License Exhibit B** — the every-10-min `/snapshots/latest` value is informational, but the binding SLA is the morning-window daily average. Computed once per day at 9:00 AM Denver time.
+Most recent daily 6 AM – 9 AM Denver SLA window. **This is the contractually-correct compliance metric per License Exhibit B** — the every-10-min `/snapshots/latest` value is informational, but the binding SLA is the morning-window daily average. Computed once per day at 9:02 AM Denver time, just after the window closes.
 
 > **Which field is the answer:** `avg_percent_all_devices_equity` / `compliance_equity_pass`, measured against the city's official Equity Area map (`equity`). The city clarified that map in August 2026; before then this documentation pointed at `..._v1`, which is now retained history. The `_v1`, `_v2` and `_erN` families are all still computed and still returned, so a dashboard built against the old field keeps working — it is just no longer reporting the number the contract turns on.
 >
