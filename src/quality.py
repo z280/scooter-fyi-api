@@ -150,7 +150,9 @@ The evidence is exposed publicly as `dwell_percentile_hood` (0-100) and
 `dwell_peer_median_hours` so the frontend can explain verdicts
 ("idle 31h — 5× its block's typical 6h") instead of asserting them.
 Percentile is the ≤-fraction: share of peers (self included) whose dwell
-is ≤ this device's dwell.
+is ≤ this device's dwell. On the wire it is FLOORED to an integer
+(`dwell_percentile_wire`), never rounded, so a client testing `>= 90`
+agrees with the server's `>= 0.90` exactly.
 
 BATTERY PERCENT
 ---------------
@@ -169,6 +171,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -297,6 +300,28 @@ class DwellPeerStats:
     peer_median_hours: float | None
     peer_count: int
     is_outlier: bool
+
+
+# Slack for float error in `fraction * 100`. The fraction is k/n; if k/n*100
+# is not an integer m it sits at least 1/n below the next one, so any epsilon
+# well under 1/n (n = peer-set size, bounded by the fleet, ~10^4) can never
+# lift a true 89.9x to 90 — while it does rescue exact values like 29/100,
+# whose product lands on 28.999999999999996.
+_PERCENTILE_WIRE_EPS = 1e-9
+
+
+def dwell_percentile_wire(fraction: float | None) -> int | None:
+    """`DwellPeerStats.percentile` as the public 0-100 int, FLOORED.
+
+    Floor, not round: the outlier rule tests the unrounded fraction
+    ``>= _DWELL_OUTLIER_PERCENTILE`` (0.90), and clients re-test the wire
+    value ``>= 90``. With round(), a true 0.895 shipped as 90 and the client
+    flagged an outlier the server did not. With floor, wire ``>= 90`` iff
+    fraction ``>= 0.90``.
+    """
+    if fraction is None:
+        return None
+    return math.floor(fraction * 100 + _PERCENTILE_WIRE_EPS)
 
 
 def compute_dwell_peer_stats(

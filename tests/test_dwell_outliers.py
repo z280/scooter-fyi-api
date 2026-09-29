@@ -19,9 +19,12 @@ from __future__ import annotations
 from datetime import timedelta
 
 import h3
+import pytest
 
 from src.quality import (
+    _DWELL_OUTLIER_PERCENTILE,
     compute_dwell_peer_stats,
+    dwell_percentile_wire,
     compute_quality_designation,
     compute_reliability_tier,
 )
@@ -228,3 +231,30 @@ def test_outlier_demerit_stacks_with_dwell_demerit():
     with_flag = compute_quality_designation(**base, is_dwell_outlier=True)
     assert without_flag == "acceptable"
     assert with_flag == "poor"
+
+
+# ---------- dwell_percentile_hood wire encoding (floor, not round) -----------
+@pytest.mark.parametrize("fraction, wire", [
+    (9 / 10, 90), (27 / 30, 90), (0.9, 90),
+    (0.8999, 89), (0.895, 89), (0.8950001, 89),
+    (1.0, 100), (0.0, 0),
+    (29 / 100, 29),   # 29/100*100 == 28.999999999999996 in float
+    (57 / 100, 57),   # 56.99999999999999
+    (None, None),
+])
+def test_dwell_percentile_wire_boundaries(fraction, wire):
+    assert dwell_percentile_wire(fraction) == wire
+
+
+def test_dwell_percentile_wire_is_exact_floor_of_every_k_over_n():
+    """Percentiles are k/n. For every peer-set size up to 1,000 (and a
+    fleet-scale n), the wire value must equal the exact integer floor
+    100k // n, and `wire >= 90` must agree with the server's float gate
+    `k/n >= _DWELL_OUTLIER_PERCENTILE`."""
+    sizes = list(range(1, 1001)) + [9_000, 9_973, 12_000]
+    for n in sizes:
+        for k in range(n + 1):
+            frac = k / n
+            wire = dwell_percentile_wire(frac)
+            assert wire == (100 * k) // n, (k, n)
+            assert (wire >= 90) == (frac >= _DWELL_OUTLIER_PERCENTILE), (k, n)

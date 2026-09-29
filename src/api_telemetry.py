@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -57,7 +58,19 @@ ALLOWED_EVENTS: frozenset[str] = frozenset(
         "install_prompt",
         # navigation
         "mode_switch",
+        # Home bar funnel: opened -> destination chosen -> wheels answered.
+        # Props are an `action` (and the chosen `wheels`), never the place.
+        "home_bar",
+        # Walk-to-scooter panel: manual arrive, set/change destination,
+        # choose route, find another. `action` only.
+        "arrival_panel",
+        # Crosshair button. Tapped often = the map is losing riders.
+        "recenter",
+        # Free-ride mode from the top bar (GPS track, no vehicle/destination).
+        "ride_mode_free",
         "drawer_open",
+        # The About page's founder note — the OPEN only, never the close.
+        "about_founder_open",
         "account_tab",
         "theme_change",
         # features
@@ -76,6 +89,14 @@ ALLOWED_EVENTS: frozenset[str] = frozenset(
         "geocode_search",
         "hex_tool",
         "cluster_tool",
+        # Dibs: certificate shown, dropped/released, explainer opened, link
+        # copied. `action` only — like favorites, never the vehicle.
+        "dibs",
+        # Which dibs alert fired (`alert`); taken-vs-countdown is the honest
+        # measure of whether dibs is worth anything.
+        "dibs_alert",
+        # The walked-to scooter left the feed first, and why (`reason`).
+        "device_gone",
         # device popup
         "popup_open",
         "popup_action",
@@ -107,6 +128,40 @@ _CLOCK_SKEW = timedelta(hours=1)
 _RATE_BUCKET = "telemetry_ip"
 _RATE_LIMIT = 120
 _RATE_WINDOW_S = 3600
+
+
+# Drop-log shaping. The names are CLIENT-SUPPLIED, so they are reduced to a
+# safe charset and truncated before they reach a log line (no newlines, no
+# ANSI escapes, no megabyte "name"), deduplicated, and capped in count. The
+# point of logging them at all: a name the frontend ships but this allowlist
+# lacks is otherwise invisible — a count alone says nothing about which.
+_DROP_LOG_MAX_NAMES = 10
+_DROP_LOG_MAX_NAME_CHARS = 40
+_DROP_LOG_UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]")
+_NON_OBJECT = "<non-object>"
+_NON_STRING = "<non-string-name>"
+
+
+def _safe_event_name(name: str) -> str:
+    if name in (_NON_OBJECT, _NON_STRING):
+        return name
+    clipped = name[:_DROP_LOG_MAX_NAME_CHARS]
+    safe = _DROP_LOG_UNSAFE.sub("?", clipped)
+    if len(name) > _DROP_LOG_MAX_NAME_CHARS:
+        safe += "..."
+    return safe or "<empty>"
+
+
+def _dropped_summary(names: list[str]) -> str:
+    """Deduplicated, sanitized, count-capped rendering for the drop log."""
+    unique: list[str] = []
+    for name in names:
+        safe = _safe_event_name(name)
+        if safe not in unique:
+            unique.append(safe)
+    shown = unique[:_DROP_LOG_MAX_NAMES]
+    extra = len(unique) - len(shown)
+    return ", ".join(shown) + (f" (+{extra} more)" if extra else "")
 
 
 def _vocab(value: object, allowed: frozenset[str]) -> str:
@@ -188,14 +243,17 @@ async def ingest_events(request: Request) -> Response:
 
     now = datetime.now(timezone.utc)
     rows = []
-    dropped = 0
+    dropped: list[str] = []
     for event in events:
         if not isinstance(event, dict):
-            dropped += 1
+            dropped.append(_NON_OBJECT)
             continue
         name = event.get("n")
-        if not isinstance(name, str) or name not in ALLOWED_EVENTS:
-            dropped += 1
+        if not isinstance(name, str):
+            dropped.append(_NON_STRING)
+            continue
+        if name not in ALLOWED_EVENTS:
+            dropped.append(name)
             continue
         sid = event.get("sid")
         sid = sid[:MAX_SID_CHARS] if isinstance(sid, str) and sid else "?"
@@ -207,7 +265,10 @@ async def ingest_events(request: Request) -> Response:
                 received_at = claimed
         rows.append((name, sid, received_at, _clean_props(event.get("p"))))
     if dropped:
-        log.info("telemetry: dropped %d event(s) from one batch", dropped)
+        log.info(
+            "telemetry: dropped %d event(s) from one batch: %s",
+            len(dropped), _dropped_summary(dropped),
+        )
     if not rows:
         return Response(status_code=204)
 
