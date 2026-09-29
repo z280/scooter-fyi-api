@@ -1022,8 +1022,11 @@ def equity_backfill_cli(sub_args: list[str]) -> int:
     fleet, fidelity and rebuilt metrics (`null` only when nothing could be
     reconstructed) — the tool for checking the reconstruction against days
     the live pipeline already measured. The day's average is always over
-    the 6-9 AM SLA window, as the write path's daily_sla would store it,
-    even with `--full-day`.
+    the 6-9 AM SLA window (as daily_sla averages), even with `--full-day`,
+    and covers ONLY gate-passing reconstructions. It is a reconstructed-only
+    figure, not a prediction of the stored SLA row: a real write keeps any
+    existing value on a gate-rejected snapshot in the window, and
+    daily_sla's AVG() would include it.
     """
     usage = "usage: python -m src.cli equity_backfill <start> [end] [--full-day] [--dry-run]"
     flags = {a for a in sub_args if a.startswith("--")}

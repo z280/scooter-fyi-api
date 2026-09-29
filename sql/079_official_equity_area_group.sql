@@ -23,7 +23,9 @@
 --
 -- The sitting/standing columns (total_/percent_all_/percent_{sitting,
 -- standing}_equity and their avg_* daily counterparts) STAY NULL on
--- reprocessed days (2026-05-31 .. 2026-08-23; live from 2026-08-24):
+-- reprocessed days (2026-05-31 .. 2026-08-23, except 2026-08-09 and
+-- 2026-08-10, which failed the fidelity gate on every snapshot and were
+-- never rebuilt; live from 2026-08-24):
 -- src/equity_backfill.py does not rebuild the split
 -- (device_history.vehicle_use_type is only populated on stops recorded
 -- from ~2026-07-05). NULL there means unmeasured, not zero, and must not

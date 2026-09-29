@@ -85,8 +85,9 @@ vs reconstructed fleet, fidelity, gate outcome, and rebuilt metrics —
 None only when there is no reconstructed fleet) and the day average over
 the gate-passing snapshots inside the 6-9 AM SLA window (even with
 `window_only=False`), computed in memory the same way daily_sla does (a
-plain mean, NULLs skipped). Nothing in this module
-writes the job_runs ledger either path: only the zero-arg scheduled
+plain mean, NULLs skipped) — a reconstructed-only figure, which equals
+the stored SLA value only when no gate-rejected snapshot in the window
+already holds a value. Nothing in this module writes the job_runs ledger either path: only the zero-arg scheduled
 commands in src/cli.py are recorded there, and `equity_backfill` is a
 sub-argument command.
 """
@@ -503,14 +504,17 @@ def reprocess_date(
     result.snapshots_passing_gate = len(pending)
 
     if dry_run:
-        # Predicts what the write path would store: daily_sla's AVG() over
-        # the contractual 6-9 AM window ONLY, even when `--full-day` loaded
-        # (and reports per-snapshot detail for) the whole day — averaging 24
-        # hours would label a different number as the SLA figure. Same
-        # arithmetic: a plain mean, NULLs skipped. Only gate-passing
-        # snapshots count — exactly the ones a real run would write — so
-        # this is the reconstructed-only figure, never a blend with
-        # whatever live values the day already holds.
+        # A reconstructed-only average over daily_sla's contractual 6-9 AM
+        # window, even when `--full-day` loaded (and reports per-snapshot
+        # detail for) the whole day — averaging 24 hours would label a
+        # different number as the SLA figure. Same arithmetic as daily_sla:
+        # a plain mean, NULLs skipped. Only gate-passing snapshots count —
+        # exactly the ones a real run would write — so this is never a
+        # blend with live values the day already holds. That also means it
+        # is NOT always what a real run would store: a real write leaves an
+        # existing value on a gate-rejected snapshot in place, and
+        # daily_sla's AVG() includes it. On a day with no prior values
+        # (the backfill's actual targets) the two coincide.
         win_start, win_end = daily_sla.window_for_date(d)
         pcts = [
             m["percent_all_devices_equity"]
