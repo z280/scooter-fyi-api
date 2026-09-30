@@ -74,11 +74,14 @@ Two known gaps, both handled explicitly rather than papered over:
    of the feed past ABSENT_STOP_AFTER, stamping departed_at with the last
    time it was seen and `departure_reason = 'absent'`. The absence therefore
    drops out of the intervals read here, whether or not the vehicle ever
-   comes back. `python -m src.cli close_ghost_stops` closed the backlog under
-   the same rule, but it can only see vehicles that are still absent. A
-   temporary absence recorded before sql/083, which ended in a return, stays
-   in history as part of a stop, so days before that deploy keep some upward
-   bias. The gate is unchanged and still the control.
+   comes back. That fixes stops from the deploy on. For the ones already open
+   before it, `python -m src.cli close_ghost_stops` applies the same rule to
+   the backlog — a manual one-off, so those stops stay open, and days read
+   here keep counting them, until someone runs it. Even once run it can only
+   see vehicles that are still absent: a temporary absence recorded before
+   sql/083, which ended in a return, stays in history as part of a stop, so
+   days before that deploy keep some upward bias either way. The gate is
+   unchanged and still the control.
 
 WHAT IT WRITES ----------------------------------------------------------
 The `*_equity` columns on `snapshot_metadata_core` (sql/079), then

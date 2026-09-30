@@ -372,6 +372,25 @@ def update_for_cycle(
     stats.skipped_no_identifier = sum(1 for d in devices if not d.vehicle_identifier)
 
     if not eligible:
+        # Nothing observable this cycle — but absence still needs sweeping.
+        # A fresh payload with no usable identifier in it is the strongest
+        # evidence of absence there is, and it is exactly the case where
+        # every open stop wants closing: a withdrawal of the whole fleet, or
+        # a feed that stopped carrying plates. Returning here without the
+        # sweep would leave behind precisely the ghost stops this rule
+        # exists to remove, in the one case that matters most. Nothing
+        # upstream aborts a zero-device cycle (src/cycle.py writes the core
+        # snapshot and calls this either way), so it has to be handled here.
+        with connection() as conn:
+            with conn.cursor() as cur:
+                stats.stops_closed_absent = close_absent_stops(
+                    cur, absence_window(cur, snapshot_time, bounded=True))
+            conn.commit()
+        log.info(
+            "device_state cycle=%s: nothing eligible (skipped=%d), "
+            "swept only: stops(closed_absent=%d)",
+            cycle_id, stats.skipped_no_identifier, stats.stops_closed_absent,
+        )
         return stats
 
     with connection() as conn:

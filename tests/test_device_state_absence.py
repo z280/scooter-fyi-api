@@ -27,12 +27,13 @@ _K = device_state.ABSENT_MIN_MISSED_CYCLES
 _M = device_state.ABSENT_SWEEP_WINDOW_CYCLES
 
 
-def _device(lat_lon=_SPOT, *, is_reserved=None, device_id="bike-1") -> TaggedDevice:
+def _device(lat_lon=_SPOT, *, is_reserved=None, device_id="bike-1",
+            vehicle_identifier=_VID) -> TaggedDevice:
     lat, lon = lat_lon
     return TaggedDevice(
         device_id=device_id, vehicle_type_id="1", form_factor="scooter",
         lat=lat, lon=lon, spatial_status="denver_core",
-        vehicle_identifier=_VID, vehicle_plate="1234567",
+        vehicle_identifier=vehicle_identifier, vehicle_plate="1234567",
         current_range_meters=20000, is_reserved=is_reserved,
     )
 
@@ -216,6 +217,32 @@ def test_every_cycle_sweeps_last_after_its_own_history_writes(cycle):
     assert sweep > cur.index_of("UPDATE device_state SET vehicle_plate")
     # It is the bounded, per-cycle form.
     assert "last_observed_at >= %(since)s" in cur.calls[sweep][0]
+
+
+def test_a_feed_with_nothing_usable_in_it_still_sweeps(cycle):
+    """The case where the sweep matters most must not be the one it skips.
+
+    A fresh payload carrying no usable identifier — the whole fleet
+    withdrawn, or a feed that stopped sending plates — leaves nothing to
+    observe, so the cycle has no per-device work to do. It still has a sweep
+    to do: those are exactly the vehicles whose stops want closing, and
+    nothing upstream aborts the cycle (src/cycle.py writes the core snapshot
+    and calls the updater either way), so the stops would stay open for as
+    long as the condition lasted.
+    """
+    stats, cur = cycle([_device(vehicle_identifier=None)],
+                       snapshot_times=_cycles(_K + _M))
+    assert stats.skipped_no_identifier == 1
+    sweep = cur.index_of("departure_reason = 'absent'")
+    # The bounded, per-cycle form, same as any other cycle's sweep.
+    assert "last_observed_at >= %(since)s" in cur.calls[sweep][0]
+
+
+def test_an_empty_feed_still_sweeps(cycle):
+    """Same for a payload with no devices at all, rather than unusable ones."""
+    stats, cur = cycle([], snapshot_times=_cycles(_K + _M))
+    assert stats.skipped_no_identifier == 0
+    assert cur.ran("departure_reason = 'absent'")
 
 
 def test_a_move_records_moved(cycle):
