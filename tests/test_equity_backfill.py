@@ -799,3 +799,16 @@ def test_no_verdict_before_the_window_ends(monkeypatch):
     monkeypatch.setattr(eb, "_utcnow", lambda: w_end + timedelta(minutes=1))
     closed_run = eb.reprocess_date(d, dry_run=True)
     assert closed_run.window_open is False and closed_run.unmeasurable_reason == "low_fidelity"
+
+
+def test_window_open_is_reported_even_with_no_snapshots_yet(monkeypatch):
+    from src.daily_sla import window_for_date
+
+    d = date(2026, 8, 10)
+    _, w_end = window_for_date(d)
+    _patch_io_forbidding_writes(monkeypatch, [], [])
+    monkeypatch.setattr(eb, "_utcnow", lambda: w_end - timedelta(hours=2))
+    r = eb.reprocess_date(d, dry_run=True)
+    assert r.snapshots_considered == 0
+    assert r.window_open is True and r.as_dict()["window_open"] is True
+    assert r.unmeasurable_reason is None

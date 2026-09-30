@@ -565,6 +565,9 @@ def reprocess_date(
         # 0, not None, for a dry run that returns early with no snapshots:
         # None is reserved for non-dry runs (see DayResult).
         snapshots_averaged=0 if dry_run else None,
+        # Set before any early return, so an open day with no snapshots yet
+        # still says so.
+        window_open=window_only and daily_sla.window_for_date(d)[1] > _utcnow(),
     )
 
     snapshots = _load_snapshots(start, end)
@@ -629,11 +632,8 @@ def reprocess_date(
     # And only once the window has ENDED: the manual CLI accepts today (or
     # a future date), and a few early snapshots all failing must not stamp
     # a still-open day as unmeasurable.
-    if window_only:
-        if daily_sla.window_for_date(d)[1] > _utcnow():
-            result.window_open = True
-        else:
-            result.unmeasurable_reason = unmeasurable_verdict(result)
+    if window_only and not result.window_open:
+        result.unmeasurable_reason = unmeasurable_verdict(result)
 
     if dry_run:
         # A reconstructed-only average over daily_sla's contractual 6-9 AM
