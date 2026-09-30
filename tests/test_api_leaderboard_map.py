@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 
 import h3
 from fastapi import FastAPI, Response
@@ -56,10 +55,9 @@ def _account(
     show_public_username: bool = True,
     ruling_color: str | None = None,
     ruling_border_color: str | None = None,
-    ruling_alpha=Decimal("0.60"),
 ) -> tuple:
     return (account_id, display_name, show_in_leaderboards, show_public_username,
-            ruling_color, ruling_border_color, ruling_alpha)
+            ruling_color, ruling_border_color)
 
 
 # Four earners in one cell, already tie-break ordered.
@@ -280,22 +278,38 @@ def test_a_missing_account_row_falls_through_rather_than_500(monkeypatch):
 # Colors
 # ---------------------------------------------------------------------------
 
-def test_null_color_pair_nulls_ruling_alpha_alongside_it(monkeypatch):
+def test_an_unclaimed_color_pair_is_null_on_both_halves(monkeypatch):
     _install(monkeypatch, api_leaderboard, _TOTALS, _UNIVERSE, _ALL_ELIGIBLE)
     leader = _cell(_call())["leader"]
     assert leader["ruling_color"] is None
     assert leader["ruling_border_color"] is None
-    assert leader["ruling_alpha"] is None, \
-        "the column default 0.60 must not leak as if it were a real opacity"
 
 
-def test_claimed_color_pair_passes_through_with_alpha_as_a_float(monkeypatch):
-    accounts = [_account(101, display_name="Duke swift🦦", ruling_color="#7c54cd",
-                         ruling_border_color="#382264", ruling_alpha=Decimal("0.60"))] + _ALL_ELIGIBLE[1:]
+def test_a_null_fill_nulls_the_border_too(monkeypatch):
+    """The pairing rule, held in the handler as well as by sql/044's
+    accounts_ruling_colors_coherent: a client never sees half a pair."""
+    accounts = [_account(101, display_name="Duke swift🦦", ruling_color=None,
+                         ruling_border_color="#382264")] + _ALL_ELIGIBLE[1:]
     _install(monkeypatch, api_leaderboard, _TOTALS, _UNIVERSE, accounts)
     leader = _cell(_call())["leader"]
-    assert leader["ruling_color"] == "#7c54cd"
-    assert isinstance(leader["ruling_alpha"], float) and leader["ruling_alpha"] == 0.6
+    assert (leader["ruling_color"], leader["ruling_border_color"]) == (None, None)
+
+
+def test_claimed_color_pair_passes_through(monkeypatch):
+    accounts = [_account(101, display_name="Duke swift🦦", ruling_color="#7c54cd",
+                         ruling_border_color="#382264")] + _ALL_ELIGIBLE[1:]
+    _install(monkeypatch, api_leaderboard, _TOTALS, _UNIVERSE, accounts)
+    leader = _cell(_call())["leader"]
+    assert (leader["ruling_color"], leader["ruling_border_color"]) == ("#7c54cd", "#382264")
+
+
+def test_an_entry_carries_exactly_the_published_fields(monkeypatch):
+    """No opacity field (sql/085 dropped the column): the frontend paints
+    every claimed hexagon at one constant fill opacity."""
+    _install(monkeypatch, api_leaderboard, _TOTALS, _UNIVERSE, _ALL_ELIGIBLE)
+    cell = _cell(_call())
+    for entry in [cell["leader"], *cell["runners_up"]]:
+        assert set(entry) == {"display_name", "points", "ruling_color", "ruling_border_color"}
 
 
 # ---------------------------------------------------------------------------

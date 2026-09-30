@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 
 from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
@@ -48,10 +47,9 @@ def _account(
     show_public_username: bool = True,
     ruling_color: str | None = None,
     ruling_border_color: str | None = None,
-    ruling_alpha=Decimal("0.60"),
 ) -> tuple:
     return (account_id, display_name, show_in_leaderboards, show_public_username,
-            ruling_color, ruling_border_color, ruling_alpha)
+            ruling_color, ruling_border_color)
 
 
 # (account_id, points, first_point_at) — the shape of the live GROUP BY.
@@ -211,11 +209,14 @@ def test_depth_is_capped_after_filtering_not_in_sql(monkeypatch):
         "capping in SQL would silently return a short list whenever a top earner opted out"
 
 
-def test_unclaimed_color_pair_nulls_the_alpha(monkeypatch):
+def test_unclaimed_color_pair_is_null_and_there_is_no_opacity_field(monkeypatch):
     _install(monkeypatch, api_leaderboard, _TOTALS, _ALL_ELIGIBLE)
     out = _call()
     assert out["leaders"][0]["ruling_color"] is None
-    assert out["leaders"][0]["ruling_alpha"] is None
+    assert out["leaders"][0]["ruling_border_color"] is None
+    for entry in out["leaders"]:
+        assert set(entry) == {"rank", "display_name", "points",
+                              "ruling_color", "ruling_border_color"}
 
 
 def test_304_on_an_unchanged_tally(monkeypatch):

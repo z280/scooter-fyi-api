@@ -1,0 +1,123 @@
+"""Every sql/ migration gets a number of its own.
+
+src/pg.py:run_migrations applies `sorted(SQL_DIR.glob("*.sql"))` and keys
+schema_migrations on the FILENAME, not the number, so two files sharing a
+prefix do not collide at runtime: both run, ordered by the rest of the
+name. The damage is subtler. "sql/061" stops identifying one change; the
+order between the two is decided by the alphabet, not by which depends on
+which; and it happens precisely when two branches are written in parallel
+-- which is when nobody is watching the number.
+
+No database is needed; this is a directory listing.
+"""
+
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from pathlib import Path
+
+import pytest
+
+SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
+
+# The two pairs that shipped before this guard existed. They stay, and they
+# stay exactly as named: schema_migrations is keyed on filename, so renaming
+# either half would make it a NEW migration to every database that already
+# recorded the old name -- production included -- and it would run a second
+# time there. Every file here is already applied in production.
+#
+# Nothing new belongs on this list. A new duplicate means renumbering the
+# file that has NOT merged yet, while no database has recorded its name.
+_HISTORICAL_DUPLICATES: dict[int, frozenset[str]] = {
+    61: frozenset({"061_area_leaders_live.sql", "061_telemetry.sql"}),
+    69: frozenset({"069_device_status_snapshots.sql", "069_rental_aware_trip_detection.sql"}),
+}
+
+# Three digits, zero-padded, so the lexicographic sort run_migrations does
+# is also numeric order; then one or more lower_snake words, each starting
+# with a letter -- no empty word (`__`, a trailing `_`), no all-digit or
+# digit-led word, no capitals. Every file on main when this was tightened
+# already conformed, so there is no historical exception to carry.
+_NAME = re.compile(r"^\d{3}_[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*\.sql$")
+# The number alone, read from ANY file -- a malformed name must still count
+# toward duplicate detection, not slip past it by failing the name check.
+_NUMBER = re.compile(r"^(\d+)_")
+
+
+def _migrations() -> list[str]:
+    # Case-insensitive on the suffix, deliberately wider than the runner's
+    # own `glob("*.sql")`: a `086_x.SQL` would be silently skipped by
+    # src/pg.py, so it has to reach _NAME here and fail loudly instead.
+    return sorted(
+        p.name for p in SQL_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() == ".sql"
+    )
+
+
+def test_every_migration_is_named_nnn_description():
+    bad = [n for n in _migrations() if not _NAME.match(n)]
+    assert not bad, (
+        f"{bad}: name migrations NNN_lower_snake.sql -- a three-digit, "
+        "zero-padded prefix keeps string order equal to numeric order, and "
+        "the description is lowercase words joined by single underscores"
+    )
+
+
+@pytest.mark.parametrize("name", [
+    "085_drop_ruling_alpha.sql",
+    "061_telemetry.sql",
+    "044_royalty_titles_and_ruling_colors.sql",
+    "048_h3_r8_area_leaders.sql",    # digits INSIDE a word are fine
+    "064_reclassify_type5_as_rover.sql",
+])
+def test_the_name_rule_accepts_lower_snake(name):
+    assert _NAME.match(name)
+
+
+@pytest.mark.parametrize("name", [
+    "086_bad__name.sql",             # empty word
+    "086_bad_.sql",                  # trailing underscore
+    "086__bad.sql",                  # leading underscore
+    "086_123.sql",                   # all-digit word
+    "086_bad_2nd_try.sql",           # digit-led word
+    "086_Bad_name.sql",              # uppercase
+    "086_bad-name.sql",              # hyphen
+    "86_bad_name.sql",               # unpadded number
+    "0860_bad_name.sql",             # four digits
+    "086_.sql",                      # no description
+    "086_bad_name.SQL",              # extension case
+])
+def test_the_name_rule_rejects_anything_else(name):
+    assert not _NAME.match(name)
+
+
+def test_no_two_migrations_share_a_number():
+    by_number: dict[int, set[str]] = defaultdict(set)
+    for name in _migrations():
+        m = _NUMBER.match(name)
+        if m:
+            by_number[int(m.group(1))].add(name)
+
+    unexpected = {
+        n: sorted(names)
+        for n, names in by_number.items()
+        if len(names) > 1 and names != _HISTORICAL_DUPLICATES.get(n)
+    }
+    next_free = max(by_number) + 1
+    assert not unexpected, (
+        f"migration number(s) reused: {unexpected}. Renumber the file that "
+        f"has not merged yet -- the next free number is {next_free:03d}. Do "
+        "NOT rename one that has shipped: schema_migrations is keyed on "
+        "filename, so a rename re-runs it everywhere it already ran."
+    )
+
+
+def test_the_historical_duplicates_are_still_exactly_as_shipped():
+    """The allowlist is for two specific, already-applied pairs. If one of
+    them has been renamed, that rename is the bug (it would re-run in
+    production); if the list has gone stale some other way, it should be
+    trimmed rather than left to excuse a future collision."""
+    names = set(_migrations())
+    for n, pair in _HISTORICAL_DUPLICATES.items():
+        assert pair <= names, f"sql/{n:03d}: expected {sorted(pair)} to be untouched"

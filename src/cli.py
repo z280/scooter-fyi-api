@@ -94,8 +94,6 @@ Available commands:
                       of territory control. The leaderboard itself is no
                       longer computed here at all -- sql/061 moved it to read
                       time so territory can change while a rider is watching.
-                      Aliased as `recompute_area_leaders` for the crontab
-                      already deployed under the old name.
     process_device_feature_reports
                       Grade the crowdsourced device-feature confirmations
                       that have landed since the last firing (sql/055):
@@ -160,7 +158,9 @@ _MONITOR_INGEST = {
     "recovery_threshold": 1,
 }
 _MONITOR_DAILY_SLA = {
-    "schedule": {"type": "crontab", "value": "0 9 * * *"},
+    # Mirrors the crontab's `2 9 * * *` (09:02, after the window's last
+    # cycle has had time to land -- see the comment there).
+    "schedule": {"type": "crontab", "value": "2 9 * * *"},
     "timezone": "America/Denver",
     "checkin_margin": 10,
     "max_runtime": 5,
@@ -944,11 +944,6 @@ COMMANDS = {
     "deidentify_donations":  deidentify_donations,
     "refresh_area_universe": _cli_refresh_area_universe,
     "cleanup_job_runs":      _cli_cleanup_job_runs,
-    # Deprecated alias. The live crontab is an admin-editable copy on the
-    # scheduler_state volume, so a rename here would break the deployed
-    # schedule until someone edits it by hand -- this keeps the old name
-    # working until /admin/scheduler/edit catches up.
-    "recompute_area_leaders": _cli_refresh_area_universe,
     "process_device_feature_reports": process_device_feature_reports,
     "rollup_analytics":      rollup_analytics,
     "cleanup_telemetry":     cleanup_telemetry,

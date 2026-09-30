@@ -1067,12 +1067,11 @@ GET /api/v1/leaderboard/map
         "display_name": "Duke Swift 🦦",
         "points": 88,
         "ruling_color": "#7c54cd",
-        "ruling_border_color": "#382264",
-        "ruling_alpha": 0.6
+        "ruling_border_color": "#382264"
       },
       "runners_up": [
         { "display_name": "...", "points": 30,
-          "ruling_color": null, "ruling_border_color": null, "ruling_alpha": null }
+          "ruling_color": null, "ruling_border_color": null }
       ]
     },
     "8828308283fffff": {
@@ -1112,10 +1111,10 @@ recompute, and this one answers from the ledger alone.
   fewer (including both empty/null). No `royalty_title` field:
   `display_name` already composes it (sql/044's generated column).
 - A rider with no claimed ruling-color pair leads with
-  `ruling_color: null` -- the API never invents a default; that's a
-  frontend decision. `ruling_alpha` is nulled alongside an unclaimed
-  pair (it otherwise carries a non-null `0.60` schema default that would
-  leak as a meaningless fill opacity).
+  `ruling_color: null` and `ruling_border_color: null` -- always both,
+  never half a pair. The API never invents a default; that's a frontend
+  decision, as is the fill opacity: there is no per-rider opacity field
+  (see [Ruling colours](#ruling-colours)).
 - **ETag is content-only** -- `W/"arealb:<sha256(cells)[:16]>"` over a
   canonical (`sort_keys=True`) serialization. There is no run id to key
   on any more, and `computed_at` moves every request, so keying on it
@@ -1156,9 +1155,9 @@ GET /api/v1/leaderboard/regional
   "window_end": "2026-07-29T09:15:00+00:00",
   "leaders": [
     { "rank": 1, "display_name": "Duke Swift 🦦", "points": 312,
-      "ruling_color": "#7c54cd", "ruling_border_color": "#382264", "ruling_alpha": 0.6 },
+      "ruling_color": "#7c54cd", "ruling_border_color": "#382264" },
     { "rank": 2, "display_name": "...", "points": 210,
-      "ruling_color": null, "ruling_border_color": null, "ruling_alpha": null }
+      "ruling_color": null, "ruling_border_color": null }
   ]
 }
 ```
@@ -1235,7 +1234,7 @@ GET /api/v1/equity-estimate?ranks=1,2
 
 ### `GET /api/v1/compliance/daily/latest`
 
-Most recent daily 6 AM – 9 AM Denver SLA window. **This is the contractually-correct compliance metric per License Exhibit B** — the every-10-min `/snapshots/latest` value is informational, but the binding SLA is the morning-window daily average. Computed once per day at 9:00 AM Denver time.
+Most recent daily 6 AM – 9 AM Denver SLA window. **This is the contractually-correct compliance metric per License Exhibit B** — the every-10-min `/snapshots/latest` value is informational, but the binding SLA is the morning-window daily average. Computed once per day at 9:02 AM Denver time, just after the window closes.
 
 > **Which field is the answer:** `avg_percent_all_devices_equity` / `compliance_equity_pass`, measured against the city's official Equity Area map (`equity`). The city clarified that map in August 2026; before then this documentation pointed at `..._v1`, which is now retained history. The `_v1`, `_v2` and `_erN` families are all still computed and still returned, so a dashboard built against the old field keeps working — it is just no longer reporting the number the contract turns on.
 >
@@ -1719,7 +1718,6 @@ Bearer required. GET returns:
   "display_name": "Queen Brave 🦉",
   "ruling_color": "#c53637",
   "ruling_border_color": "#026fd7",
-  "ruling_alpha": 0.6,
   "badges": [ { "id": "first_report", "label": "Filed a report", "earned_at": "2026-07-01T18:00:00+00:00" } ]
 }
 ```
@@ -1826,8 +1824,10 @@ The curated word lists, for building a username picker. Bearer required
 ### Ruling colours
 
 Your territory on the leaderboard map is drawn with a **fill** and an
-**inner border**, both chosen from a curated 128-colour palette, plus an
-opacity you control.
+**inner border**, both chosen from a curated 128-colour palette. How
+strongly the fill is painted is not yours to choose: every claimed
+territory renders at the same opacity, so a hexagon's shade says who holds
+it and nothing else.
 
 ```json
 {
@@ -1843,9 +1843,7 @@ Rules, all enforced by the database:
   not both. Adjacent territories can therefore never render identically.
 * **Fill and border must differ**, and are set **together** — send both,
   or send both as `null` to clear and release your claim.
-* **`ruling_alpha` is 0.10–1.00** (default `0.60`) and applies to the
-  **fill only**; the border always renders opaque. To leave the map
-  entirely, set `show_in_leaderboards: false` rather than a low alpha.
+* To leave the map entirely, set `show_in_leaderboards: false`.
 
 `taken_pairs` lets a picker grey out unavailable combinations instead of
 discovering them by `409` on save. It lists pairs only — never which
@@ -1855,7 +1853,14 @@ account holds one.
 |---|---|
 | `400` | one-sided colour update, fill equal to border, or a value not on the curated list |
 | `409` | that exact (fill, border) pair is already claimed |
-| `422` | `ruling_alpha` outside 0.10–1.00 |
+
+> **`ruling_alpha` was removed** (`sql/085`). It was a per-rider fill
+> opacity, 0.10–1.00, and it was on `GET`/`PUT /api/v1/profile` and on every
+> entry of `/leaderboard/map` and `/leaderboard/regional`. The frontend had
+> already stopped reading or sending it, so it was dropped from `/api/v1`
+> outright rather than through a `/v2`. A `PUT` that still sends it is
+> **not** refused: like any unknown key it is ignored, so an older client
+> keeps working.
 
 ### Rider preferences — three kinds, three questions
 

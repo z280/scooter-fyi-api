@@ -82,11 +82,6 @@ _RATE_PLANS = ("resident", "visitor", "equity")
 _MAX_FAVORITES = 100
 _MAX_THEME_LEN = 64
 _MAX_TITLE_LEN = 64
-# Mirrors accounts_ruling_alpha_range (sql/044). Duplicated here only so
-# the rejection is a 422 naming the field rather than a CheckViolation
-# surfacing as a 500 — the DB remains the enforcement point.
-_MIN_RULING_ALPHA = 0.10
-_MAX_RULING_ALPHA = 1.00
 # Shared by both username-mutating endpoints below — they change the same
 # field, so one combined cap (not one each) is what actually limits abuse.
 _LIMIT_USERNAME_REROLL_PER_ACCOUNT = (10, 3600)
@@ -115,9 +110,6 @@ class ProfileUpdate(BaseModel):
     royalty_title: str | None = Field(default=None, max_length=_MAX_TITLE_LEN)
     ruling_color: str | None = Field(default=None, max_length=7)
     ruling_border_color: str | None = Field(default=None, max_length=7)
-    ruling_alpha: float | None = Field(
-        default=None, ge=_MIN_RULING_ALPHA, le=_MAX_RULING_ALPHA
-    )
 
 
 class UsernameChoice(BaseModel):
@@ -131,7 +123,7 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
         SELECT email, phone_number, public_username, show_public_username,
                show_in_leaderboards, rate_plan, theme, favorites,
                home_lat, home_lng, work_lat, work_lng,
-               royalty_title, ruling_color, ruling_border_color, ruling_alpha,
+               royalty_title, ruling_color, ruling_border_color,
                display_name, phone_verified_at, sms_opted_out_at
         FROM accounts WHERE id = %s
         """,
@@ -143,7 +135,7 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
     (email, phone_number, public_username, show_public_username,
      show_in_leaderboards, rate_plan, theme, favorites,
      home_lat, home_lng, work_lat, work_lng,
-     royalty_title, ruling_color, ruling_border_color, ruling_alpha,
+     royalty_title, ruling_color, ruling_border_color,
      display_name, phone_verified_at, sms_opted_out_at) = row
     return {
         "email": email,
@@ -168,7 +160,6 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
         "royalty_title": royalty_title,
         "ruling_color": ruling_color,
         "ruling_border_color": ruling_border_color,
-        "ruling_alpha": float(ruling_alpha) if ruling_alpha is not None else None,
         "show_public_username": bool(show_public_username),
         "show_in_leaderboards": bool(show_in_leaderboards),
         "rate_plan": rate_plan,
@@ -385,16 +376,6 @@ def put_profile(
                 params.append(payload.ruling_color)
                 sets.append("ruling_border_color = %s")
                 params.append(payload.ruling_border_color)
-
-            if "ruling_alpha" in provided:
-                if payload.ruling_alpha is None:
-                    raise HTTPException(
-                        400,
-                        f"ruling_alpha must be a number between {_MIN_RULING_ALPHA} "
-                        f"and {_MAX_RULING_ALPHA}",
-                    )
-                sets.append("ruling_alpha = %s")
-                params.append(payload.ruling_alpha)
 
             if sets:
                 params.append(user.account_id)
