@@ -779,3 +779,23 @@ def test_a_full_day_dry_run_reaches_no_verdict(monkeypatch):
     _patch_io_forbidding_writes(monkeypatch, [_snapshot(T0, recorded=10)], stops)
     r = eb.reprocess_date(date(2026, 8, 9), dry_run=True, window_only=False)
     assert r.unmeasurable_reason is None
+
+
+def test_no_verdict_before_the_window_ends(monkeypatch):
+    """A day whose early snapshots all fail is not unmeasurable yet: until
+    its 6-9 AM window ends, a run (dry or real) concludes nothing."""
+    from src.daily_sla import window_for_date
+
+    d = date(2026, 8, 10)
+    w_start, w_end = window_for_date(d)
+    stops = [_stop(f"v{i}", w_start - timedelta(hours=1), None, in_equity=i < 3) for i in range(10)]
+    snaps = [_snapshot(w_start + timedelta(minutes=10), recorded=20)]  # fidelity 0.5 -> fails
+    _patch_io_forbidding_writes(monkeypatch, snaps, stops)
+
+    monkeypatch.setattr(eb, "_utcnow", lambda: w_end - timedelta(minutes=30))
+    open_run = eb.reprocess_date(d, dry_run=True)
+    assert open_run.window_open is True and open_run.unmeasurable_reason is None
+
+    monkeypatch.setattr(eb, "_utcnow", lambda: w_end + timedelta(minutes=1))
+    closed_run = eb.reprocess_date(d, dry_run=True)
+    assert closed_run.window_open is False and closed_run.unmeasurable_reason == "low_fidelity"

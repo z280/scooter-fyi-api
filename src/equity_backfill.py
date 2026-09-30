@@ -235,6 +235,9 @@ class DayResult:
     #: there is no row, or the row already holds an equity figure (a live
     #: one is never overwritten with "unmeasurable").
     unmeasurable_recorded: bool = False
+    #: True when the day's 6-9 AM window had not yet ended at run time: no
+    #: verdict is reached (or recorded) for a day that is still open.
+    window_open: bool = False
 
     def as_dict(self, *, include_snapshots: bool = False) -> dict[str, Any]:
         fid = self.fidelity
@@ -254,6 +257,7 @@ class DayResult:
             "compliance_equity_pass": self.compliance_equity_pass,
             "unmeasurable_reason": self.unmeasurable_reason,
             "unmeasurable_recorded": self.unmeasurable_recorded,
+            "window_open": self.window_open,
         }
         if include_snapshots:
             out["snapshots"] = [
@@ -468,6 +472,11 @@ def _write_metrics(rows: list[tuple[Any, dict[str, Any]]]) -> int:
 UNMEASURABLE_REASON_COLUMN = "equity_unmeasurable_reason"
 
 
+def _utcnow() -> datetime:
+    """Current UTC time; a seam so tests can place a run inside a window."""
+    return datetime.now(timezone.utc)
+
+
 def unmeasurable_verdict(result: DayResult) -> str | None:
     """Why `result`'s day has no defensible equity figure, or None.
 
@@ -617,8 +626,14 @@ def reprocess_date(
     # The SLA average is over the 6-9 AM window, so only a window-only run's
     # counts speak for it. Reached before the dry-run branch so a dry run
     # reports the verdict a real run would record.
+    # And only once the window has ENDED: the manual CLI accepts today (or
+    # a future date), and a few early snapshots all failing must not stamp
+    # a still-open day as unmeasurable.
     if window_only:
-        result.unmeasurable_reason = unmeasurable_verdict(result)
+        if daily_sla.window_for_date(d)[1] > _utcnow():
+            result.window_open = True
+        else:
+            result.unmeasurable_reason = unmeasurable_verdict(result)
 
     if dry_run:
         # A reconstructed-only average over daily_sla's contractual 6-9 AM

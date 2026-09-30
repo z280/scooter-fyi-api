@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 import uuid
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -43,6 +43,7 @@ MIGRATION = SQL_DIR / "084_equity_unmeasurable.sql"
 # Far from any real data (and from tests/test_equity_backfill_pg.py's 2031-01).
 DAY_UNMEASURED = date(2031, 3, 10)   # no live equity figure; every snapshot fails
 DAY_LIVE = date(2031, 3, 11)         # live equity figure; every snapshot fails too
+AFTER_FIXTURE_DAYS = datetime(2031, 4, 1, tzinfo=timezone.utc)
 DAYS = (DAY_UNMEASURED, DAY_LIVE)
 LIVE_PCT = 12.34
 IN_EQUITY = (39.785137, -104.826320)
@@ -96,6 +97,9 @@ def pg(monkeypatch):
 
     for mod in (eb, daily_sla, api_public):
         monkeypatch.setattr(mod, "connection", _fake_connection)
+    # The fixture days are in 2031: pin "now" after them, or every run would
+    # see a still-open window and (correctly) reach no verdict.
+    monkeypatch.setattr(eb, "_utcnow", lambda: AFTER_FIXTURE_DAYS)
     # The spatial predicate is covered against the real map elsewhere; tag by
     # coordinate so this needs no DuckDB spatial extension.
     monkeypatch.setattr(
@@ -268,3 +272,18 @@ def test_no_verdict_without_a_daily_row(pg):
     assert r.unmeasurable_recorded is False
     assert _sla(pg, DAY_UNMEASURED) is None
     assert _calendar()[DAY_UNMEASURED.isoformat()]["status"] == "no_data"
+
+
+def test_no_verdict_while_the_window_is_still_open(pg, monkeypatch):
+    """Run mid-window (07:30 Denver) over a day whose snapshots so far all
+    fail: the day is not over, so nothing is concluded or recorded."""
+    w_start, _ = daily_sla.window_for_date(DAY_UNMEASURED)
+    monkeypatch.setattr(eb, "_utcnow", lambda: w_start + timedelta(hours=1, minutes=30))
+
+    r = eb.reprocess_date(DAY_UNMEASURED)
+    assert r.snapshots_skipped_low_fidelity == 2
+    assert r.window_open is True
+    assert r.unmeasurable_reason is None
+    assert r.unmeasurable_recorded is False
+    assert _sla(pg, DAY_UNMEASURED) == (None, None, None)
+    assert _calendar()[DAY_UNMEASURED.isoformat()]["status"] == "pending"
