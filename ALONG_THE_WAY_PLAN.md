@@ -25,6 +25,10 @@ the decisions, the phasing, and the risks. The second half is the **API lane**
 `denver-scooter-fyi/docs/ALONG_THE_WAY_PLAN.md` — a companion, not a
 duplicate; where the two must agree, this file is the one that is right.
 
+**Phase 10 reaches a third repository**, `zNeill/keepdenverfair`, which already
+runs the advocacy sites and their inbound mail. Nothing before Phase 10 touches
+it.
+
 **Phase 1 shipped** (API #92, frontend #82) and **Phase 4 shipped** (#90).
 The rest is a plan to be argued with.
 
@@ -248,7 +252,7 @@ Each phase is independently mergeable and useful on its own.
 | **7 — The walkthrough** | A first-time rider is shown the app that actually exists, and the tour auto-shows again | — (frontend-only) | `onboarding.ts` rewritten against the home bar, `ONBOARDING_AUTOSHOW` back on |
 | **8 — The receipt** | Was this trip charged per Exhibit C? Complaint ready to send — and, consented, an evidence pile that can answer whether the discount is applied at all | receipt submissions migration, aggregate endpoint, three-address rule in full | on-device OCR, confirm-what-we-read, copy-the-complaint |
 | **9 — Reaching the rider** | Opted-in SMS when the plan changes under you; 20-second checks on plan-critical vehicles; a resume link that survives losing your session | trip-alert consent, server-side plan, targeted upstream check, `comms.py` | alert opt-in, resume deep link, foreground-bounded checking |
-| **10 — Advocacy** | Opt-in CC to `advocacy@weseeyouveo.com`, a review portal, and replies into a case **only when invited** by `@WSYV` / `@advocacy` | inbound mail pipeline, mention detection, operator SMS | the CC tick, per complaint |
+| **10 — Advocacy** | Opt-in CC to `advocacy@weseeyouveo.com`, a review portal, and replies into a case **only when invited** by `@WSYV` / `@advocacy` | **mostly built** in `zNeill/keepdenverfair` (§14.1): what remains is mention detection, the reply guard, and an operator alert | the CC tick, per complaint |
 
 **Phase 4 has no dependency on 1–3** — it needs only the QR scanner, which
 already exists — and could ship at any point after Phase 1. It is listed here
@@ -329,10 +333,12 @@ Every response says what it relaxed. Every swap card shows it.
 
 ### 5.3 API — `sql/080_ride_specs.sql`
 
-Next free migration number is **083**. `080` is this phase's `ride_specs`,
-`081` is Phase 4's `favorite_devices`, and `082` retires `find_ride_pref`
-(§2) — all three are on `main` or in flight. Note `069` is used twice
-already; do not add a third.
+Next free migration number is **085**, and this line goes stale fast — check
+`sql/` rather than trusting it. `080` is this phase's `ride_specs`, `081` is
+Phase 4's `favorite_devices`, `082` retires `find_ride_pref` (§2), and `083`
+(`device_history_departure_reason`) and `084` (the equity calendar's fifth
+status) arrived from outside this program while it was being planned. Note
+`069` is used twice already; do not add a third.
 
 `user_preferences.kind` carries a named CHECK constraint listing the allowed
 kinds. Extend it with the **exact guarded shape `sql/050` established** — read
@@ -1622,6 +1628,14 @@ Access is operator-only, the same posture as `/admin/*`.
 **No reply is sent into a case unless the case mentions `@WSYV` or
 `@advocacy`.**
 
+**This is now a guard to ADD, not a rule to design.** `POST
+/api/admin/inbound-messages/:id/reply` already exists and already sends,
+through the site-derived Postmark token, marking the thread replied. Today
+nothing stops it answering an uninvited case. That single check is the most
+important line of code in this phase, and it belongs **in the server**, on
+that endpoint — not in the admin UI, where a determined click routes around
+it.
+
 This is the right rule and worth stating the reason, because it will be
 tempting to relax it: an advocacy organisation that inserts itself into every
 case becomes a nuisance and spends the standing it needs for the cases that
@@ -1632,10 +1646,34 @@ party answering over their shoulder takes the case away from them.
 The invitation can come from either side: a rider who asks for help, or a Veo
 agent who brings them in. Both are invitations; neither is assumed.
 
-**New work:** detecting the mention means reading the advocacy mailbox, and
-there is no inbound-email pipeline today. `comms.py` has reply routing for
-**SMS** (`poll_replies` / `ack_reply`), which is the shape to copy but not the
-transport.
+**Most of this already exists, in `zNeill/keepdenverfair`.** Phase 10 was
+scoped assuming an inbound-email pipeline had to be built. It does not:
+
+| Piece | Where |
+|---|---|
+| Inbound webhook, secret-verified | `POST /api/webhooks/postmark-inbound`, `apps/server/src/server.ts` |
+| Site routing from the recipient **domain** | `siteKeyForDomain(domainFromEmailAddress(recipient))` |
+| Persisted inbox, deduped on `Message-ID` | `store.recordInboundMessage`, unique partial index — Postmark replays inbound under some failure modes |
+| `In-Reply-To` captured | the same call — which is what threads a Zendesk case together |
+| Forward to a human | `inbound-forwarder.ts` → `POSTMARK_INBOUND_FORWARD_TO` |
+| Inbox API | `GET /api/admin/inbound-messages`, `GET /:id`, `POST /:id/reply` |
+| Admin UI | `apps/admin/src/pages/communications.astro` |
+| `weseeyouveo.com` credentials | `POSTMARK_WSYV_SERVER_TOKEN`, `POSTMARK_WSYV_INBOUND_FROM` |
+
+**Routing keys off the domain, not the local part**, so
+`advocacy@weseeyouveo.com` already arrives in that inbox with no
+configuration change at all.
+
+So the portal (§14.2) is `communications.astro` plus an invited/uninvited
+filter, not a new surface. What genuinely remains is three things:
+
+1. **Mention detection** — scan `textBody` / `strippedTextReply` for `@WSYV`
+   or `@advocacy` and flag the message as invited. The flag belongs on the
+   inbound row, beside `in_reply_to`.
+2. **The operator alert** — that repo has no SMS at all. `comms.py` lives in
+   `scooter-fyi-api` and is reached over the tailnet, so either server can
+   call it; **decide which, rather than letting both grow a client.**
+3. **The reply guard** — see §14.3, and read it before touching the code.
 
 ### 14.4 The alert
 
