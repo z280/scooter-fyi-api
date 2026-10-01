@@ -232,6 +232,37 @@ def absence_window(cur, now: datetime, *, bounded: bool) -> AbsenceWindow | None
 
     Returns None when fewer than ABSENT_MIN_MISSED_CYCLES observed cycles
     exist. Nothing can be judged absent then.
+
+    KNOWN LIMITATION, AND THE THIRD FAILURE CASE. `snapshot_metadata_core`
+    rows prove a feed snapshot was WRITTEN, not that this module observed it:
+    `cycle.py` commits the core snapshot and then calls `update_for_cycle`
+    inside a try/except that logs and swallows. So rows can exist for cycles
+    `device_state` never processed, and the missed-cycle term counts them.
+
+    The guard survives failed sweeps (the window absorbs them) and ingest
+    outages (no rows, so no cycles to miss). It does NOT cover the case where
+    ingest is healthy and this updater alone is down, because then the rows
+    keep arriving while `last_observed_at` goes stale.
+
+    The exposure is narrow in both directions. `cutoff` takes the EARLIER of
+    `now - ABSENT_STOP_AFTER` and `times[k-1]`; at the healthy two-minute
+    cadence `times[k-1]` is only ~8 minutes back, so the one-hour term binds
+    and the cycle term never fires. It takes **more than an hour of continuous
+    updater-only failure** to backdate a stop, and past roughly two hours the
+    bounded `since` floor slides below the stale `last_observed_at`, so those
+    vehicles drop out of the per-cycle sweep and become ordinary ghosts for
+    `close_ghost_stops`.
+
+    Inside that window a stop is truncated at the outage start and a fresh one
+    opens on recovery — a hole the length of the outage. That makes the
+    reconstruction UNDERCOUNT, the opposite direction from the ghost bias, so
+    it trips the ±10% fidelity gate rather than publishing a confident wrong
+    number; with sql/084 the day reads `unmeasurable`. Failing closed is why
+    this is a follow-up and not a blocker.
+
+    The fix is to record the cycles this module actually processed, atomically
+    with its own transaction, and read those instead. Deliberately not done
+    here: it needs its own migration and a retention trim.
     """
     k, m = ABSENT_MIN_MISSED_CYCLES, ABSENT_SWEEP_WINDOW_CYCLES
     cur.execute(
