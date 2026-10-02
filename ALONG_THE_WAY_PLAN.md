@@ -792,7 +792,19 @@ option of simply carrying on would not be in the graph to lose.
 
 **`started_at` needs a "now" to be worth anything, and the evaluation instant
 is therefore part of the contract.** Today's usage is
-`free_minutes_used_before_ride + (now − started_at)`.
+
+```
+free_minutes_used_before_ride + billable_minutes(now − started_at)
+```
+
+**Through the billable-minute rounding, never a raw subtraction.** Veo bills
+the **started** minute — `ride-cost.ts` is `max(1, ceil(ms / 60_000))` and
+`billable_minutes` here must agree with it — so a rider 61 seconds in has spent
+**2** of the free hour, not 1. Subtracting raw also mixes units, since the
+baseline is minutes and the instants are not. Rounding this down would rank the
+rider with free minutes they do not have and price a paid minute as free, which
+is the single direction §6.3.1 forbids: its whole promise is a **floor** on
+minutes used and a **ceiling** on minutes remaining.
 
 **The field is a baseline for a reason.** Revision 3 sent
 `free_minutes_used_this_ride` — minutes spent *during* the current rental — and
