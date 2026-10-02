@@ -244,7 +244,7 @@ Each phase is independently mergeable and useful on its own.
 |---|---|---|---|
 | **1 — The ideal scooter** | Requirements stated once, saved to the account, synced, and **applied to the map in one tap** | `sql/080`, `/api/v1/profile/ride-specs` | `ride-spec.ts`, spec sheet, the map bridge |
 | **2 — The hand-off plan** | Multi-leg plans: ride a near vehicle, pick up the one you wanted en route. Ranked by time **and** money, every unlock priced | `valhalla.matrix()`, `src/trip_plans.py`, `POST /api/v1/trip/candidates` | `along-the-way.ts`, free-minutes control, wired into the home bar's plan flow |
-| **3 — The living plan** | Dibs on the next vehicle while riding to it; the plan re-solves on any disruption, says so once, and offers the backups | `sql/083` (`replaces_dibs_id`), `replaces` on `POST /dibs`, time-to-arrival claim bound | `trip-plan.ts`, `arrival-panel.ts` re-solve face, backups sheet, `dibs-notify.ts` 5th alert |
+| **3 — The living plan** | Dibs on the next vehicle while riding to it; the plan re-solves on any disruption, says so once, and offers the backups | **the next free migration** (`replaces_dibs_id`) — check `sql/`, do not trust a number written here; `replaces` on `POST /dibs`, time-to-arrival claim bound | `trip-plan.ts`, `arrival-panel.ts` re-solve face, backups sheet, `dibs-notify.ts` 5th alert |
 | **4 — My Scooters** | Keep a vehicle you scanned; find it again; be told when it's free | `sql/081` ✅, `/api/v1/profile/favorite-devices`, availability watch | `my-scooters.ts`, popup action, map layer |
 | **5a — Start in an Equity Area** | "Walk 2 min further, save $1.80" | equity flag + cost on candidates | `equity-savings.ts`, candidate chips |
 | **5b — Equity hand-off** | Hand off inside an Equity Area when the arithmetic says to — **not a separate search**, just an equity-priced leg in the Phase 2 planner (§9) | `src/equity_savings.py` as a cost term | equity chip on the plan card |
@@ -299,7 +299,7 @@ no migration and no stored field.
   "features":     ["basket"],           // consensus must be TRUE (null/unknown does not match)
   "min_battery":  40,                   // percent
   "min_quality":  "no-risk",            // "any" | "no-risk" | "ok-only"
-  "must_reach":   true,                 // disqualify anything that cannot reach the destination
+  "must_reach":   true,                 // disqualify anything that cannot reach ITS OWN leg's end (§5.2)
   "max_walk_minutes": 12,               // <= 15 whenever auto-dibs is on; see 7.2
   "must": ["features", "must_reach"]    // which of the above are HARD
 }
@@ -320,8 +320,23 @@ means *confirmed* to have one.
 The order is fixed, published in the UI, and identical on both sides:
 
 1. **Never relaxed:** availability, anything the rider marked `must`, and
-   `must_reach` when set. A vehicle that cannot reach the destination is not a
-   worse candidate, it is not a candidate.
+   `must_reach` when set. A vehicle that cannot reach the end of **the leg it
+   is assigned** is not a worse candidate, it is not a candidate.
+
+   **"Its own leg", not "the destination" — this is a revision 3 correction
+   and it is load-bearing.** Under the old single-vehicle reading the two were
+   the same thing. They are not any more: a scruffy Astro with 1.5 km of range
+   is a perfectly good *starter* when its hand-off is 1.2 km away, and
+   disqualifying it for not reaching `D` removes exactly the vehicles the
+   hand-off plan is built to use. It would also make §7.2's battery trigger
+   unreachable, since a plan whose legs are all individually reach-feasible is
+   the only kind that could ever be built.
+
+   So `canReach` is evaluated per ride leg, against that leg's endpoint — the
+   next pickup, or the drop-off node `X` for the final leg (§6.2). The
+   "unknown never disqualifies" rule is unchanged: a vehicle whose range the
+   feed never reported still passes, because not knowing is not knowing it
+   cannot.
 2. `min_battery`, down to the reach-feasible floor and no further.
 3. Preferred `features`, dropped one at a time, cheapest-signal first.
 4. `models`, widened to the same form factor (standing → standing).
@@ -333,8 +348,11 @@ Every response says what it relaxed. Every swap card shows it.
 
 ### 5.3 API — `sql/080_ride_specs.sql`
 
-Next free migration number is **085**, and this line goes stale fast — check
-`sql/` rather than trusting it. `080` is this phase's `ride_specs`, `081` is
+Next free migration number is **085** at the time of writing, and **this line
+goes stale fast — check `sql/` rather than trusting it.** It has drifted three
+times during this program's planning alone, so nowhere else in this document
+names a migration number for unbuilt work: phases refer to "the next free
+migration" and the implementer looks. `080` is this phase's `ride_specs`, `081` is
 Phase 4's `favorite_devices`, `082` retires `find_ride_pref` (§2), and `083`
 (`device_history_departure_reason`) and `084` (the equity calendar's fifth
 status) arrived from outside this program while it was being planned. Note
@@ -482,15 +500,30 @@ revisions 1–2.
 
 ### 6.2 The search: a graph, and it is small
 
-Nodes are the origin `P`, the destination `D`, and the candidate vehicles.
-Edges are legs:
+Nodes are the origin `P`, the destination `D`, **a drop-off node `X` near
+`D`**, and the candidate vehicles. Edges are legs:
 
 | Edge | Mode | How it is measured |
 |---|---|---|
 | `P → Sᵢ` | walk | one pedestrian matrix, 1 source × N targets |
 | `Sᵢ → Sⱼ` | ride | the bicycle matrix below |
-| `Sᵢ → D` | ride | folded into the same bicycle matrix, as one extra target |
-| `Sₗₐₛₜ → D` | walk | the final few metres; straight-line is fine |
+| `Sᵢ → X` | ride | folded into the same bicycle matrix, as one extra target |
+| `X → D` | walk | the final few metres; straight-line is fine |
+| `P → D` | walk | the degenerate plan: no vehicle at all, when that is genuinely best |
+
+**`X` exists because without it the graph cannot express the trip this phase
+illustrates.** An earlier draft had both terminal edges starting at a pickup
+node and ending at `D` — a ride *or* a walk from the last scooter, never a
+ride *then* a walk. So the picture (`walk → ride → ride → walk`) and the graph
+described two different trips. A drop-off node near `D`, with the final
+walking edge starting there and bounded by its own short cap, fixes that: a
+rider parks where parking is legal and walks the last block, which is what
+actually happens.
+
+In practice `X` is chosen from the legal-parking geometry the app already
+knows, or falls back to `D` itself when nothing better is available — in which
+case the final walk leg is zero-length and the plan reads exactly as it used
+to.
 
 So it is still **two Valhalla calls**, as revision 2 promised — but the second
 one is now `N sources × (N+1) targets` rather than `N × 1`. That is the real
@@ -508,9 +541,30 @@ cost of this design and the plan should not pretend otherwise.
 - **The bbox** is the envelope of `P` and `D`, expanded by the walk cap. A
   vehicle behind the rider and off the line is not a node.
 
-With N pruned to ~30, the bicycle matrix is under a thousand pairs — one call
-— and the route is then a **shortest path** over that graph. Dijkstra, on a
-graph this size, is microseconds.
+**Those three rules do not, by themselves, bound N**, and an earlier draft
+claimed they pruned it to ~30. They do not: the walk cap restricts only which
+vehicles can be `S₁`, so every non-`risk` vehicle in the bbox remains a
+*downstream* node. A long or dense trip can therefore produce a large N and
+quadratic matrix work.
+
+So the candidate set needs an **explicit bounded selection step**, before any
+matrix call:
+
+1. take every non-`risk` vehicle in the bbox;
+2. keep the best `W` as possible first hops, ranked by walk seconds inside the
+   walk cap;
+3. keep the best `H` as possible pickups, ranked by how much ride-leg they
+   remove — `ride(Sᵢ→D)` ascending, which is the "further along" test;
+4. `N = |W ∪ H|`, with `W` and `H` **constants chosen against the deployed
+   matrix's own limits**, not against a guess.
+
+Only then is the matrix one call and the search a **shortest path** over a
+graph whose size is known in advance. Dijkstra over a few dozen nodes is
+microseconds; the bound is what makes that sentence true rather than hopeful.
+
+**Verify the deployed matrix's maximum source and target counts before
+choosing `W` and `H`.** Valhalla's `/sources_to_targets` has configurable
+limits and the deployed image's are unknown to this document.
 
 **Prerequisite, unchanged and now more load-bearing:** verify the deployed
 Valhalla serves `/sources_to_targets` and honours the same costing options as
@@ -548,12 +602,38 @@ costs money. For a rider near the end of that hour a faster route is worth
 disproportionately more than it is to anybody else, and a planner that prices
 minutes linearly misses this completely.
 
-Handling it without breaking the shortest-path search: **inside the free hour
-every edge's money term is zero**, and past it the term is linear — both
-Dijkstra-safe. Only a trip that *crosses* the boundary mid-ride has a cost
-that depends on the path so far. Solve those by running the search twice, once
-under each regime, and taking the cheaper; do not state-augment the graph for
-a case this rare.
+Handling it correctly: **the free-minute balance goes into the search state.**
+A node is `(location, free minutes consumed so far)`, and an edge's money term
+is computed from the balance on arrival.
+
+**This replaces an earlier shortcut that was simply wrong.** Revision 3 said
+to solve twice — once pricing every minute free, once pricing every minute
+paid — and take the cheaper. Neither search need find the optimum, and the
+counterexample is not exotic. With 10 free minutes left and a paid minute
+scored at 2 minutes of time, three plans given as (total minutes, billable
+ride minutes):
+
+| Plan | Total | Billable | Paid | **True score** | All-free search | All-paid search |
+|---|---|---|---|---|---|---|
+| A | 12 | 12 | 2 | **16** | 12 ← picks this | 36 |
+| B | 14 | 8 | 0 | **14** | 14 | 30 ← picks this |
+| C | 13 | 10 | 0 | **13** ✅ | 13 | 33 |
+
+The all-free search picks A, the all-paid search picks B, and the optimum is
+C — which neither returns, so repricing their winners cannot recover it. The
+error is structural: uniform pricing destroys the very trade-off (spend more
+total minutes to stay inside the free balance) that the cliff creates.
+
+**The state space is small enough that there is no excuse.** The free budget
+is 60 whole minutes, so the augmentation is at most 61 copies of a graph with
+~N nodes — still trivially Dijkstra-able, and exact. Equivalently, keep
+nondominated `(time, free-minutes-consumed)` labels per node. Either way,
+**rank crossing trips by their actual charges**, never by a regime assumed in
+advance.
+
+For a rider with no free balance (every tier but Access, or an Access rider
+who has spent the hour) the money term is linear and the augmentation
+collapses to one layer — the ordinary search, at no extra cost.
 
 #### 6.3.1 "How many free minutes have I got left?"
 
@@ -601,9 +681,30 @@ same list rather than being a separate concept.
   "rate_plan": "equity",
   "free_minutes_remaining": 30,   // the rider's own answer; null = estimate it
   "limit": 4,                     // plans returned, hard-capped
-  "geometry": true                // routed geometry for the top plan only
+  "geometry": true,               // routed geometry for the top plan only
+
+  // IN-RIDE STATE — null on an initial search, set on every re-solve (§7).
+  // Without this a re-solve cannot compare "keep riding what you are on"
+  // against "hand off", and would re-charge an unlock the rider has paid.
+  "in_ride": {
+    "vehicle_identifier": "…",
+    "range_meters": 2400,          // what the CURRENT vehicle can still do
+    "unlock_paid": true,           // so continuing costs no unlock
+    "started_at": "2026-10-02T01:31:00Z",   // for the free-minute balance
+    "free_minutes_used_this_ride": 6
+  }
 }
 ```
+
+**`in_ride` changes the graph, not just the pricing.** On an initial search the
+only edges leaving the origin are walks (§6.2). On a re-solve the rider is
+*on* a vehicle, so the origin also has a **continuation edge** — keep riding
+the current scooter to any reachable node — priced with **no unlock**, because
+it is already paid, and bounded by that vehicle's remaining range rather than
+a fresh one's.
+
+Omitting this would make every re-solve quietly prefer handing off, since the
+option of simply carrying on would not be in the graph to lose.
 
 ```jsonc
 // response
@@ -706,9 +807,26 @@ sense — the failure mode that made "a plan plus a rescue" the wrong shape.
 ### 7.3 Dibs, and why riding changes it
 
 Dibs goes on the **next** vehicle in the plan, claimed while the rider is
-riding toward it. That is the mechanism that makes a hand-off trustworthy: the
-Cosmo at 16th & Blake is still there when you arrive because you claimed it
-six minutes ago.
+riding toward it.
+
+**It does not hold the vehicle, and this document must never imply it does.**
+`src/api_dibs.py` is explicit: *"It does not reserve anything: Veo has no
+reservation system, this app cannot stop a vehicle unlocking, and no claim
+here changes what the operator will rent to whom."* An earlier draft of this
+section said the pickup "is still there when you arrive because you claimed
+it" — which is precisely the reservation promise §7.4 forbids, and it was
+wrong on the facts as well as the vocabulary.
+
+What a claim actually buys a hand-off is two things, both real and neither a
+guarantee:
+
+1. **Recorded intent**, so the app greys out "I'll ride this one" for anybody
+   else looking at the same vehicle in this app (`GET /api/v1/dibs/vehicle/{id}`).
+2. **A watched vehicle**, so the moment it goes the plan re-solves (§7.1–7.2)
+   rather than the rider discovering it on arrival.
+
+The honest sentence is therefore: *the pickup is monitored, and if somebody
+takes it you will be moved before you get there* — not *it will be waiting*.
 
 Two consequences the existing dibs rules do not cover:
 
@@ -1371,8 +1489,30 @@ All three, or we do not make the claim:
 - the trip **demonstrably** starts or ends inside an Equity Area polygon
   (`equity-areas.ts`'s bundled geometry, already how the on-screen indicator
   works);
-- the charged rate **demonstrably** is not $1 + 13¢/min;
+- the confirmed charge **demonstrably EXCEEDS** the applicable expected
+  charge — not merely differs from it;
 - the rider has **confirmed** the extracted figures.
+
+**"Differs" was the wrong test and it would have produced complaints about
+trips charged too little.** A lower promotional rate, a credit, or a free
+Access trip all differ from `$1 + 13¢/min` while leaving the rider better
+off; a tool that writes to support about those is worse than useless to the
+people it is for.
+
+So the comparison is one-sided, and it has to absorb the ways a correct charge
+legitimately fails to equal the arithmetic:
+
+- **billable-minute rounding** — `billableMinutes` is `ceil`, with a floor of
+  1 (`ride-cost.ts`), so compare against the rounded figure, never raw minutes;
+- **tax**, which `estimateWithTax` applies on top of `unlock + perMin`;
+- **credits, promotions and discounts**, which can only ever reduce the charge
+  and therefore never evidence an overcharge;
+- **the unresolved Access and Pass interactions**, which stay *"we cannot
+  tell"* per §9.2.3 rather than becoming a claim either way.
+
+A margin below which we say nothing is part of this: a few cents of rounding
+disagreement is not a finding, and treating it as one spends the credibility
+the evidence pile depends on.
 
 Below that bar the verdict is *"we cannot tell"*, and the UI says why. A false
 accusation is worse than silence here: it costs a rider their time and their
@@ -1532,18 +1672,33 @@ times: **six times the load, zero extra freshness.** It is not a small
 inefficiency, it is the entire cost with none of the benefit.
 
 **What actually delivers 20-second news:** an active plan depends on a handful
-of vehicles — the pickup and its backups, one to five of them — so check
-*those*, live, against upstream, bypassing the ingest cycle entirely. Upstream
-being per-request means that returns genuinely current state.
+of vehicles — the pickup and its backups, one to five of them — so what we
+*read, store and compare* is those. Upstream being per-request means a fetch
+returns genuinely current state.
 
-```
-                 fleet (≈3000)          plan-critical (1–5)
-ingest cycle     every 2 min            —
-targeted check   —                      every 20 s, while a plan is live
-```
+**A retraction, because an earlier draft claimed a saving it does not have.**
+It said this was "three orders of magnitude cheaper" than a global poll. That
+is wrong, and `src/ingest.py`'s `fetch_gbfs()` is why: GBFS `free_bike_status`
+is a **whole-feed** endpoint. There is no per-vehicle query, so checking five
+vehicles still downloads the entire fleet payload and filters it afterwards.
+Narrowing saves our own storage and comparison work — not the upstream fetch.
 
-Narrow and frequent beats broad and frequent by three orders of magnitude, and
-it is the only version of this that is honest about where the latency was.
+**The saving that is real is coalescing, and it is about scaling, not size:**
+
+| | Upstream fetches |
+|---|---|
+| Ingest cycle, today | 1 per 2 min |
+| **One shared 20-second check**, serving every active plan | 1 per 20 s — **6× the ingest, and O(1) in riders** |
+| Per-rider independent checks (the naive reading) | 1 per 20 s **per rider** — O(riders), and unacceptable |
+
+So the design is **one coalesced fetch on a 20-second tick, shared across all
+live plans**, with each plan reading its own 1–5 vehicles out of the result.
+Six times the upstream requests is a real and statable cost; multiplying full
+fleet fetches by the number of riding riders is not.
+
+Alternatively, **if a vehicle-scoped upstream API can be verified to exist**,
+use it and the per-vehicle saving becomes real. Treat that as a prerequisite
+to check, not an assumption — exactly as with the Valhalla matrix.
 
 **Do not change the global ingest cadence to achieve this.** The crontab is
 explicit that the live schedule is an admin-editable copy
@@ -1551,9 +1706,28 @@ explicit that the live schedule is an admin-editable copy
 audit's trip-duration resolution. This feature does not get to retune the
 audit.
 
-Bounds: only while a plan is live and the app is foregrounded, stopping on
-completion, abandonment or backgrounding; and rate-limited per account, not
-just per IP — an account is the thing that has one trip.
+#### 13.4.1 Who watches while the tab is closed
+
+**Foreground-only checking and closed-tab SMS cannot both be the whole
+story**, and an earlier draft asserted both: the client check stopped on
+backgrounding, while §13.6 promised alerts with the app closed. Nothing would
+have been detecting the loss to text about.
+
+Two distinct watchers, and the plan should name both:
+
+| | Runs where | While |
+|---|---|---|
+| **Client check** | the browser | a plan is live **and the document is foregrounded**; stops on `visibilitychange`, completion, abandonment |
+| **Server watcher** | the API, over the stored plan (§13.6) | the plan is live, **regardless of the tab** — bounded by the plan's own lifetime and a hard ceiling |
+
+The client one keeps an open app instantly fresh. The **server** one is what
+makes an SMS possible at all, and it is the one Phase 9's acceptance criterion
+("phone in a pocket") actually rests on. The `ride_watch` job is the existing
+pattern.
+
+Rate-limit per **account**, not just per IP — an account is the thing that has
+one trip — and the test that matters is **pickup loss detected while the app is
+backgrounded or closed**, which is the case the client check cannot cover.
 
 ### 13.5 The resume link: a reference, never a credential
 
@@ -1726,7 +1900,7 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   EXISTS` — use the guarded named-constraint shape from `sql/040`–`042` and
   `sql/050`. `tests/test_migration_replay_pg.py` must keep passing.
 - **Three-address rule** (`src/api_meta.py` header): any new stored field is a
-  retention rule. Both `sql/083` (`release_reason`, `replaces_dibs_id`) and
+  retention rule. Both Phase 3's migration (`release_reason`, `replaces_dibs_id`) and
   **`sql/081` in full** need `src/cli.py` (cleanup/de-id), `src/api_meta.py:
   _PRIVACY`, and `src/templates/legal/privacy_policy.html` updated
   **together**. `favorite_devices` is the more consequential of the two: it is
