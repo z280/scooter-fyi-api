@@ -2093,7 +2093,7 @@ Phase 9 is already building.
 moves. It moved. One text:
 
 ```
-Astral Osprey 123 is no longer within 50m of where you scanned. This move was first observed at 14:32.
+Astral Osprey 123 is no longer within 50m of where you scanned. This move was first observed at 2:32pm.
 ```
 
 #### 13.8.1 Why this is allowed, when §8.4 forbids watching a favourite move
@@ -2169,13 +2169,17 @@ name. There is room, but not unlimited room: anything added to this message has
 to be counted, because a two-segment alert costs double and may arrive in
 pieces.
 
-**`HH:MM` is the time the MOVE was observed, never the time the text was sent.**
-Denver local, 24-hour, from the ingest cycle that first saw it — `device_state`
-/ `device_history` already carry the cycle's observation time, and that is the
-value to read. This matters more than it looks: see the quiet-hours rule below,
-where it is the only thing that makes a deferred text honest. (If a 12-hour
-clock reads better to a US recipient, that is a formatting change in one place
-and the rest of this section is unaffected.)
+**The clock time is when the MOVE was observed, never when the text was sent.**
+Denver local, 12-hour, lowercase `am`/`pm`, no space — `2:32pm`. A 24-hour clock
+would be the cheaper thing to format and the wrong thing to read: this lands on a
+US consumer's lock screen beside messages from people, not in a log, and `14:32`
+is a register nobody there is reading in. Single-digit hours carry no leading
+zero for the same reason (`9:05am`, not `09:05am`).
+
+The value comes from the ingest cycle that first saw the move — `device_state` /
+`device_history` already carry the cycle's observation time, and that is the
+column to read. This matters more than it looks: see the quiet-hours rule below,
+where it is the only thing that makes a deferred text honest.
 
 #### 13.8.4 Caps — and why this event wants quiet hours DEFERRED, not dropped
 
@@ -2192,7 +2196,7 @@ move the message to a better time — it deletes the only message the rider
 signed up for, and they find out by opening the app and seeing the watch
 already closed. So: a departure observed inside the quiet window is **held and
 sent at 07:00**, carrying its original observation time. A 07:00 text saying
-"first observed at 03:14" is true, useful, and the reason that field is in the
+"first observed at 3:14am" is true, useful, and the reason that field is in the
 copy at all.
 
 A deferred alert that is still pending when the rider stops the watch is
@@ -2320,14 +2324,19 @@ its own device refresh, and a rider with the tab open gets it from there.
 - The body matches the copy verbatim, and the time is the **observation** time,
   not the send time. Pinned by sending at a clock time deliberately different
   from the observed one.
+- The clock is 12-hour with a lowercase suffix and no leading zero, across noon,
+  midnight and a single-digit hour — `12:00pm`, `12:00am`, `9:05am`. Midnight and
+  noon are where a hand-rolled 12-hour conversion goes wrong (`0:00pm`, or
+  `12:00pm` for midnight), and this one is hand-rolled because it needs a fixed
+  timezone.
 - **No position anywhere in the body**, for a scooter that moved a measured
   distance — asserted against the new coordinates and the distance, so a future
   "helpful" addition fails here rather than in the field.
 - 49 m sends nothing; 51 m sends. `is_reserved` sends with no movement at all.
 - One absent cycle sends nothing; two send.
 - Exactly one text per watch, and the row is gone afterwards.
-- A move observed at 03:14 sends nothing until 07:00, then sends **quoting
-  03:14**.
+- A move observed at 3:14am sends nothing until 07:00 Denver, then sends
+  **quoting 3:14am**.
 - A watch stopped while an alert is pending sends nothing, ever.
 - `notify_sms: false` sends nothing and still closes the watch.
 - No trip-alert opt-in, or no verified number → no send attempted.
