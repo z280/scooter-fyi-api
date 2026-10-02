@@ -1929,6 +1929,12 @@ want to be interrupted for:
 | A better option appeared and we took it | yes | no |
 | Re-solved, nothing you would act on changed | no | no |
 | Plan complete | yes | no |
+| A scooter the rider scanned and asked to watch has moved (§13.8) | yes | **yes, on opt-in** |
+
+The watch row sits **outside this ceiling**, and must, because a watch is not a
+trip: it is armed at a kerb, frequently with no trip in progress, and it sends
+once and then deletes itself (§13.8.4). Its budget is one, enforced by the row
+going away rather than by a counter — a tighter cap than any number stated here.
 
 **Hard ceiling of three texts per trip**, on top of `dibs-notify.ts`'s four
 alerts per claim. Three because the two SMS-worthy events above are both
@@ -2074,6 +2080,263 @@ It is now committed, so the conversation happens rather than being deferred:
   not assumed.
 - The targeted check covers only plan-critical vehicles, and stops on
   completion, abandonment and backgrounding.
+
+### 13.8 Texting a watched scooter's departure
+
+Supersedes §8.7's deferral ("SMS via `comms.py` is a Phase 6 question and
+carries its own consent and quota conversation"). This is that conversation,
+and it lands here rather than in Phase 4 because everything it needs — consent,
+quota, STOP, a verified number, a watcher that runs with no tab open — is what
+Phase 9 is already building.
+
+**The event.** A rider scanned a scooter's QR sticker and asked to be told if it
+moves. It moved. One text:
+
+```
+Astral Osprey 123 is no longer within 50m of where you scanned. This move was first observed at 14:32.
+```
+
+#### 13.8.1 Why this is allowed, when §8.4 forbids watching a favourite move
+
+§8.4 is the rule this feature has to answer to, and it is worth restating
+before anything else in this section: *you may know where a scooter is
+standing, you may not follow it.* The attack it was written against is exactly
+this feature's shape — "scan the sticker on the scooter parked outside
+somebody's house, keep it, watch where it goes next."
+
+**This text carries no location, and that is the whole of the argument.** It
+names the vehicle, states that it left a radius around a point *the rider
+themselves established by standing at it*, and gives a time. Everything in it
+is either already known to the recipient or is not a position at all. It tells
+them the scooter is gone; it does not tell them where to.
+
+So the rule for this section, and the one a future "improvement" will want to
+break:
+
+> **Never add where it went.** Not the new position, not the distance moved,
+> not a direction, not a neighbourhood, not a link that resolves to any of
+> those. A departure alert is a fact about the origin. The moment it becomes a
+> fact about the destination it is the following tool §8.4 refuses to build,
+> and the fact that it arrives by SMS makes it worse, not better — a text
+> renders on a lock screen, persists in carrier logs, and gets screenshotted.
+
+The rider opens the app to see where, which they were going to do anyway. The
+app may show them, because a parked scooter's position is already public on the
+map; the text may not, because a text is not the map.
+
+**The scan is load-bearing, not decoration.** "Where you scanned" is in the
+copy because the anchor point has to be somewhere the rider physically was.
+That is the same thing §8.2's 75 m gate proves, reached the same way, and it
+is what separates a watch on a scooter you are standing next to from a watch on
+a scooter you picked off a map across town. A watch that can be armed from the
+map has no business generating a text, and the frontend lane draws exactly that
+line (frontend plan §9.7): the popup's bell stays local and in-app, and only a
+scan-anchored watch is SMS-eligible.
+
+#### 13.8.2 Fifty metres, and the measurement that already settled it
+
+`src/ride_watch.py`'s module docstring records the production telemetry, taken
+against this fleet on 2026-08-10:
+
+> consecutive samples of `is_reserved` vehicles moved 320 m on average (68% of
+> steps > 50 m — scooter pace), against 1.2 m for the rest of the fleet (0.2%
+> of steps > 50 m — GPS jitter)
+
+So 50 m is not a round number somebody liked. It is a line with a measured
+error rate on both sides: a parked scooter's GPS crosses it in 0.2% of samples,
+and a ridden one crosses it in 68%. It is also comfortably outside
+`stationary_threshold_meters` (16 m, `config.json`), which is the ingest's own
+"has it moved" line and is tuned for reconstructing history rather than for not
+waking somebody up.
+
+**One number, not two.** The frontend shipped a local watch at 25 m
+(`device-notify.ts`'s `MOVED_METERS`), chosen before this measurement was
+consulted. It moves to 50 to match, because two thresholds for one question is
+how the in-app notice and the text end up disagreeing in front of a rider who
+got both.
+
+#### 13.8.3 The copy, and the two things that will break it
+
+**No brand prefix.** `comms.py`'s own header is explicit: the prefix is applied
+server-side, "we must NOT add our own — that would double it." The body we hand
+comms starts at `Astral` and nothing before it. Worth a test rather than a
+comment, because `[scooter.fyi] [scooter.fyi] Astral Osprey 123…` is the
+obvious bug and it is invisible in every unit test that only checks the body.
+
+**One segment.** 102 characters of body, 116 with the prefix comms adds, against
+160 for a single GSM-7 segment — and ~120 with the longest plausible vehicle
+name. There is room, but not unlimited room: anything added to this message has
+to be counted, because a two-segment alert costs double and may arrive in
+pieces.
+
+**`HH:MM` is the time the MOVE was observed, never the time the text was sent.**
+Denver local, 24-hour, from the ingest cycle that first saw it — `device_state`
+/ `device_history` already carry the cycle's observation time, and that is the
+value to read. This matters more than it looks: see the quiet-hours rule below,
+where it is the only thing that makes a deferred text honest. (If a 12-hour
+clock reads better to a US recipient, that is a formatting change in one place
+and the rest of this section is unaffected.)
+
+#### 13.8.4 Caps — and why this event wants quiet hours DEFERRED, not dropped
+
+**One text per watch, and the watch is over.** No 6-hour rule is needed here,
+unlike §8.7's availability alert: the question a move-watch asks is answered
+once, and the answer ends it. The anchor point is stale the moment the scooter
+leaves it, so a watch that kept running would be measuring against a place
+nothing is any more.
+
+**Quiet hours defer rather than suppress.** §8.7 bans availability alerts
+between 22:00 and 07:00 Denver time, and for a recurring "it's free again"
+nudge that is plainly right. For a one-shot terminal alert, dropping it does not
+move the message to a better time — it deletes the only message the rider
+signed up for, and they find out by opening the app and seeing the watch
+already closed. So: a departure observed inside the quiet window is **held and
+sent at 07:00**, carrying its original observation time. A 07:00 text saying
+"first observed at 03:14" is true, useful, and the reason that field is in the
+copy at all.
+
+A deferred alert that is still pending when the rider stops the watch is
+dropped, not sent. They asked us to stop.
+
+**Everything `comms.py` already enforces stands and is not re-implemented
+here**: STOP across every application on the shared number (409, not an error
+the rider ever sees), hourly and daily quota (429), and the fallback transport.
+A 202 is accepted, not delivered — and with `fell_back: true` no confirmation
+will ever follow, so this path is built to be safe under "the text silently
+never arrived". The in-app notice is what makes that safe: it is not a backup
+for the text, it is the primary, and the text is the part that reaches a pocket.
+
+#### 13.8.5 Consent
+
+§13.2's rule applies unchanged and is the reason this is not a free ride on an
+existing number: **a rider who typed their number to get a sign-in code has not
+agreed to be texted about scooters.** A scan-anchored watch asks for the
+trip-alert opt-in at the moment the watch is armed — the moment it is obviously
+useful — and a rider who declines gets the watch, locally, with the in-app
+notice and no text. The opt-in is one grant covering Phase 9's texts; this is
+not a second switch.
+
+No verified number on the profile → offer to add one *there*, through the
+existing `POST /api/v1/profile/phone/{code,verify}` flow. There is no second
+place to put a phone number.
+
+#### 13.8.6 What this costs, said plainly
+
+A texted watch cannot be local. A closed tab detects nothing (§13.4.1 is the
+same argument for plans), so the watch has to be a row on the server — which
+means **a stored association between an account and a specific vehicle the
+rider was physically standing next to.** That is precisely the thing the
+in-app-only version avoided by keeping watches in `localStorage`, and it is not
+a cost to discover later:
+
+- The row stores the account, the `vehicle_identifier`, the anchor lat/lon, the
+  anchor time, and the `qr_raw_value` that proved presence. It does not store
+  where the scooter went, at any point, including after the alert fires.
+- **It is short-lived by construction.** A watch expires 72 hours after it is
+  armed whether or not it ever fires — the same window `quality.py`'s
+  `_RELIABILITY_IDLE_HOURS` already treats as "this scooter is not coming
+  back". A watch is a thing a rider wants for an afternoon, and one that
+  outlives the trip it was for is a subscription nobody renewed.
+- Fired, expired and stopped watches are **deleted, not flagged**. There is no
+  history here worth keeping and every row of it is a record of where somebody
+  stood.
+- `GET /api/v1/meta/privacy` is the authoritative retention statement and gains
+  this table with the rest.
+
+#### 13.8.7 API shape
+
+`sql/0NN_device_move_watches.sql` — take the next free number from `sql/`
+rather than trusting one written here.
+
+```sql
+CREATE TABLE device_move_watches (
+  id                  BIGSERIAL PRIMARY KEY,
+  account_id          UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  vehicle_identifier  TEXT NOT NULL,
+  -- The anchor: where the rider stood when they scanned. The ONLY position
+  -- this table ever holds.
+  anchor_lat          DOUBLE PRECISION NOT NULL,
+  anchor_lon          DOUBLE PRECISION NOT NULL,
+  scanned_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  vehicle_name        TEXT NOT NULL,          -- what the text calls it
+  notify_sms          BOOLEAN NOT NULL DEFAULT FALSE,
+  status              TEXT NOT NULL DEFAULT 'watching'
+                        CHECK (status IN ('watching','pending_quiet_hours')),
+  -- Set when the move is first OBSERVED, which is what the copy quotes —
+  -- never the send time.
+  moved_observed_at   TIMESTAMPTZ,
+  expires_at          TIMESTAMPTZ NOT NULL,
+  UNIQUE (account_id, vehicle_identifier)
+);
+-- The targeted index §8.7 insists on: the per-cycle job must never scan this
+-- table whole.
+CREATE INDEX device_move_watches_live
+  ON device_move_watches (vehicle_identifier)
+  WHERE status IN ('watching','pending_quiet_hours');
+```
+
+There is no `moved_lat`/`moved_lon` column, and adding one is the §13.8.1
+violation wearing a schema. The watcher compares and discards.
+
+| Endpoint | Notes |
+|---|---|
+| `POST /api/v1/profile/device-move-watches` | Body: `qr_raw_value`, `lat`, `lng`, `notify_sms`. **Same gate as §8.2's keep**: the server extracts the plate, resolves the vehicle, and refuses a fix further than 75 m from it (`too_far_from_device`, with `meters_away`). The client validates none of it — `qr.py` owns the rule. Re-arming an existing watch REPLACES it, anchored at the new scan. Cap the number of live watches per account; `favorite_limit_reached`'s shape is the precedent. |
+| `GET /api/v1/profile/device-move-watches` | The rider's live watches. Returns the anchor, never a current position — the map is where positions come from. |
+| `DELETE /api/v1/profile/device-move-watches/{vehicle_identifier}` | Stop. Drops a pending quiet-hours alert with it. |
+
+#### 13.8.8 The watcher
+
+`src/device_move_watch.py`, and §8.7's instruction applies verbatim: copy
+`src/ride_watch.py` exactly. Called from `cycle.py:run_once()` after
+`device_state.update_for_cycle`, wrapped by the caller in try/except (a failure
+here must never fail the cycle), driven by the partial index above.
+
+Per cycle, for each live watch:
+
+1. **Moved?** Haversine from the anchor to this cycle's position ≥ 50 m. The
+   `is_reserved` flag is a second, earlier trigger — Veo flips it at unlock,
+   before the position has gone anywhere — and either one answers the rider's
+   question. Absence from the feed for two consecutive cycles is a third;
+   `device-watch.ts`'s `MISSING_TICKS_BEFORE_GONE` is the same rule for the
+   same reason, and a feed that drops and re-adds a parked vehicle must not
+   send a text.
+2. Stamp `moved_observed_at` from **this cycle's** observation time.
+3. Quiet hours (22:00–07:00 Denver) → `status = 'pending_quiet_hours'` and
+   nothing is sent. A separate pass at 07:00 drains those, using the stored
+   `moved_observed_at` for the copy.
+4. Otherwise send via `comms.py`, body per §13.8.3, no prefix.
+5. Delete the row. Fired, expired or stopped, the watch does not persist —
+   including when the send 409s on STOP or 429s on quota. A row kept "to retry"
+   is a row that texts somebody about yesterday.
+
+The in-app notice is NOT this job's business: the frontend already fires it off
+its own device refresh, and a rider with the tab open gets it from there.
+
+#### 13.8.9 Tests
+
+- **The body carries no brand prefix**, asserted on the exact string handed to
+  `comms.send_sms` — the double-prefix bug is invisible to any test that only
+  checks for the vehicle name.
+- The body matches the copy verbatim, and the time is the **observation** time,
+  not the send time. Pinned by sending at a clock time deliberately different
+  from the observed one.
+- **No position anywhere in the body**, for a scooter that moved a measured
+  distance — asserted against the new coordinates and the distance, so a future
+  "helpful" addition fails here rather than in the field.
+- 49 m sends nothing; 51 m sends. `is_reserved` sends with no movement at all.
+- One absent cycle sends nothing; two send.
+- Exactly one text per watch, and the row is gone afterwards.
+- A move observed at 03:14 sends nothing until 07:00, then sends **quoting
+  03:14**.
+- A watch stopped while an alert is pending sends nothing, ever.
+- `notify_sms: false` sends nothing and still closes the watch.
+- No trip-alert opt-in, or no verified number → no send attempted.
+- STOP → the 409 is recorded, the row is deleted, and no error surfaces to the
+  rider.
+- An expired watch is deleted without sending.
+- The per-cycle job uses the partial index and never scans the table whole;
+  a cycle with no live watches does no per-vehicle work at all.
+- The arming endpoint refuses a fix beyond 75 m, naming the distance.
 
 ---
 
