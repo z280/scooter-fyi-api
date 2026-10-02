@@ -481,13 +481,25 @@ These come from the product owner and override anything inherited from
 revisions 1–2.
 
 1. **Likely-rideable, always.** A `risk`-tier vehicle is **not offered**, at
-   any leg of any plan. The single exception: when there is genuinely no
-   non-risky vehicle within a **5-minute walk**, the app may offer one, and
-   says plainly that it is doing so because there is nothing else nearby.
-   This is not a ranking penalty — revision 2 had it as "+6 minutes" and that
-   was wrong. Rideability is the reason this platform exists, and a planner
-   that routes somebody onto a scooter we have flagged as risky to save them
-   four minutes has sold the whole proposition for four minutes.
+   any leg of any plan. This is not a ranking penalty — revision 2 had it as
+   "+6 minutes" and that was wrong. Rideability is the reason this platform
+   exists, and a planner that routes somebody onto a scooter we have flagged
+   as risky to save them four minutes has sold the whole proposition for four
+   minutes.
+
+   **The single exception is a FIRST HOP, and the asymmetry is deliberate.**
+   When there is genuinely no non-risky vehicle within a **5-minute walk**,
+   the app may offer a risky one as the vehicle you start on, and says plainly
+   that it is doing so because there is nothing else nearby.
+
+   It does **not** extend to pickups. The escape exists so a rider with only
+   a risky scooter near them is not simply told "no plans"; a *pickup* has no
+   such argument, because by then the rider is already moving and refusing a
+   risky hand-off costs them a shorter chain, not the trip. So: risky first
+   hops under the stated condition, never a risky pickup, and §6.2's
+   candidate selection has to implement exactly that rather than excluding
+   `risk` everywhere (which is what an earlier draft of it did, making this
+   exception unreachable).
 2. **Always show estimated cost AND time, including startup costs.** Every
    plan, every leg, every time. A hand-off's entire case is that an extra
    unlock is worth it, and that case cannot be made without the number.
@@ -531,7 +543,9 @@ cost of this design and the plan should not pretend otherwise.
 
 **What keeps N small** — and all three of these are rules we wanted anyway:
 
-- **Rule 1 prunes hardest.** Only non-`risk` vehicles are nodes at all.
+- **Rule 1 prunes hardest.** Non-`risk` vehicles only, except for the
+  first-hop escape in §6.1 — which fires when nothing else is within a
+  5-minute walk, and therefore only when the alternative set was empty anyway.
 - **The first hop must be a short walk.** Only vehicles inside the walk cap
   can be `S₁`, which is a handful, not the fleet. Note what the spec's
   `max_walk_minutes` now MEANS: it bounds the walk onto the **first** vehicle,
@@ -550,13 +564,22 @@ quadratic matrix work.
 So the candidate set needs an **explicit bounded selection step**, before any
 matrix call:
 
-1. take every non-`risk` vehicle in the bbox;
-2. keep the best `W` as possible first hops, ranked by walk seconds inside the
-   walk cap;
-3. keep the best `H` as possible pickups, ranked by how much ride-leg they
-   remove — `ride(Sᵢ→D)` ascending, which is the "further along" test;
+1. take every vehicle in the bbox, keeping its reliability tier;
+2. **first hops** — the best `W` non-`risk` vehicles by walk seconds inside
+   the walk cap. **If that set is empty**, and only then, refill it from the
+   `risk`-tier vehicles inside the walk cap and set `risk_tier_offered` on the
+   response. This is rule 1's exception, and this step is the only place in
+   the search that admits a `risk` vehicle at all;
+3. **pickups** — the best `H` **non-`risk`** vehicles, ranked by how much
+   ride-leg they remove: `ride(Sᵢ→D)` ascending, which is the "further along"
+   test. No exception here, ever (§6.1);
 4. `N = |W ∪ H|`, with `W` and `H` **constants chosen against the deployed
    matrix's own limits**, not against a guess.
+
+**Step 2 and step 3 differ on purpose**, and a reader tempted to unify them
+should read §6.1's second paragraph first: a risky vehicle you walk to is
+sometimes the only trip available, and a risky vehicle you hand off to never
+is.
 
 Only then is the matrix one call and the search a **shortest path** over a
 graph whose size is known in advance. Dijkstra over a few dozen nodes is
@@ -1962,7 +1985,7 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 | 3 | **The phone is in a pocket and the tab is throttled.** The whole re-solve runs client-side in Phase 3. | Rev 3 makes this *less* pressing than rev 2 assumed: a rider mid-hand-off is riding, and a phone mounted for navigation has the tab in front. It still bites for the pocket case — say so in the UI. Phase 9 (§13) is the committed fix: opted-in SMS through `comms.py`, which already carries consent, quota and reply routing. |
 | 4 | **Auto-dibs makes dibs worse for everyone.** Dibs' own rules exist to stop hoarding; a feature that claims automatically is exactly the pressure they were written against, and rev 3's unbounded chaining makes a plan want to claim *more* vehicles. | A plan holds **at most one claim at a time** — release before claim, always, however many hops it intends (§7.3). Watch the ratio of claims to rides in telemetry, and be willing to turn auto-claim off. |
 | 5 | **Valhalla has no matrix, or its matrix disagrees with its routes.** Now MORE load-bearing than in rev 2: the scooter-to-scooter relation is N×N, and a fan-out over N² pairs is not viable. | Verify against the deployed image **before** building the endpoint. Without a matrix, this phase drops to **one hand-off maximum** and a bipartite search — still useful, but say so rather than discovering it late. §6.2. |
-| 6 | **The plan search is expensive and rate-limited**, and rev 3's second matrix call is N×(N+1) rather than N×1. | Still two calls per search. N is pruned hard and deliberately: non-`risk` only (rule 1), first hop inside the walk cap, and the `P`/`D` bbox. The client's straight-line tier carries the interactive list; the server call is reserved for the moment a decision is made. |
+| 6 | **The plan search is expensive and rate-limited**, and rev 3's second matrix call is N×(N+1) rather than N×1. | Still two calls per search, and N is now explicitly bounded by §6.2's selection step (`W` first hops, `H` pickups) rather than by three rules that did not in fact bound it. Non-`risk` throughout, bar rule 1's first-hop escape; first hop inside the walk cap; `P`/`D` bbox. The client's straight-line tier carries the interactive list; the server call is reserved for the moment a decision is made. |
 | 7 | **A re-solve chain sends somebody in a circle**, and rev 3 removed the hop counter that used to bound it. | Re-solve from current position, permanent `exclude`, and generalised cost that must strictly improve to be adopted. Telemetry on total legs and total minutes per trip is the check — a plan that keeps re-solving is a bug, not a feature. |
 | 8 | **Spec too tight = nothing found**, and "no scooters match" reads as "no scooters". | The published relaxation ladder, `relaxed` on every response, and an EXHAUSTED state that says what was tried and offers the one-tap loosening. |
 | 9 | **The map bridge desynchronizes.** A filter set that still claims to be "my ideal scooter" after the rider changed it is a lie the UI is telling. | §5.5's attach/detach rule, and the lossy direction stated on the toggle rather than discovered. |
