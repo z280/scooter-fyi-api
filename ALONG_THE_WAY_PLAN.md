@@ -1214,12 +1214,26 @@ saving = (base_per_min − 13¢) × t  −  13¢ × d  −  $1.00 (second unlock
 - **Access tier: never offered.** See §3.
 
 And the cheapest case is free: **if the direct route already crosses an Equity
-Area, `d = 0`** and the only cost is the second unlock. So the search is two
-tiers, and the first is nearly free to compute — sample the route geometry the
-app already has against the bundled polygons (`equity-areas.ts`'s
-`isInEquityArea`, which is already how the on-screen indicator works) and see
-whether it is already inside one. Only if not does it cost a second routing
-call to test a detour.
+Area, `d = 0`** and the only cost is the second unlock.
+
+**Two different questions, and revision 3b's deletion of the stopover search
+makes it worth separating them** — the paragraph that used to stand here
+answered both as one, which is no longer implementable now that the rate is a
+term in the Phase 2 planner rather than its own search:
+
+| Question | Answered by | Whose job |
+|---|---|---|
+| *Does this leg bill at the Equity Area rate?* | the **leg's own endpoints** against the polygons — `isInEquityArea(from) ‖ isInEquityArea(to)` | the money term, §6.3 |
+| *Where might a worthwhile equity pickup be?* | the direct route's geometry against the polygons, which is nearly free (`equity-areas.ts`'s `isInEquityArea`, already how the on-screen indicator works) | candidate selection, §6.2 |
+
+The first is the rule Exhibit A §5.2 actually states — a trip that **starts or
+ends** inside a polygon — so a leg merely *passing through* one earns no
+discount, and pricing it as though it did advertises money the rider will not
+get. §12.5 draws exactly this line for receipts, and the planner has no licence
+to be looser than the receipt checker. The second is a hint for choosing
+candidates, and it is all that survives of "two tiers of search": there is no
+second routing call to test a detour, because there is no separate stopover
+search left to make one.
 
 ### 9.2 Four things this must be honest about
 
