@@ -590,6 +590,14 @@ matrix call:
 4. `N = |W ∪ H|`, with `W` and `H` **constants chosen against the deployed
    matrix's own limits**, not against a guess.
 
+   **And they have to reach the client tier, which cannot import them.** The
+   two repos share no runtime module, and these values are not fixed until the
+   matrix has been measured — so §6.5's tier gets them **on the candidates
+   response**, caches them for the session, and falls back to a **documented
+   default** when it has never had one or the call failed. The default belongs
+   in both plans once chosen: an undocumented fallback is every implementation
+   picking its own bound, which is the thing step 4 exists to prevent.
+
 **Step 2 and step 3 differ on purpose**, and a reader tempted to unify them
 should read §6.1's second paragraph first: a risky vehicle you walk to is
 sometimes the only trip available, and a risky vehicle you hand off to never
@@ -834,9 +842,11 @@ differently from run to run, and cannot be tested against the cliff at all.
     "legs": [
       { "mode": "walk", "seconds": 92,  "meters": 118 },
       { "mode": "ride", "seconds": 361, "meters": 1804, "vehicle": { /* … */ },
-        "unlock_cents": 0, "minute_cents": 0, "free_minutes_used": 7 },
+        "unlock_cents": 0, "minute_cents": 0, "tax_cents": 0,
+        "free_minutes_used": 7 },
       { "mode": "ride", "seconds": 540, "meters": 2700, "vehicle": { /* … */ },
-        "unlock_cents": 0, "minute_cents": 0, "free_minutes_used": 9 },
+        "unlock_cents": 0, "minute_cents": 0, "tax_cents": 0,
+        "free_minutes_used": 9 },
       { "mode": "walk", "seconds": 60,  "meters": 78 }
     ],
     "total_seconds": 1053,
@@ -886,11 +896,18 @@ this document kept implying otherwise:
 **And `X` collapses to `D` in this tier, stated rather than left to be
 discovered.** §6.2's drop-off node needs legal-parking geometry, which the
 client does not have — so the cheap tier ends its last ride leg **at `D`**, and
-evaluates `must_reach` for that leg against `D` too. The consequence is
-one-directional and must be said on the surface: the client's figures **omit
-the final walk**, so they are a *lower bound* on time, never an upper one. That
-is reconciliation rule 3's job — the routed answer, which has the geometry,
-replaces it at the moment a decision is made.
+evaluates `must_reach` for that leg against `D` too. The client's figures therefore **omit the final walk**.
+
+**An earlier draft called that a lower bound. It is not**, and the correction
+matters because a false directional guarantee invites a test that enforces it:
+the omitted walk pushes the estimate down, while `DETOUR_FACTOR = 1.35` —
+**rounded up** rather than averaged, against 1.33 and 1.18 observed
+(`reach.ts`) — and a fixed 18 km/h riding pace push it up. Nothing makes them
+cancel in a known direction, so a routed leg can come back **shorter** than the
+client's. The honest statement is the one `reach.ts` already makes about
+itself: it is an estimate and must be labelled one. Reconciliation rule 3 is
+what resolves it — the routed answer, which has the geometry, replaces the
+estimate at the moment a decision is made.
 
 The reconciliation rules survive revision 2 intact, because they were never
 about walking:
@@ -1725,8 +1742,10 @@ one-minute ride billed at the base rate would fall inside the margin and be
 reported as "we cannot tell", which is the opposite of what this phase is for.
 Below, the only thing to clear is tax rounding, which is a cent or two. So 10¢
 sits between the two bounds, and the upper bound is the part to preserve if the
-figure is ever revisited. Test at 9¢, 10¢ and 11¢ so the boundary is pinned
-rather than implied.
+figure is ever revisited. Test at 9¢, 10¢ and 11¢ **with their verdicts
+stated** — `cannot_tell`, `cannot_tell`, `overcharged` — since naming the three
+figures without their expected answers still lets a test choose `>` or `≥` and
+pass either way.
 
 Below that bar the verdict is *"we cannot tell"*, and the UI says why.
 
@@ -1737,7 +1756,8 @@ applied* — which is the only question it exists to answer:
 | The charge | Verdict |
 |---|---|
 | explained **entirely** by billable-minute rounding and tax — i.e. it **equals** the expected figure, properly computed | **`correct`** |
-| **exceeds** the expected figure, but by less than the margin | **`cannot_tell`** |
+| **exceeds** the expected figure by **10¢ or less** — the margin itself included | **`cannot_tell`** |
+| **exceeds** it by **more than 10¢** | **`overcharged`**, the bar above being met |
 
 One is arithmetic we can account for; the other is a gap we cannot explain and
 will not accuse anybody over. A false
