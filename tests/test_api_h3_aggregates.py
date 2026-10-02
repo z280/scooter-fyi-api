@@ -30,17 +30,18 @@ _CELL_B = h3.latlng_to_cell(39.7500, -105.0000, 9)   # trips only
 assert _CELL_A != _CELL_B
 
 # (h3_idx, vid, is_disabled, is_reserved, range_m, max_range_m,
-#  failed_starts, first_observed_at_location, has_negative_report)
+#  failed_starts, first_observed_at_location, recent_no_go_mask (sql/087),
+#  has_negative_report)
 _DEVICE_ROWS = [
     # ok tier, battery 100 (LUT top), dwell 2h
     (h3.str_to_int(_CELL_A), "v-ok", False, False, 45293, 52800,
-     0, _NOW - timedelta(hours=2), False),
+     0, _NOW - timedelta(hours=2), 0, False),
     # high_risk (live negative report), battery 58 (off-LUT fallback), dwell 30h
     (h3.str_to_int(_CELL_A), "v-risk", False, False, 26400, 52800,
-     0, _NOW - timedelta(hours=30), True),
+     0, _NOW - timedelta(hours=30), 0, True),
     # untracked + rangeless: unknown tier, no battery, no dwell sample
     (h3.str_to_int(_CELL_A), "v-untracked", False, False, None, 52800,
-     None, None, False),
+     None, None, None, False),
 ]
 
 # (detected_at, from_lat, from_lon) — B gets 3 starts in the 13:00 UTC hour
@@ -197,11 +198,11 @@ def test_dwell_outlier_feeds_risk_share(_fake_db, monkeypatch):
 
     rows = [
         (h3.str_to_int(_CELL_A), "v-ok", False, False, 45293, 52800,
-         0, _NOW - timedelta(hours=2), False),
+         0, _NOW - timedelta(hours=2), 0, False),
         # 50h clean dwell: under the 72h ghost rule on its own, over the
         # 48h gate once the peer-outlier flag is set.
         (h3.str_to_int(_CELL_A), "v-ghostish", False, False, 40000, 52800,
-         0, _NOW - timedelta(hours=50), False),
+         0, _NOW - timedelta(hours=50), 0, False),
     ]
     monkeypatch.setattr("tests.test_api_h3_aggregates._DEVICE_ROWS", rows)
 

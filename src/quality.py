@@ -61,6 +61,7 @@ evaluated in order (first match wins):
 
     high_risk : has_negative_report
               | number_failed_starts ≥ 2
+              | recent_rentals_no_go ≥ 2          (of the last 3 rentals)
               | number_failed_starts == 1 AND dwell ≥ 24h
               | dwell ≥ 72h                       (ghost-scooter idle)
               | dwell-outlier vs peers AND dwell ≥ 48h
@@ -95,9 +96,23 @@ explain.
 A single failed start no longer stays "ok" — it now reads "unknown" rather
 than a clean bill of health, since one bike_id rotation could still be a
 rebalancing scan rather than confirmed evidence of a rider failure. Two or
-more, or one plus a day of dwell, remain outright high_risk. Dwell counters
-reset when the scooter moves (see src/device_state.py), so both inputs are
-naturally scoped to the current location — that's the "recent window".
+more, or one plus a day of dwell, remain outright high_risk.
+
+What counts as a failed start changed in sql/087 (see FAILED STARTS AND
+JITTER in src/device_state.py): a rental released inside 50 m of where it
+started with a rotated bike_id now counts, which is most real failures on
+this feed, and GPS jitter under 50 m no longer resets the count or the dwell
+clock. The count is cleared by a relocation of at least 500 m, and carried
+across a shorter one, so it is scoped to "since the vehicle last proved it
+works" rather than to the exact parking spot. Dwell still restarts on any
+real relocation.
+
+recent_rentals_no_go (sql/087) is how many of the vehicle's last 3 completed
+rentals were such failed starts. Two or more is high_risk on its own. It
+catches what the decay lets go: fail, one good long ride, fail again leaves
+number_failed_starts at 1, but that vehicle is not a one-failure vehicle.
+Measured over 4 days of archive, the next rental after a failed start fails
+again 37% of the time (1.8% fleet baseline), and after two in a row 59%.
 
 The 2x-median rule used to have no floor at all (unlike the outlier rule's
 24h one), which on a high-turnover block meant a 1h peer median demoted a
@@ -208,6 +223,9 @@ _DAY_END_HOUR = 20
 # Reliability-tier thresholds (see module docstring).
 _RELIABILITY_FS_HARD = 2           # failed starts that alone mean high_risk
 _RELIABILITY_FS_DWELL_HOURS = 24.0 # 1 failed start + this much dwell
+# sql/087: failed starts among the vehicle's last 3 completed rentals
+# (device_state.recent_no_go_mask) that alone mean high_risk.
+_RELIABILITY_RECENT_NO_GO = 2
 _RELIABILITY_IDLE_HOURS = 72.0     # dwell alone (ghost scooter; was 96h pre-recalibration)
 _RELIABILITY_OUTLIER_DWELL_HOURS = 48.0  # peer-relative dwell outlier + this much dwell
 _RELIABILITY_UNKNOWN_DWELL_MULT = 2.0    # dwell ≥ this × peer median → unknown…
@@ -552,6 +570,15 @@ def smart_ride_grade(rentals_observed: int | None,
     return int(round(max(GRADE_FLOOR, min(GRADE_CEILING, grade))))
 
 
+def recent_rentals_no_go(recent_no_go_mask: int | None) -> int | None:
+    """Failed starts among the last 3 completed rentals, from
+    device_state.recent_no_go_mask (sql/087). None when the vehicle is not
+    state-tracked."""
+    if recent_no_go_mask is None:
+        return None
+    return bin(int(recent_no_go_mask) & 0b111).count("1")
+
+
 def compute_reliability_tier(
     *,
     number_failed_starts: int | None,
@@ -562,6 +589,7 @@ def compute_reliability_tier(
     peer_median_dwell_hours: float | None = None,
     battery_percent: int | None = None,
     now: datetime | None = None,
+    recent_rentals_no_go: int | None = None,
 ) -> str:
     """Return "ok", "unknown", or "high_risk". Rules in module docstring."""
     fs = number_failed_starts or 0
@@ -572,6 +600,8 @@ def compute_reliability_tier(
         dwell_hours = 0.0
 
     if has_negative_report or fs >= _RELIABILITY_FS_HARD:
+        return "high_risk"
+    if (recent_rentals_no_go or 0) >= _RELIABILITY_RECENT_NO_GO:
         return "high_risk"
     if fs == 1 and dwell_hours >= _RELIABILITY_FS_DWELL_HOURS:
         return "high_risk"
