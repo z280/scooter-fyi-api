@@ -204,8 +204,13 @@ def private_device_history(
     """Time-ordered list of position stops for a single scooter.
 
     Each row is one 'stop' — the scooter arrived at a position and stayed
-    until movement was detected. dwell_failed_starts counts bike_id
-    rotations that happened during the stop without the scooter moving.
+    until movement was detected or, since sql/083, until it had been out of
+    the feed too long (departure_reason 'absent', departed_at = the last
+    time it was seen there; see src/device_state.py ABSENCE).
+    departure_reason is 'moved' for other closes since sql/083 and null for
+    open stops and for stops closed before it. dwell_failed_starts counts
+    bike_id rotations that happened during the stop without the scooter
+    moving.
     """
     if not _VID_RE.match(vehicle_identifier):
         raise HTTPException(400, "vehicle_identifier must be 16 lowercase hex chars")
@@ -247,7 +252,7 @@ def private_device_history(
                 """
                 SELECT snapshot_time, departed_at, lat, lon, spatial_status,
                        form_factor, device_id_observed, dwell_failed_starts,
-                       cycle_id
+                       cycle_id, departure_reason
                 FROM device_history
                 WHERE vehicle_identifier = %s
                   AND snapshot_time <= %s
@@ -270,6 +275,7 @@ def private_device_history(
             "device_id_observed": r[6],
             "dwell_failed_starts": int(r[7] or 0),
             "cycle_id": str(r[8]) if r[8] else None,
+            "departure_reason": r[9],
         }
         for r in rows
     ]

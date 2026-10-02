@@ -101,6 +101,13 @@ Available commands:
                       disagreement flags the vehicle 'needs review', and
                       three reports resolve one by 2/3 consensus
                       (src/device_features.py:process_pending).
+    close_ghost_stops One-off, by hand: close device_history stops left open
+                      by vehicles that left the feed before sql/083 made the
+                      cycle do it (src/ghost_stops.py). Idempotent.
+                      `close_ghost_stops [--dry-run] [YYYY-MM-DD ...]`;
+                      --dry-run writes nothing and prints the count plus the
+                      Equity Area reconstruction's fidelity before/after for
+                      the given days (default: the last five).
     migrate           Apply pending SQL migrations.
     admin             Manage the admin allowlist:
                       `admin (list | add <email> | remove <email>)`.
@@ -1052,8 +1059,44 @@ def equity_backfill_cli(sub_args: list[str]) -> int:
     return 0
 
 
+def close_ghost_stops_cli(sub_args: list[str]) -> int:
+    """`python -m src.cli close_ghost_stops [--dry-run] [YYYY-MM-DD ...]`.
+
+    See src/ghost_stops.py. Without --dry-run it WRITES: it closes every
+    open stop whose vehicle has been out of the feed past the absence rule,
+    in one transaction, and prints what it closed. Run it once after
+    sql/083 is deployed, by hand. It is not in the crontab, because the
+    cycle keeps new absences closed from then on. Dates are only meaningful
+    with --dry-run, which previews those days' reconstruction fidelity.
+    """
+    import json
+
+    from . import ghost_stops
+
+    usage = "usage: python -m src.cli close_ghost_stops [--dry-run] [YYYY-MM-DD ...]"
+    flags = {a for a in sub_args if a.startswith("--")}
+    dates = [a for a in sub_args if not a.startswith("--")]
+    if flags - {"--dry-run"}:
+        print(usage, file=sys.stderr)
+        return 2
+    dry_run = "--dry-run" in flags
+    if dates and not dry_run:
+        print("error: dates only apply to --dry-run", file=sys.stderr)
+        return 2
+    try:
+        days = [datetime.strptime(d, "%Y-%m-%d").date() for d in dates] or None
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    result = ghost_stops.dry_run(days) if dry_run else ghost_stops.run()
+    print(json.dumps(result, default=str))
+    return 0
+
+
 _SUBARG_COMMANDS.update({
     "admin": admin_cli,
+    "close_ghost_stops": close_ghost_stops_cli,
     "equity_backfill": equity_backfill_cli,
 })
 
