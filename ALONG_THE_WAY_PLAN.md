@@ -773,7 +773,9 @@ same list rather than being a separate concept.
     "range_meters": 2400,          // what the CURRENT vehicle can still do
     "unlock_paid": true,           // so continuing costs no unlock
     "started_at": "2026-10-02T01:31:00Z",   // for the free-minute balance
-    "free_minutes_used_this_ride": 6
+    // Minutes of today's free hour spent BEFORE this rental began. A
+    // baseline, not a running total: it cannot age, so it is safe to send.
+    "free_minutes_used_before_ride": 6
   }
 }
 ```
@@ -789,9 +791,21 @@ Omitting this would make every re-solve quietly prefer handing off, since the
 option of simply carrying on would not be in the graph to lose.
 
 **`started_at` needs a "now" to be worth anything, and the evaluation instant
-is therefore part of the contract.** `free_minutes_used_this_ride` is a
-snapshot taken when the client built the request; the rental keeps running, so
-the balance has to be advanced by the elapsed time before anything is priced.
+is therefore part of the contract.** Today's usage is
+`free_minutes_used_before_ride + (now − started_at)`.
+
+**The field is a baseline for a reason.** Revision 3 sent
+`free_minutes_used_this_ride` — minutes spent *during* the current rental — and
+then aged it by `now − started_at`, which **double-counts** every minute
+already in the snapshot: a 6-minute figure measured six minutes in becomes 12.
+A baseline measured *before the rental began* is constant for the whole ride,
+so ageing it is exactly right and there is no second timestamp to keep
+consistent. A re-solve after a **nonzero** baseline is the regression that
+catches the double-count; the zero case passes either way, which is why the
+bug survived.
+
+The balance still has to be advanced by elapsed time before anything is
+priced.
 The server does that **once per request, from the instant it receives it**, and
 prices the whole search from that single value — never re-reading the clock
 mid-search, which would make a plan's rank depend on where in the search it was
@@ -848,6 +862,24 @@ filters are a view, not a statement of what they will ride). It renders the
 list instantly; the server tier corrects it with routed legs at the moment a
 decision is made, never on a refresh tick.
 
+**Three things it must be GIVEN rather than find out**, because it is pure and
+this document kept implying otherwise:
+
+| Input | Why it cannot be read inside |
+|---|---|
+| the **evaluation instant** | see §6.4: a search that reads the clock ranks identical inputs differently and cannot be tested against the free-minute cliff |
+| the **tax rate** | `ride-cost.ts` holds it as mutable module state. A pure search that reads it ranks against whatever the module currently says, and a client pricing pre-tax while the server prices with tax breaks reconciliation rule 3 below without either being wrong |
+| the **free-minute baseline** | §6.4's `free_minutes_used_before_ride`, which does not age |
+
+**And `X` collapses to `D` in this tier, stated rather than left to be
+discovered.** §6.2's drop-off node needs legal-parking geometry, which the
+client does not have — so the cheap tier ends its last ride leg **at `D`**, and
+evaluates `must_reach` for that leg against `D` too. The consequence is
+one-directional and must be said on the surface: the client's figures **omit
+the final walk**, so they are a *lower bound* on time, never an upper one. That
+is reconciliation rule 3's job — the routed answer, which has the geometry,
+replaces it at the moment a decision is made.
+
 The reconciliation rules survive revision 2 intact, because they were never
 about walking:
 
@@ -888,7 +920,17 @@ case — it is one entry in a list:
 
 - the vehicle you are heading for is taken, disabled, or vanishes from the feed;
 - a materially better plan appears (this is revision 2's "upgrade", and it is
-  no longer a separate optional Phase 3b — it is the same code path);
+  no longer a separate optional Phase 3b — it is the same code path).
+  **"Materially" is 120 seconds of generalised cost, and a re-solve for this
+  trigger fires at most once every 3 minutes.** Without a number this trigger
+  re-solves on estimate noise: the search reruns on every refresh, and a
+  one-second improvement is a disruption by this list's own wording. 120 s is
+  chosen **above `bonus_favorite`'s 90 s on purpose** — a favourite coming into
+  range must not by itself rearrange a trip in progress — and it is 15¢ at
+  §6.3.0's exchange rate, so it clears rounding without needing a real saving
+  to be large. Ties and sub-threshold gains change **nothing**: no re-solve, no
+  claim movement, no notification. **The other four triggers have no threshold
+  and no interval** — a vehicle that is gone is gone;
 - your battery is draining faster than the estimate and the current leg will
   not reach its hand-off;
 - you fall far enough behind the plan's timings that its dibs will expire;
@@ -1664,6 +1706,16 @@ A margin below which we say nothing is part of this: a few cents of rounding
 disagreement is not a finding, and treating it as one spends the credibility
 the evidence pile depends on.
 
+**The margin is 10¢, and it has a real ceiling rather than being a matter of
+taste.** One minute of the Equity Area discount is **12¢** (25¢ base against
+13¢), so a margin at or above that makes the **shortest trips unprovable** — a
+one-minute ride billed at the base rate would fall inside the margin and be
+reported as "we cannot tell", which is the opposite of what this phase is for.
+Below, the only thing to clear is tax rounding, which is a cent or two. So 10¢
+sits between the two bounds, and the upper bound is the part to preserve if the
+figure is ever revisited. Test at 9¢, 10¢ and 11¢ so the boundary is pinned
+rather than implied.
+
 Below that bar the verdict is *"we cannot tell"*, and the UI says why.
 
 **Two cases below the bar read alike and must not be collapsed**, or `correct`
@@ -1818,8 +1870,17 @@ want to be interrupted for:
 | Re-solved, nothing you would act on changed | no | no |
 | Plan complete | yes | no |
 
-Hard ceiling per trip, on top of the existing per-claim ceiling. A text that
-says "we checked and it is fine" is not reassurance, it is attrition.
+**Hard ceiling of three texts per trip**, on top of `dibs-notify.ts`'s four
+alerts per claim. Three because the two SMS-worthy events above are both
+"where you are going has changed", and a trip that produces a fourth is a trip
+going wrong in a way a fourth text does not fix — at that point the app is the
+place to look, and a phone that has buzzed four times is a phone whose next
+alert gets ignored. Without a stated number the "ceiling holds" test can pick
+its own and pass, which is the safeguard defeating itself. Test the boundary:
+the third sends, the fourth does not, and the suppression is visible in-app.
+
+A text that says "we checked and it is fine" is not reassurance, it is
+attrition.
 
 ### 13.4 The rapid check — narrow, not fast
 
