@@ -211,8 +211,14 @@ def test_ordinary_absence_still_closes_after_the_threshold_and_k_misses(pg, shor
 
 def test_a_real_change_in_fleet_size_is_followed_by_the_baseline(pg, short_baseline, monkeypatch):
     # The baseline includes cycles that did not count, so a fleet that really
-    # halves (and stays halved) counts again once that is the median of the
+    # shrinks (and stays shrunk) counts again once that is the median of the
     # baseline window. Production: ABSENT_BASELINE_CYCLES = 720, ~12 h in.
+    #
+    # BELOW half, not halved. 4 of 10 is 0.40, and it has to be under the floor
+    # for the baseline to have anything to adapt to: ABSENT_FLOOR_RATIO is
+    # compared with `>=`, so an exact halving counts on the very first cycle and
+    # never reaches this path at all. `test_what_counts_as_an_observation` pins
+    # both sides of that boundary (3750/7500 counts, 3749 does not).
     monkeypatch.setattr(device_state, "ABSENT_BASELINE_CYCLES", 10)
     last = _run(pg, _T0, _T0 + 10 * _EVERY, lambda t: _fleet())
     counted = [_observe(pg, last + i * _EVERY, _fleet(without={1, 2, 3, 4, 5, 6})

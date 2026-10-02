@@ -111,7 +111,8 @@ leaves no row, so it is never a miss, however long the failure lasts.
 
 A processed cycle also has to be a plausible observation of the fleet to
 count: its eligible payload (devices with a vehicle_identifier) must be
-non-empty and at least ABSENT_FLOOR_RATIO of the recent baseline. An empty
+non-empty and at least ABSENT_FLOOR_RATIO of the recent baseline — at least,
+not more than, so a payload at exactly half the baseline is believed. An empty
 or plate-less payload is far more likely an upstream or ingest glitch than a
 withdrawal of the whole fleet (PR #98 review, finding 2), and counting it
 would close every open stop an hour in and reopen them all on recovery. Such
@@ -208,7 +209,7 @@ ABSENT_STOP_AFTER = timedelta(hours=1)
 #: ...and it must also have missed this many consecutive OBSERVED cycles
 #: (sql/086: cycles this module committed, in device_state_processed_cycles,
 #: whose payload passed ABSENT_FLOOR_RATIO; never a cycle whose update
-#: failed, nor an empty or implausibly small payload). After
+#: failed, nor an empty payload, nor one below half the baseline). After
 #: an ingest outage, wall-clock time alone would count our own downtime as the
 #: vehicles' absence, and one partial recovery cycle could close stops that
 #: are still in use. Five cycles is ten minutes of real observations.
@@ -252,15 +253,24 @@ ABSENT_SWEEP_WINDOW_CYCLES = 30
 #:    trailing mean.
 #: So no real cycle in four months would have been excluded at 0.5. The floor
 #: rejects an empty, plate-less or truncated payload, and a partial one that
-#: loses half the fleet, while leaving room for every dip the fleet has
-#: actually shown.
+#: loses MORE than half the fleet, while leaving room for every dip the fleet
+#: has actually shown.
 #:
-#: The baseline includes cycles that did not count, so it follows a real
-#: change in fleet size: a fleet that genuinely halves overnight counts again
-#: once that is the median of the last day, about 12 h in. A zero count never
-#: counts, whatever the baseline. Until ABSENT_BASELINE_MIN_CYCLES processed
-#: cycles exist (just after sql/086 is applied) there is no baseline and any
-#: non-zero cycle counts.
+#: THE FLOOR IS INCLUSIVE, which decides where the interesting boundary is.
+#: `counts_as_observation` compares `>=`, so a payload at exactly half the
+#: baseline counts immediately — it is a cycle we believe, not one we wait out.
+#: Only a payload BELOW half is rejected, and only that case has anything to do
+#: with the baseline adapting.
+#:
+#: And it does adapt, because the baseline includes cycles that did not count:
+#: a fleet that genuinely drops below half and stays there counts again once
+#: that is the median of the last day, about 12 h in. By the same token a
+#: partial glitch that lasts longer than that would eventually be believed —
+#: the alternative, a baseline of counted cycles only, would never adapt at all
+#: and a real contraction would stop absence closing until somebody intervened.
+#: A zero count never counts, whatever the baseline, however long it lasts.
+#: Until ABSENT_BASELINE_MIN_CYCLES processed cycles exist (just after sql/086
+#: is applied) there is no baseline and any non-zero cycle counts.
 ABSENT_FLOOR_RATIO = 0.5
 ABSENT_BASELINE_CYCLES = 720
 ABSENT_BASELINE_MIN_CYCLES = 30
