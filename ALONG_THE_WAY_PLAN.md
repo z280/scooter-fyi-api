@@ -658,6 +658,51 @@ For a rider with no free balance (every tier but Access, or an Access rider
 who has spent the hour) the money term is linear and the augmentation
 collapses to one layer — the ordinary search, at no extra cost.
 
+#### 6.3.0 The exchange rate, which this document had been assuming without stating
+
+"Money converted to seconds" is not implementable until the conversion is a
+number. Without one, two correct implementations of this plan rank the same
+fleet differently, and nothing in either is wrong.
+
+**`SECONDS_PER_CENT = 8`.** One constant, shared by the server tier and the
+client tier, because a client that degrades to a different exchange rate
+degrades to a different *answer*, not a rougher one.
+
+**It is already in this document.** The counterexample above scores "a paid
+minute at 2 minutes of time" — a paid Access minute is 15¢, and 15 × 8 = 120
+seconds. That table is arithmetic at this rate, not an illustration, and it
+only works because the rate is roughly this high. The constant was implicit;
+stating it changes nothing except that it can now be implemented and argued
+with.
+
+Both ends of it, in rider terms:
+
+| | Worth |
+|---|---|
+| A $1 unlock | **13 min 20 s** — so a `resident`'s extra hand-off has to save more than thirteen minutes |
+| One free Access minute preserved | **2 minutes** of extra travel — so walking a minute to save a billable minute is worth doing |
+
+**Below about 4 seconds per cent the Access cliff stops changing routes at
+all**, and §6.3's state augmentation becomes dead weight. The reason is one
+line of arithmetic: staying inside the free hour means walking instead of
+riding, which trades one minute of time for one billable minute (15¢). That
+trade pays only while 15¢ outranks 60 seconds — i.e. above 4 s/¢. So the rate
+is not a free parameter to tune for taste: set it near a
+value-of-time-at-minimum-wage figure (about 2 s/¢) and this feature's hardest
+piece of machinery would be solving a trade-off that no longer exists.
+
+**It is a policy choice and should be read as one.** 8 s/¢ values an hour of
+a rider's time at about $4.50 — low against any wage, and deliberately so: the
+riders this is built for are the ones for whom $1 is a real number. The figure
+belongs beside `bonus_favorite`'s 90 seconds as a starting value with its
+consequence written down, and it is the single number that most changes the
+plan list, so it should be reviewed on real trips rather than defended from
+this paragraph.
+
+Tests, in both lanes: a plan one unlock cheaper and **13 minutes slower**
+wins; the same plan **14 minutes** slower loses. Asserted on the crossover,
+because a scalar with no stated rate passes any test you write for it.
+
 #### 6.3.1 "How many free minutes have I got left?"
 
 `config.ts` carries the honest admission that makes this necessary:
@@ -1817,6 +1862,14 @@ It is now committed, so the conversation happens rather than being deferred:
 
 - Store the **plan**, not a track: the legs, the current claim, the backups.
   Not a breadcrumb trail of where the rider has been.
+- **Three operations, because storage with no end state is a leak.** Create on
+  the plan the rider chose, update on each re-solve, finish on arrival or
+  abandonment: `POST /api/v1/trip/plans`, `PATCH …/plans/{id}`, `DELETE
+  …/plans/{id}`. The server cannot infer which of the offered backups was
+  taken, and `fetchPlanCriticalState` reads vehicles rather than plans, so
+  without `create` the watcher has nothing to watch and the resume link has
+  nothing to resume. Without `finish` the watcher runs until the ceiling
+  expires it, texting about a trip that ended.
 - **Delete on completion or abandonment**, with a short hard ceiling
   regardless — a plan is worth minutes, not days, and `pending-trip.ts`
   already argues exactly this for the client-side intent.
@@ -2051,6 +2104,7 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 | 19 | **The free-minutes estimate is wrong and the rider is billed.** Rides taken outside this app are invisible to it (§6.3.1). | The figure is a *ceiling* on what is left and is labelled as one, the rider can correct it before planning, and no plan is ever described as "free" on the strength of our estimate alone. |
 | 20 | **Notification fatigue kills the alert that matters**, and rev 3 announces EVERY re-solve rather than only the ones outside an envelope. | Re-solve messages *replace* `taken`, never stack. One-tick hold, same four-per-claim ceiling. A re-solve that changes nothing the rider would act on is not announced at all — "we checked and the plan stands" is not news. |
 | 21 | **`recommend.ts` and the new scorer disagree in front of the rider.** | They answer different questions and may differ in order. They share disqualification predicates and must never differ on what is rideable. Consider folding the drawer onto the plan search once Phase 2 is proven. |
+| 22 | **The exchange rate is one number that silently re-ranks everything.** §6.3.0's `SECONDS_PER_CENT = 8` decides whether a $1 unlock beats thirteen minutes, and below ~4 s/¢ the Access cliff stops changing routes at all — so a well-meant "let's value time realistically" edit would quietly retire §6.3's state augmentation while every test still passed. | The constant lives in one place, shared by both tiers, with its two rider-facing consequences and the 4 s/¢ floor stated beside it. Crossover tests pin the 13-vs-14-minute boundary, so a change to the rate fails a test instead of changing the plan list in silence. Telemetry on hand-offs per plan per tier is the field check. |
 
 ---
 
@@ -2098,7 +2152,7 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   operator gets a text.
 - **8.** A rider drops in a receipt for a trip that started in an Equity Area,
   is told in plain terms what they were charged and what Exhibit C says they
-  should have been, and copies a complaint in one tap — with the image never
+  should have been, and opens a ready-to-send complaint in one tap — with the image never
   having left their phone. A rider whose receipt cannot answer the question is
   told that, rather than guessed at. And the consented submissions can say, with
   a denominator attached, how often the discount was applied at all.
