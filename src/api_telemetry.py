@@ -113,9 +113,27 @@ ALLOWED_EVENTS: frozenset[str] = frozenset(
         "popup_action",
         # ride wizard funnel
         "ride_open",
+        # An entry turned away because a ride was already live — the
+        # BRB-then-tap-a-scooter path, which used to build a wizard over the
+        # running ride. Counted so a climb here reads as "riders are reaching
+        # for the wizard when they wanted the HUD".
+        "ride_open_deflected",
         "ride_screen",
         "ride_complete",
         "ride_abandon",
+        # A rider told us, at the moment it happened, that the scooter would
+        # not ride (`outcome`: reported / deduped). This is the one
+        # reliability signal device_state.py cannot infer — its
+        # number_failed_starts is a GBFS bike_id rotation seen in place, and
+        # quality.py needs two of those to downgrade a device.
+        "ride_failed_start",
+        # In-ride HUD: the follow-cam was re-engaged after a pan.
+        "hud_recenter",
+        # The main menu's QR dial, by the mode it was turned to (`mode`).
+        "qr_utility",
+        # "Notify me if moved" switched on or off for a device (`action`).
+        # Never the vehicle, the same rule favorites and dibs follow.
+        "device_notify_moved",
         # auth funnel
         "auth_start",
         "auth_success",
