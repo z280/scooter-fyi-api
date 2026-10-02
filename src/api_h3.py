@@ -47,6 +47,7 @@ from .quality import (
     compute_battery_percent,
     compute_quality_designation,
     compute_reliability_tier,
+    recent_rentals_no_go,
 )
 
 router = APIRouter()
@@ -110,6 +111,7 @@ def h3_aggregates(
                        r.is_disabled, r.is_reserved,
                        r.current_range_meters, r.max_range_meters_for_type,
                        ds.number_failed_starts, ds.first_observed_at_location,
+                       ds.recent_no_go_mask,
                        (EXISTS (
                            SELECT 1 FROM negative_reports nr
                            WHERE nr.vehicle_identifier = r.vehicle_identifier
@@ -163,7 +165,7 @@ def h3_aggregates(
         return acc
 
     for (h3_idx, vid, is_disabled, is_reserved, range_m, max_range_m,
-         failed_starts, first_obs, has_neg) in device_rows:
+         failed_starts, first_obs, recent_mask, has_neg) in device_rows:
         if h3_idx is None:
             continue
         acc = _cell(h3.int_to_str(int(h3_idx)))
@@ -192,6 +194,7 @@ def h3_aggregates(
             peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
             battery_percent=battery,
             now=snapshot_time,
+            recent_rentals_no_go=recent_rentals_no_go(recent_mask),
         )
         if tier == "high_risk":
             acc.high_risk += 1

@@ -35,6 +35,7 @@ from .quality import (
     compute_battery_percent,
     compute_quality_designation,
     compute_reliability_tier,
+    recent_rentals_no_go,
 )
 
 _COMPLIANCE_PASS_COLUMNS = tuple(compliance_pass_column(g) for g in COMPLIANCE_GROUPS)
@@ -278,8 +279,9 @@ def _if_none_match_hit(request: Request, etag: str) -> bool:
     return etag in (t.strip() for t in inm.split(","))
 
 
-def _rental_outcomes() -> dict[str, tuple[int, int]]:
-    """{vehicle_identifier: (rentals_observed, rentals_no_go)} for the fleet.
+def _rental_outcomes() -> dict[str, tuple[int, int, int]]:
+    """{vehicle_identifier: (rentals_observed, rentals_no_go,
+    recent_no_go_mask)} for the fleet.
 
     sql/072. One row per device, two integers - small enough to fetch whole
     rather than join, and fetching it separately keeps the payload SELECT (all
@@ -292,16 +294,19 @@ def _rental_outcomes() -> dict[str, tuple[int, int]]:
         with connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT vehicle_identifier, rentals_observed, rentals_no_go "
+                    "SELECT vehicle_identifier, rentals_observed, rentals_no_go, "
+                    "recent_no_go_mask "
                     "FROM device_state WHERE rentals_observed > 0")
-                return {r[0]: (int(r[1] or 0), int(r[2] or 0)) for r in cur.fetchall()}
+                return {r[0]: (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0))
+                        for r in cur.fetchall()}
     except Exception:  # noqa: BLE001
         log.warning("rental outcomes unavailable — grades omitted this cycle")
         return {}
 
 
-def _outcome(outcomes: dict[str, tuple[int, int]], vid: str | None) -> tuple[int, int]:
-    return outcomes.get(vid or "", (0, 0))
+def _outcome(outcomes: dict[str, tuple[int, int, int]],
+             vid: str | None) -> tuple[int, int, int]:
+    return outcomes.get(vid or "", (0, 0, 0))
 
 
 def _devices_current_impl(
@@ -533,6 +538,11 @@ def _devices_current_impl(
     features = []
     for r in rows:
         number_failed_starts = int(r[22]) if r[22] is not None else None
+        rentals_observed, rentals_no_go, recent_mask = _outcome(rental_outcomes, r[5])
+        # sql/087. None for a vehicle device_state has never tracked, like
+        # number_failed_starts; 0 for a tracked one with no failed rentals.
+        recent_no_go = (recent_rentals_no_go(recent_mask)
+                        if number_failed_starts is not None else None)
         # Derived once so the reliability floor, the wire field and the
         # usable-range estimate all cite the same number rather than three
         # independent lookups of the same range. compute_quality_designation
@@ -565,6 +575,7 @@ def _devices_current_impl(
             peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
             battery_percent=battery_percent,
             now=now_utc,
+            recent_rentals_no_go=recent_no_go,
         )
         properties: dict[str, Any] = {
             "device_id": r[0],
@@ -599,9 +610,13 @@ def _devices_current_impl(
             # sql/072 — the one reliability signal that survived validation:
             # a vehicle's no-go rate persists at r=+0.275 across weeks, and
             # the worst 10% of vehicles carry 32.4% of all failures.
-            "rentals_observed": _outcome(rental_outcomes, r[5])[0],
-            "rentals_no_go": _outcome(rental_outcomes, r[5])[1],
-            "smart_ride_grade": smart_ride_grade(*_outcome(rental_outcomes, r[5])),
+            "rentals_observed": rentals_observed,
+            "rentals_no_go": rentals_no_go,
+            # sql/087 — failed starts among the last 3 completed rentals; 2+
+            # makes reliability_tier high_risk on its own, so a client that
+            # mirrors the tier needs it.
+            "recent_rentals_no_go": recent_no_go,
+            "smart_ride_grade": smart_ride_grade(rentals_observed, rentals_no_go),
             # sql/073 — a label a rider can say out loud. Derived from the
             # identifier, never stored.
             "public_name": vehicle_identity.public_name(r[5]),

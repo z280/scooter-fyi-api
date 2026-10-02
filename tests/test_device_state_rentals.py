@@ -87,6 +87,11 @@ class _FakeCursor:
             self.state["first_ever_observed_at"],
             self.state["rental_started_at"],
             self.state.get("last_observed_at", _T0 - timedelta(minutes=2)),
+            # sql/087. None = origin unknown (first seen mid-rental, or in a
+            # rental when sql/087 landed), which takes the pre-087 path.
+            self.state.get("rental_max_distance_m"),
+            self.state.get("rental_origin_device_id"),
+            self.state.get("last_fix_lat"), self.state.get("last_fix_lon"),
         )]
 
     def fetchone(self):
@@ -213,8 +218,10 @@ def test_ten_cycle_rental_yields_one_trip_not_ten(cycle):
 # ---------------------------------------------------------------------------
 
 def test_release_within_threshold_reopens_the_stop_but_records_no_trip(cycle):
-    """A cancelled reservation, or a round trip. The vehicle demonstrably
-    left and came back, so dwell restarts — but nothing relocated."""
+    """A round trip, or (as here, rental_max_distance_m NULL) a release
+    whose origin is unknown. The vehicle may have left and come back, so
+    dwell restarts — but nothing relocated. A rental KNOWN never to have left
+    50 m is an in-place release instead: tests/test_device_state_failed_starts.py."""
     stats, cur = cycle([_device(_NUDGE, is_reserved=False)],
                        state=_known(rental_started_at=_T0))
     assert (stats.rentals_ended, stats.moved) == (1, 0)
@@ -282,13 +289,13 @@ def test_new_device_first_seen_mid_rental_is_flagged(cycle):
     stats, cur = cycle([_device(_ORIGIN, is_reserved=True)], state=None)
     assert (stats.new_devices, stats.rentals_started) == (1, 1)
     inserted = cur.rows_for("INSERT INTO device_state")
-    assert inserted[0][-1] == _T0        # rental_started_at, last column
+    assert inserted[0][-3] == _T0        # rental_started_at, before last_fix_lat/lon
 
 
 def test_new_device_not_in_a_rental_has_no_flag(cycle):
     stats, cur = cycle([_device(_ORIGIN, is_reserved=False)], state=None)
     assert (stats.new_devices, stats.rentals_started) == (1, 0)
-    assert cur.rows_for("INSERT INTO device_state")[0][-1] is None
+    assert cur.rows_for("INSERT INTO device_state")[0][-3] is None
 
 
 def test_mixed_fleet_partitions_in_one_pass(cycle):

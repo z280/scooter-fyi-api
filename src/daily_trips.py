@@ -1,10 +1,10 @@
 """Daily trip/popularity rollup.
 
-A "trip" is a MOVED transition detected in src/device_state.py — the
-vehicle's position changed by more than the stationary threshold between
-consecutive 10-minute cycles, i.e. someone rode it somewhere. Each one is
-logged to `trip_events` as it's detected; this module rolls those events
-up once a day into:
+A "trip" is a MOVED transition detected in src/device_state.py: a rental
+that went somewhere, counted once at its release (sql/069), or a move without
+a rental of more than 50 m with a rotated bike_id or 100 m without one
+(sql/087). Each one is logged to `trip_events` as it's detected; this module
+rolls those events up once a day into:
 
     daily_trip_summary          — total trips + distinct vehicles tripped
     daily_vehicle_trip_counts   — per-vehicle trip count + popularity rank
@@ -14,6 +14,12 @@ compliance SLA job (src/daily_sla.py) — see src/cli.py's `daily_sla`
 command and /app/crontab — but scoped to a FULL Denver-local calendar
 day, not the narrow 6am-9am SLA window. `compute_for_date(date)` is
 callable directly for backfills.
+
+DAYS ARE NOT COMPARABLE ACROSS sql/087. Before it, any change of position over
+the 16 m stationary threshold was a trip, so GPS drift on parked vehicles was
+roughly two of every three. Replaying 2026-09-29: 70,867 trips under the old
+rule (production recorded 70,898), 26,419 under the new one, against 23,459
+rentals. Earlier days are not restated.
 
 Denver TZ is `America/Denver` — handled with stdlib zoneinfo so DST
 transitions are correct.
