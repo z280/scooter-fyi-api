@@ -1,8 +1,9 @@
 """sql/083 ghost-stop closing, against real Postgres.
 
-Drives src/device_state.update_for_cycle cycle by cycle (with the observed
-cycles it relies on written to observation_cycles / snapshot_metadata_core,
-as the real cycle writes them first), and src/ghost_stops' cleanup and dry
+Drives src/device_state.update_for_cycle cycle by cycle (writing
+observation_cycles / snapshot_metadata_core first, as the real cycle does;
+the absence rule itself counts the cycles device_state records in sql/086's
+ledger), and src/ghost_stops' cleanup and dry
 run, and checks what device_history ends up holding:
 
   * a vehicle absent past the threshold has its stop closed at its LAST
@@ -17,8 +18,8 @@ run, and checks what device_history ends up holding:
 
 SKIPS unless VEO_TEST_PG_DSN points at a reachable, migratable database.
 Like tests/test_area_leaders_pg.py, it wipes device_history / device_state /
-trip_events (and snapshot_metadata_core, whose newest rows the absence rule
-reads) at setup.
+trip_events, snapshot_metadata_core and device_state_processed_cycles (whose
+newest rows the absence rule reads) at setup.
 """
 
 from __future__ import annotations
@@ -92,6 +93,7 @@ def pg(monkeypatch):
         cur.execute("DELETE FROM device_history")
         cur.execute("DELETE FROM device_state")
         cur.execute("DELETE FROM snapshot_metadata_core")
+        cur.execute("DELETE FROM device_state_processed_cycles")
     conn.commit()
 
     @contextmanager

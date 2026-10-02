@@ -46,8 +46,10 @@ def _cycles(n: int, *, every=timedelta(minutes=2), latest=_T0) -> list[datetime]
 class _FakeCursor:
     rowcount = 0
 
-    def __init__(self, *, state=None, open_stop=True, snapshot_times=()):
+    def __init__(self, *, state=None, open_stop=True, snapshot_times=(), baseline=None):
         self.state = state
+        # (rows, median) answered to record_processed_cycle's baseline read.
+        self.baseline = baseline
         self.open_stop = open_stop
         self.snapshot_times = list(snapshot_times)
         self.calls: list[tuple[str, list]] = []
@@ -62,7 +64,7 @@ class _FakeCursor:
         self.calls.append((self._last, list(seq)))
 
     def fetchall(self):
-        if "FROM snapshot_metadata_core" in self._last:
+        if "FROM device_state_processed_cycles" in self._last:
             return [(t,) for t in self.snapshot_times]
         if self._last.startswith("SELECT DISTINCT vehicle_identifier FROM device_history"):
             return [(_VID,)] if self.open_stop else []
@@ -75,6 +77,8 @@ class _FakeCursor:
         return []
 
     def fetchone(self):
+        if "percentile_cont" in self._last:
+            return self.baseline if self.baseline is not None else (0, None)
         return None
 
     def __enter__(self):
@@ -219,30 +223,96 @@ def test_every_cycle_sweeps_last_after_its_own_history_writes(cycle):
     assert "last_observed_at >= %(since)s" in cur.calls[sweep][0]
 
 
-def test_a_feed_with_nothing_usable_in_it_still_sweeps(cycle):
-    """The case where the sweep matters most must not be the one it skips.
-
-    A fresh payload carrying no usable identifier — the whole fleet
-    withdrawn, or a feed that stopped sending plates — leaves nothing to
-    observe, so the cycle has no per-device work to do. It still has a sweep
-    to do: those are exactly the vehicles whose stops want closing, and
-    nothing upstream aborts the cycle (src/cycle.py writes the core snapshot
-    and calls the updater either way), so the stops would stay open for as
-    long as the condition lasted.
-    """
+def test_a_feed_with_nothing_usable_in_it_still_sweeps_but_is_not_an_observation(cycle):
+    """A fresh payload carrying no usable identifier (a feed that stopped
+    sending plates, or the whole fleet withdrawn) is recorded as processed
+    but NOT as an observed cycle (sql/086), so it can never be one of the
+    missed cycles that closes a stop. The bounded sweep still runs, for the
+    vehicles that already qualified from real cycles."""
     stats, cur = cycle([_device(vehicle_identifier=None)],
-                       snapshot_times=_cycles(_K + _M))
+                       snapshot_times=_cycles(_K + _M), baseline=(720, 7500))
     assert stats.skipped_no_identifier == 1
+    assert stats.counted_as_observation is False
+    [row] = cur.rows_for("INSERT INTO device_state_processed_cycles")
+    assert row[2:] == (0, 7500, False)
     sweep = cur.index_of("departure_reason = 'absent'")
+    assert sweep > cur.index_of("INSERT INTO device_state_processed_cycles")
     # The bounded, per-cycle form, same as any other cycle's sweep.
     assert "last_observed_at >= %(since)s" in cur.calls[sweep][0]
 
 
-def test_an_empty_feed_still_sweeps(cycle):
-    """Same for a payload with no devices at all, rather than unusable ones."""
+def test_an_empty_feed_is_not_an_observation_even_without_a_baseline(cycle):
+    """Same for a payload with no devices at all; zero never counts, even
+    just after sql/086 when there is no baseline yet."""
     stats, cur = cycle([], snapshot_times=_cycles(_K + _M))
     assert stats.skipped_no_identifier == 0
+    assert stats.counted_as_observation is False
+    [row] = cur.rows_for("INSERT INTO device_state_processed_cycles")
+    assert row[2:] == (0, None, False)
     assert cur.ran("departure_reason = 'absent'")
+
+
+# ---------------------------------------------------------------------------
+# sql/086: the processed-cycle ledger
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("eligible, baseline, counts", [
+    (0, None, False),        # zero never counts, with or without a baseline
+    (0, 7500, False),
+    (1, None, True),         # no baseline yet (fresh ledger): any non-zero counts
+    (7500, 7500, True),
+    (5868, 7500, True),      # 0.78: the lowest real cycle since 2026-05-30
+    (3750, 7500, True),      # exactly at the floor
+    (3749, 7500, False),     # just below it
+    (40, 7500, False),       # near-empty
+])
+def test_what_counts_as_an_observation(eligible, baseline, counts):
+    assert device_state.counts_as_observation(eligible, baseline) is counts
+
+
+def test_the_absence_rule_counts_processed_cycles_not_core_snapshots():
+    cur = _FakeCursor(snapshot_times=_cycles(_K + _M))
+    device_state.absence_window(cur, _T0, bounded=True)
+    sql, params = cur.calls[-1]
+    assert "FROM device_state_processed_cycles" in sql
+    assert "WHERE counts_as_observation" in sql
+    assert "snapshot_metadata_core" not in sql
+    assert params == [(_T0, _K + _M)]
+
+
+def test_a_normal_cycle_records_itself_in_its_own_transaction_before_the_sweep(cycle):
+    stats, cur = cycle([_device(_ELSEWHERE)],
+                       state=_state(last_seen=_T0 - timedelta(minutes=2)),
+                       snapshot_times=_cycles(_K + _M), baseline=(720, 1))
+    assert stats.counted_as_observation is True
+    ledger = cur.index_of("INSERT INTO device_state_processed_cycles")
+    # After this cycle's own observations, before the window is read.
+    assert ledger > cur.index_of("UPDATE device_state SET vehicle_plate")
+    assert ledger > cur.index_of("INSERT INTO device_history")
+    assert ledger < cur.index_of("FROM device_state_processed_cycles WHERE counts_as_observation")
+    assert ledger < cur.index_of("departure_reason = 'absent'")
+    [row] = cur.rows_for("INSERT INTO device_state_processed_cycles")
+    assert row[1:] == (_T0, 1, 1, True)
+
+
+def test_the_baseline_ignores_a_short_ledger():
+    cur = _FakeCursor(baseline=(device_state.ABSENT_BASELINE_MIN_CYCLES - 1, 7500))
+    assert device_state.record_processed_cycle(cur, uuid.uuid4(), _T0, 10) is True
+    [row] = cur.rows_for("INSERT INTO device_state_processed_cycles")
+    assert row[3] is None
+
+
+def test_the_ledger_trim_keeps_the_newest_rows_whatever_their_age():
+    cur = _FakeCursor(baseline=(720, 7500))
+    device_state.record_processed_cycle(cur, uuid.uuid4(), _T0, 7500)
+    sql, [params] = cur.calls[-1]
+    assert sql.startswith("DELETE FROM device_state_processed_cycles")
+    assert "OFFSET %(keep)s LIMIT 1" in sql
+    assert params == {"before": _T0 - device_state.ABSENT_LEDGER_RETENTION,
+                      "keep": device_state.ABSENT_LEDGER_KEEP_MIN - 1}
+    # Enough rows are always kept for the rule's widest read.
+    assert device_state.ABSENT_LEDGER_KEEP_MIN > max(
+        device_state.ABSENT_BASELINE_CYCLES, _K + _M)
 
 
 def test_a_move_records_moved(cycle):

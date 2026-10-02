@@ -99,6 +99,28 @@ The second condition matters after an ingest outage. Without it, the first
 cycle back would judge every vehicle against a wall-clock gap made by our
 own downtime.
 
+WHAT COUNTS AS AN OBSERVED CYCLE (sql/086). Not a snapshot_metadata_core
+row: src/cycle.py commits that before calling `update_for_cycle`, and
+swallows this module's failures, so it proves only that a snapshot was
+written. Counting it let a healthy ingest with a failing updater close, and
+backdate, the stops of vehicles that were in every one of those feeds
+(PR #98 review, finding 1). Instead `update_for_cycle` records each cycle it
+processes in `device_state_processed_cycles`, in the same transaction as its
+observations, and the rule counts those rows. A cycle whose updater failed
+leaves no row, so it is never a miss, however long the failure lasts.
+
+A processed cycle also has to be a plausible observation of the fleet to
+count: its eligible payload (devices with a vehicle_identifier) must be
+non-empty and at least ABSENT_FLOOR_RATIO of the recent baseline — at least,
+not more than, so a payload at exactly half the baseline is believed. An empty
+or plate-less payload is far more likely an upstream or ingest glitch than a
+withdrawal of the whole fleet (PR #98 review, finding 2), and counting it
+would close every open stop an hour in and reopen them all on recovery. Such
+a cycle is still processed (what it does contain is observed) and still
+sweeps, but it is never one of the missed cycles, so it cannot be the reason
+a stop closes. Only vehicles that had already missed
+ABSENT_MIN_MISSED_CYCLES real cycles before it can close during it.
+
 departed_at is set to the vehicle's LAST OBSERVED time, the last moment it
 was known to be there, and never to the moment the rule fired. So the
 threshold decides only WHICH absences count as a departure, not how much
@@ -185,7 +207,9 @@ log = logging.getLogger(__name__)
 ABSENT_STOP_AFTER = timedelta(hours=1)
 
 #: ...and it must also have missed this many consecutive OBSERVED cycles
-#: (snapshot_metadata_core rows, which only fresh-payload cycles write). After
+#: (sql/086: cycles this module committed, in device_state_processed_cycles,
+#: whose payload passed ABSENT_FLOOR_RATIO; never a cycle whose update
+#: failed, nor an empty payload, nor one below half the baseline). After
 #: an ingest outage, wall-clock time alone would count our own downtime as the
 #: vehicles' absence, and one partial recovery cycle could close stops that
 #: are still in use. Five cycles is ten minutes of real observations.
@@ -195,7 +219,8 @@ ABSENT_MIN_MISSED_CYCLES = 5
 #: last this-many OBSERVED cycles (about an hour at the 2-minute cadence).
 #: The window is counted in cycles, not wall-clock time, so an ingest outage
 #: of any length is still covered by the first sweeps after it. Up to this
-#: many consecutive failed sweeps can be absorbed. The one-off cleanup
+#: many consecutive failed sweeps can be absorbed (and since sql/086 a failed
+#: sweep leaves no ledger row, so any number of them). The one-off cleanup
 #: (`python -m src.cli close_ghost_stops`) applies the same rule with no
 #: window, and can be re-run at any time as the backstop.
 #:
@@ -206,6 +231,58 @@ ABSENT_MIN_MISSED_CYCLES = 5
 #: bounded sweep visits the few vehicles that crossed the line since the
 #: last hour of cycles, in a few ms.
 ABSENT_SWEEP_WINDOW_CYCLES = 30
+
+#: A processed cycle counts as an observation of the fleet (one of the cycles
+#: a vehicle must miss) only if its eligible count is non-zero AND at least
+#: this fraction of the baseline: the median eligible count of the previous
+#: ABSENT_BASELINE_CYCLES processed cycles (about 24 h at the 2-minute
+#: cadence, so it spans a full daily deployment cycle).
+#:
+#: Measured read-only on production, 2026-10-02. The eligible count equals
+#: snapshot_metadata_core's total_devices_denver + total_not_in_denver
+#: exactly (828 of 828 cycles still in raw_telemetry_points, where every
+#: device carried an identifier), so the core table gives the history back to
+#: 2026-05-30: 66,429 cycles. In those:
+#:  * no cycle had zero devices, and the smallest was 6,332;
+#:  * against this exact baseline (median of the previous 720 cycles) the
+#:    lowest cycle was 0.80; 0.1% of cycles fell below 0.93, 12 below 0.90,
+#:    and none below 0.50 (66,403 cycles with >= 30 before them);
+#:  * against the previous cycle alone the worst single drop was to 0.78
+#:    (2026-06-11 10:10, back to normal two cycles later), and the longest
+#:    dip was 2026-09-28 20:14-20:30 UTC, 8 cycles at 0.87-0.93 of the
+#:    trailing mean.
+#: So no real cycle in four months would have been excluded at 0.5. The floor
+#: rejects an empty, plate-less or truncated payload, and a partial one that
+#: loses MORE than half the fleet, while leaving room for every dip the fleet
+#: has actually shown.
+#:
+#: THE FLOOR IS INCLUSIVE, which decides where the interesting boundary is.
+#: `counts_as_observation` compares `>=`, so a payload at exactly half the
+#: baseline counts immediately — it is a cycle we believe, not one we wait out.
+#: Only a payload BELOW half is rejected, and only that case has anything to do
+#: with the baseline adapting.
+#:
+#: And it does adapt, because the baseline includes cycles that did not count:
+#: a fleet that genuinely drops below half and stays there counts again once
+#: that is the median of the last day, about 12 h in. By the same token a
+#: partial glitch that lasts longer than that would eventually be believed —
+#: the alternative, a baseline of counted cycles only, would never adapt at all
+#: and a real contraction would stop absence closing until somebody intervened.
+#: A zero count never counts, whatever the baseline, however long it lasts.
+#: Until ABSENT_BASELINE_MIN_CYCLES processed cycles exist (just after sql/086
+#: is applied) there is no baseline and any non-zero cycle counts.
+ABSENT_FLOOR_RATIO = 0.5
+ABSENT_BASELINE_CYCLES = 720
+ABSENT_BASELINE_MIN_CYCLES = 30
+
+#: Retention for device_state_processed_cycles, trimmed every cycle. The rule
+#: reads at most ABSENT_BASELINE_CYCLES rows; the rest is an audit trail of
+#: what the updater processed. The newest ABSENT_LEDGER_KEEP_MIN rows are
+#: always kept, whatever their age, so an updater outage longer than the
+#: retention cannot empty the ledger: the first cycles back then still see the
+#: pre-outage cycles, and judge absence against them.
+ABSENT_LEDGER_RETENTION = timedelta(days=7)
+ABSENT_LEDGER_KEEP_MIN = 1000
 
 
 @dataclass(frozen=True)
@@ -218,8 +295,83 @@ class AbsenceWindow:
     since: datetime | None = None
 
 
+def counts_as_observation(eligible_count: int, baseline: float | None) -> bool:
+    """Whether a processed cycle with `eligible_count` usable devices counts
+    as an observation of the fleet (see ABSENT_FLOOR_RATIO)."""
+    if eligible_count <= 0:
+        return False
+    if baseline is None:
+        return True
+    return eligible_count >= ABSENT_FLOOR_RATIO * float(baseline)
+
+
+def record_processed_cycle(cur, cycle_id: uuid.UUID, snapshot_time: datetime,
+                           eligible_count: int) -> bool:
+    """Record that this module processed `cycle_id`, and trim the ledger.
+
+    Runs on the caller's cursor and transaction and does not commit, so the
+    row exists exactly when the cycle's observations were committed. Call it
+    BEFORE `absence_window` in the same transaction: the current cycle is one
+    of the observed cycles it counts. Returns whether the cycle counts as an
+    observation (see ABSENT_FLOOR_RATIO).
+    """
+    cur.execute(
+        """
+        SELECT count(*), percentile_cont(0.5) WITHIN GROUP (ORDER BY eligible_count)
+        FROM (
+            SELECT eligible_count FROM device_state_processed_cycles
+            WHERE snapshot_time < %s
+            ORDER BY snapshot_time DESC
+            LIMIT %s
+        ) recent
+        """,
+        (snapshot_time, ABSENT_BASELINE_CYCLES),
+    )
+    row = cur.fetchone()
+    n, median = (row if row is not None else (0, None))
+    baseline = median if (n or 0) >= ABSENT_BASELINE_MIN_CYCLES else None
+    counts = counts_as_observation(eligible_count, baseline)
+    cur.execute(
+        """
+        INSERT INTO device_state_processed_cycles
+            (cycle_id, snapshot_time, eligible_count, baseline_count, counts_as_observation)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (cycle_id) DO NOTHING
+        """,
+        (str(cycle_id), snapshot_time, eligible_count, baseline, counts),
+    )
+    # Older than the retention AND not among the newest KEEP_MIN rows. With
+    # fewer rows than that the subquery is NULL and nothing is deleted.
+    cur.execute(
+        """
+        DELETE FROM device_state_processed_cycles
+        WHERE snapshot_time < %(before)s
+          AND snapshot_time < (
+              SELECT snapshot_time FROM device_state_processed_cycles
+              ORDER BY snapshot_time DESC
+              OFFSET %(keep)s LIMIT 1
+          )
+        """,
+        {"before": snapshot_time - ABSENT_LEDGER_RETENTION,
+         "keep": ABSENT_LEDGER_KEEP_MIN - 1},
+    )
+    if not counts:
+        log.warning(
+            "device_state cycle=%s: eligible=%d against baseline=%s is below "
+            "the %.0f%% floor; not counted as an observed cycle for absence",
+            cycle_id, eligible_count, baseline, ABSENT_FLOOR_RATIO * 100,
+        )
+    return counts
+
+
 def absence_window(cur, now: datetime, *, bounded: bool) -> AbsenceWindow | None:
     """The absence rule as of `now`, from the recent observed cycles.
+
+    The observed cycles are the rows of `device_state_processed_cycles` that
+    count as observations (sql/086): cycles this module committed, with a
+    plausible payload. Not snapshot_metadata_core, whose rows can exist for
+    cycles this module never processed (see WHAT COUNTS AS AN OBSERVED CYCLE
+    in the module docstring).
 
     cutoff = the earlier of `now - ABSENT_STOP_AFTER` and the time of the
     ABSENT_MIN_MISSED_CYCLES-th most recent observed cycle. A vehicle last seen
@@ -233,42 +385,25 @@ def absence_window(cur, now: datetime, *, bounded: bool) -> AbsenceWindow | None
     Returns None when fewer than ABSENT_MIN_MISSED_CYCLES observed cycles
     exist. Nothing can be judged absent then.
 
-    KNOWN LIMITATION, AND THE THIRD FAILURE CASE. `snapshot_metadata_core`
-    rows prove a feed snapshot was WRITTEN, not that this module observed it:
-    `cycle.py` commits the core snapshot and then calls `update_for_cycle`
-    inside a try/except that logs and swallows. So rows can exist for cycles
-    `device_state` never processed, and the missed-cycle term counts them.
-
-    The guard survives failed sweeps (the window absorbs them) and ingest
-    outages (no rows, so no cycles to miss). It does NOT cover the case where
-    ingest is healthy and this updater alone is down, because then the rows
-    keep arriving while `last_observed_at` goes stale.
-
-    The exposure is narrow in both directions. `cutoff` takes the EARLIER of
-    `now - ABSENT_STOP_AFTER` and `times[k-1]`; at the healthy two-minute
-    cadence `times[k-1]` is only ~8 minutes back, so the one-hour term binds
-    and the cycle term never fires. It takes **more than an hour of continuous
-    updater-only failure** to backdate a stop, and past roughly two hours the
-    bounded `since` floor slides below the stale `last_observed_at`, so those
-    vehicles drop out of the per-cycle sweep and become ordinary ghosts for
-    `close_ghost_stops`.
-
-    Inside that window a stop is truncated at the outage start and a fresh one
-    opens on recovery — a hole the length of the outage. That makes the
-    reconstruction UNDERCOUNT, the opposite direction from the ghost bias, so
-    it trips the ±10% fidelity gate rather than publishing a confident wrong
-    number; with sql/084 the day reads `unmeasurable`. Failing closed is why
-    this is a follow-up and not a blocker.
-
-    The fix is to record the cycles this module actually processed, atomically
-    with its own transaction, and read those instead. Deliberately not done
-    here: it needs its own migration and a retention trim.
+    Why the three failure cases are covered:
+      * a failed sweep: the bounded window spans m observed cycles, so the
+        next sweep still covers what it missed;
+      * an ingest outage: no cycles, so nothing to miss; the first cycle back
+        cannot count our downtime;
+      * an updater-only failure (ingest healthy, this module failing): its
+        cycles leave no ledger row, so the cutoff stays at the pre-failure
+        cycles and every vehicle seen in the last processed cycle survives.
+        After any length of failure the first processed cycle closes only
+        what had missed k processed cycles, and stamps it with the vehicle's
+        real last-observed time.
+    An empty or implausibly small payload is processed but does not count,
+    so during one the cutoff cannot advance past the last real cycles.
     """
     k, m = ABSENT_MIN_MISSED_CYCLES, ABSENT_SWEEP_WINDOW_CYCLES
     cur.execute(
         """
-        SELECT snapshot_time FROM snapshot_metadata_core
-        WHERE snapshot_time <= %s
+        SELECT snapshot_time FROM device_state_processed_cycles
+        WHERE counts_as_observation AND snapshot_time <= %s
         ORDER BY snapshot_time DESC
         LIMIT %s
         """,
@@ -380,6 +515,8 @@ class StateUpdateStats:
     # stops_closed_absent: stops this cycle's sweep closed as absent.
     stops_reopened: int = 0
     stops_closed_absent: int = 0
+    # sql/086: whether this cycle counts as an observed cycle for the rule.
+    counted_as_observation: bool | None = None
 
 
 def update_for_cycle(
@@ -403,17 +540,19 @@ def update_for_cycle(
     stats.skipped_no_identifier = sum(1 for d in devices if not d.vehicle_identifier)
 
     if not eligible:
-        # Nothing observable this cycle — but absence still needs sweeping.
-        # A fresh payload with no usable identifier in it is the strongest
-        # evidence of absence there is, and it is exactly the case where
-        # every open stop wants closing: a withdrawal of the whole fleet, or
-        # a feed that stopped carrying plates. Returning here without the
-        # sweep would leave behind precisely the ghost stops this rule
-        # exists to remove, in the one case that matters most. Nothing
-        # upstream aborts a zero-device cycle (src/cycle.py writes the core
-        # snapshot and calls this either way), so it has to be handled here.
+        # Nothing observable this cycle. Nothing upstream aborts a zero-device
+        # cycle (src/cycle.py writes the core snapshot and calls this either
+        # way), so it is handled here. It is recorded as processed but NOT as
+        # an observation: an empty or plate-less payload is far more likely an
+        # upstream or ingest glitch than the whole fleet leaving, so it must
+        # never be the reason a stop closes (sql/086, ABSENT_FLOOR_RATIO). The
+        # sweep still runs, and can close only vehicles that had already
+        # missed ABSENT_MIN_MISSED_CYCLES real cycles before it, so a glitch
+        # that outlasts a failed sweep or two still lets those through.
         with connection() as conn:
             with conn.cursor() as cur:
+                stats.counted_as_observation = record_processed_cycle(
+                    cur, cycle_id, snapshot_time, 0)
                 stats.stops_closed_absent = close_absent_stops(
                     cur, absence_window(cur, snapshot_time, bounded=True))
             conn.commit()
@@ -864,7 +1003,11 @@ def update_for_cycle(
             # ABSENCE (sql/083). Deliberately LAST among the history writes:
             # everything seen this cycle now has last_observed_at =
             # snapshot_time, so it cannot match. Only vehicles missing from
-            # this and the preceding cycles can.
+            # this and the preceding cycles can. The ledger row goes in first
+            # (sql/086): this cycle is one of the observed cycles the window
+            # counts, and the row commits or rolls back with everything above.
+            stats.counted_as_observation = record_processed_cycle(
+                cur, cycle_id, snapshot_time, len(eligible))
             stats.stops_closed_absent = close_absent_stops(
                 cur, absence_window(cur, snapshot_time, bounded=True))
 

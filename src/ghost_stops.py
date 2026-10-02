@@ -16,6 +16,14 @@ bound, and `device_state.close_absent_stops`):
     observed cycles, gets departed_at = the vehicle's last observed time,
     departure_reason = 'absent'.
 
+"Observed cycles" are the ones device_state itself processed and counted
+(sql/086's device_state_processed_cycles), exactly as for the per-cycle
+sweep, so this backstop respects the same guards: run while the updater has
+been failing, it cannot close the stops of vehicles that were in those feeds,
+and an empty or implausibly small payload is never one of the missed cycles.
+It also means that right after sql/086 is applied it closes nothing until
+ABSENT_MIN_MISSED_CYCLES cycles have been processed (about 10 minutes).
+
 Idempotent: a closed stop no longer matches, so a second run closes only
 what has newly gone absent since. The run changes nothing else. It does not
 touch device_state, trip_events, or any stored compliance figure. In
@@ -88,6 +96,7 @@ def _rule(window: device_state.AbsenceWindow | None) -> dict[str, Any]:
     return {
         "absent_after_hours": device_state.ABSENT_STOP_AFTER.total_seconds() / 3600,
         "min_missed_cycles": device_state.ABSENT_MIN_MISSED_CYCLES,
+        "observed_cycles": "device_state_processed_cycles (counts_as_observation)",
         "cutoff": window.cutoff.isoformat() if window else None,
     }
 

@@ -49,8 +49,8 @@ class _FakeCursor:
     * the device_state SELECT: the one `state` row (or none);
     * sql/083's open-stop probe (only issued for a vehicle last seen long
       ago): `state["has_open_stop"]`, default True;
-    * sql/083's absence_window read of snapshot_metadata_core: no observed
-      cycles, so the sweep is a no-op here (tests/test_device_state_absence.py
+    * sql/083's absence_window read of sql/086's processed-cycle ledger: no
+      observed cycles, so the sweep is a no-op here (tests/test_device_state_absence.py
       covers it).
     """
 
@@ -75,7 +75,7 @@ class _FakeCursor:
             return []
         if "FROM device_history" in self._last_sql:
             return [(_VID,)] if self.state.get("has_open_stop", True) else []
-        if "FROM snapshot_metadata_core" in self._last_sql:
+        if "FROM device_state_processed_cycles" in self._last_sql:
             return []
         return [(
             _VID,

@@ -128,6 +128,10 @@ def run_once() -> str | None:
         # Update per-scooter persistent state + history. Isolated try/except:
         # state-tracking is a derived layer, not load-bearing for the core
         # snapshot. A failure here shouldn't fail the cycle.
+        # The core snapshot above is already committed, so its row is NOT
+        # evidence that device_state saw this cycle; device_state records the
+        # cycles it processed itself (sql/086) and its absence rule counts
+        # only those.
         #
         # Feed device_state the SPATIAL-CORRECTED statuses (post-buffer
         # promote/demote), not the raw ingest bbox tags. run_cycle applies
