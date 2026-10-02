@@ -593,10 +593,19 @@ matrix call:
    **And they have to reach the client tier, which cannot import them.** The
    two repos share no runtime module, and these values are not fixed until the
    matrix has been measured — so §6.5's tier gets them **on the candidates
-   response**, caches them for the session, and falls back to a **documented
-   default** when it has never had one or the call failed. The default belongs
-   in both plans once chosen: an undocumented fallback is every implementation
-   picking its own bound, which is the thing step 4 exists to prevent.
+   response** as a typed field, caches them for the session, and falls back to
+   a documented default when it has never had one or the call failed:
+
+   ```jsonc
+   "bounds": { "first_hops": 8, "pickups": 12 }   // echoed on every response
+   ```
+
+   **The cold-start default is the same pair, and it is provisional.** `N ≤ 20`
+   makes the second matrix call `20 × 21 = 420` pairs, which is the figure to
+   measure the deployed matrix against; when the measured values land they
+   replace the default **in both plans at once**. A default written in only one
+   of them is two tiers disagreeing about what was *considered*, which rule 2
+   of §6.5 forbids.
 
 **Step 2 and step 3 differ on purpose**, and a reader tempted to unify them
 should read §6.1's second paragraph first: a risky vehicle you walk to is
@@ -627,6 +636,14 @@ Edge cost is not seconds. It is **generalised cost**: seconds, plus money
 converted to seconds, plus preference penalties. One scale, as before.
 
 The per-hop money cost, across the tiers `config.ts` already models:
+
+**One exception, and it is the Equity Area rate.** An equity-priced leg's
+unlock comes from `EQUITY_AREA_RATE`, **not from the rider's tier**: `$1 +
+13¢/min` is a rate, and whether a Pass waives *that* dollar is exactly what
+Exhibit C does not say. §9.1 already requires the **worse (charged)** VeoPlus
+reading for the second unlock, so pricing it per tier in the search would have
+the planner and the disclosure disagree about one leg, with the planner on the
+optimistic side.
 
 | Tier | Unlock | Cost of one extra hop |
 |---|---|---|
@@ -1785,10 +1802,21 @@ happen. So the action opens their own mail client with `to`, `cc`, `subject`
 and `body` populated — the rider reviews and sends, and the CC is a real
 header rather than a line of prose.
 
-`mailto:` has a length limit that varies by client, so when the body would
-overflow it, fall back to the clipboard **and show `To:` and any `Cc:` as
-their own copyable fields**. A fallback that folds the CC into body text is
-the bug this paragraph exists to prevent.
+`mailto:` has a length limit that varies by client — and **"when the body
+would overflow" is not a condition anything can evaluate.** No client exposes
+such a signal, a `mailto:` that is too long **opens a silently truncated
+draft** instead of failing, and the limit applies to the **fully
+percent-encoded URI** rather than to the body, which encoding can more than
+double. Measuring the body measures the wrong string, and the failure it misses
+is a complaint that looks sent with its figures gone.
+
+So: build the whole URI, **measure its encoded length**, and take the clipboard
+route above **1,800 characters** — conservative, below the smallest limit in
+common circulation rather than tuned to one client. **The clipboard route is
+also always available as its own control**, so no rider depends on our estimate
+of a limit we cannot query. Either way it shows `To:` and any `Cc:` **as their
+own copyable fields**: a fallback that folds the CC into body text is the bug
+this paragraph exists to prevent.
 
 **Neither path is reachable until the rider has confirmed the figures**
 (§12.3). Gating one and not the other would leave an unconfirmed complaint
@@ -2188,7 +2216,11 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   `trip_exhausted`, `free_minutes_corrected`, `spec_applied_to_map`,
   `spec_saved_from_map`, `favorite_added`, `favorite_removed`,
   `favorite_available_alert`, `equity_savings_shown`, `equity_savings_taken`,
-  `receipt_checked`, `receipt_verdict`, `receipt_complaint_prepared`,
+  `receipt_checked`, `receipt_verdict` (whose `reason` is an **enum** —
+  `exceeds_bar` | `matches_expected` | `no_geography` | `inside_margin` |
+  `veoplus_unmodelled` | `tier_unresolved` — since an unconstrained reason
+  becomes free text from the verdict UI, and that is how an amount or an
+  address reaches an allowlisted event), `receipt_complaint_prepared`,
   `receipt_contributed`, `trip_alert_opt_in`, `trip_alert_sent`,
   `resume_link_used`, `advocacy_cc_added`.
 
