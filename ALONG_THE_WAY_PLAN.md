@@ -1954,16 +1954,30 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   started casually.
 - **Telemetry allowlist is mirrored by hand** in two repos —
   `denver-scooter-fyi/src/telemetry.ts`'s `TELEMETRY_EVENTS` and
-  `src/api_telemetry.py`'s `ALLOWED_EVENTS`. New events (`trip_plan_start`,
-  `trip_candidates`, `trip_swap`, `trip_swap_offer`, `trip_exhausted`,
-  `spec_applied_to_map`, `spec_saved_from_map`, `favorite_added`,
-  `favorite_removed`, `favorite_available_alert`, `equity_savings_shown`,
-  `equity_savings_taken`, `receipt_checked`, `receipt_verdict`,
-  `receipt_complaint_prepared` (with `mechanism`; **not** `…_copied`, since
-  §12.6's primary path opens a draft and copies nothing),
-  `receipt_contributed`, `trip_alert_opt_in`,
-  `trip_alert_sent`, `resume_link_used`, `advocacy_cc_added`) must land in
-  both, in the same PR, and carry no free text — the existing contract is a fixed name plus enumerated props. **No
+  `src/api_telemetry.py`'s `ALLOWED_EVENTS`. **The authoritative list is the
+  frontend lane's §Telemetry table**, which carries each event's props; this
+  is the same names, and the two must not drift:
+
+  `trip_plan_start`, `trip_candidates`, `trip_plan_chosen`, `trip_resolve`,
+  `trip_exhausted`, `free_minutes_corrected`, `spec_applied_to_map`,
+  `spec_saved_from_map`, `favorite_added`, `favorite_removed`,
+  `favorite_available_alert`, `equity_savings_shown`, `equity_savings_taken`,
+  `receipt_checked`, `receipt_verdict`, `receipt_complaint_prepared`,
+  `receipt_contributed`, `trip_alert_opt_in`, `trip_alert_sent`,
+  `resume_link_used`, `advocacy_cc_added`.
+
+  **Three renames and one deletion came out of revision 3, and this list had
+  drifted on all four** — which is precisely the failure the "mirrored by
+  hand" rule exists to prevent, so it is worth naming them:
+
+  | Was | Now | Why |
+  |---|---|---|
+  | `trip_swap` | `trip_resolve` | a swap became one trigger of a re-solve (§7.2) |
+  | `trip_swap_offer` | **deleted** | there is no offer: every re-solve is applied and reversible (§7.1) |
+  | `receipt_complaint_copied` | `receipt_complaint_prepared` | the primary path opens a draft and copies nothing (§12.6) |
+  | — | `trip_plan_chosen`, `free_minutes_corrected` | new in revision 3, and never mirrored here until now |
+
+  All of them must land in both repos in the same PR, and carry no free text — the existing contract is a fixed name plus enumerated props. **No
   `vehicle_identifier` in any of them**: that would attach a device to a
   session in the one system deliberately built to hold no persistent
   identifier.
