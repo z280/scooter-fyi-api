@@ -859,8 +859,22 @@ Two consequences the existing dibs rules do not cover:
   window (`sql/076`), so the constraint must become a **time-to-arrival** one
   computed from the actual leg, not a walk-minutes constant.
 - **A plan holds at most one claim at a time**, exactly as revision 2's swap
-  rule required. Release before claiming, always. A chained plan does not get
-  to hold three scooters hostage because it intends to visit them.
+  rule required — but **the server keeps that invariant, not the client.** A
+  chained plan does not get to hold three scooters hostage because it intends
+  to visit them.
+
+  **Not "release, then claim".** That was revision 2's wording and it is the
+  *non-atomic* path: two calls, a window holding no claim at all, and a failed
+  second call that permanently loses the first — for nothing, since the rider
+  is still riding toward a pickup they no longer hold. A re-solve therefore
+  moves the claim in **one** `POST /api/v1/dibs` carrying `replaces`, with the
+  old row expired and the new one written in a single transaction. That is
+  what makes "at most one" an invariant rather than a convention the client is
+  trusted to honour, and it is the reason `replaces` exists (§7.4's migration).
+
+  Until `replaces` ships, the two-call fallback is permitted — and must treat
+  a failed claim as **a re-solve that did not happen**, keeping the old claim,
+  never as a claim lost.
 
 ### 7.4 What this must never claim
 
@@ -1567,6 +1581,11 @@ overflow it, fall back to the clipboard **and show `To:` and any `Cc:` as
 their own copyable fields**. A fallback that folds the CC into body text is
 the bug this paragraph exists to prevent.
 
+**Neither path is reachable until the rider has confirmed the figures**
+(§12.3). Gating one and not the other would leave an unconfirmed complaint
+sendable by the route that happens to be primary, which is the whole failure
+the confirm step exists to stop.
+
 The body states the **account identifier** (§12.3's only purpose — without it
 the complaint cannot credibly say whose trip this was), the trip, the charge,
 the expected charge under Exhibit C, and cites Exhibit A §5.2 — facts and a
@@ -1940,7 +1959,9 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   `spec_applied_to_map`, `spec_saved_from_map`, `favorite_added`,
   `favorite_removed`, `favorite_available_alert`, `equity_savings_shown`,
   `equity_savings_taken`, `receipt_checked`, `receipt_verdict`,
-  `receipt_complaint_copied`, `receipt_contributed`, `trip_alert_opt_in`,
+  `receipt_complaint_prepared` (with `mechanism`; **not** `…_copied`, since
+  §12.6's primary path opens a draft and copies nothing),
+  `receipt_contributed`, `trip_alert_opt_in`,
   `trip_alert_sent`, `resume_link_used`, `advocacy_cc_added`) must land in
   both, in the same PR, and carry no free text — the existing contract is a fixed name plus enumerated props. **No
   `vehicle_identifier` in any of them**: that would attach a device to a
@@ -1995,7 +2016,7 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 | 20 | **The resume link becomes a credential in a channel we do not control.** An SMS renders on a lock screen, persists in carrier logs, gets screenshotted, lands on shared handsets. | The link carries a plan reference and never a session (§13.5). A dead session means signing in and *then* resuming — asserted in tests, not assumed, because this is precisely the thing a later refactor "simplifies". |
 | 21 | **Rapid checking buys load instead of freshness.** The client already polls every 90s against an ingest that runs every 2 min, so a faster global poll re-reads the same cycle. | Check *narrowly*, not *fast*: 1–5 plan-critical vehicles live against upstream (which is per-request and always current), leaving the global cadence — shared with the compliance audit — alone. §13.4. |
 | 22 | **Advocacy inserts itself and loses its standing.** An organisation that answers every case is a nuisance; the cases where it matters are the ones where it is invited. | No reply into a case without `@WSYV` or `@advocacy` in it (§14.3), whatever the portal's pattern suggests. The rider's complaint stays the rider's. |
-| 15 | **OCR misreads a receipt and we accuse somebody wrongly.** Receipt formats change without notice, and a misread total is a rider sent to lose an argument. | The rider confirms every extracted figure over their own screenshot before anything is copied or submitted, and §12.5's three-part bar means "we cannot tell" is a frequent, designed answer rather than a failure. |
+| 15 | **OCR misreads a receipt and we accuse somebody wrongly.** Receipt formats change without notice, and a misread total is a rider sent to lose an argument. | The rider confirms every extracted figure over their own screenshot before **either** complaint path is reachable — the `mailto:` as well as the clipboard fallback, since gating only one of them still lets an unconfirmed complaint be sent — and §12.5's three-part bar means "we cannot tell" is a frequent, designed answer rather than a failure. |
 | 16 | **The evidence pile becomes a movement record.** Receipts are time, place and money tied to an account — stronger than anything else this program stores. | The image never leaves the device (§12.2); only confirmed fields upload. The pile stores the date, area and rates, not coordinates or the account identifier; the account link lives only as long as the rider needs it to withdraw. Consent is per-submission and withdrawal actually deletes. |
 | 17 | **The aggregate gets overstated.** A self-selected sample of receipts from an app whose users already suspect they were overcharged is not a census of Denver. | The claim is always "N of M trips riders submitted", with its denominator attached and its self-selection named. Never a fraud accusation, whatever the number says. The evidence is worth something precisely because it is boring and checkable. |
 | 18 | **The free-minutes estimate is wrong and the rider is billed.** Rides taken outside this app are invisible to it (§6.3.1). | The figure is a *ceiling* on what is left and is labelled as one, the rider can correct it before planning, and no plan is ever described as "free" on the strength of our estimate alone. |
