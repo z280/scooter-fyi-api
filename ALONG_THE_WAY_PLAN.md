@@ -1185,10 +1185,16 @@ call to test a detour.
    point of advice, not in a drawer: **"this should cost $X. If Veo bills you
    the base rate, screenshot it."**
 2. **Two rentals is a real risk, not just a fee.** Between ending leg one and
-   starting leg two, somebody can take the scooter. Dibs does not prevent
-   that — nothing does. The stopover card must say so, and the honest
-   mitigation is the Phase 2 search: show whether *another* vehicle meeting
-   the spec is standing in that Equity Area before advising the split.
+   starting leg two, somebody can take the scooter. Dibs does not prevent that
+   — nothing does (§7.3). **The plan's own details must say so**, not a
+   stopover card: there is no such card any more (§9's opening), and the
+   disclosure travels with every equity plan instead.
+
+   The mitigation is now structural rather than advisory: a hand-off plan is
+   built out of a pickup that **exists**, so "is there another vehicle meeting
+   the spec standing in that Equity Area" is answered by the plan existing at
+   all. Revision 2 had to ask the question separately because its stopover was
+   a location rather than a vehicle.
 3. **VeoPlus is unmodelled.** Whether the Pass waives the Equity Area's $1
    unlock is not stated in Exhibit C, and `config.ts` deliberately declines to
    infer it. The optimizer must price the **worse** reading (unlock charged)
@@ -1204,23 +1210,32 @@ call to test a detour.
 
 ### 9.3 API shape
 
-`src/equity_savings.py` + a `savings` block on the candidate response, rather
-than a new endpoint: the question "what will this cost" is asked about a
-candidate, and answering it anywhere else means the answer can disagree with
-the vehicle it is about. `/api/v1/trip/candidates` gains:
+`src/equity_savings.py` + a `savings` block **on each plan** (§6.4), rather
+than a new endpoint: the question "what will this cost" is asked about a plan,
+and answering it anywhere else means the answer can disagree with the plan it
+is about.
+
+**There is no `stopover` field, because there is no stopover.** Revision 3
+deleted the separate split (§9's opening): an equity hand-off is an ordinary
+plan whose pickup happens to sit inside a polygon, so the saving is a property
+of *that plan* and the hand-off is already in its `legs`. A dedicated field
+would be a second representation of something the plan already describes.
 
 ```jsonc
 "savings": {
   "plan": "resident",
-  "direct_cents": 475,
-  "best": {
-    "kind": "start_in_equity_area",     // or "stopover" | "none"
-    "cents": 295, "saves_cents": 180, "adds_seconds": 130,
-    "stopover": null,                    // { lat, lon, area_id } for a split
-    "caveats": ["discount_not_guaranteed"]
-  }
+  "baseline_cents": 475,        // the cheapest plan with no equity-priced leg
+  "cents": 295,
+  "saves_cents": 180,
+  "adds_seconds": 130,          // versus that baseline
+  "from": "start_in_equity_area",   // or "hand_off_in_equity_area" | "none"
+  "equity_legs": [1],           // indices into this plan's own `legs`
+  "caveats": ["discount_not_guaranteed"]
 }
 ```
+
+`equity_legs` is how a card says *which* leg is discounted without inventing a
+parallel geometry: it points into the legs the plan already carries.
 
 The polygons are already server-side (`data/equity.geojson`, boundary layer
 `equity`, `src/equity_groups.py`'s `OFFICIAL_GROUP`) and client-side (bundled
@@ -2018,24 +2033,24 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 | 1 | **A favourite becomes a way to follow a person.** In-use vehicles broadcast a live moving position on a public endpoint; a targeted subscription to one is a different thing from a public map. | §8.4: position withheld server-side whenever `is_reserved`, an explicit `position_withheld` flag so nobody "fixes" it later, no location in the availability alert, a 10-favourite cap, and the QR gate on top. Write the rule into the endpoint's docstring the way `sql/076` writes down what dibs is not. |
 | 2 | **The QR gate proves less than it looks like it proves.** `validate_scan` is a plate-knowledge check; nothing today compares position. | §8.2: require the 75 m proximity check as well, and say in the code comment why the scan alone is not enough — otherwise the next feature to reuse the gate inherits the wrong assumption. |
 | 3 | **The phone is in a pocket and the tab is throttled.** The whole re-solve runs client-side in Phase 3. | Rev 3 makes this *less* pressing than rev 2 assumed: a rider mid-hand-off is riding, and a phone mounted for navigation has the tab in front. It still bites for the pocket case — say so in the UI. Phase 9 (§13) is the committed fix: opted-in SMS through `comms.py`, which already carries consent, quota and reply routing. |
-| 4 | **Auto-dibs makes dibs worse for everyone.** Dibs' own rules exist to stop hoarding; a feature that claims automatically is exactly the pressure they were written against, and rev 3's unbounded chaining makes a plan want to claim *more* vehicles. | A plan holds **at most one claim at a time** — release before claim, always, however many hops it intends (§7.3). Watch the ratio of claims to rides in telemetry, and be willing to turn auto-claim off. |
+| 4 | **Auto-dibs makes dibs worse for everyone.** Dibs' own rules exist to stop hoarding; a feature that claims automatically is exactly the pressure they were written against, and rev 3's unbounded chaining makes a plan want to claim *more* vehicles. | A plan holds **at most one claim at a time**, however many hops it intends — and the **server** keeps that invariant via `replaces`, in one transaction, rather than the client releasing first (§7.3). Watch the ratio of claims to rides in telemetry, and be willing to turn auto-claim off. |
 | 5 | **Valhalla has no matrix, or its matrix disagrees with its routes.** Now MORE load-bearing than in rev 2: the scooter-to-scooter relation is N×N, and a fan-out over N² pairs is not viable. | Verify against the deployed image **before** building the endpoint. Without a matrix, this phase drops to **one hand-off maximum** and a bipartite search — still useful, but say so rather than discovering it late. §6.2. |
 | 6 | **The plan search is expensive and rate-limited**, and rev 3's second matrix call is N×(N+1) rather than N×1. | Still two calls per search, and N is now explicitly bounded by §6.2's selection step (`W` first hops, `H` pickups) rather than by three rules that did not in fact bound it. Non-`risk` throughout, bar rule 1's first-hop escape; first hop inside the walk cap; `P`/`D` bbox. The client's straight-line tier carries the interactive list; the server call is reserved for the moment a decision is made. |
 | 7 | **A re-solve chain sends somebody in a circle**, and rev 3 removed the hop counter that used to bound it. | Re-solve from current position, permanent `exclude`, and generalised cost that must strictly improve to be adopted. Telemetry on total legs and total minutes per trip is the check — a plan that keeps re-solving is a bug, not a feature. |
 | 8 | **Spec too tight = nothing found**, and "no scooters match" reads as "no scooters". | The published relaxation ladder, `relaxed` on every response, and an EXHAUSTED state that says what was tried and offers the one-tap loosening. |
 | 9 | **The map bridge desynchronizes.** A filter set that still claims to be "my ideal scooter" after the rider changed it is a lie the UI is telling. | §5.5's attach/detach rule, and the lossy direction stated on the toggle rather than discovered. |
 | 10 | **Availability alerts become a firehose.** A popular scooter turns over several times a day. | One alert per favourite per 6 hours, none 22:00–07:00 Denver, opt-in per favourite and off by default. |
-| 11 | **Equity advice that costs money.** Wrong tier, unmodelled Pass, a discount Veo does not apply. | Never for Access; price the worse VeoPlus reading; carry the screenshot caveat at the point of advice; never advise a split whose saving is under $0.50. |
-| 19 | **SMS becomes the thing people block.** A living plan re-solves on five triggers; texting each one spends the budget that protects the message that matters, and `dibs-notify.ts` caps at four alerts per claim *on purpose*. | SMS is strictly narrower than the in-app notice (§13.3): two events earn a text, a hard per-trip ceiling sits on top of the per-claim one, and "we checked and it is fine" is never sent. Consent is separate from the sign-in number and revocable. |
-| 20 | **The resume link becomes a credential in a channel we do not control.** An SMS renders on a lock screen, persists in carrier logs, gets screenshotted, lands on shared handsets. | The link carries a plan reference and never a session (§13.5). A dead session means signing in and *then* resuming — asserted in tests, not assumed, because this is precisely the thing a later refactor "simplifies". |
-| 21 | **Rapid checking buys load instead of freshness.** The client already polls every 90s against an ingest that runs every 2 min, so a faster global poll re-reads the same cycle. | Check *narrowly*, not *fast*: 1–5 plan-critical vehicles live against upstream (which is per-request and always current), leaving the global cadence — shared with the compliance audit — alone. §13.4. |
-| 22 | **Advocacy inserts itself and loses its standing.** An organisation that answers every case is a nuisance; the cases where it matters are the ones where it is invited. | No reply into a case without `@WSYV` or `@advocacy` in it (§14.3), whatever the portal's pattern suggests. The rider's complaint stays the rider's. |
-| 15 | **OCR misreads a receipt and we accuse somebody wrongly.** Receipt formats change without notice, and a misread total is a rider sent to lose an argument. | The rider confirms every extracted figure over their own screenshot before **either** complaint path is reachable — the `mailto:` as well as the clipboard fallback, since gating only one of them still lets an unconfirmed complaint be sent — and §12.5's three-part bar means "we cannot tell" is a frequent, designed answer rather than a failure. |
-| 16 | **The evidence pile becomes a movement record.** Receipts are time, place and money tied to an account — stronger than anything else this program stores. | The image never leaves the device (§12.2); only confirmed fields upload. The pile stores the date, area and rates, not coordinates or the account identifier; the account link lives only as long as the rider needs it to withdraw. Consent is per-submission and withdrawal actually deletes. |
-| 17 | **The aggregate gets overstated.** A self-selected sample of receipts from an app whose users already suspect they were overcharged is not a census of Denver. | The claim is always "N of M trips riders submitted", with its denominator attached and its self-selection named. Never a fraud accusation, whatever the number says. The evidence is worth something precisely because it is boring and checkable. |
-| 18 | **The free-minutes estimate is wrong and the rider is billed.** Rides taken outside this app are invisible to it (§6.3.1). | The figure is a *ceiling* on what is left and is labelled as one, the rider can correct it before planning, and no plan is ever described as "free" on the strength of our estimate alone. |
-| 12 | **Notification fatigue kills the alert that matters**, and rev 3 announces EVERY re-solve rather than only the ones outside an envelope. | Re-solve messages *replace* `taken`, never stack. One-tick hold, same four-per-claim ceiling. A re-solve that changes nothing the rider would act on is not announced at all — "we checked and the plan stands" is not news. |
-| 13 | **`recommend.ts` and the new scorer disagree in front of the rider.** | They answer different questions and may differ in order. They share disqualification predicates and must never differ on what is rideable. Consider folding the drawer onto the corridor scorer once Phase 2 is proven. |
+| 11 | **Equity advice that costs money.** Wrong tier, unmodelled Pass, a discount Veo does not apply. | Never for Access; price the worse VeoPlus reading; carry the screenshot caveat at the point of advice; never offer an equity hand-off whose only advantage is a saving under $0.50 (§9 — there is no separate "split" any more; it is a plan in the ordinary list). |
+| 12 | **SMS becomes the thing people block.** A living plan re-solves on five triggers; texting each one spends the budget that protects the message that matters, and `dibs-notify.ts` caps at four alerts per claim *on purpose*. | SMS is strictly narrower than the in-app notice (§13.3): two events earn a text, a hard per-trip ceiling sits on top of the per-claim one, and "we checked and it is fine" is never sent. Consent is separate from the sign-in number and revocable. |
+| 13 | **The resume link becomes a credential in a channel we do not control.** An SMS renders on a lock screen, persists in carrier logs, gets screenshotted, lands on shared handsets. | The link carries a plan reference and never a session (§13.5). A dead session means signing in and *then* resuming — asserted in tests, not assumed, because this is precisely the thing a later refactor "simplifies". |
+| 14 | **Rapid checking buys load instead of freshness.** The client already polls every 90s against an ingest that runs every 2 min, so a faster global poll re-reads the same cycle. | Check *narrowly*, not *fast* — but note that narrowing does **not** shrink the fetch: GBFS is a whole-feed endpoint, so the saving is **coalescing**. One shared 20-second full-feed fetch serves every live plan (6× the ingest's requests, O(1) in riders); each plan reads only its 1–5 vehicles out of that snapshot. The global cadence — shared with the compliance audit — stays alone. §13.4. |
+| 15 | **Advocacy inserts itself and loses its standing.** An organisation that answers every case is a nuisance; the cases where it matters are the ones where it is invited. | No reply into a case without `@WSYV` or `@advocacy` in it (§14.3), whatever the portal's pattern suggests. The rider's complaint stays the rider's. |
+| 16 | **OCR misreads a receipt and we accuse somebody wrongly.** Receipt formats change without notice, and a misread total is a rider sent to lose an argument. | The rider confirms every extracted figure over their own screenshot before **either** complaint path is reachable — the `mailto:` as well as the clipboard fallback, since gating only one of them still lets an unconfirmed complaint be sent — and §12.5's three-part bar means "we cannot tell" is a frequent, designed answer rather than a failure. |
+| 17 | **The evidence pile becomes a movement record.** Receipts are time, place and money tied to an account — stronger than anything else this program stores. | The image never leaves the device (§12.2); only confirmed fields upload. The pile stores the date, area and rates, not coordinates or the account identifier; the account link lives only as long as the rider needs it to withdraw. Consent is per-submission and withdrawal actually deletes. |
+| 18 | **The aggregate gets overstated.** A self-selected sample of receipts from an app whose users already suspect they were overcharged is not a census of Denver. | The claim is always "N of M trips riders submitted", with its denominator attached and its self-selection named. Never a fraud accusation, whatever the number says. The evidence is worth something precisely because it is boring and checkable. |
+| 19 | **The free-minutes estimate is wrong and the rider is billed.** Rides taken outside this app are invisible to it (§6.3.1). | The figure is a *ceiling* on what is left and is labelled as one, the rider can correct it before planning, and no plan is ever described as "free" on the strength of our estimate alone. |
+| 20 | **Notification fatigue kills the alert that matters**, and rev 3 announces EVERY re-solve rather than only the ones outside an envelope. | Re-solve messages *replace* `taken`, never stack. One-tick hold, same four-per-claim ceiling. A re-solve that changes nothing the rider would act on is not announced at all — "we checked and the plan stands" is not news. |
+| 21 | **`recommend.ts` and the new scorer disagree in front of the rider.** | They answer different questions and may differ in order. They share disqualification predicates and must never differ on what is rideable. Consider folding the drawer onto the plan search once Phase 2 is proven. |
 
 ---
 
