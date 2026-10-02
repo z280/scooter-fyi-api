@@ -1385,18 +1385,31 @@ that unlock is *"we cannot tell"*, not an overcharge.
 
 ### 12.6 The complaint
 
-One tap copies a prefilled email to the clipboard. **The rider sends it, from
-their own address.** The app never sends it.
+**The rider sends it, from their own address.** The app never sends it.
 
 That is not a limitation to route around, it is the design: sending it would
 mean this project making a contractual assertion on somebody's behalf, about a
-contract it is not party to, from an address they do not control. Copy-to-
-clipboard is the correct ceiling.
+contract it is not party to, from an address they do not control. The rider
+pressing send is the correct ceiling.
 
-The body states the trip, the charge, the expected charge under Exhibit C, and
-cites Exhibit A §5.2 — facts and a contract reference, no adjectives. It is a
-billing query, not an accusation, because at the single-receipt level an
-overcharge is indistinguishable from a bug.
+**The mechanism is a `mailto:`, not a clipboard copy, and §14.1's CC is why:
+text in a body cannot set a recipient.** Copying a body leaves the rider to
+type the addresses, which is precisely where an opted-in CC silently fails to
+happen. So the action opens their own mail client with `to`, `cc`, `subject`
+and `body` populated — the rider reviews and sends, and the CC is a real
+header rather than a line of prose.
+
+`mailto:` has a length limit that varies by client, so when the body would
+overflow it, fall back to the clipboard **and show `To:` and any `Cc:` as
+their own copyable fields**. A fallback that folds the CC into body text is
+the bug this paragraph exists to prevent.
+
+The body states the **account identifier** (§12.3's only purpose — without it
+the complaint cannot credibly say whose trip this was), the trip, the charge,
+the expected charge under Exhibit C, and cites Exhibit A §5.2 — facts and a
+contract reference, no adjectives. It is a billing query, not an accusation,
+because at the single-receipt level an overcharge is indistinguishable from a
+bug.
 
 **Recipient:** `support@veoride.zendesk.com`. It is a Zendesk queue, which is
 worth knowing for two reasons: a ticket gets a reference number the rider can
@@ -1613,6 +1626,11 @@ other, and the UI must not imply it is.
 So it is its own tick, defaulted **off**, with a plain statement of what the
 CC sees. And it is per-complaint: a rider who wanted backup last week has not
 volunteered for it forever.
+
+**It must set a real `cc` recipient** (§12.6's `mailto:`). An address written
+into body text is not a CC and would never reach the mailbox — a feature that
+*appears* to loop in an advocate and does not is worse than no feature, since
+the rider believes they have backup they do not have.
 
 ### 14.2 The portal
 
