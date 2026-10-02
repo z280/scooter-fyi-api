@@ -566,10 +566,24 @@ matrix call:
 
 1. take every vehicle in the bbox, keeping its reliability tier;
 2. **first hops** — the best `W` non-`risk` vehicles by walk seconds inside
-   the walk cap. **If that set is empty**, and only then, refill it from the
-   `risk`-tier vehicles inside the walk cap and set `risk_tier_offered` on the
-   response. This is rule 1's exception, and this step is the only place in
-   the search that admits a `risk` vehicle at all;
+   the walk cap. **If there is no non-`risk` vehicle within a FIXED five-minute
+   walk**, and only then, refill from the `risk`-tier vehicles inside the walk
+   cap and set `risk_tier_offered` on the response. This is rule 1's exception,
+   and this step is the only place in the search that admits a `risk` vehicle
+   at all.
+
+   **Five minutes, not `max_walk_minutes`** — which riders set from 1 to 15.
+   Testing the rider's own cap would admit a risky vehicle whenever the cap is
+   tight: a 3-minute cap with a non-risky vehicle 4 minutes away is not "no
+   non-risky vehicle nearby", and rule 1 says it must not be treated as one.
+   Rule 1 is a **platform** rule; the cap is a **rider preference**; they
+   cannot share a radius.
+
+   **And when the gap opens** — non-risky vehicles beyond the cap but inside
+   five minutes — **relax the cap, never rule 1.** The cap is on §5.2's
+   relaxation ladder and rule 1 is not, so the answer is the 4-minute non-risky
+   vehicle with its relaxation disclosed, never a risky 2-minute one and never
+   an empty list;
 3. **pickups** — the best `H` **non-`risk`** vehicles, ranked by how much
    ride-leg they remove: `ride(Sᵢ→D)` ascending, which is the "further along"
    test. No exception here, ever (§6.1);
@@ -774,6 +788,18 @@ a fresh one's.
 Omitting this would make every re-solve quietly prefer handing off, since the
 option of simply carrying on would not be in the graph to lose.
 
+**`started_at` needs a "now" to be worth anything, and the evaluation instant
+is therefore part of the contract.** `free_minutes_used_this_ride` is a
+snapshot taken when the client built the request; the rental keeps running, so
+the balance has to be advanced by the elapsed time before anything is priced.
+The server does that **once per request, from the instant it receives it**, and
+prices the whole search from that single value — never re-reading the clock
+mid-search, which would make a plan's rank depend on where in the search it was
+reached. The same figure is echoed on the response so a replayed request is
+reproducible. The client tier takes the instant as an **injected** input for the
+same reason: a search that reads the clock internally ranks identical inputs
+differently from run to run, and cannot be tested against the cliff at all.
+
 ```jsonc
 // response
 {
@@ -917,9 +943,22 @@ Two consequences the existing dibs rules do not cover:
   what makes "at most one" an invariant rather than a convention the client is
   trusted to honour, and it is the reason `replaces` exists (§7.4's migration).
 
-  Until `replaces` ships, the two-call fallback is permitted — and must treat
-  a failed claim as **a re-solve that did not happen**, keeping the old claim,
-  never as a claim lost.
+  **And the fallback this section used to permit could not have worked.** It
+  said two calls were acceptable until `replaces` ships, provided a failed
+  claim was treated as "a re-solve that did not happen, keeping the old claim"
+  — but the first call has already released that claim, so there is nothing to
+  keep; and claim-before-release is refused by the server invariant three
+  paragraphs up. The licence was self-contradictory, so it is withdrawn: a
+  **claim-moving re-solve is a hard dependency on `replaces`** (§7.4's
+  migration), and the sequencing table says so.
+
+  **What ships before it**, since Phase 3 is not blocked wholesale: the
+  re-solve happens — route, plan, notification — and the claim does not follow
+  it. The old claim is released, the new pickup is **unclaimed**, and the
+  surface says so. The cost is the recorded intent alone; the **watcher reads
+  the stored plan, not the claim** (§13.4.1), so monitoring is unaffected. A
+  surface implying the claim moved when it did not is the one unacceptable
+  outcome.
 
 ### 7.4 What this must never claim
 
@@ -1625,7 +1664,19 @@ A margin below which we say nothing is part of this: a few cents of rounding
 disagreement is not a finding, and treating it as one spends the credibility
 the evidence pile depends on.
 
-Below that bar the verdict is *"we cannot tell"*, and the UI says why. A false
+Below that bar the verdict is *"we cannot tell"*, and the UI says why.
+
+**Two cases below the bar read alike and must not be collapsed**, or `correct`
+becomes unreachable and the evidence pile can never record the discount *being
+applied* — which is the only question it exists to answer:
+
+| The charge | Verdict |
+|---|---|
+| explained **entirely** by billable-minute rounding and tax — i.e. it **equals** the expected figure, properly computed | **`correct`** |
+| **exceeds** the expected figure, but by less than the margin | **`cannot_tell`** |
+
+One is arithmetic we can account for; the other is a gap we cannot explain and
+will not accuse anybody over. A false
 accusation is worse than silence here: it costs a rider their time and their
 credibility, and it costs this project the only thing that makes the evidence
 pile worth anything.
