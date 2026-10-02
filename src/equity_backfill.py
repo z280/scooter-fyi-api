@@ -109,6 +109,32 @@ the stored SLA value only when no gate-rejected snapshot in the window
 already holds a value. Nothing in this module writes the job_runs ledger either path: only the zero-arg scheduled
 commands in src/cli.py are recorded there, and `equity_backfill` is a
 sub-argument command.
+
+WHEN THE ANSWER IS "COULD NOT BE MEASURED" ------------------------------
+If a day HAS 6-9 AM snapshots but not one of them survives — every
+reconstruction fell outside the fidelity gate, or none could be
+reconstructed or checked at all — nothing is written and the equity
+average stays NULL. On its own that NULL is indistinguishable from "not
+reprocessed yet", and the calendar would keep showing the day as `pending`
+after it had been attempted — indefinitely, once the day ages out of the
+nightly lookback (2026-08-09 and 2026-08-10 are the cases that forced this:
+91/91 and 93/93 snapshots at fidelity 1.11-1.15).
+
+So the job records the verdict its latest attempt reached:
+`daily_sla_compliance.equity_unmeasurable_reason` (sql/084), `low_fidelity`
+or `no_history` (see `unmeasurable_verdict`). The calendar reads it as the
+status `unmeasurable` — the day is over and has data, but no figure the
+latest attempt could defend; not a failure. It is a current verdict, not a
+permanent one: the nightly sweep keeps retrying the day inside its lookback
+(see `days_needing_reprocess`), a manual run can retry any day, and a
+successful attempt supersedes it. The verdict is only ever written onto a
+row whose equity average
+is still NULL, so it can never contradict a live figure, and
+`daily_sla.compute_for_date` clears it whenever it produces a figure, so a
+later run that CAN measure the day supersedes it. Only window-only runs
+record a verdict: the SLA average is over the window, so a `--full-day`
+run's snapshot counts do not speak for it. A dry run reports the verdict
+it reached (`unmeasurable_reason`) and records nothing.
 """
 
 from __future__ import annotations
@@ -221,6 +247,16 @@ class DayResult:
     #: Per-snapshot detail, populated only by a dry run (it is the whole
     #: point of one, and too bulky for the job_runs summary otherwise).
     snapshots: list[dict[str, Any]] = field(default_factory=list)
+    #: Why this day could not be measured (`unmeasurable_verdict`), or None
+    #: when it could — or when there was nothing to measure.
+    unmeasurable_reason: str | None = None
+    #: True when that verdict was stored on the day's SLA row. False when
+    #: there is no row, or the row already holds an equity figure (a live
+    #: one is never overwritten with "unmeasurable").
+    unmeasurable_recorded: bool = False
+    #: True when the day's 6-9 AM window had not yet ended at run time: no
+    #: verdict is reached (or recorded) for a day that is still open.
+    window_open: bool = False
 
     def as_dict(self, *, include_snapshots: bool = False) -> dict[str, Any]:
         fid = self.fidelity
@@ -238,6 +274,9 @@ class DayResult:
             "fidelity_mean": round(sum(fid) / len(fid), 4) if fid else None,
             "avg_percent_all_devices_equity": self.avg_percent_all_devices_equity,
             "compliance_equity_pass": self.compliance_equity_pass,
+            "unmeasurable_reason": self.unmeasurable_reason,
+            "unmeasurable_recorded": self.unmeasurable_recorded,
+            "window_open": self.window_open,
         }
         if include_snapshots:
             out["snapshots"] = [
@@ -443,6 +482,77 @@ def _write_metrics(rows: list[tuple[Any, dict[str, Any]]]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# The "could not be measured" verdict
+# ---------------------------------------------------------------------------
+#: sql/084's verdict column for the official map. Spelled out like
+#: REBUILT_COLUMNS above; tests pin it to
+#: `equity_groups.unmeasurable_reason_column(OFFICIAL_GROUP)`, which is what
+#: the calendar and daily_sla's clearing clause read.
+UNMEASURABLE_REASON_COLUMN = "equity_unmeasurable_reason"
+
+
+def _utcnow() -> datetime:
+    """Current UTC time; a seam so tests can place a run inside a window."""
+    return datetime.now(timezone.utc)
+
+
+def unmeasurable_verdict(result: DayResult) -> str | None:
+    """Why `result`'s day has no defensible equity figure, or None.
+
+    None whenever there is nothing to conclude: a day with no snapshots is
+    not unmeasurable, it is empty (the calendar already has `no_data` and
+    `pending` for that), and a day where even one snapshot passed the gate
+    HAS a figure. Otherwise:
+
+      low_fidelity — at least one snapshot was reconstructed and checked,
+                     and every one that was fell outside the gate
+      no_history   — no snapshot could be reconstructed or checked at all
+
+    Pure, and computed from counts alone, so the rule is testable without a
+    database and cannot drift from the numbers reported beside it.
+    """
+    if result.snapshots_considered <= 0:
+        return None
+    passed = (
+        result.snapshots_considered
+        - result.snapshots_skipped_low_fidelity
+        - result.snapshots_skipped_no_history
+    )
+    if passed > 0:
+        return None
+    if result.snapshots_skipped_low_fidelity > 0:
+        return "low_fidelity"
+    return "no_history"
+
+
+def _record_unmeasurable(d: date_cls, reason: str) -> bool:
+    """Store `reason` on `d`'s SLA row. True if a row now carries it.
+
+    Guarded by `avg_percent_all_devices_equity IS NULL`: re-running the
+    backfill over a day the live pipeline measured (whose snapshots may well
+    fail today's gate — see the ghost-stop note above) must not stamp a
+    live figure as unmeasurable. No row is created either: a day the daily
+    job never computed is that job's gap, the same rule
+    `days_needing_reprocess` follows. `computed_at` is left alone — the
+    averages did not change.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE daily_sla_compliance
+                   SET {UNMEASURABLE_REASON_COLUMN} = %s
+                 WHERE sla_date = %s
+                   AND avg_percent_all_devices_equity IS NULL
+                """,
+                (reason, d),
+            )
+            updated = cur.rowcount
+        conn.commit()
+    return bool(updated)
+
+
+# ---------------------------------------------------------------------------
 # One day
 # ---------------------------------------------------------------------------
 def reprocess_date(
@@ -463,6 +573,10 @@ def reprocess_date(
     `dry_run=True` performs no write of any kind (see the module
     docstring): it returns per-snapshot detail in `result.snapshots` and
     the in-memory day average over gate-passing snapshots instead.
+
+    A window-only run over a day whose snapshots ALL fail (see
+    `unmeasurable_verdict`) records that verdict on the SLA row instead —
+    the one write such a run makes (a dry run only reports it).
     """
     start, end = _bounds(d, window_only)
     result = DayResult(
@@ -470,6 +584,9 @@ def reprocess_date(
         # 0, not None, for a dry run that returns early with no snapshots:
         # None is reserved for non-dry runs (see DayResult).
         snapshots_averaged=0 if dry_run else None,
+        # Set before any early return, so an open day with no snapshots yet
+        # still says so.
+        window_open=window_only and daily_sla.window_for_date(d)[1] > _utcnow(),
     )
 
     snapshots = _load_snapshots(start, end)
@@ -528,6 +645,15 @@ def reprocess_date(
 
     result.snapshots_passing_gate = len(pending)
 
+    # The SLA average is over the 6-9 AM window, so only a window-only run's
+    # counts speak for it. Reached before the dry-run branch so a dry run
+    # reports the verdict a real run would record.
+    # And only once the window has ENDED: the manual CLI accepts today (or
+    # a future date), and a few early snapshots all failing must not stamp
+    # a still-open day as unmeasurable.
+    if window_only and not result.window_open:
+        result.unmeasurable_reason = unmeasurable_verdict(result)
+
     if dry_run:
         # A reconstructed-only average over daily_sla's contractual 6-9 AM
         # window, even when `--full-day` loaded (and reports per-snapshot
@@ -570,6 +696,9 @@ def reprocess_date(
         result.avg_percent_all_devices_equity = None if pct is None else float(pct)
         result.compliance_equity_pass = row.get("compliance_equity_pass")
 
+    if result.unmeasurable_reason:
+        result.unmeasurable_recorded = _record_unmeasurable(d, result.unmeasurable_reason)
+
     log.info("equity reprocess %s: %r", d, result.as_dict())
     return result
 
@@ -588,6 +717,12 @@ def days_needing_reprocess(
     a day the daily job never computed is that job's backlog, not this
     one's, and inventing a row here would hide the gap. Today is excluded
     — its window may not have closed.
+
+    A day already marked unmeasurable (sql/084) still has a NULL average,
+    so it stays a candidate while it is inside the lookback. That is
+    deliberate: the verdict is re-reached each night rather than frozen on
+    the first attempt, and costs no more than the retry these days got
+    before the verdict existed.
     """
     today = today or datetime.now(DENVER_TZ).date()
     earliest = today - timedelta(days=lookback_days)
@@ -664,5 +799,6 @@ def run_backlog(
         "snapshots_skipped_low_fidelity": sum(
             r["snapshots_skipped_low_fidelity"] for r in results
         ),
+        "days_unmeasurable": [r["sla_date"] for r in results if r["unmeasurable_reason"]],
         "days": results,
     }

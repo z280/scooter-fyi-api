@@ -100,3 +100,43 @@ def test_official_group_columns_match_the_migration():
         "percent_sitting_equity",
         "percent_standing_equity",
     ]
+
+
+# ---------------------------------------------------------------------------
+# The unmeasurable verdict (sql/084)
+# ---------------------------------------------------------------------------
+def test_only_the_reprocessed_official_map_can_be_unmeasurable():
+    """v1/v2 were recorded live by the pipeline and are never rebuilt, so
+    nothing can conclude they are unmeasurable; the official map is the one
+    group src/equity_backfill.py reconstructs."""
+    from src.equity_groups import REPROCESSED_GROUPS, unmeasurable_reason_column
+
+    assert REPROCESSED_GROUPS == (OFFICIAL_GROUP,)
+    assert set(REPROCESSED_GROUPS) <= set(COMPLIANCE_GROUPS)
+    assert unmeasurable_reason_column(OFFICIAL_GROUP) == "equity_unmeasurable_reason"
+    for g in ("v1", "v2", "er1"):
+        assert unmeasurable_reason_column(g) is None
+
+
+def test_the_verdict_column_is_not_a_metric_column():
+    """core_metric_columns() drives a positional zip in compute.run_cycle();
+    the verdict lives on daily_sla_compliance only and must never leak into
+    that list (or into the snapshot table)."""
+    from src.equity_groups import unmeasurable_reason_column
+
+    assert unmeasurable_reason_column(OFFICIAL_GROUP) not in core_metric_columns()
+    assert not [c for c in core_metric_columns() if "unmeasurable" in c]
+
+
+def test_the_reason_codes_match_the_migration_check():
+    """sql/084's CHECK is what stops an undocumented code reaching the API;
+    the Python list is what the code and docs are written against."""
+    import re
+    from pathlib import Path
+
+    from src.equity_groups import UNMEASURABLE_REASONS
+
+    sql = (Path(__file__).resolve().parents[1] / "sql" / "084_equity_unmeasurable.sql").read_text()
+    m = re.search(r"CHECK \(equity_unmeasurable_reason IN \(([^)]*)\)\)", sql)
+    assert m, "sql/084 CHECK not found"
+    assert tuple(v.strip().strip("'") for v in m.group(1).split(",")) == UNMEASURABLE_REASONS
