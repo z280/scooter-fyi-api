@@ -147,6 +147,58 @@ _DEVICE_CLASSES = frozenset({"mobile", "tablet", "desktop"})
 _OS_FAMILIES = frozenset({"ios", "android", "mac", "windows", "linux"})
 _VIEWPORTS = frozenset({"xs", "sm", "md", "lg", "xl"})
 
+# Per-event prop vocabularies, for the events whose privacy claim is a claim
+# about their PROPS and not only about their name.
+#
+# `_clean_props` is deliberately generic — any scalar, under any key, capped and
+# truncated. That is the right default for a funnel event whose prop is a screen
+# number, and the wrong one for an event whose entry above says "never the
+# vehicle": nothing enforced that. A buggy build, or a crafted POST (this
+# endpoint is unauthenticated by design), could park a plate, a coordinate or a
+# line of free text under any key it liked and the analytics table would keep
+# it — against `templates/legal/privacy_policy.html`, which promises, for every
+# event, "no free text, no search queries, no coordinates, no ride content, and
+# no preference values". A promise the client alone keeps is not kept.
+#
+# An event ABSENT from this map keeps the generic behaviour. An event PRESENT
+# keeps only the keys named here, and under each key only the listed values;
+# everything else is dropped silently, because a prop the server will not store
+# must not cost the rider their whole event. The right move when a new prop is
+# added to one of these events is to extend its entry — never to delete it.
+_EVENT_PROP_VOCAB: dict[str, dict[str, frozenset]] = {
+    # Carries no props at all, in either direction.
+    "ride_open_deflected": {},
+    "hud_recenter": {},
+    # `ride-failed-start.ts`'s four FailedStartOutcome values.
+    "ride_failed_start": {
+        "outcome": frozenset({"reported", "deduped", "unreportable", "failed"}),
+    },
+    # The dial's two positions, plus `qr-ride-scan.ts`'s action kinds for the
+    # ride position. `plate` is deliberately NOT a key here: the unknown-vehicle
+    # action carries one in the app and it must not reach this table.
+    "qr_utility": {
+        "mode": frozenset({"features", "ride"}),
+        "action": frozenset({
+            "start", "resume", "associate", "already",
+            "unreadable", "unknown_vehicle", "post_ride",
+        }),
+    },
+    # On or off. Never the vehicle — now enforced, not just asserted.
+    "device_notify_moved": {"action": frozenset({"on", "off"})},
+}
+
+
+def _vocab_props(name: str, props: dict) -> dict:
+    """Narrow `props` to the event's vocabulary, when it has one."""
+    vocab = _EVENT_PROP_VOCAB.get(name)
+    if vocab is None:
+        return props
+    return {
+        key: value
+        for key, value in props.items()
+        if isinstance(value, str) and value in vocab.get(key, frozenset())
+    }
+
 MAX_BATCH_EVENTS = 50
 MAX_BODY_BYTES = 32 * 1024
 MAX_PROP_KEYS = 12
@@ -292,7 +344,10 @@ async def ingest_events(request: Request) -> Response:
             claimed = datetime.fromtimestamp(t / 1000, tz=timezone.utc)
             if now - _CLOCK_SKEW <= claimed <= now + _CLOCK_SKEW:
                 received_at = claimed
-        rows.append((name, sid, received_at, _clean_props(event.get("p"))))
+        rows.append(
+            (name, sid, received_at,
+             _vocab_props(name, _clean_props(event.get("p")))),
+        )
     if dropped:
         log.info(
             "telemetry: dropped %d event(s) from one batch: %s",

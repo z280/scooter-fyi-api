@@ -298,3 +298,143 @@ def test_drop_log_caps_name_count():
     assert out.startswith("n0, n1,")
     assert out.endswith(f"(+{25 - api_telemetry._DROP_LOG_MAX_NAMES} more)")
     assert "n10" not in out.split(" (+")[0].split(", ")
+
+
+# ---------------------------------------------------------------------------
+# The sticky-usage events (frontend plan §9.7 / API plan §13.8), pinned the
+# same way `_NEWLY_COLLECTED` pins the batch before them: a hand-mirrored
+# allowlist across two repos is exactly the kind of list a rename edits on one
+# side only, and the failure mode is silent — the server logs a drop and the
+# frontend never hears about it.
+# ---------------------------------------------------------------------------
+
+_STICKY_USAGE = (
+    "ride_open_deflected", "ride_failed_start", "hud_recenter",
+    "qr_utility", "device_notify_moved",
+)
+
+
+def test_sticky_usage_events_are_allowlisted():
+    assert set(_STICKY_USAGE) <= api_telemetry.ALLOWED_EVENTS
+
+
+def test_sticky_usage_events_are_stored(monkeypatch):
+    calls, _ = _install(monkeypatch)
+    r = _client().post(
+        "/api/v1/telemetry/events",
+        json=_batch([
+            _event("ride_open_deflected"),
+            _event("ride_failed_start", outcome="reported"),
+            _event("hud_recenter"),
+            _event("qr_utility", mode="ride", action="resume"),
+            _event("device_notify_moved", action="on"),
+        ]),
+    )
+    assert r.status_code == 204
+    [rows] = _inserted_rows(calls)
+    assert [row[1] for row in rows] == list(_STICKY_USAGE)
+
+
+# ---------------------------------------------------------------------------
+# `_EVENT_PROP_VOCAB`: the events whose allowlist comment makes a claim about
+# their PROPS. The claim used to live only in the browser; these pin it in the
+# one place a crafted POST cannot route around.
+# ---------------------------------------------------------------------------
+
+
+def _stored_props(calls, name):
+    """The `props` JSON actually handed to the INSERT, per event of `name`."""
+    [rows] = _inserted_rows(calls)
+    return [json.loads(row[9]) for row in rows if row[1] == name]
+
+
+def test_vocabulary_events_keep_their_legitimate_props(monkeypatch):
+    calls, _ = _install(monkeypatch)
+    _client().post(
+        "/api/v1/telemetry/events",
+        json=_batch([
+            _event("device_notify_moved", action="off"),
+            _event("qr_utility", mode="ride", action="unknown_vehicle"),
+            _event("ride_failed_start", outcome="deduped"),
+        ]),
+    )
+    assert _stored_props(calls, "device_notify_moved") == [{"action": "off"}]
+    assert _stored_props(calls, "qr_utility") == [
+        {"mode": "ride", "action": "unknown_vehicle"},
+    ]
+    assert _stored_props(calls, "ride_failed_start") == [{"outcome": "deduped"}]
+
+
+def test_vocabulary_drops_a_vehicle_a_coordinate_and_free_text(monkeypatch):
+    # The whole point: "never the vehicle" is enforced here, not asserted in a
+    # comment. The EVENT still lands — a prop we refuse to store is not a
+    # reason to lose the count.
+    calls, _ = _install(monkeypatch)
+    r = _client().post(
+        "/api/v1/telemetry/events",
+        json=_batch([
+            _event(
+                "device_notify_moved",
+                action="on",
+                vehicle_identifier="a1b2c3",
+                lat=39.7392,
+                lng=-104.9903,
+                note="parked outside 1700 Blake",
+            ),
+            # The unknown-vehicle action carries a plate in the app. It must
+            # not arrive here, even alongside a legitimate `action`.
+            _event("qr_utility", mode="ride", action="unknown_vehicle",
+                   plate="1025543"),
+        ]),
+    )
+    assert r.status_code == 204
+    assert _stored_props(calls, "device_notify_moved") == [{"action": "on"}]
+    assert _stored_props(calls, "qr_utility") == [
+        {"mode": "ride", "action": "unknown_vehicle"},
+    ]
+
+
+def test_vocabulary_rejects_an_unlisted_value_for_a_listed_key(monkeypatch):
+    # A key in the vocabulary is not a licence to write free text under it.
+    calls, _ = _install(monkeypatch)
+    _client().post(
+        "/api/v1/telemetry/events",
+        json=_batch([
+            _event("device_notify_moved", action="on; vehicle=a1b2c3"),
+            _event("ride_failed_start", outcome="it was broken at 1700 Blake"),
+        ]),
+    )
+    assert _stored_props(calls, "device_notify_moved") == [{}]
+    assert _stored_props(calls, "ride_failed_start") == [{}]
+
+
+def test_no_prop_events_store_nothing_whatever_is_sent(monkeypatch):
+    calls, _ = _install(monkeypatch)
+    _client().post(
+        "/api/v1/telemetry/events",
+        json=_batch([
+            _event("hud_recenter", lat=39.7392, screen="6"),
+            _event("ride_open_deflected", state="riding"),
+        ]),
+    )
+    assert _stored_props(calls, "hud_recenter") == [{}]
+    assert _stored_props(calls, "ride_open_deflected") == [{}]
+
+
+def test_events_outside_the_vocabulary_are_untouched(monkeypatch):
+    # The map is opt-in: the ~40 events that predate it keep the generic
+    # `_clean_props` behaviour, so adding it is not a silent data change.
+    calls, _ = _install(monkeypatch)
+    _client().post(
+        "/api/v1/telemetry/events",
+        json=_batch([_event("drawer_open", drawer="filters", n_open=3)]),
+    )
+    assert _stored_props(calls, "drawer_open") == [
+        {"drawer": "filters", "n_open": 3},
+    ]
+
+
+def test_every_vocabulary_name_is_an_allowlisted_event():
+    # A vocabulary for an event the allowlist drops is dead code that reads
+    # like protection.
+    assert set(api_telemetry._EVENT_PROP_VOCAB) <= api_telemetry.ALLOWED_EVENTS

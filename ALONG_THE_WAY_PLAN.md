@@ -2163,9 +2163,9 @@ comms starts at `Astral` and nothing before it. Worth a test rather than a
 comment, because `[scooter.fyi] [scooter.fyi] Astral Osprey 123…` is the
 obvious bug and it is invisible in every unit test that only checks the body.
 
-**One segment.** 102 characters of body, 116 with the prefix comms adds, against
-160 for a single GSM-7 segment — and ~120 with the longest plausible vehicle
-name. There is room, but not unlimited room: anything added to this message has
+**One segment.** 103 characters of body for the copy above, 117 with the prefix
+comms adds, against 160 for a single GSM-7 segment — and ~125 prefixed with the
+longest plausible vehicle name (a two-digit hour adds one more). There is room, but not unlimited room: anything added to this message has
 to be counted, because a two-segment alert costs double and may arrive in
 pieces.
 
@@ -2233,8 +2233,12 @@ rider was physically standing next to.** That is precisely the thing the
 in-app-only version avoided by keeping watches in `localStorage`, and it is not
 a cost to discover later:
 
-- The row stores the account, the `vehicle_identifier`, the anchor lat/lon, the
-  anchor time, and the `qr_raw_value` that proved presence. It does not store
+- The row stores the account, the `vehicle_identifier`, the anchor lat/lon and
+  the anchor time. The `qr_raw_value` the rider posted is what *proved*
+  presence, and it is validated and discarded, never stored — `qr.py` extracts
+  the plate, resolves the vehicle and applies the 75 m gate, and after that the
+  raw payload is a caller-controlled string with nothing left to answer, which
+  is why there is no column for it in the schema below. The row does not store
   where the scooter went, at any point, including after the alert fires.
 - **It is short-lived by construction.** A watch expires 72 hours after it is
   armed whether or not it ever fires — the same window `quality.py`'s
@@ -2482,7 +2486,16 @@ Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
   `denver-scooter-fyi/src/telemetry.ts`'s `TELEMETRY_EVENTS` and
   `src/api_telemetry.py`'s `ALLOWED_EVENTS`. **The authoritative list is the
   frontend lane's §Telemetry table**, which carries each event's props; this
-  is the same names, and the two must not drift:
+  is the same names, and the two must not drift.
+
+  An event whose entry claims something about its **props** — "`action` only,
+  never the vehicle" — needs that claim enforced in
+  `api_telemetry._EVENT_PROP_VOCAB` as well as in the browser: this endpoint is
+  unauthenticated by design, `_clean_props` keeps any scalar under any key, and
+  the privacy policy's "no free text, no coordinates" is a promise about what
+  the table *holds*, not about what a correct client sends. The sticky-usage
+  five (§13.8) are the first entries; the ~40 events that predate the map keep
+  the generic behaviour until each is given a vocabulary of its own.
 
   `trip_plan_start`, `trip_candidates`, `trip_plan_chosen`, `trip_resolve`,
   `trip_exhausted`, `free_minutes_corrected`, `spec_applied_to_map`,
