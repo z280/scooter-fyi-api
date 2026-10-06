@@ -5,7 +5,15 @@
 Owner's spec (2026-10-06): trip minutes (duration), cost before tax, cost with tax, start date/time, end date/time, start and end points picked on the map, and a scooter ID entered by hand or from the QR code. The backend tries to align the claim with a trip. If none of the useful data is present, thank the rider and retain nothing. Points:
 
 - **10** for a submission whose subtotal and total match its own screenshot.
-- **100** for one corroborated by a ride in our history: same scooter ID, and start and end points each within 100 m.
+- **100** for one corroborated by a ride in our history. Owner's original wording: same scooter ID, start and end points within 100 m. Since receipts carry no location, this becomes: the same scooter observed in the feed starting and ending at the receipt's times (±4 min), with the observed points supplying the location.
+
+## The constraint that shapes everything (owner, 2026-10-06)
+
+**A Veo receipt has no geographic information.** It does show the **scooter code**, the start and end times, and the costs. So a claim is located by **matching the scooter code and the receipt's times against our feed history**. The ride's start and end points come from what we observed in the feed, not from the rider.
+
+- **Scooter code → vehicle.** Veo publishes each scooter's number in its public `free_bike_status` feed (`rental_uris … &number=<plate>`), and we already derive `vehicle_identifier = HMAC(plate)` from it (`src/vehicle_identity.py`). *Assumption to confirm with a real receipt:* the receipt's scooter code is that same number.
+- **History is deep enough:** `device_history` departures since 2026-05-31 and `trip_events` since 2026-07-05, with no pruning. A receipt from weeks ago is still matchable.
+- **Precision:** the feed is sampled every 2 minutes, so observed rental start and end are known to about ±2 min.
 
 ## What exists already
 
@@ -25,8 +33,8 @@ Owner's spec (2026-10-06): trip minutes (duration), cost before tax, cost with t
 - trip minutes;
 - cost before tax ($), cost with tax ($);
 - start and end date/time (defaulting to now);
-- start and end points: "Pick on map" for each, using map-pick, pre-filled from the tapped spot;
-- scooter ID: typed, or "Scan QR" (reuses qr-scan);
+- **scooter code** as printed on the receipt: typed, or "Scan QR" (reuses qr-scan) if the rider is still at the scooter. Required.
+- *No location fields.* The receipt has none, and the ride's points come from the feed match (Phase 2).
 - receipt screenshot.
 
 If the rider is signed out, the form shows "Sign in to send a receipt" (the endpoint requires a session, so the evidence has provenance).
@@ -34,19 +42,19 @@ If the rider is signed out, the form shows "Sign in to send a receipt" (the endp
 **API:** extend `discount_reports` in a migration that supersedes #105:
 
 - `trip_minutes`, `subtotal_cents`, `total_cents`, `ride_started_at`;
-- `start_lat`/`start_lng` (`end_*` already exists);
-- `vehicle_ref` (as entered) and `vehicle_identifier` (resolved HMAC, when the ref resolves);
+- `vehicle_ref` (the scooter code as entered) and `vehicle_identifier` (HMAC of it, computed server-side);
+- `matched_start_lat/lng`, `matched_end_lat/lng`, filled from the feed match, not from the rider;
 - `region_name`, `zone_version = 'equity'`;
 - `review_status`, `match_status`, `matched_trip_event_id`;
 - `expected_cents`, `rate_error_cents`.
 
 **The "useful data" gate (server-side, before anything is stored).** A rate error can only be shown with:
 
-- (a) trip minutes, plus
-- (b) a pre-tax or with-tax cost, plus
-- (c) a start or end point inside an Equity Area.
+- (a) a scooter code,
+- (b) start and end times (trip minutes can be derived from them), and
+- (c) a pre-tax or with-tax cost.
 
-Without all three, the API returns `422 not_rate_checkable`, keeps no row and no image (the upload is rejected before the R2 PUT), and the form says: *"Thanks for taking part. We can't check a rate from this, so we haven't kept it."*
+Where the ride happened is then established by the feed match. Without all three, the API returns `422 not_rate_checkable`, keeps no row and no image (the upload is rejected before the R2 PUT), and the form says: *"Thanks for taking part. We can't check a rate from this, so we haven't kept it."*
 
 **Arithmetic, computed and stored at submission:**
 
@@ -58,16 +66,21 @@ Without all three, the API returns `422 not_rate_checkable`, keeps no row and no
 - Start and end points are what the rider picks, not their GPS. The public CSV currently exports exact `end_lat/lng`; Phase 1 rounds exported points to 3 decimals (about 100 m).
 - The privacy payload and policy list the new fields in the same change.
 
-## Phase 2: ride matching (backend)
+## Phase 2: ride matching from feed history (backend)
 
-- **Candidates:** releases in `trip_events` ending within ±10 min of `ride_ended_at` whose `to` point is within 100 m of the end point. Each is paired with its rental start (`device_history.departed_at` of the origin stop) within ±10 min of `ride_started_at`, with a `from` point within 100 m of the start point. If a scooter ID was given, it must match `vehicle_identifier`.
+- **Vehicle:** `vehicle_identifier = HMAC(scooter code)`. If no vehicle with that identifier has ever been seen, the result is `match_status = unknown_vehicle`, which usually means a typo or a misread code.
+- **Ride:** that vehicle's rental whose observed start (`device_history.departed_at` of the stop it left) is within ±4 min of the receipt's start, and whose release (`trip_events.detected_at`) is within ±4 min of the receipt's end. ±4 min is two feed cycles plus clock skew.
+- **Where:** the matched ride's `from` and `to` points are the start and end. **Equity eligibility** is whether either point lies in an official Equity Area. A ride that started *and* ended outside every area is not owed the discount: the API records `not_equity_ride` and the rider is told why.
 - **`match_status`:**
-  - `corroborated`: scooter ID given and matches, and both points within 100 m;
-  - `plausible`: exactly one candidate, but no scooter ID or only one point;
-  - `ambiguous`;
-  - `none`.
-- **Where it runs:** a scheduled job (`match_discount_reports`), not the request path. It's a time-boxed indexed query, but it shouldn't make the rider wait.
-- **Known limit:** 2-minute snapshots put rental start and end times at ±2 min. Veo can also rotate the bike_id at release; matching uses `vehicle_identifier`, which survives rotation.
+  - `corroborated`: exactly one ride, both times within tolerance;
+  - `partial`: one time matches, e.g. the vehicle was absent from the feed for part of the ride;
+  - `ambiguous`: more than one candidate;
+  - `none`;
+  - `unknown_vehicle`.
+- **Where it runs:** a scheduled job (`match_discount_reports`), not the request path.
+- **Known limits:**
+  - **Failed starts:** an in-place rental leaves no `trip_events` row. That is now counted as a failed start (sql/087), so a receipt for one matches on the start time plus the in-place release instead.
+  - **Missing scooters:** vehicles that drop out of the feed mid-ride (`departure_reason = 'absent'`) match on whichever end was observed, so `partial`.
 
 ## Phase 3: automated analysis + points (the API decides)
 
@@ -128,7 +141,7 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 
 ## Defaults chosen (say if any should change)
 
-1. **Gate:** minutes + a cost + an Equity Area point. Anything less is declined and not retained.
+1. **Gate:** scooter code + start and end times + a cost. Anything less is declined and not retained. Equity eligibility comes from the feed match.
 2. **Points:** 10 *or* 100 per submission, not 110.
-3. **Matching tolerance:** ±10 min on times, 100 m on points (your spec).
+3. **Matching:** scooter code plus the receipt's start and end times, ±4 min against feed history. The location comes from the feed, because the receipt has none.
 4. **Points settle automatically** when the API verifies a receipt (Phase 3, owner's direction). Only `uncertain` reports wait for a human, after a short shadow-mode start.
