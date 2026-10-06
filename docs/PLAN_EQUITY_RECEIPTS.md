@@ -73,7 +73,7 @@ What follows for the design:
 
 The owner's Sep 29 rides were **deliberate tests**, stopping inside the Equity Area.
 
-Separately, Veo told him that for a period he had been **stacking VeoPlus Premium with the Denver Resident Pass**, which was never supposed to be possible. That gave free unlocks + 25¢/min. Veo removed the stacking after **2026-09-10**. So the samples hold both signatures:
+Separately, Veo told the owner that for a period the account had been **stacking VeoPlus Premium with the Denver Resident Pass**, which was never supposed to be possible. That gave free unlocks + 25¢/min. Veo removed the stacking after **2026-09-10**. So the samples hold both signatures:
 
 - **May 26 receipt (#1025894):** $3.50 for 14 min = **$0 + 25¢**, the stacked rate.
 - **Sep 27/29 receipts:** **$1 + 25¢**, a single plan (Resident), after the stacking was removed. The Sep 29 Equity Area rides were therefore charged the plain Resident rate instead of $1 + 13¢: `equity_not_applied`, with no stacking caveat.
