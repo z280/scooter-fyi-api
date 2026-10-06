@@ -37,6 +37,8 @@ The prices follow one pattern:
 
 Matched against feed history by plate + date + duration (±1 min):
 
+Prices at the time: Charged = after Veo's discount, under the owner's stacked Premium + Resident plan.
+
 | Receipt | Match | Equity | Charged | Contract equity price |
 |---|---|---|---|---|
 | #1018354, 16 min, Sep 29 | unique, 15:16→15:32 | ends EQ_003 | $5.00 | $3.08 |
@@ -54,6 +56,30 @@ What follows for the design:
 4. **Rides before 2026-05-31** are told plainly that they are before our history.
 5. **The gate** becomes plate + minutes + subtotal/total, all of which are on every receipt. Start and end times are optional, for disambiguation only.
 6. **Gold set seed.** These six receipts are the first gold-set and bake-off cases, *if the owner agrees to keep them as test fixtures*.
+
+## Rate plans: compare the receipt against the rider's own plan (owner, 2026-10-06)
+
+The owner's Sep 29 rides were **deliberate tests**, stopping inside the Equity Area. Veo has since told him that the $1 + 25¢/min he was being charged came from **stacking VeoPlus Premium with the Denver Resident Pass, which was never supposed to be possible.** Two consequences:
+
+1. **The app keeps the stacked plan selectable.** `resident_plus` ("free unlocks + 25¢/min") stays in `RATE_PLANS`. Whether anyone else gets a stacked rate is itself worth learning (the owner's "social experiment").
+2. **A receipt is judged against the rider's own plan, not one fixed rate.** The form asks for the rate plan, pre-filled from the profile's `rate_plan` when signed in, with "Not sure" allowed. The analysis records three prices:
+
+| Price | How it is computed |
+|---|---|
+| **Implied (rate signature)** | Solve the receipt's subtotal and minutes for unlock ∈ {$0, $1} and a per-minute rate, e.g. "$1 + 25¢". Stored as `rate_signature`, whatever the plan. |
+| **Plan-expected** | Unlock + per-minute from the declared plan (`RATE_PLANS`; for Access, minutes past the daily free 60 cannot be known, so the result is "≤"). |
+| **Contract-expected** | If the matched ride starts or ends in an Equity Area: the **lower** of the plan price and Exhibit C's $1 + 13¢/min, which applies whatever the tier (Exhibit A §5.2). Otherwise, the plan price. |
+
+**`rate_finding`:**
+
+- `equity_not_applied`: the ride touched an Equity Area, the equity price was lower, and it was not charged. The Sep 29 rides land here: charged $1 + 25¢, owed $1 + 13¢, even with the stacking.
+- `plan_mismatch`: charged differently from the declared plan, in either direction. A rider being *undercharged* (as with the stacking) is recorded too.
+- `matches_plan`.
+- `plan_unknown`: the rider was not sure. The signature is still recorded.
+
+**Social experiment.** The public aggregate counts `rate_signature` × declared plan by month (no identity), so "who else pays $1 + 25¢ while on Premium?" can be answered from data.
+
+**Matching uses the plan too, but only as a consistency check.** A receipt's Charge line is always the base price ($1 + 39¢/min in every sample), so the minutes are double-checked from the charge: minutes = (charge − $1) / $0.39. That catches a misread duration before it feeds the ride match.
 
 ## What exists already
 
