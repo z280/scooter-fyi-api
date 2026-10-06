@@ -4,14 +4,17 @@ Scope: counting what the fleet did. The asking-riders side lives on
 `claude/rider-reporting` (denver-scooter-fyi).
 
 The governing plan is `docs/ANALYTICS_PLAN.md` in **denver-scooter-fyi**, on
-`claude/scooter-app-sticky-usage-wqcq9z` (unmerged at the time of writing).
+main. Read its §0.2 first: it records the 25 m radius decision and the two
+caveats a published figure still has to carry.
 
 ## What exists (tier 1)
 
 `GET /api/v1/fleet/outcomes` — the lifetime no-go rate, fleet-wide and by
-model, straight off sql/072's counters. Built, unmerged, on
-`claude/scooter-app-sticky-usage-wqcq9z` in this repo. It is deliberately
-labelled `window: "lifetime"` because that is all those counters can say.
+model, straight off sql/072's counters. On main (#109). It is deliberately
+labelled `window: "lifetime"` because that is all those counters can say, and
+its module header records the two caveats that outlive it: the counters span
+the 16 m and 25 m definitions, and a no-go is end displacement rather than
+maximum, so round trips count as one.
 
 ## 1. The hourly rollup — do this first, it gates the rest
 
