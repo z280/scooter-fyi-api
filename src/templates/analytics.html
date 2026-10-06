@@ -11,6 +11,73 @@
   <span style="opacity:.7">— raw-table windows: events 90d, request metrics 30d</span>
 </p>
 
+<!-- Veo's response time to parking reports.
+     First, because it is the only panel on this page that measures somebody
+     ELSE's behaviour rather than ours, and it is the one with an audience
+     outside this room. See src/parking_response.py for how it is derived and
+     for the ambiguity it cannot resolve (we see that a vehicle moved, never
+     who moved it) — which is why the control column is not optional. -->
+<h2>Parking reports — did anything happen?</h2>
+<p style="opacity:.75">
+  Measured from the moment a rider filed to Veo, to the moment the vehicle
+  left that spot. We cannot see <em>who</em> moved it, so the control column
+  is the number that matters: vehicles nobody reported, parked over the same
+  window.
+</p>
+<table>
+  <thead>
+    <tr>
+      <th>reports</th><th>moved</th><th>pulled from feed</th>
+      <th>still there</th><th>median</th><th>p90</th>
+      <th>control median (unreported)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>{{ parking.n }}</td>
+      <td>{{ parking.moved }}</td>
+      <td>{{ parking.absent }}</td>
+      <td>{{ parking.unresolved }}</td>
+      <td>{% if parking.median_hours is none %}&mdash;{% else %}{{ parking.median_hours }} h{% endif %}</td>
+      <td>{% if parking.p90_hours is none %}&mdash;{% else %}{{ parking.p90_hours }} h{% endif %}</td>
+      <td>
+        {% if parking.control_median_hours is none %}&mdash;
+        {% else %}{{ parking.control_median_hours }} h
+          <span style="opacity:.6">(n={{ parking.control_n }})</span>
+        {% endif %}
+      </td>
+    </tr>
+  </tbody>
+</table>
+{% if parking.reports %}
+<details>
+  <summary>Every report in this window ({{ parking.n }})</summary>
+  <table>
+    <thead>
+      <tr><th>filed</th><th>vehicle</th><th>parked since</th><th>outcome</th></tr>
+    </thead>
+    <tbody>
+      {% for r in parking.reports %}
+        <tr>
+          <td>{{ r.reported_at }}</td>
+          <td><code>{{ r.vehicle_identifier }}</code></td>
+          <td>{{ r.parked_since }}</td>
+          <td>
+            {% if r.departed_at is none %}
+              still there, {{ r.age_hours }} h and counting
+            {% elif r.departure_reason == 'absent' %}
+              left the feed after {{ r.hours_to_move }} h
+            {% else %}
+              moved after {{ r.hours_to_move }} h
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endif %}
+
 <h2>Daily actives</h2>
 <table>
   <thead><tr><th>day (Denver)</th><th>visitors</th><th>sessions</th><th>events</th></tr></thead>

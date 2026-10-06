@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from . import accounts, auth, campaigns, job_runs
+from . import accounts, auth, campaigns, job_runs, parking_response
 from .cli import COMMANDS
 from .pg import connection
 
@@ -672,10 +672,18 @@ def analytics(
                 for r, n, p, e in cur.fetchall()
             ]
 
+    # Veo's response time to parking reports. Derived from device_history
+    # rather than a table of its own — see src/parking_response.py's header for
+    # why there is no watcher here. Outside the cursor block above because it
+    # opens its own connection and swallows its own failures: this is one panel
+    # on a diagnostic page, and it must not be able to take the page down.
+    parking = parking_response.summarize(since, datetime.now(timezone.utc))
+
     return _render(
         "analytics.html",
         user=user,
         days=days,
+        parking=parking,
         daily=daily,
         top_events=top_events,
         drawers=drawers,
