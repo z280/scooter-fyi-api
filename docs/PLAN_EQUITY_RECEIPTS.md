@@ -75,10 +75,15 @@ Owner's direction (2026-10-06): the API does the analysis and settles points its
 
 **Extract.** Read the screenshot with two independent readers:
 
-- **(A) a vision LLM** (Claude Haiku 4.5, structured output). It returns minutes, unlock fee, per-minute rate, subtotal, tax, total, start and end times, and the vehicle ID if shown.
+- **(A) a vision LLM via OpenRouter** (owner's decision, 2026-10-06): a dedicated OpenRouter key for this project only, and the **cheapest model that passes the gold set**. It returns minutes, unlock fee, per-minute rate, subtotal, tax, total, start and end times, and the vehicle ID if shown, using structured output (JSON schema).
+  - **Bake-off candidates** (OpenRouter list prices 2026-10-06, $/M tokens in/out): `qwen/qwen3.7-flash` (0.03/0.13), `google/gemma-3-12b-it` (0.05/0.15), `google/gemini-2.5-flash-lite` (0.05/0.20 batch), `openai/gpt-5-nano` (0.05/0.40). At about 1.5k tokens in and 200 out, each costs well under $0.001 per receipt.
+  - **Choosing:** run every candidate on every gold receipt and pick the cheapest with perfect money-field accuracy. Re-run the bake-off when the gold set grows or a model is retired.
+  - **Escalation:** when the cheap model and local OCR disagree, ask one stronger model once before falling back to `uncertain`.
+  - **Privacy:** every request sets OpenRouter provider preferences `data_collection: "deny"`, and zero-data-retention routing where the chosen model supports it. The privacy payload and policy name OpenRouter and the routed provider as processors of the receipt image.
+  - **The key:** `OPENROUTER_RECEIPTS_API_KEY` in the API's environment, written by a script the owner runs (never printed or pasted into a chat). With the key absent, Phase 3 runs OCR-only and anything that needs the model is `uncertain`.
 - **(B) local OCR** on ovh3 (PaddleOCR or Tesseract) plus a Veo-layout parser.
 
-A works from day one and survives layout changes. B keeps a second opinion that never leaves the server. **Needs the owner's OK:** A makes Anthropic a processor of the receipt image, so the privacy payload and policy say so in the same change.
+A works from day one and survives layout changes. B keeps a second opinion that never leaves the server.
 
 **Cross-check, recorded per check in `analysis_checks` (JSONB):**
 
