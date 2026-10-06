@@ -73,7 +73,9 @@ class _FakeCursor:
             return [(_VID, s["device_id"], s["lat"], s["lon"],
                      s["first_observed_at_location"], s["number_failed_starts"],
                      s["first_ever_observed_at"], s["rental_started_at"],
-                     s["last_observed_at"])]
+                     s["last_observed_at"], s.get("rental_max_distance_m"),
+                     s.get("rental_origin_device_id"), s.get("last_fix_lat"),
+                     s.get("last_fix_lon"))]
         return []
 
     def fetchone(self):

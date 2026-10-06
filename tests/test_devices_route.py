@@ -110,3 +110,14 @@ def test_include_plate_query_param_cannot_leak_plates(client):
 def test_bad_bbox_is_400_not_422(client):
     r = client.get("/api/v1/devices/current?bbox=nope")
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize("outcomes, tier", [({}, "ok"), (None, "unknown")])
+def test_unavailable_rental_outcomes_never_vouch_ok(client, monkeypatch, outcomes, tier):
+    """sql/087: recent_rentals_no_go comes from a separate query. If it fails
+    (None), a tracked vehicle must not read "ok" on the strength of a 0 that
+    was never observed; an empty map (query ran, nothing failed) still can."""
+    monkeypatch.setattr(api_public, "_rental_outcomes", lambda: outcomes)
+    body = client.get("/api/v1/devices/current").json()
+    (feature,) = body["features"]
+    assert feature["properties"]["reliability_tier"] == tier

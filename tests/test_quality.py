@@ -9,6 +9,7 @@ from src.quality import (
     compute_quality_designation,
     compute_reliability_tier,
     daylight_hours_between,
+    recent_rentals_no_go,
 )
 
 DENVER = ZoneInfo("America/Denver")
@@ -202,6 +203,36 @@ def test_reliability_one_failed_start_is_unknown():
     alone for high_risk — but it's no longer a clean "ok" either."""
     out = compute_reliability_tier(**{**_REL_BASE, "number_failed_starts": 1})
     assert out == "unknown"
+
+
+# --- sql/087: recent no-go rentals feed the tier -----------------------------
+
+def test_recent_rentals_no_go_counts_the_last_three_bits_only():
+    assert recent_rentals_no_go(None) is None
+    assert recent_rentals_no_go(0) == 0
+    assert recent_rentals_no_go(0b101) == 2
+    assert recent_rentals_no_go(0b111) == 3
+    assert recent_rentals_no_go(0b1000) == 0      # a 4th rental back is gone
+
+
+def test_reliability_two_of_last_three_rentals_failed_is_high_risk():
+    """fail, a good long ride (which cleared the counter), fail: the counter
+    says 1, the mask says 2 of 3, and the vehicle is high_risk."""
+    out = compute_reliability_tier(**{**_REL_BASE, "number_failed_starts": 1,
+                                      "recent_rentals_no_go": 2})
+    assert out == "high_risk"
+    out = compute_reliability_tier(**{**_REL_BASE, "number_failed_starts": 0,
+                                      "recent_rentals_no_go": 2})
+    assert out == "high_risk"
+
+
+def test_reliability_one_recent_failure_alone_does_not_demote():
+    """The ladder is unchanged: one failed start (counter) is unknown, a
+    single failure that has since been cleared is not held against it."""
+    assert compute_reliability_tier(**{**_REL_BASE, "recent_rentals_no_go": 1}) == "ok"
+    assert compute_reliability_tier(**{**_REL_BASE, "recent_rentals_no_go": None}) == "ok"
+    assert compute_reliability_tier(**{**_REL_BASE, "number_failed_starts": 1,
+                                       "recent_rentals_no_go": 1}) == "unknown"
 
 
 def test_reliability_one_failed_start_plus_24h_dwell_is_high_risk():

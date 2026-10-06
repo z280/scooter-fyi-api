@@ -2,7 +2,7 @@
 
 Called once per ingest cycle (after compute, before transmit). Reads the
 current `device_state` rows for any vehicle_identifier we observed this
-cycle, applies a four-way branch per device, and writes back updated state
+cycle, applies a branch per device, and writes back updated state
 + optional history rows.
 
 The branches:
@@ -11,15 +11,24 @@ The branches:
   * IN_RENTAL        — observed with is_reserved true. Freeze: stored
                        position is NOT updated, no trip, no new history
                        row. See RENTALS below.
-  * MOVED            — distance to stored position > threshold. Close the
-                       prior open history row (set departed_at), insert a
-                       new one, reset first_observed_at_location, reset
-                       failed-starts counter.
-  * FAILED_START     — distance ≤ threshold AND device_id rotated. Bump
-                       counter on the state row and on the currently-open
-                       history row.
-  * STATIONARY       — distance ≤ threshold AND device_id unchanged. Just
-                       update last_observed_at.
+  * IN-PLACE RELEASE — is_reserved just cleared, and the rental never left
+                       IN_PLACE_RADIUS_M of its origin (sql/087). With a
+                       rotated bike_id it is a FAILED START: bump the
+                       counter, keep position and dwell clock, reopen the
+                       stop, no trip. Without one it is a reservation blip:
+                       the same, minus the counter. See FAILED STARTS below.
+  * MOVED            — a release that went somewhere, or (not a rental)
+                       distance to stored position > JITTER_RADIUS_M with a
+                       rotated bike_id, or > UNROTATED_MOVE_M without. Close
+                       the prior open history row (set departed_at), insert a
+                       new one, reset first_observed_at_location; clear the
+                       failed-starts counter only if the relocation covered
+                       FAILED_START_DECAY_M.
+  * FAILED_START     — not a rental, distance ≤ JITTER_RADIUS_M AND
+                       device_id rotated. Bump counter on the state row and
+                       on the currently-open history row.
+  * STATIONARY       — not a rental, distance ≤ UNROTATED_MOVE_M AND
+                       device_id unchanged. Just update last_observed_at.
 
 Devices with no vehicle_identifier (the upstream payload didn't embed a
 plate in rental_uris) are skipped entirely — we have no stable key to
@@ -58,17 +67,17 @@ reserved cycle only bumps last_observed_at. When is_reserved clears, the
 stored position is still the origin, so the ordinary distance comparison
 below sees origin -> drop point and fires exactly ONE MOVED with exactly
 one trip_events row. No new branch is needed for the release itself —
-that is what MOVED was always for.
+that is what MOVED was always for — with one exception since sql/087: a
+release that never left IN_PLACE_RADIUS_M (see FAILED STARTS below).
 
 Two details that fall out of this and are deliberate:
 
-  * A rental that ends within the threshold of where it started (a
-    cancelled reservation, or a genuine round trip) produces NO
-    trip_events row, the same as any other sub-threshold observation. It
-    still gets a fresh history row and a reset dwell clock, because the
-    vehicle demonstrably left and came back — see _release_reopens_stop
-    in the write section. 8,384 of that day's 30,566 episodes lasted
-    ≤ 2 minutes and are mostly this.
+  * A rental that never left IN_PLACE_RADIUS_M is not a trip at all (see
+    FAILED STARTS below). A rental that went farther and came back within
+    the stationary threshold (a round trip) produces NO trip_events row,
+    the same as any other sub-threshold observation, but still gets a fresh
+    history row and a reset dwell clock, because the vehicle demonstrably
+    left and came back.
   * A vehicle that IS absent while rented still works untouched: nothing
     observes it, so nothing updates, and its reappearance elsewhere is a
     single MOVED. Both operator conventions land on the same answer.
@@ -77,6 +86,47 @@ is_reserved is None when upstream omits it or sends a non-bool
 (src/ingest.py normalises that) and reads as NOT in a rental — a feed
 that stops publishing the flag degrades to the old behaviour rather than
 freezing every device forever.
+
+FAILED STARTS AND JITTER (sql/087)
+----------------------------------
+Until sql/087 a failed start was counted only for a vehicle that was NOT
+reserved, within the 16 m stationary threshold, with a rotated bike_id. On
+this feed a rider's unlock IS a reservation, so the common failure (unlock,
+it will not go, give up) is a one- or two-cycle rental released where it
+stood with a new bike_id. That release routed to MOVED, even 0 m from the
+unlock point, which reset number_failed_starts to 0 and restarted the dwell
+clock: the strongest predictor of the next failure erased the evidence.
+Replaying 2026-09-29, 670 rentals ended inside 50 m of where they started,
+never having left it, with a rotated bike_id, and counted for nothing. Over
+four days of archive, the next rental after one fails the same way 37.1% of
+the time, against 1.8% after any other rental.
+
+Now a release whose rental never got farther than IN_PLACE_RADIUS_M from its
+origin, and ended inside it, is an IN-PLACE RELEASE. sql/087 keeps the
+rental's running maximum distance (rental_max_distance_m) and its starting
+bike_id (rental_origin_device_id) for this. With a rotated bike_id it is a
+failed start. Without one it is a reservation blip (followed by a real failure
+no more often than any rental) and counts for nothing. Either way nothing
+about the stop changes: the stored position and first_observed_at_location
+stay, the stop closed at the rental's start is reopened, and no trip_events
+row is written. rentals_observed / rentals_no_go (sql/072) are counted exactly
+as before.
+
+The 16 m threshold also turned GPS jitter into trips. A parked vehicle's
+reported fix wanders, and a new fix sticks until the next one, so a 20 m
+jump persists like a real move does. On 2026-09-29 that produced 48,429
+non-rental MOVEDs, each resetting the dwell clock and the failed-start
+count and writing a trip_events row, about 3x the day's real rentals. So a
+vehicle not coming out of a rental must now move more than JITTER_RADIUS_M
+with a rotated bike_id, or more than UNROTATED_MOVE_M without one, to be
+MOVED. Within JITTER_RADIUS_M a rotated bike_id is a failed start; anything
+else that is not MOVED is STATIONARY.
+
+A failed-start count decays only with evidence the vehicle works: a
+relocation of at least FAILED_START_DECAY_M. And recent_no_go_mask records
+the last RECENT_RENTALS_KEPT rental outcomes (failed start or went
+somewhere), which src/quality.py reads as a tier rule of its own, so two
+failures separated by one good ride still read high_risk.
 
 ABSENCE — a stop also ends when the vehicle leaves the feed (sql/083)
 --------------------------------------------------------------------
@@ -129,10 +179,10 @@ Every other close now records 'moved'.
 
 REAPPEARANCE. What happens when a vehicle whose stop was closed as absent
 comes back:
-  * Elsewhere (beyond stationary_threshold_meters): an ordinary MOVED. It opens a new stop and
+  * Elsewhere (MOVED by the rules above): an ordinary MOVED. It opens a new stop and
     writes the same trip_events row it always did. The prior stop is
     already closed, so the MOVED close leaves its departed_at alone.
-  * At the same place (within it), with the same bike_id (STATIONARY) or
+  * At the same place (not MOVED), with the same bike_id (STATIONARY) or
     a rotated one (FAILED_START): a NEW device_history row is opened at the
     reappearance time. The old stop is NOT reopened. Reopening it would
     claim the vehicle was parked there for the whole absence, and that is
@@ -283,6 +333,74 @@ ABSENT_BASELINE_MIN_CYCLES = 30
 #: pre-outage cycles, and judge absence against them.
 ABSENT_LEDGER_RETENTION = timedelta(days=7)
 ABSENT_LEDGER_KEEP_MIN = 1000
+
+
+# FAILED STARTS AND JITTER (sql/087) — see the module docstring for the
+# branches. All three constants were chosen from the R2 archive, 2026-09-27
+# 08:00Z .. 2026-10-01 08:00Z (95,198 reservation episodes, 4 days), read-only.
+
+#: A rental is a FAILED START when the vehicle never got farther than this
+#: from its origin while reserved, is released within it, and comes back with
+#: a rotated bike_id. How often the vehicle's NEXT rental is such a failure,
+#: by where a rotated release landed and how far it ever got (4 days):
+#:   never > 50 m, end <= 35 m:   40.6%  (2,540 rentals)
+#:   never > 50 m, end 35-50 m:   32.4%  (343)
+#:   never > 50 m, end 50-75 m:   26.4%  (329)   <- not counted, see below
+#:   never > 50 m, end > 75 m:     3.8%  (5,565; sparse samples of real rides)
+#:   got farther than 50 m:        1.8%  (78,916; the fleet baseline, 2.1%)
+#: The signal tapers rather than stopping. 50 m keeps the geometry to one
+#: circle, the same 50 m the jitter rule below uses, and is the top of the
+#: owner's 30-50 m range; the 50-75 m band is a known, smaller residual.
+#: Inside the circle a release with NO rotation (528) is followed by a
+#: rotated failure 4.0% of the time, near baseline: a reservation blip, not
+#: an attempt (they recur on the same vehicles), and it counts for nothing.
+IN_PLACE_RADIUS_M = 50.0
+
+#: A vehicle that is NOT coming out of a rental is never MOVED (new stop,
+#: dwell reset, trip_events row) within this distance of its stored position.
+#: Within it, a rotated bike_id is a FAILED START (as it always was inside the
+#: stationary threshold) and anything else is STATIONARY: the stored position
+#: and dwell clock stay put. Beyond it, a rotated bike_id is MOVED (most
+#: likely a short ride between two samples); an unrotated one must also clear
+#: UNROTATED_MOVE_M.
+#:
+#: On 2026-09-29 the old 16 m rule turned 48,429 non-rental position changes
+#: into MOVED, two thirds of them 16-25 m, with no rotation, mostly bikes:
+#: GPS jitter, ~3x the day's real rentals in trip_events. The alternative the
+#: owner offered, "confirm the new position on two consecutive samples", does
+#: not separate jitter: of consecutive-sample jumps of 16-25 m, 85.5% are
+#: still there one sample later and 65% two samples later (25-35 m: 81%/56%,
+#: 35-50 m: 78%/51%; for comparison > 100 m: 83%/66%). A jittered fix sticks
+#: until the next fix, so persistence is not evidence of movement.
+#: Displacement is, so 50 m.
+JITTER_RADIUS_M = 50.0
+
+#: ...and with no rotation and no rental, more than this. Replaying
+#: 2026-09-29 with a flat 50 m left 9,113 non-rental MOVEDs, 5,254 of them
+#: 50-100 m with no rotation. Whether the vehicle is back within 25 m of where
+#: it "left" inside two hours separates drift from movement:
+#:   non-rental, no rotation, 50-75 m:   44-47% back  (4,267)
+#:                            75-100 m:  21-24%       (987)
+#:                           100-150 m:  12%          (960)
+#:                           150-300 m:   6-7%        (1,095)
+#:                             > 300 m:   1-3%        (759)
+#:   rental releases, rotated, > 75 m:    3-7% (the real-move baseline)
+#: So 100 m: the drift-dominated bands are out, and what is left behaves
+#: within a few points of real rides.
+UNROTATED_MOVE_M = 100.0
+
+#: A completed relocation (a rental that went somewhere, or a non-rental
+#: MOVED) clears number_failed_starts only if it covered at least this much.
+#: A shorter one carries the count to the new spot. After a failed start, the
+#: chance the next rental fails too, by how far the rental in between went
+#: (4 days): <= 300 m 36.2%, 300-500 m 12.2%, 500-1000 m 5.9%, 1-2 km 5.1%,
+#: > 2 km 3.2% (baseline 1.8%). The owner's ~300 m is the knee; 500 m is where
+#: a vehicle's risk is back within a few points of the fleet's.
+FAILED_START_DECAY_M = 500.0
+
+#: recent_no_go_mask keeps this many rental outcomes (sql/087).
+RECENT_RENTALS_KEPT = 3
+_RECENT_MASK = (1 << RECENT_RENTALS_KEPT) - 1
 
 
 @dataclass(frozen=True)
@@ -517,6 +635,15 @@ class StateUpdateStats:
     stops_closed_absent: int = 0
     # sql/086: whether this cycle counts as an observed cycle for the rule.
     counted_as_observation: bool | None = None
+    # sql/087. rentals_failed_start: of this cycle's rentals_ended, how many
+    # were failed starts (also included in failed_starts).
+    # rentals_blip: released inside IN_PLACE_RADIUS_M with no rotation.
+    # jitter_held: non-rental SAMPLES beyond the stationary threshold that are
+    # not MOVED (the old rule called each of them MOVED). Counted per sample,
+    # so a vehicle that sits 30 m off its stored position counts every cycle.
+    rentals_failed_start: int = 0
+    rentals_blip: int = 0
+    jitter_held: int = 0
 
 
 def update_for_cycle(
@@ -571,7 +698,9 @@ def update_for_cycle(
                 """
                 SELECT vehicle_identifier, current_device_id, current_lat, current_lon,
                        first_observed_at_location, number_failed_starts,
-                       first_ever_observed_at, rental_started_at, last_observed_at
+                       first_ever_observed_at, rental_started_at, last_observed_at,
+                       rental_max_distance_m, rental_origin_device_id,
+                       last_fix_lat, last_fix_lon
                 FROM device_state
                 WHERE vehicle_identifier = ANY(%s)
                 FOR UPDATE
@@ -612,6 +741,8 @@ def update_for_cycle(
             rental_start_updates: list[tuple] = []   # sql/069
             rental_hold_updates: list[tuple] = []
             rental_outcome_updates: list[tuple] = []  # sql/072
+            in_place_release_updates: list[tuple] = []  # sql/087
+            reopen_stops: list[tuple] = []   # (vid, closed_at, failed_start 0/1)
 
             for d in eligible:
                 vid = d.vehicle_identifier
@@ -642,6 +773,7 @@ def update_for_cycle(
                         # unknowable in that case — this at least keeps the
                         # ONE-trip-per-rental invariant.
                         snapshot_time if d.is_reserved is True else None,
+                        d.lat, d.lon,     # last_fix_lat/lon (sql/087)
                     ))
                     if d.is_reserved is True:
                         stats.rentals_started += 1
@@ -655,12 +787,36 @@ def update_for_cycle(
                     continue
 
                 (prev_device_id, prev_lat, prev_lon, prev_first_seen, prev_fs,
-                 _ever, prev_rental_started_at, _prev_last_seen) = prior[vid]
+                 _ever, prev_rental_started_at, prev_last_seen,
+                 prev_rental_max, prev_origin_device_id,
+                 prev_fix_lat, prev_fix_lon) = prior[vid]
+
+                if prev_lat is None or prev_lon is None:
+                    distance = float("inf")
+                else:
+                    distance = _distance_meters(
+                        float(prev_lat), float(prev_lon), d.lat, d.lon
+                    )
+                # sql/087. Rental geometry (how far a rental got, where it
+                # ended, whether it went nowhere) is measured from the last
+                # fix before the rental, i.e. where the rider unlocked it,
+                # not from the stored stop position: that one deliberately
+                # does not follow drift (UNROTATED_MOVE_M) and can sit tens
+                # of metres off. last_fix_* is frozen during a rental because
+                # IN_RENTAL never writes it. NULL (rows from before sql/087)
+                # falls back to the stored position.
+                if prev_fix_lat is not None and prev_fix_lon is not None:
+                    from_fix = _distance_meters(
+                        float(prev_fix_lat), float(prev_fix_lon), d.lat, d.lon)
+                else:
+                    from_fix = distance
 
                 # IN_RENTAL (sql/069) — see RENTALS in the module docstring.
-                # Freeze before any distance is computed: the stored position
-                # must keep pointing at the origin so the release below is a
-                # single origin -> drop-point MOVED.
+                # Freeze: the stored position keeps pointing at the origin so
+                # the release below is a single origin -> drop-point
+                # comparison. `distance` is therefore origin -> here, and
+                # sql/087 keeps its running maximum so the release can tell
+                # a rental that went nowhere from a round trip.
                 if d.is_reserved is True:
                     if prev_rental_started_at is None:
                         stats.rentals_started += 1
@@ -669,75 +825,138 @@ def update_for_cycle(
                         rental_start_updates.append((
                             snapshot_time,    # rental_started_at
                             d.device_id, d.spatial_status,
-                            snapshot_time, str(cycle_id), vid,
+                            snapshot_time, str(cycle_id),
+                            None if from_fix == float("inf") else from_fix,
+                            prev_device_id,   # rental_origin_device_id
+                            vid,
                         ))
                     else:
                         stats.rentals_held += 1
+                        # NULL stays NULL: the origin is unknown (first seen
+                        # mid-rental, or in a rental when sql/087 landed).
+                        new_max = (
+                            None if prev_rental_max is None or from_fix == float("inf")
+                            else max(float(prev_rental_max), from_fix)
+                        )
                         rental_hold_updates.append((
-                            d.spatial_status, snapshot_time, str(cycle_id), vid,
+                            d.spatial_status, snapshot_time, str(cycle_id),
+                            new_max, vid,
                         ))
                     continue
 
                 released = prev_rental_started_at is not None
                 if released:
                     stats.rentals_ended += 1
+                    # sql/072, unchanged: every release is an observed rental,
+                    # and a no-go is one that ended inside the stationary
+                    # threshold of where it was unlocked. smart_ride_grade is
+                    # calibrated on exactly this, so sql/087 does not redefine
+                    # it (it only measures from the unlock fix, see from_fix).
+                    no_go = from_fix <= threshold
+                    rental_outcome_updates.append((1 if no_go else 0, vid))
+                    if no_go:
+                        stats.rentals_no_go += 1
 
-                if prev_lat is None or prev_lon is None:
-                    distance = float("inf")
-                else:
-                    distance = _distance_meters(
-                        float(prev_lat), float(prev_lon), d.lat, d.lon
-                    )
+                # IN-PLACE RELEASE (sql/087). The rental never left
+                # IN_PLACE_RADIUS_M of its origin and ended inside it. The
+                # vehicle did not go anywhere, so nothing about its stop
+                # changes: same stored position, same dwell clock, the stop
+                # the rental start closed is reopened, and no trip_events row.
+                # With a rotated bike_id it was an attempt that failed: a
+                # FAILED START. Without one it was a reservation blip and
+                # counts for nothing.
+                in_place = (
+                    released
+                    and prev_rental_max is not None
+                    and float(prev_rental_max) <= IN_PLACE_RADIUS_M
+                    and from_fix <= IN_PLACE_RADIUS_M
+                )
+                if in_place:
+                    origin_device_id = prev_origin_device_id or prev_device_id
+                    failed = d.device_id != origin_device_id
+                    if failed:
+                        stats.failed_starts += 1
+                        stats.rentals_failed_start += 1
+                    else:
+                        stats.rentals_blip += 1
+                    in_place_release_updates.append((
+                        d.device_id, d.spatial_status, d.form_factor,
+                        d.vehicle_use_type, d.vehicle_model_name,
+                        d.vehicle_type_id,
+                        1 if failed else 0,          # number_failed_starts +
+                        1 if failed else None,       # recent_no_go_mask push
+                        snapshot_time, str(cycle_id),
+                        d.lat, d.lon,                # last_fix_lat/lon
+                        vid,
+                    ))
+                    # A vehicle that also vanished for longer than the absence
+                    # threshold mid-rental gets a fresh stop instead, exactly
+                    # as REAPPEARANCE does: reopening would claim it was
+                    # parked there throughout.
+                    long_gone = (prev_last_seen is not None
+                                 and prev_last_seen < snapshot_time - ABSENT_STOP_AFTER)
+                    reopen_stops.append((
+                        vid, None if long_gone else prev_rental_started_at,
+                        1 if failed else 0,
+                        (vid, d.vehicle_plate, str(cycle_id), snapshot_time,
+                         d.lat, d.lon, d.spatial_status, d.form_factor,
+                         d.device_id, 1 if failed else 0,
+                         d.h3_8_index, d.h3_9_index, d.h3_10_index,
+                         d.vehicle_use_type, d.vehicle_model_name),
+                    ))
+                    continue
 
-                if distance > threshold or released:
+                # A release that went somewhere, a release whose origin is
+                # unknown (old path), or a non-rental relocation: past
+                # JITTER_RADIUS_M with a rotated bike_id, or past
+                # UNROTATED_MOVE_M without one.
+                rotated = d.device_id != prev_device_id
+                if (released
+                        or distance > UNROTATED_MOVE_M
+                        or (rotated and distance > JITTER_RADIUS_M)):
                     # MOVED — close prior stop, open a new one. This is a
                     # "successful trip" for popularity-tracking purposes
-                    # (src/daily_trips.py): the vehicle relocated between
-                    # consecutive cycles, which for a dockless fleet means
-                    # someone rode it somewhere.
+                    # (src/daily_trips.py).
                     #
-                    # `released` (sql/069) enters here too, and it is the
-                    # ONLY way a rental ever produces a trip: prev_lat/lon
-                    # were frozen at the origin for the whole rental, so
-                    # `distance` is the actual origin -> drop-point
-                    # relocation and this fires exactly once. A release that
-                    # lands back within the threshold — a cancelled
-                    # reservation, or a round trip — takes this branch for
+                    # `released` (sql/069) enters here and is the ONLY way a
+                    # rental produces a trip: prev_lat/lon were frozen at the
+                    # origin, so `distance` is origin -> drop point and this
+                    # fires exactly once. A release that lands back within the
+                    # stationary threshold after going farther than
+                    # IN_PLACE_RADIUS_M (a round trip) takes this branch for
                     # the history row and the dwell reset (the vehicle
                     # demonstrably left and came back), but records neither
-                    # `moved` nor a trip_events row, exactly like any other
-                    # sub-threshold observation.
+                    # `moved` nor a trip_events row.
                     real_move = distance > threshold
                     if real_move:
                         stats.moved += 1
-                    # sql/072: a completed rental's outcome, recorded where it
-                    # is already known. `released` means this MOVED closes a
-                    # rental rather than an ordinary relocation, and `distance`
-                    # is origin-to-drop-point because sql/069 froze the origin
-                    # for its duration. A rental that ends within the
-                    # stationary threshold of where the rider unlocked it did
-                    # not take them anywhere.
-                    if released:
-                        rental_outcome_updates.append(
-                            (0 if real_move else 1, vid))
-                        if not real_move:
-                            stats.rentals_no_go += 1
+                    # sql/087: a relocation clears the failed-start count only
+                    # if it covered FAILED_START_DECAY_M; a shorter one
+                    # carries it. A release pushes "went somewhere" into the
+                    # recent-rentals mask; a non-rental move pushes nothing.
+                    clears = distance >= FAILED_START_DECAY_M
                     close_history_ids.append(vid)
                     moved_updates.append((
                         d.vehicle_plate, d.device_id, d.lat, d.lon,
                         d.spatial_status, d.form_factor,
                         snapshot_time,    # new first_observed_at_location
+                        clears,           # number_failed_starts := 0 ?
+                        0 if released else None,   # recent_no_go_mask push
                         snapshot_time,    # last_observed_at
                         str(cycle_id),
                         d.h3_8_index, d.h3_9_index, d.h3_10_index,
                         d.vehicle_use_type, d.vehicle_model_name,
                         d.vehicle_type_id,
+                        d.lat, d.lon,     # last_fix_lat/lon
                         vid,
                     ))
                     new_history_rows.append((
                         vid, d.vehicle_plate, str(cycle_id), snapshot_time,
                         d.lat, d.lon, d.spatial_status, d.form_factor,
-                        d.device_id, 0,
+                        d.device_id,
+                        # The count a short relocation carries belongs to the
+                        # new stop too.
+                        0 if clears else int(prev_fs or 0),
                         d.h3_8_index, d.h3_9_index, d.h3_10_index,
                         d.vehicle_use_type, d.vehicle_model_name,
                     ))
@@ -750,25 +969,32 @@ def update_for_cycle(
                             from_lat, from_lon, d.lat, d.lon,
                             None if distance == float("inf") else distance,
                         ))
-                elif d.device_id != prev_device_id:
-                    # FAILED_START — same spot, new bike_id. We deliberately
-                    # do NOT update the stored h3 cells here: the scooter
-                    # hasn't moved enough to trip the threshold, so its
-                    # "current location" cells are unchanged. (GPS drift
-                    # could otherwise cause noisy h3_10 flips on every
-                    # failed start.)
+                    continue
+
+                if distance > threshold:
+                    # Beyond the stationary threshold but not MOVED, not a
+                    # rental: what the 16 m rule used to call MOVED.
+                    stats.jitter_held += 1
+
+                if rotated:
+                    # FAILED_START — not reserved, within JITTER_RADIUS_M, new
+                    # bike_id (sql/087 widened this from the stationary
+                    # threshold). We deliberately do NOT update the stored
+                    # position or h3 cells: the scooter has not moved, and GPS
+                    # drift would otherwise flip h3_10 on every failed start.
                     stats.failed_starts += 1
                     failed_start_updates.append((
                         d.device_id, d.spatial_status, d.form_factor,
                         d.vehicle_use_type, d.vehicle_model_name,
                         d.vehicle_type_id,
-                        snapshot_time, str(cycle_id), vid,
+                        snapshot_time, str(cycle_id), d.lat, d.lon, vid,
                     ))
                 else:
-                    # STATIONARY — same spot, same bike_id
+                    # STATIONARY — same bike_id, within UNROTATED_MOVE_M.
                     stats.stationary += 1
                     stationary_updates.append((
-                        d.spatial_status, snapshot_time, str(cycle_id), vid,
+                        d.spatial_status, snapshot_time, str(cycle_id),
+                        d.lat, d.lon, vid,
                     ))
 
                 # Back in the feed where its stop was closed as absent
@@ -777,7 +1003,7 @@ def update_for_cycle(
                 # (dwell clock included) is updated exactly as the branch
                 # above decided. A MOVED return never gets here, because it
                 # opens its own stop.
-                if distance <= threshold and not released and vid in without_open_stop:
+                if vid in without_open_stop:
                     stats.stops_reopened += 1
                     new_history_rows.append((
                         vid, d.vehicle_plate, str(cycle_id), snapshot_time,
@@ -806,8 +1032,9 @@ def update_for_cycle(
                         current_h3_8_index, current_h3_9_index, current_h3_10_index,
                         max_observed_range_meters, max_observed_range_at,
                         current_vehicle_use_type, current_vehicle_model_name,
-                        current_vehicle_type_id, rental_started_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        current_vehicle_type_id, rental_started_at,
+                        last_fix_lat, last_fix_lon
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     new_state_rows,
                 )
@@ -847,7 +1074,13 @@ def update_for_cycle(
                         current_spatial_status = %s,
                         current_form_factor = %s,
                         first_observed_at_location = %s,
-                        number_failed_starts = 0,
+                        -- sql/087: cleared only by a relocation of at
+                        -- least FAILED_START_DECAY_M; a shorter one carries
+                        -- the count to the new spot.
+                        number_failed_starts = CASE WHEN %s THEN 0
+                                                    ELSE number_failed_starts END,
+                        recent_no_go_mask = CASE WHEN %s::int IS NULL THEN recent_no_go_mask
+                            ELSE (((recent_no_go_mask::int << 1) | %s::int) & {mask})::smallint END,
                         last_observed_at = %s,
                         last_cycle_id = %s,
                         current_h3_8_index = %s,
@@ -856,23 +1089,57 @@ def update_for_cycle(
                         current_vehicle_use_type = %s,
                         current_vehicle_model_name = %s,
                         current_vehicle_type_id = %s,
-                        -- sql/069: this is the only place a rental is
-                        -- cleared, and it is unconditional — every release
-                        -- routes through MOVED (see `or released` above),
-                        -- so the flag can never outlive the rental it
-                        -- describes.
-                        rental_started_at = NULL
+                        last_fix_lat = %s,
+                        last_fix_lon = %s,
+                        -- sql/069 + sql/087: every release routes through
+                        -- here or through the in-place release below, and
+                        -- both clear all three rental columns, so they can
+                        -- never outlive the rental they describe.
+                        rental_started_at = NULL,
+                        rental_max_distance_m = NULL,
+                        rental_origin_device_id = NULL
                     WHERE vehicle_identifier = %s
-                    """,
-                    moved_updates,
+                    """.format(mask=_RECENT_MASK),
+                    # The mask push appears twice in the SQL (IS NULL test,
+                    # then the value).
+                    [u[:8] + (u[8],) + u[8:] for u in moved_updates],
+                )
+
+            # IN-PLACE RELEASE (sql/087). Position, h3 cells and
+            # first_observed_at_location are deliberately untouched: the
+            # vehicle never left, so neither did its dwell clock. The bike_id
+            # is picked up so the next cycle compares like with like.
+            if in_place_release_updates:
+                cur.executemany(
+                    """
+                    UPDATE device_state SET
+                        current_device_id = %s,
+                        current_spatial_status = %s,
+                        current_form_factor = %s,
+                        current_vehicle_use_type = %s,
+                        current_vehicle_model_name = %s,
+                        current_vehicle_type_id = %s,
+                        number_failed_starts = number_failed_starts + %s,
+                        recent_no_go_mask = CASE WHEN %s::int IS NULL THEN recent_no_go_mask
+                            ELSE (((recent_no_go_mask::int << 1) | %s::int) & {mask})::smallint END,
+                        last_observed_at = %s,
+                        last_cycle_id = %s,
+                        last_fix_lat = %s,
+                        last_fix_lon = %s,
+                        rental_started_at = NULL,
+                        rental_max_distance_m = NULL,
+                        rental_origin_device_id = NULL
+                    WHERE vehicle_identifier = %s
+                    """.format(mask=_RECENT_MASK),
+                    [u[:7] + (u[7],) + u[7:] for u in in_place_release_updates],
                 )
 
             # IN_RENTAL, first cycle (sql/069). Deliberately does NOT touch
             # current_lat/current_lon/first_observed_at_location: freezing the
             # origin is the whole mechanism. device_id is picked up because
-            # GBFS rotates bike_id per trip and the post-rental FAILED_START
-            # comparison would otherwise misread the rotation as a failed
-            # unlock at the drop point.
+            # GBFS rotates bike_id per trip; the bike_id before the rental is
+            # kept in rental_origin_device_id (sql/087) so the release can
+            # still tell whether it rotated.
             if rental_start_updates:
                 cur.executemany(
                     """
@@ -881,15 +1148,17 @@ def update_for_cycle(
                         current_device_id = %s,
                         current_spatial_status = %s,
                         last_observed_at = %s,
-                        last_cycle_id = %s
+                        last_cycle_id = %s,
+                        rental_max_distance_m = %s,
+                        rental_origin_device_id = %s
                     WHERE vehicle_identifier = %s
                     """,
                     rental_start_updates,
                 )
 
             # sql/072. Separate from moved_updates because a release lands in
-            # the MOVED branch whether or not the vehicle actually went
-            # anywhere, and only the counters distinguish the two.
+            # the MOVED branch or the in-place release, and the counters are
+            # the same for both.
             if rental_outcome_updates:
                 cur.executemany(
                     """
@@ -901,14 +1170,16 @@ def update_for_cycle(
                     rental_outcome_updates,
                 )
 
-            # IN_RENTAL, every later cycle — liveness only.
+            # IN_RENTAL, every later cycle — liveness, plus how far from the
+            # origin the rental has got (sql/087).
             if rental_hold_updates:
                 cur.executemany(
                     """
                     UPDATE device_state SET
                         current_spatial_status = %s,
                         last_observed_at = %s,
-                        last_cycle_id = %s
+                        last_cycle_id = %s,
+                        rental_max_distance_m = %s
                     WHERE vehicle_identifier = %s
                     """,
                     rental_hold_updates,
@@ -926,7 +1197,9 @@ def update_for_cycle(
                         current_vehicle_type_id = %s,
                         number_failed_starts = number_failed_starts + 1,
                         last_observed_at = %s,
-                        last_cycle_id = %s
+                        last_cycle_id = %s,
+                        last_fix_lat = %s,
+                        last_fix_lon = %s
                     WHERE vehicle_identifier = %s
                     """,
                     failed_start_updates,
@@ -938,7 +1211,9 @@ def update_for_cycle(
                     UPDATE device_state SET
                         current_spatial_status = %s,
                         last_observed_at = %s,
-                        last_cycle_id = %s
+                        last_cycle_id = %s,
+                        last_fix_lat = %s,
+                        last_fix_lon = %s
                     WHERE vehicle_identifier = %s
                     """,
                     stationary_updates,
@@ -959,6 +1234,43 @@ def update_for_cycle(
                     """,
                     (snapshot_time, close_history_ids),
                 )
+
+            # IN-PLACE RELEASE (sql/087): reopen the stop the rental's first
+            # cycle closed (departed_at = rental_started_at, 'moved'), adding
+            # the failed start to it. Only when the vehicle has no other open
+            # stop. Anything not reopened (the stop was closed some other
+            # way, or the vehicle vanished mid-rental for longer than
+            # ABSENT_STOP_AFTER) gets a fresh stop from now instead, so the
+            # vehicle is never left without one.
+            if reopen_stops:
+                reopenable = [r for r in reopen_stops if r[1] is not None]
+                reopened: set[str] = set()
+                if reopenable:
+                    cur.execute(
+                        """
+                        UPDATE device_history h SET
+                            departed_at = NULL,
+                            departure_reason = NULL,
+                            dwell_failed_starts = h.dwell_failed_starts + v.fs
+                        FROM (
+                            SELECT unnest(%s::text[]) AS vid,
+                                   unnest(%s::timestamptz[]) AS closed_at,
+                                   unnest(%s::int[]) AS fs
+                        ) v
+                        WHERE h.vehicle_identifier = v.vid
+                          AND h.departed_at = v.closed_at
+                          AND h.departure_reason = 'moved'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM device_history o
+                              WHERE o.vehicle_identifier = v.vid
+                                AND o.departed_at IS NULL)
+                        RETURNING h.vehicle_identifier
+                        """,
+                        ([r[0] for r in reopenable], [r[1] for r in reopenable],
+                         [r[2] for r in reopenable]),
+                    )
+                    reopened = {row[0] for row in (cur.fetchall() or [])}
+                new_history_rows.extend(r[3] for r in reopen_stops if r[0] not in reopened)
 
             # Increment dwell_failed_starts on the currently-open stop for
             # any failed-start events. Same idea: targets the row where
@@ -1021,11 +1333,12 @@ def update_for_cycle(
 
     log.info(
         "device_state cycle=%s: new=%d moved=%d failed_starts=%d stationary=%d "
-        "skipped=%d rentals(started=%d held=%d ended=%d no_go=%d) "
-        "stops(closed_absent=%d reopened=%d)",
+        "skipped=%d jitter_held=%d rentals(started=%d held=%d ended=%d no_go=%d "
+        "failed_start=%d blip=%d) stops(closed_absent=%d reopened=%d)",
         cycle_id, stats.new_devices, stats.moved, stats.failed_starts,
-        stats.stationary, stats.skipped_no_identifier,
+        stats.stationary, stats.skipped_no_identifier, stats.jitter_held,
         stats.rentals_started, stats.rentals_held, stats.rentals_ended,
-        stats.rentals_no_go, stats.stops_closed_absent, stats.stops_reopened,
+        stats.rentals_no_go, stats.rentals_failed_start, stats.rentals_blip,
+        stats.stops_closed_absent, stats.stops_reopened,
     )
     return stats
