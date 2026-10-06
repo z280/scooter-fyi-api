@@ -4,8 +4,9 @@
 
 Owner's spec (2026-10-06): trip minutes (duration), cost before tax, cost with tax, start date/time, end date/time, start and end points picked on the map, and a scooter ID entered by hand or from the QR code. The backend tries to align the claim with a trip. If none of the useful data is present, thank the rider and retain nothing. Points:
 
-- **10** for a submission whose subtotal and total match its own screenshot.
-- **100** for one corroborated by a ride in our history. Owner's original wording: same scooter ID, start and end points within 100 m. Since receipts carry no location, this becomes: the same scooter observed in the feed starting and ending at the receipt's times (±4 min), with the observed points supplying the location.
+- **50** (owner, revised 2026-10-06) for a **proven, feed-backed failure by Veo to charge the appropriate rate**. 100 was too much next to the existing values (dibs stand-down 300/50, QR scan 100, referral 100).
+- **10** for a valid submission whose numbers match its own screenshot but which does not prove a rate failure (to confirm with the owner).
+- Original wording of the proven tier, kept for the record: corroborated by a ride in our history. Owner's original wording: same scooter ID, start and end points within 100 m. Since receipts carry no location, this becomes: the same scooter observed in the feed starting and ending at the receipt's times (±4 min), with the observed points supplying the location.
 
 ## The constraint that shapes everything (owner, 2026-10-06)
 
@@ -77,7 +78,7 @@ Two consequences:
 | **Plan-expected** | Unlock + per-minute from the declared plan (`RATE_PLANS`; for Access, minutes past the daily free 60 cannot be known, so the result is "≤"). |
 | **Contract-expected** | If the matched ride starts or ends in an Equity Area: the **lower** of the plan price and Exhibit C's $1 + 13¢/min, which applies whatever the tier (Exhibit A §5.2). Otherwise, the plan price. |
 
-**`rate_finding`:**
+**`rate_finding`** (only `equity_not_applied`, and a `plan_mismatch` that is an *overcharge*, count as "proven" for +50, and only with a corroborated feed match plus readable plan evidence):
 
 - `equity_not_applied`: the ride touched an Equity Area, the equity price was lower, and it was not charged. The Sep 29 rides land here: charged Resident $1 + 25¢, owed $1 + 13¢.
 - `plan_mismatch`: charged differently from the declared plan, in either direction. A rider being *undercharged* (as with the stacking) is recorded too.
@@ -107,8 +108,13 @@ Two consequences:
 - cost before tax ($), cost with tax ($);
 - start and end date/time (defaulting to now);
 - **scooter code** as printed on the receipt: typed, or "Scan QR" (reuses qr-scan) if the rider is still at the scooter. Required.
-- **approximate start and end pins on the map** (owner, 2026-10-06), placed with map-pick and optional. The receipt has no location, so these are the rider's own independent evidence: they break ties between candidate rides, and pins within 100 m of the observed points qualify a receipt for the 100-point tier. The feed's observed points remain what establishes Equity Area eligibility.
-- receipt screenshot.
+- **approximate start and end pins on the map** (owner, 2026-10-06), placed with map-pick and optional. The receipt has no location, so these are the rider's own independent evidence: they break ties between candidate rides, and pins far (more than 300 m) from the observed points send the case to "Needs your help" rather than letting it be proven. The feed's observed points remain what establishes Equity Area eligibility.
+- receipt screenshot;
+- **plan evidence screenshot: REQUIRED for an Equity Area discrepancy** (owner, 2026-10-06). This is a screenshot from the Veo app showing the rider's active plan or pass (VeoPlus Premium, Resident Pass, Access Program, or none), ideally with its dates. Without it, the form will not submit an equity discrepancy.
+
+  **Why it is required.** Veo's likely answer to an equity claim is "riders on VeoPlus Premium or a Denver Resident plan don't get the Equity Area rate". The contract says otherwise: Exhibit A §5.2 applies the Equity Area rate to any trip starting or ending in an Equity Area, whatever the tier. So every claim must carry proof of the plan the rider was on, and the reporting can show the equity rate missing *per plan*.
+
+  The vision reader extracts the plan name and validity dates from it, the same way as the receipt. The image is stored with the receipt (private, 18-month retention).
 
 If the rider is signed out, the form shows "Sign in to send a receipt" (the endpoint requires a session, so the evidence has provenance).
 
@@ -157,21 +163,27 @@ Where the ride happened is then established by the feed match. Without all three
 - **Feed freshness:** cycles run every 120 s (p95 240 s), so a finished ride is matchable **2–6 min after it ends.**
 - **Rider pins:**
   - **Tie-break:** among candidates, keep the ride whose observed from/to are nearest the pins.
-  - **100-point tier:** both pins within 100 m of the observed points, plus the plate, plus duration ±2 min.
+  - **Consistency:** if pins were given, both must lie within 300 m of the observed points for the match to count as corroborated. Pins within 100 m are recorded as "strong" in the evidence packet.
 
-### Real-time UX (Phase 2)
+### UX: a "My receipts" queue, not a live wait (owner, 2026-10-06)
 
-On submit, the form shows one of four result cards:
+With the feed 2–6 minutes behind, nobody will sit and watch a spinner. Submitting is fire-and-forget:
 
-1. **Matched:** "Your 16-min ride on #1018354, about 3:16 → 3:32 PM, ended in Equity Area 003. Charged $5.00; the equity rate is $3.08." Points are shown at once (as *pending* during shadow mode).
-2. **Ride too recent:** "Rides show up about 5 minutes after they end, so we're watching for yours." The card updates live: it polls `GET /api/v1/reports/discount/{id}` every 30 s while open, and the API re-matches each cycle. A rider who leaves finds the result in their account under "My receipts".
-3. **More than one ride fits:** the pins usually settle it automatically. Otherwise: "Did your ride start around **2:40 PM** or **6:18 PM**?" (times only; see privacy below).
-4. **No match, with the reason:** plate never seen (typo?), no ride of that length on that date, or the ride is before feed history (2026-05-31).
+- The form confirms "Received. We'll check it against the feed and show the result in **My receipts**."
+- If the ride is already in the feed, the match has usually finished by the time the rider opens the list.
+- **My receipts** is a new tab in the account drawer (user menu), backed by `GET /api/v1/reports/discount` (the rider's own reports). Each row shows the plate, date and minutes, a status, and the points:
 
-**Privacy.** The other rides on that scooter that day are strangers' trips. Candidate choices never show routes or places, only start times rounded to 5 min. The matched ride's route is shown only after the rider confirms it and their pins agree with it.
-- **Known limits:**
-  - **Failed starts:** an in-place rental leaves no `trip_events` row. That is now counted as a failed start (sql/087), so a receipt for one matches on the start time plus the in-place release instead.
-  - **Missing scooters:** vehicles that drop out of the feed mid-ride (`departure_reason = 'absent'`) match on whichever end was observed, so `partial`.
+| Status | Meaning |
+|---|---|
+| Checking | Queued, or waiting for the ride to appear in the feed. It re-matches every cycle for up to 30 min, then once an hour for a day. |
+| Needs your help | More than one ride fits and the pins did not settle it: "Did it start around 2:40 PM or 6:18 PM?" (start times only). |
+| Proven rate error, +50 | Feed-backed, and the charged rate is not the one owed. |
+| Valid, +10 | Consistent with its screenshot, but no rate error proven. |
+| Not matched | With the reason: plate never seen, no ride of that length that day, or before feed history. |
+| Rejected | The image contradicts the typed numbers, or the plan evidence is missing or unreadable. |
+
+- An unread badge on the user-menu entry when a status changes.
+- An optional SMS/email via z280-comms when a report is proven. This is opt-in and follows the existing contact preferences.
 
 ## Phase 3: automated analysis + points (the API decides)
 
@@ -198,7 +210,7 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 
 **Decide (`analysis_status`):**
 
-- `verified`: checks 1–3 pass and the readers agree → **+10**, settled immediately. If `match_status = corroborated` → **+100** instead.
+- `verified`: checks 1–3 pass and the readers agree → **+10**, settled immediately. If the case is also **proven** (a corroborated feed match, `rate_finding` of `equity_not_applied` or an overcharging `plan_mismatch`, and readable plan evidence) → **+50** instead.
 - `uncertain`: a reader is missing or they disagree on a field → points stay `pending`, and the report goes to the human portal (Phase 3b).
 - `rejected`: the image contradicts the typed numbers → no points, and the rider is told which field did not match.
 
@@ -209,7 +221,7 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 - 20 submissions per account per day (the existing limit).
 - One award per matched ride.
 - 10-point awards capped at 3 per day.
-- The 100-point tier needs a ride we independently observed, so a doctored image cannot earn it.
+- The 50-point tier needs a ride we independently observed, so a doctored image cannot earn it.
 
 ## Phase 3b: human portal (fallback + labels)
 
@@ -225,14 +237,22 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 - **Training (only if volume justifies it):** with a few hundred labelled receipts, fine-tune a document model (e.g. Donut or LayoutLM) to run locally on ovh3. That removes the third-party processor and per-call cost. Not worth it before then, given that 0 receipts have ever been filed.
 - **Needed now:** a few real Veo receipt screenshots, equity and standard, to build reader B's parser and the first test cases.
 
-## Phase 5: reporting
+## Phase 5: reporting (owner, 2026-10-06: required)
 
-- Confirmed rate errors are aggregated by Equity Area in the public summary and monthly CSV (no identity).
-- The rider gets an outcome notification on their account: reviewed / corroborated / points.
+1. **Evidence packets** (admin, for DOTI or Veo). A filterable report of proven cases. Each case carries:
+   - the ride: date and time, plate, duration, and the observed start and end with the Equity Area named;
+   - the charged subtotal, against the plan price and the contract price;
+   - **the rider's plan, with its plan-evidence screenshot**;
+   - the receipt screenshot and the match details (feed cycle ids).
+
+   Exportable as a PDF or ZIP (images plus CSV) for one case, a date range or one area. Rider identity is never included; an opaque case id stands in for it.
+2. **Rebuttal-ready summary.** Proven `equity_not_applied` broken down by declared plan (none / Resident / VeoPlus / Premium / Access), each row backed by its plan-evidence images, with the contract clause quoted (Exhibit A §5.2, Exhibit C "Equity Area Pricing"). If Veo says premium or resident riders are excluded, the answer is already a table.
+3. **Public aggregates** in the existing summary and monthly CSV: counts and overcharge totals by area, plan and month, plus the rate-signature × plan table (the "does anyone else get stacked rates?" experiment). No identity, and points rounded to about 100 m.
+4. **The rider's own view.** In My receipts, each proven case shows the finding in plain words: what they paid, what the contract says they owed, and why.
 
 ## Defaults chosen (say if any should change)
 
 1. **Gate:** scooter code + start and end times + a cost. Anything less is declined and not retained. Equity eligibility comes from the feed match.
-2. **Points:** 10 *or* 100 per submission, not 110.
+2. **Points:** 50 for a proven, feed-backed rate failure; 10 for a valid but unproven submission (to confirm); one award per ride.
 3. **Matching:** scooter code plus the receipt's start and end times, ±4 min against feed history. The location comes from the feed, because the receipt has none.
 4. **Points settle automatically** when the API verifies a receipt (Phase 3, owner's direction). Only `uncertain` reports wait for a human, after a short shadow-mode start.
