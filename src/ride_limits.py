@@ -45,7 +45,9 @@ WHY EACH ONE EXISTS
   ride can display 1220 any more, which required stacking all 600
   waypoints onto one ride. That is worth having on its own terms.
 
-  Not covered by this cap, and larger: `qr_scan` at 100 points x 20
+  RETIRED 2026-10-06: POST /api/v1/devices/qr-scan is no longer mounted
+  (it was farmable: plates are public), so `qr_scan` no longer pays. The
+  history, kept for context: not covered by this cap, and larger: `qr_scan` at 100 points x 20
   scans/hr (_LIMIT_QR_SCAN_PER_ACCOUNT) = 2000/hr, deliberately exempt
   because a device scan is not a ride award. It is bounded over a
   lifetime rather than per hour — credit_qr_scan_points pays once per

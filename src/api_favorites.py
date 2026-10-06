@@ -68,9 +68,11 @@ router = APIRouter()
 # RETIRED 2026-10-06 (owner): "Keep a Scooter" / My Scooters was killed for
 # its risks, and the frontend no longer offers it, but these routes were
 # still mounted. Create, read (which returns positions) and edit are moved
-# onto this router, which src/main.py never mounts. DELETE stays on `router`:
-# the privacy policy promises riders an immediate hard delete of anything
-# they kept, and that promise outlives the feature.
+# onto this router, which src/main.py never mounts. Two routes stay on
+# `router`, because the privacy policy promises riders an immediate hard
+# delete of anything they kept and that promise outlives the feature:
+# DELETE, and an identifiers-only listing (GET .../retired) so a rider can
+# find what to delete. Neither returns a position or any live state.
 _retired = APIRouter()
 
 _VEHICLE_IDENTIFIER_RE = r"^[0-9a-f]{16}$"
@@ -299,6 +301,33 @@ def list_favorites(user: SessionUser = Depends(require_session)) -> dict[str, An
     return {
         "favorite_devices": [_favorite_payload(r, now) for r in rows],
         "max_favorites": MAX_FAVORITE_DEVICES,
+    }
+
+
+@router.get("/api/v1/profile/favorite-devices/retired")
+def list_retired_favorites(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
+    """What this rider kept before Keep a Scooter was retired (2026-10-06),
+    so the DELETE below is usable: it needs a vehicle_identifier, and nothing
+    else shows one any more.
+
+    Identifiers, nicknames and dates ONLY. No position, battery or live
+    state: those are what made the feature risky, and the full listing
+    (`list_favorites`, above) stays unmounted."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT vehicle_identifier, nickname, created_at FROM favorite_devices "
+                "WHERE account_id = %s ORDER BY created_at DESC",
+                (user.account_id,),
+            )
+            rows = cur.fetchall()
+    return {
+        "retired": True,
+        "favorite_devices": [
+            {"vehicle_identifier": r[0], "nickname": r[1],
+             "kept_at": r[2].isoformat() if r[2] else None}
+            for r in rows
+        ],
     }
 
 

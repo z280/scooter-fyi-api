@@ -45,3 +45,46 @@ def test_riders_can_still_delete_what_they_kept():
 
 def test_the_published_schedule_no_longer_offers_qr_scan():
     assert "qr_scan" not in api_points.points_schedule()
+
+
+def test_riders_can_list_what_they_kept_to_delete_it():
+    assert ("GET", "/api/v1/profile/favorite-devices/retired") in _routes()
+
+
+def test_the_retired_listing_returns_no_position_or_live_state(monkeypatch):
+    """Identifiers, nicknames and dates only."""
+    from contextlib import contextmanager
+    from datetime import datetime, timezone
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src import api_favorites
+    from src.accounts import SessionUser, require_session
+
+    class _Cur:
+        def execute(self, *a, **k): pass
+        def fetchall(self):
+            return [("a1ef50e3bea698ba", "Rover", datetime(2026, 9, 29, tzinfo=timezone.utc))]
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class _Conn:
+        def cursor(self): return _Cur()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    @contextmanager
+    def _conn():
+        yield _Conn()
+
+    monkeypatch.setattr(api_favorites, "connection", _conn)
+    app_ = FastAPI()
+    app_.include_router(api_favorites.router)
+    app_.dependency_overrides[require_session] = lambda: SessionUser(
+        account_id=4, email="r@example.com", scopes=("rider",),
+        expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc), sliding=True,
+        method="google", token_sha256="x")
+    body = TestClient(app_).get("/api/v1/profile/favorite-devices/retired").json()
+    (row,) = body["favorite_devices"]
+    assert set(row) == {"vehicle_identifier", "nickname", "kept_at"}
