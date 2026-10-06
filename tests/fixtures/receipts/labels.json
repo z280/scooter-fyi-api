@@ -1,5 +1,5 @@
 {
-  "_about": "Gold set seed for the equity receipt reader (docs/PLAN_EQUITY_RECEIPTS.md, Phase 4). The owner's own Veo screenshots, kept with his permission (2026-10-06). Money in cents. 'expected' is what a reader must extract from the image; 'match' and 'finding' are what feed history and the rules concluded (2026-10-06), for end-to-end tests.",
+  "_about": "Gold set seed for the equity receipt reader (docs/PLAN_EQUITY_RECEIPTS.md, Phase 4). The owner's own Veo screenshots, kept with the owner's permission (2026-10-06). Money in cents. 'expected' is what a reader must extract from the image; 'match' and 'finding' are what feed history and the rules concluded (2026-10-06), for end-to-end tests.",
   "receipts": [
     {
       "file": "receipt-1021645-2026-09-29.png", "kind": "receipt",
