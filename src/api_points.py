@@ -164,11 +164,10 @@ def points_schedule() -> dict[str, dict[str, int]]:
     # (found 2026-10-06). Stand-down is tiered by who stands down: an
     # existing rider (`points`) or a new one the dibs page brought in
     # (`new_rider_points`).
-    from . import api_dibs
     schedule["referral"] = {"points": p.POINTS_REFERRAL}
     schedule["stand_down"] = {
-        "points": api_dibs.STAND_DOWN_POINTS_EXISTING,
-        "new_rider_points": api_dibs.STAND_DOWN_POINTS_NEW,
+        "points": p.STAND_DOWN_POINTS_EXISTING,
+        "new_rider_points": p.STAND_DOWN_POINTS_NEW,
     }
 
     return schedule

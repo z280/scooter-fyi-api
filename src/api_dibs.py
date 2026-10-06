@@ -56,6 +56,7 @@ from .accounts import normalize_us_phone
 from .api_auth import send_sign_in_code
 from .client_ip import real_client_ip
 from .pg import connection
+from .points import POINTS_REFERRAL, STAND_DOWN_POINTS_EXISTING, STAND_DOWN_POINTS_NEW
 from .ratelimit import enforce
 
 log = logging.getLogger(__name__)
@@ -598,8 +599,8 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
 #: must actually ride to be paid), the amount caps the take, and the honest
 #: answer is that per-account point accumulation needs watching in the admin
 #: panel. That monitoring does not exist yet.
-STAND_DOWN_POINTS_NEW = 300
-STAND_DOWN_POINTS_EXISTING = 50
+# The values live in src/points.py with every other award (imported above),
+# so /points/schedule publishes them without importing this module.
 #: "today" — end of the calendar day in Denver, not 24 hours. The copy says
 #: today and a rider reads that as "before I go to bed", not "before this time
 #: tomorrow".
@@ -673,10 +674,14 @@ def dibs_stand_down(
             )
             cur.execute(
                 "INSERT INTO referrals (dibs_id, referrer_username, phone, "
-                "lat, lon, kind, newcomer_points, newcomer_deadline) "
-                "VALUES (%s, %s, %s, %s, %s, 'stand_down', %s, %s)",
+                "lat, lon, kind, points, newcomer_points, newcomer_deadline) "
+                "VALUES (%s, %s, %s, %s, %s, 'stand_down', %s, %s, %s)",
+                # `points` explicitly, from the constant /points/schedule
+                # publishes, rather than sql/076's DEFAULT 100: otherwise
+                # retuning POINTS_REFERRAL would change the table riders read
+                # and not what is paid.
                 (dibs_id, d["claimed_by"], e164, d.get("lat"), d.get("lon"),
-                 award, deadline),
+                 POINTS_REFERRAL, award, deadline),
             )
         conn.commit()
 
@@ -772,9 +777,14 @@ def dibs_refer(
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO referrals (dibs_id, referrer_username, email, "
-                "phone, lat, lon) VALUES (%s, %s, %s, %s, %s, %s)",
-                (dibs_id, d["claimed_by"], email or None, phone or None,
-                 d.get("lat"), d.get("lon")),
+                "phone, lat, lon, points) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                # The phone is stored E.164: settlement matches it by equality
+                # against accounts.phone_number, which is E.164, so a number
+                # typed "(303) 555-0142" used to be a referral that could never
+                # pay. Unparseable input is kept as typed rather than dropped.
+                (dibs_id, d["claimed_by"], email or None,
+                 (normalize_us_phone(phone) or phone) if phone else None,
+                 d.get("lat"), d.get("lon"), POINTS_REFERRAL),
             )
         conn.commit()
 

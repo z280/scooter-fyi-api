@@ -150,13 +150,14 @@ FEATURE_POINT_ACTIONS: tuple[str, ...] = tuple(
 
 # --- Device photos (sql/031 content, sql/056 ledger action) ----------------
 #
-# One award per uploaded photo. The owner asked for 5; the EVEN-POINTS
+# One award per uploaded photo: 10 since 2026-10-06 (see the note above the
+# constant). History: the owner first asked for 5; the EVEN-POINTS
 # INVARIANT above makes 5 unrepresentable — `assert points % 2 == 0` in
 # credit_points and sql/053's `CHECK (points % 2 = 0)` would both reject it —
 # so this is 6, the same correction the rule already produced once for
 # POINTS_NAV_QUALITATIVE. Confirmed with the owner before landing.
 #
-# 6 places a photo level with a feature reconfirm (6) and above a not-found
+# At 6 it sat level with a feature reconfirm (6) and above a not-found
 # report (4): a photo is seconds of work, but it is the only contribution
 # that shows a rider what a scooter actually looks like before they walk to
 # it, and unlike a report it cannot be filed from an armchair — the uploader
@@ -780,6 +781,14 @@ def credit_nav_qualitative_feedback(
 # --- Referrals and stand-downs (sql/076, sql/077, sql/078) -------------------
 
 POINTS_REFERRAL = 100
+
+# Dibs stand-down (sql/077): what the person who walks away from a scooter
+# somebody else holds dibs on earns, once they ride the same day. 300 for a
+# NEW rider (an account that would not otherwise exist), 50 for an existing
+# one. The reasoning lives beside the offer in src/api_dibs.py; the numbers
+# live here so the published schedule reads them from the ledger module.
+STAND_DOWN_POINTS_NEW = 300
+STAND_DOWN_POINTS_EXISTING = 50
 
 
 def settle_referrals_for_account(

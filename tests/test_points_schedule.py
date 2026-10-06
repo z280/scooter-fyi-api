@@ -365,15 +365,30 @@ def test_the_documented_ten_km_worked_example(schedule):
 
 
 def _awardable_actions_from_migrations() -> set[str]:
-    """The user_points action CHECK as the latest migration defines it."""
+    """The user_points action CHECK as the latest migration defines it.
+
+    Anchored on the constraint's NAME, `user_points_action_allowed`, so an
+    `action IN (...)` on some other table, or in a comment, cannot replace
+    the ledger set. Fails loudly if a migration names the constraint but its
+    action list cannot be parsed (e.g. rewritten as `= ANY (ARRAY[...])`),
+    rather than silently keeping a stale set."""
     import re
     from pathlib import Path
     latest: set[str] = set()
+    pattern = re.compile(
+        r"CONSTRAINT\s+user_points_action_allowed\s+CHECK\s*\(\s*action\s+IN\s*\(([^)]*)\)",
+        re.I | re.S,
+    )
     for f in sorted((Path(__file__).resolve().parents[1] / "sql").glob("*.sql")):
-        for m in re.finditer(r"action\s+IN\s*\(([^)]*)\)", f.read_text(), re.I):
-            found = set(re.findall(r"'([a-z_]+)'", m.group(1)))
-            if found:
-                latest = found
+        # Drop SQL comments first: a comment can mention the constraint, and
+        # 052 has one with parentheses inside the action list itself.
+        text = re.sub(r"--[^\n]*", "", f.read_text())
+        defines = re.search(r"(ADD\s+)?CONSTRAINT\s+user_points_action_allowed\s+CHECK", text, re.I)
+        if not defines:
+            continue
+        found = [set(re.findall(r"'([a-z_]+)'", m.group(1))) for m in pattern.finditer(text)]
+        assert found and found[-1], f"{f.name} defines user_points_action_allowed but its action list did not parse"
+        latest = found[-1]
     return latest
 
 

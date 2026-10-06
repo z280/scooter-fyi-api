@@ -14,7 +14,8 @@ The survey is the source of THREE awards (src/points.py):
                                         and not an own-device ride
     nav_route_feedback        4 pts  — a route rating tied to a resolved
                                         ride_routes row
-    nav_qualitative_feedback  6 pts  — >=20 chars of trimmed free text
+    nav_qualitative_feedback  6 pts  — >=20 chars of trimmed free text;
+                              12 pts at >=60 (points.NAV_QUALITATIVE_DETAILED_MIN_CHARS)
 
 Every gate is read HERE, off the ride's own ride_options and the survey
 payload — src/points.py's credit_* functions are only the formula + ledger
