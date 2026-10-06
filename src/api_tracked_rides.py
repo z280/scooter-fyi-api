@@ -1254,11 +1254,16 @@ async def donate_track(
             # ride. It is the moment the newcomer became real. A rider whose
             # first ride was too short to score still turned up and rode, and
             # the person who introduced them has done exactly what was asked.
+            # Only what THIS rider earned goes in their ride response: a
+            # `referral` credit always lands on the referrer, so showing it
+            # here told the newcomer "Referral +100" for points somebody else
+            # received. (It is still credited; it is just not theirs.)
             points_awarded.extend(
-                settle_referrals_for_account(
+                a for a in settle_referrals_for_account(
                     cur, account_id=user.account_id,
                     lat=start_lat, lng=start_lon,
                 )
+                if a.get("action") != "referral"
             )
 
             if may_award and battery_modeling_on and not own_device and both_batteries_known:

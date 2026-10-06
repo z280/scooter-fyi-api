@@ -126,7 +126,13 @@ def points_schedule() -> dict[str, dict[str, int]]:
         "step_km": p.BATTERY_CONTRIBUTION_STEP_KM,
     }
     schedule["nav_route_feedback"] = {"points": p.POINTS_NAV_ROUTE_FEEDBACK}
-    schedule["nav_qualitative_feedback"] = {"points": p.POINTS_NAV_QUALITATIVE}
+    # Tiered: base `points`, and `upper_points` once the written feedback
+    # reaches `upper_min_chars` (2026-10-06).
+    schedule["nav_qualitative_feedback"] = {
+        "points": p.POINTS_NAV_QUALITATIVE,
+        "upper_points": p.POINTS_NAV_QUALITATIVE_DETAILED,
+        "upper_min_chars": p.NAV_QUALITATIVE_DETAILED_MIN_CHARS,
+    }
     schedule["nav_distance_bonus"] = {
         # `base: 0` is structural, not a tunable value: this award is purely
         # per-step (2 * ceil(km / 3)). It is stated rather than omitted so a
@@ -152,6 +158,17 @@ def points_schedule() -> dict[str, dict[str, int]]:
     # worth, and the only way that copy cannot drift from what the ledger
     # pays is for both to read this constant.
     schedule["device_photo"] = {"points": p.POINTS_DEVICE_PHOTO}
+
+    # Referrals and dibs stand-downs (sql/076-078) were awarded but never
+    # published, so the rider-facing table under-reported what can be earned
+    # (found 2026-10-06). Stand-down is tiered by who stands down: an
+    # existing rider (`points`) or a new one the dibs page brought in
+    # (`new_rider_points`).
+    schedule["referral"] = {"points": p.POINTS_REFERRAL}
+    schedule["stand_down"] = {
+        "points": p.STAND_DOWN_POINTS_EXISTING,
+        "new_rider_points": p.STAND_DOWN_POINTS_NEW,
+    }
 
     return schedule
 

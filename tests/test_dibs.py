@@ -21,7 +21,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src import api_dibs, ratelimit
+from src import api_dibs, points, ratelimit
 
 
 NOW = datetime(2026, 8, 12, 20, 34, 56, tzinfo=timezone.utc)
@@ -526,8 +526,9 @@ def test_standing_down_records_two_debts_to_two_people(client):
     assert params[0] == dibs_id
     assert params[1] == BODY["claimed_by"], "the referrer's debt is unchanged"
     assert params[2] == "+13035550142", "stored normalised, not as typed"
-    assert params[5] == 300, "an unknown number is a NEW rider: 300"
-    assert params[6] is not None, (
+    assert params[5] == points.POINTS_REFERRAL, "the holder's referral, from the published constant"
+    assert params[6] == 300, "an unknown number is a NEW rider: 300"
+    assert params[7] is not None, (
         "the same-day deadline is STORED, not derived later — it is printed "
         "on a page people screenshot"
     )
@@ -554,7 +555,7 @@ def test_an_existing_rider_stands_down_for_the_smaller_amount(client):
     assert r.status_code == 200
 
     params = client.store["__referrals__"][-1]
-    assert params[5] == 50
+    assert params[6] == 50
     assert params[2] == "+13035550142", "stored normalised, not as typed"
 
 
@@ -652,3 +653,23 @@ def test_the_disclosure_marker_is_the_browsers_own(client):
     html = client.get(f"/dibs/{dibs_id}").text
     assert "25B8" not in html
     assert "details-marker" not in html
+
+
+def test_a_referral_phone_is_stored_e164_so_it_can_ever_pay(client):
+    """Settlement matches referrals.phone by equality against
+    accounts.phone_number (E.164). Stored as typed, "(303) 555-0142" was a
+    referral that could never settle."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    r = client.post(f"/dibs/{dibs_id}/refer", data={"phone": "(303) 555-0142"})
+    assert r.status_code == 200
+    params = client.store["__referrals__"][-1]
+    assert params[3] == "+13035550142"
+
+
+def test_a_referral_pays_the_published_value(client):
+    """The row carries POINTS_REFERRAL explicitly, so the payout follows the
+    constant /points/schedule publishes instead of sql/076's DEFAULT."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.post(f"/dibs/{dibs_id}/refer", data={"email": "new@example.com"})
+    params = client.store["__referrals__"][-1]
+    assert params[6] == points.POINTS_REFERRAL

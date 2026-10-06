@@ -63,10 +63,7 @@ POINTS_GBFS_TRIP_VALIDATED = 20
 # its own thing, and it is worth the whole cap on its own by design.
 POINTS_QR_SCAN = 100
 
-# TODO(needs-user-input): the source spec gave no point value for
-# "complete missing profile information" (item 10's action list). This
-# placeholder is a GUESS and MUST be confirmed or replaced before this
-# ships — search this constant name before launch.
+# Confirmed by the owner 2026-10-06 (the points rationalisation): 10.
 POINTS_PROFILE_COMPLETION = 10
 
 # --- Ride Mode awards (PLAN_RIDE_MODE_API.md phase A2; values locked by
@@ -94,6 +91,14 @@ POINTS_BATTERY_CONTRIBUTION_BASE = 8
 POINTS_BATTERY_CONTRIBUTION_PER_STEP = 2
 POINTS_NAV_ROUTE_FEEDBACK = 4
 POINTS_NAV_QUALITATIVE = 6      # even-points rule: owner corrected 5 -> 6
+# Owner, 2026-10-06 (points rationalisation): "really good qualitative
+# feedback is worth more than saying yes it was fine". A real explanation,
+# at least NAV_QUALITATIVE_DETAILED_MIN_CHARS of it, earns the detailed
+# tier; a short note still earns the base 6 (from the caller's existing
+# 20-character floor). Length is the only machine-checkable proxy for effort,
+# so that is what this measures; no content heuristic.
+POINTS_NAV_QUALITATIVE_DETAILED = 12
+NAV_QUALITATIVE_DETAILED_MIN_CHARS = 60
 POINTS_NAV_DISTANCE_PER_STEP = 2
 POINTS_RIDE_SURVEY = 4
 
@@ -145,13 +150,14 @@ FEATURE_POINT_ACTIONS: tuple[str, ...] = tuple(
 
 # --- Device photos (sql/031 content, sql/056 ledger action) ----------------
 #
-# One award per uploaded photo. The owner asked for 5; the EVEN-POINTS
+# One award per uploaded photo: 10 since 2026-10-06 (see the note above the
+# constant). History: the owner first asked for 5; the EVEN-POINTS
 # INVARIANT above makes 5 unrepresentable — `assert points % 2 == 0` in
 # credit_points and sql/053's `CHECK (points % 2 = 0)` would both reject it —
 # so this is 6, the same correction the rule already produced once for
 # POINTS_NAV_QUALITATIVE. Confirmed with the owner before landing.
 #
-# 6 places a photo level with a feature reconfirm (6) and above a not-found
+# At 6 it sat level with a feature reconfirm (6) and above a not-found
 # report (4): a photo is seconds of work, but it is the only contribution
 # that shows a rider what a scooter actually looks like before they walk to
 # it, and unlike a report it cannot be filed from an armchair — the uploader
@@ -161,7 +167,10 @@ FEATURE_POINT_ACTIONS: tuple[str, ...] = tuple(
 # accepts at most MAX_PHOTOS_PER_DEVICE (3) visible photos across all users,
 # so a vehicle can yield at most 3 × this value however many riders try, and
 # the upload endpoint's 20/hour per-account limit bounds the rest.
-POINTS_DEVICE_PHOTO = 6
+# Raised 6 -> 10 by the owner 2026-10-06 (points rationalisation): camera,
+# framing and an upload is more effort than a survey tap, a little less
+# than a minute-long feature inspection (12).
+POINTS_DEVICE_PHOTO = 10
 
 # Step sizes for the two distance formulas above. Canonical unit is
 # KILOMETRES because that is the unit the rider-facing copy and
@@ -752,16 +761,18 @@ def credit_nav_route_feedback(
 
 def credit_nav_qualitative_feedback(
     cur, *, account_id: int, vehicle_identifier: str | None,
-    lat: float, lng: float, ride_id: str,
+    lat: float, lng: float, ride_id: str, text_length: int = 0,
 ) -> dict[str, Any] | None:
-    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_NAV_QUALITATIVE` (6)
-    for free-text navigation feedback. The CALLER checks
-    `len(nav_qualitative.strip()) >= 20` before calling — "meaningful" is
-    not machine-checkable and no content heuristic is attempted here or
-    upstream."""
+    """PLAN_RIDE_MODE_API.md phase A3, tiered 2026-10-06: free-text
+    navigation feedback earns `POINTS_NAV_QUALITATIVE` (6), or
+    `POINTS_NAV_QUALITATIVE_DETAILED` (12) when `text_length` (stripped) is
+    at least NAV_QUALITATIVE_DETAILED_MIN_CHARS. The CALLER still checks
+    the 20-character floor before calling — "meaningful" is not
+    machine-checkable and no content heuristic is attempted."""
+    detailed = text_length >= NAV_QUALITATIVE_DETAILED_MIN_CHARS
     return credit_points(
         cur, account_id=account_id, action="nav_qualitative_feedback",
-        points=POINTS_NAV_QUALITATIVE,
+        points=POINTS_NAV_QUALITATIVE_DETAILED if detailed else POINTS_NAV_QUALITATIVE,
         lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
         source_table="tracked_rides", source_id=str(ride_id),
     )
@@ -770,6 +781,14 @@ def credit_nav_qualitative_feedback(
 # --- Referrals and stand-downs (sql/076, sql/077, sql/078) -------------------
 
 POINTS_REFERRAL = 100
+
+# Dibs stand-down (sql/077): what the person who walks away from a scooter
+# somebody else holds dibs on earns, once they ride the same day. 300 for a
+# NEW rider (an account that would not otherwise exist), 50 for an existing
+# one. The reasoning lives beside the offer in src/api_dibs.py; the numbers
+# live here so the published schedule reads them from the ledger module.
+STAND_DOWN_POINTS_NEW = 300
+STAND_DOWN_POINTS_EXISTING = 50
 
 
 def settle_referrals_for_account(

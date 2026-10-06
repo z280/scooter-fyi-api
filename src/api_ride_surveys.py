@@ -14,7 +14,8 @@ The survey is the source of THREE awards (src/points.py):
                                         and not an own-device ride
     nav_route_feedback        4 pts  — a route rating tied to a resolved
                                         ride_routes row
-    nav_qualitative_feedback  6 pts  — >=20 chars of trimmed free text
+    nav_qualitative_feedback  6 pts  — >=20 chars of trimmed free text;
+                              12 pts at >=60 (points.NAV_QUALITATIVE_DETAILED_MIN_CHARS)
 
 Every gate is read HERE, off the ride's own ride_options and the survey
 payload — src/points.py's credit_* functions are only the formula + ledger
@@ -437,6 +438,7 @@ def submit_ride_survey(
                 award = credit_nav_qualitative_feedback(
                     cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
                     lat=start_lat, lng=start_lon, ride_id=str(rid),
+                    text_length=len(payload.nav_qualitative.strip()),
                 )
                 if award is not None:
                     points_awarded.append({"action": award["action"], "points": award["points"]})

@@ -53,6 +53,9 @@ _EXISTING_ACTIONS = (
 # list). Like the report awards, they are published FROM the mapping that
 # decides them (points.FEATURE_STATUS_POINTS) rather than re-listed in the
 # endpoint — the coverage test below is what holds that property.
+# Awarded since sql/076-078 but unpublished until 2026-10-06.
+_GROWTH_ACTIONS = ("referral", "stand_down")
+
 _DEVICE_FEATURE_ACTIONS = (
     "device_features_first",
     "device_features_review",
@@ -165,6 +168,7 @@ def test_no_action_is_published_that_the_schedule_does_not_explain(schedule):
     assert set(schedule) == (
         set(_EXISTING_ACTIONS) | set(_RIDE_MODE_ACTIONS)
         | set(_DEVICE_FEATURE_ACTIONS) | set(_DEVICE_PHOTO_ACTIONS)
+        | set(_GROWTH_ACTIONS)
     ) - _RETIRED_ACTIONS
 
 
@@ -175,12 +179,23 @@ def test_every_report_action_in_the_mapping_is_published(schedule):
         assert schedule[action] == {"points": value}
 
 
-def test_entries_use_only_the_two_documented_shapes(schedule):
-    """Flat {"points"} or formula {"base","per_step","step_km"} — nothing
-    else, because the client renders exactly these two."""
+#: The two tiered entries (2026-10-06) and their exact keys. The client
+#: renders each of these shapes and nothing else.
+_TIERED_SHAPES = {
+    "nav_qualitative_feedback": {"points", "upper_points", "upper_min_chars"},
+    "stand_down": {"points", "new_rider_points"},
+}
+
+
+def test_entries_use_only_the_documented_shapes(schedule):
+    """Flat {"points"}, formula {"base","per_step","step_km"}, or one of the
+    two named tiered shapes — nothing else, because the client renders
+    exactly these."""
     for action, entry in schedule.items():
         if action in _FORMULA_ACTIONS:
             assert set(entry) == {"base", "per_step", "step_km"}, action
+        elif action in _TIERED_SHAPES:
+            assert set(entry) == _TIERED_SHAPES[action], action
         else:
             assert set(entry) == {"points"}, action
         for key, value in entry.items():
@@ -211,7 +226,9 @@ def test_ride_mode_values_are_the_locked_decision_6_numbers(schedule):
     assert schedule["battery_contribution"] == {
         "base": 8, "per_step": 2, "step_km": 2}
     assert schedule["nav_route_feedback"] == {"points": 4}
-    assert schedule["nav_qualitative_feedback"] == {"points": 6}
+    # Tiered by the owner 2026-10-06: 6, or 12 for 60+ characters.
+    assert schedule["nav_qualitative_feedback"] == {
+        "points": 6, "upper_points": 12, "upper_min_chars": 60}
     assert schedule["nav_distance_bonus"] == {
         "base": 0, "per_step": 2, "step_km": 3}
     assert schedule["ride_survey"] == {"points": 4}
@@ -345,3 +362,51 @@ def test_the_documented_ten_km_worked_example(schedule):
     total = battery_award + nav_award + schedule["ride_survey"]["points"]
     assert (battery_award, nav_award, total) == (18, 18, 40)
     assert total < MAX_POINTS_PER_RIDE
+
+
+def _awardable_actions_from_migrations() -> set[str]:
+    """The user_points action CHECK as the latest migration defines it.
+
+    Anchored on the constraint's NAME, `user_points_action_allowed`, so an
+    `action IN (...)` on some other table, or in a comment, cannot replace
+    the ledger set. Fails loudly if a migration names the constraint but its
+    action list cannot be parsed (e.g. rewritten as `= ANY (ARRAY[...])`),
+    rather than silently keeping a stale set."""
+    import re
+    from pathlib import Path
+    latest: set[str] = set()
+    pattern = re.compile(
+        r"CONSTRAINT\s+user_points_action_allowed\s+CHECK\s*\(\s*action\s+IN\s*\(([^)]*)\)",
+        re.I | re.S,
+    )
+    for f in sorted((Path(__file__).resolve().parents[1] / "sql").glob("*.sql")):
+        # Drop SQL comments first: a comment can mention the constraint, and
+        # 052 has one with parentheses inside the action list itself.
+        text = re.sub(r"--[^\n]*", "", f.read_text())
+        defines = re.search(r"(ADD\s+)?CONSTRAINT\s+user_points_action_allowed\s+CHECK", text, re.I)
+        if not defines:
+            continue
+        found = [set(re.findall(r"'([a-z_]+)'", m.group(1))) for m in pattern.finditer(text)]
+        assert found and found[-1], f"{f.name} defines user_points_action_allowed but its action list did not parse"
+        latest = found[-1]
+    return latest
+
+
+def test_every_action_the_database_can_award_is_published(schedule):
+    """The table riders read must list everything they can earn. It once
+    left out referral and stand_down for months; this reads the source of
+    truth (the ledger's CHECK) so a new award cannot ship unpublished."""
+    awardable = _awardable_actions_from_migrations()
+    assert awardable, "could not find the user_points action CHECK"
+    missing = awardable - set(schedule) - _RETIRED_ACTIONS
+    assert not missing, f"awardable but unpublished: {sorted(missing)}"
+
+
+def test_every_published_value_is_even(schedule):
+    """The owner's even-points invariant, over every number a rider is shown
+    as points (thresholds and step sizes are not points)."""
+    for action, entry in schedule.items():
+        for key, value in entry.items():
+            if key in ("step_km", "upper_min_chars"):
+                continue
+            assert value % 2 == 0, (action, key, value)
