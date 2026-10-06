@@ -4,10 +4,17 @@
 (`c421ac1` api / `22f4532` frontend).
 
 **Scope:** two repositories. `z280/scooter-fyi-api` owns the report vocabulary,
-the persistence rule, the public flag and the admin surface;
-`z280/denver-scooter-fyi` owns the button a rider presses, what the map shows,
-and keeping suppressed vehicles out of the Phase 2 planner. Every work item
-below names its repo.
+the persistence rule, the public flag, the resolve endpoint and the admin
+surface; `z280/denver-scooter-fyi` owns the button a rider presses, the scan
+that explains a hidden scooter, what the map shows, and keeping suppressed
+vehicles out of the Phase 2 planner. Every work item below names its repo.
+
+**Three strands, one reason.** Reports that *stick* (§2.1-2.5) take scooters
+off the map; scan-to-identify (§2.7) is how a rider standing in front of one
+finds out why; the admin centre (§2.6, §2.8) is who can see the whole picture
+and put a mistake right. The first strand is the request. The other two are
+what make it safe to ship — a system that hides things owes an explanation to
+the person it hid them from, and a lever to the people maintaining it.
 
 **This is NOT part of the Along the Way program.** It shares no phase, no
 migration and no module with `ALONG_THE_WAY_PLAN.md`. It is here because it
@@ -132,6 +139,9 @@ it is hidden, which "high risk" never could.
 
 ### 2.6 Removing the expiry forces two admin capabilities
 
+> These two are forced by §2.2. The rest of the admin centre — the census
+> lists, the per-device dossier, SMS watch — is in §2.8 and §4.1(5).
+
 These are **consequences, not extras**. Shipping §2.2 without them is a
 regression:
 
@@ -143,6 +153,84 @@ regression:
    fleet. The existing dedupe window (`_DEDUPE_WINDOW_MINUTES`) limits repeats
    of the *same* report, not volume across devices. Admins must be able to
    **see per-reporter activity** and discount a bad actor.
+
+### 2.7 A hidden scooter must be able to explain itself
+
+§2.5 takes a scooter off the map. That leaves a rider standing in front of one
+with no way to find out why — and the thing they are looking at is *physically
+present*, so its absence from the screen reads as a bug in the app rather than
+a fact about the scooter. **Scan-to-identify therefore ships with suppression,
+not after it.** Point the camera at the sticker, get the card for whatever is
+in front of you, on the map or off it.
+
+**This cannot be done on the client.** Ride mode resolves a plate against the
+live feed the client already holds, and `qr-utility.ts` says so in as many
+words: "the plate is used to look a vehicle up in a feed the client already
+has". A suppressed device is *by construction* absent from that feed, so the
+existing path returns `unknown_vehicle` — "a plate, but no vehicle in the feed
+carries it". That is the exact dead end this feature exists to remove, and no
+amount of frontend work reaches past it: `vehicle_identifier` is
+`HMAC-SHA256(salt, plate)` and the salt is the server's — "anyone with the salt
+can rederive; anyone without it cannot". **The client cannot name a device it
+cannot already see.** Hence a server resolve endpoint, §4.1(6).
+
+**The answer is a four-way distinction, and the modal must not blur it.** Once
+this plan ships there are four reasons a scooter in front of you is missing
+from the map, and they mean entirely different things:
+
+| Reason | What happened | What to tell the rider |
+|---|---|---|
+| **Suppressed** (§2.5) | We are hiding it — an unresolved report, and it has not moved since | Which report, how old, and that it clears when the scooter moves |
+| **Missing** (§2.8) | Veo's feed stopped carrying it | Where and when we last saw it — it may be in a van |
+| **Permanently gone** (§2.8) | Missing, and an admin confirmed it is not coming back | Say so plainly |
+| **Filtered** | It *is* on the map; the rider's own filters exclude it | Which filter, and offer to clear it — the only one of the four they can fix |
+
+A scooter that is simply present and rideable also scans, and the modal says
+so. "Why is this not on the map" is the hard case, not the only one.
+
+**This also unblocks something already built.** `/api/v1/devices/qr-scan` has
+shipped — authed, rate-limited, `sql/032` behind it — and nothing calls it.
+`leaderboard-panel.ts` hides the `qr_scan` points action outright because
+"advertising 100 pts for a flow that doesn't exist is a promise nobody can
+collect on". A scan surface that reaches real devices is what lets that come
+out of hiding, and the farm risk is already handled: the award is once per
+account per device (`points.py`'s `credit_qr_scan_points` → `already_scanned_by_you`)
+under a 20/hour account bucket. Worth doing in the same change; not required by
+anything above it.
+
+### 2.8 The census: devices arriving, and devices vanishing
+
+Two admin lists — **newest devices added**, and **devices missing** spanning
+back indefinitely, with an entry acknowledgeable into a separate **permanently
+gone** list. The data already exists in `device_state`: `first_ever_observed_at`
+("never reset") descending is the first list; `last_observed_at` ascending is
+the second. Three decisions:
+
+**The missing threshold is days, not hours.** The obvious constant is
+`ABSENT_STOP_AFTER` (one hour) and it is the wrong one — it decides when to
+close a *stop*, and its own header carries the measurement that rules it out
+here: "under 2 h 1.1%, under 6 h 4.5%, and under 12 h 8.4%" of the fleet is
+absent at any moment, because "the overnight pulls sit in the 2-12 h range and
+redeploy through the morning". An hourly threshold produces a nightly list of
+hundreds of scooters that are in a van and back by nine. Start at **72 hours**,
+make it a query parameter, and keep it a number somebody can defend: the list
+is only useful if appearing on it is unusual.
+
+**Use `first_ever_observed_at`, never `first_observed_at_location`.** They sit
+two lines apart in the same table and the second is commented "reset on
+movement" — building the new-arrivals list on it would report every scooter
+that moved this morning as new. This is the likeliest single bug in the
+section; §5 has a test for it.
+
+**Acknowledgement is a new table, not a column.** `device_state` is rewritten
+by every ingest cycle, and an admin's judgement must not live where a cycle can
+overwrite it. A small `device_census_ack` (`vehicle_identifier` PK, `status`,
+`acknowledged_by`, `acknowledged_at`, `note`) holds it, and the join against it
+is what makes "permanently gone" a separate list rather than a filter nobody
+can audit. **It must survive a return**: a scooter marked gone that starts
+reporting again is the most interesting row in the system — a van emptied, or a
+vehicle recovered. Do not delete the ack on reappearance; surface the
+contradiction.
 
 ---
 
@@ -163,6 +251,12 @@ regression:
 | Admin pages, OAuth-gated | `src/api_admin.py` — `cycles`, `failures`, `scheduler`, `regions`, `admins`, `analytics`, `campaigns` |
 | Admin page pattern | `_render("name.html", ...)` + Jinja templates in `src/templates/` |
 | SMS with consent, quota, STOP | `src/comms.py` — **already built**, see `ALONG_THE_WAY_PLAN.md` §13 |
+| QR scan endpoint — authed, 20/hr, and **nothing calls it** | `src/api_qr.py:30` |
+| Plate extraction and the match check | `src/qr.py:32` `extract_plate`, `:40` `validate_scan` |
+| Why the client cannot resolve a hidden device | `src/identity.py:59-69` — salted HMAC, "anyone without it cannot" |
+| QR payload registry | `sql/032_device_qr_codes.sql` |
+| Fleet census columns | `sql/004_device_history.sql:26-28` — `first_ever_observed_at` (never reset), `last_observed_at`, and the `first_observed_at_location` trap two lines above |
+| Why "absent" is not "missing" | `src/device_state.py:243-257` — `ABSENT_STOP_AFTER` and the fleet measurement behind it |
 
 ### Frontend — `z280/denver-scooter-fyi`
 
@@ -174,6 +268,13 @@ regression:
 | Why a `not_rideable` report overrides the tier | `src/devices.ts:1621` (comment) |
 | Reliability tiers and their reasons | `src/reliability.ts` |
 | The Phase 2 planner that must exclude these | `src/along-the-way.ts` — see §4.2 |
+| Camera surface; hands back the raw payload and nothing else | `src/qr-scan.ts:182` — `openQrScanner` |
+| The mode dial: union, spec table, wrapping rotate | `src/qr-utility.ts:30-80` |
+| Client-side plate read — a lookup key, never a decision | `src/qr-utility.ts:118` — `plateFromQr` |
+| **The dead end this feature removes** | `src/qr-ride-scan.ts:52-53` — `unknown_vehicle` |
+| `qr_scan` points hidden because nothing calls the endpoint | `src/leaderboard-panel.ts:134` |
+| Modal chrome: one-at-a-time, and its two precedents | `src/qr-utility.ts:157-158` |
+| The focus trap both modals use | `src/modal-focus-trap.ts:39` — `trapFocusWithin` |
 
 ---
 
@@ -230,6 +331,37 @@ regression:
    - **Export for advocacy**: "N vehicles reported inaccessible, M still
      unmoved after X days". That is Veo's retrieval obligation, documented.
 
+6. **Resolve endpoint** (§2.7) — `POST /api/v1/devices/identify`, taking the
+   raw QR payload exactly as `qr-scan.ts` yields it and returning the device
+   card plus §2.7's reason. Reuse `qr.py`'s `extract_plate` and `identity.py`'s
+   `hash_plate`; do **not** re-implement either. It must answer for a device
+   that is suppressed, missing or gone — those are the cases it exists for — so
+   it reads `device_state` directly rather than the `/devices/current` feed.
+
+   **Session-required and rate-limited, and for a stronger reason than the scan
+   endpoint.** This maps a plate to a `vehicle_identifier`, which is precisely
+   the mapping the salt exists to withhold. Open or unmetered, it is a
+   plate-enumeration oracle that inverts the privacy model for the whole fleet
+   in one script. Copy `api_qr.py`'s shape: `require_session` plus `enforce` on
+   an account bucket at 20/hour. Somebody will argue it should be open because
+   the plate is printed on the scooter in public — the answer is that a plate
+   is public *one scooter at a time, to someone standing next to it*, and this
+   endpoint would be public *all at once, to someone who is not in Denver*.
+
+7. **Census endpoints and pages** (§2.8) — newest arrivals by
+   `first_ever_observed_at DESC`; missing by `last_observed_at` older than a
+   `hours=` parameter defaulting to 72; permanently gone as the join against
+   the new `device_census_ack` table, which needs its own migration alongside
+   the §4.1(1) one. Admin actions: acknowledge, un-acknowledge, note.
+
+   `idx_device_state_last_observed (last_observed_at DESC)` already exists and
+   serves the missing list. **There is no index on `first_ever_observed_at`** —
+   add one, or the arrivals page sorts the whole fleet on every load.
+
+   A device acknowledged gone that reappears is surfaced, not silently
+   relisted (§2.8). Give it somewhere to be seen: a count on the census page is
+   enough, but it must not be nowhere.
+
 ### 4.2 Frontend
 
 1. **The button.** A sixth option in the device popup's report chips
@@ -241,6 +373,27 @@ regression:
    drops `is_disabled` / `is_reserved`; suppressed vehicles go the same way —
    **excluded, not penalised**. A ranking that can be outvoted will eventually
    send somebody over a fence.
+4. **A third QR mode** (§2.7). `QrUtilityMode` is already a union with a spec
+   table and a wrapping dial; add `"identify"` to `QR_UTILITY_MODES` and an
+   `onIdentify` to `QrUtilityDeps`. `rotateMode` is written against
+   `QR_UTILITY_MODES.length` and needs no change — **but its comment does**: it
+   justifies wrapping over clamping in terms of "two positions", and that
+   sentence stops being true. The file states that "dial order is deliberate",
+   so: identify goes **first**, by the same reasoning that put features there —
+   it is the one a rider does knowing nothing, with nothing in flight, and it
+   is the only read-only mode of the three.
+5. **The modal.** A modal device card — "a modal version of the scooter
+   pop-up". `devices.ts:1673`'s popup is the content to mirror; the chrome is
+   `trapFocusWithin` plus the one-at-a-time rule `qr-utility.ts:157-158` states
+   and `qr-scan.ts` and `device-features.ts` already follow.
+   **It must render for a device with no marker** — that is the entire point,
+   and it is the requirement a map-coupled implementation will quietly fail.
+   Dropping a temporary marker on the map is explicitly optional; if it is
+   built, a suppressed device must not survive the modal closing.
+6. **Say which of the four.** Each §2.7 reason gets its own sentence. The
+   failure mode to avoid is a generic "we don't know about this scooter",
+   which is what the rider already gets today and the reason this exists.
+7. The census lists are admin-only. No rider-facing work.
 
 ---
 
@@ -261,6 +414,32 @@ regression:
 - The migration replays cleanly against a database that already has the
   constraint under either historical name.
 
+Scan-to-identify (§2.7):
+
+- **A suppressed device resolves from a scan and the modal names the report.**
+  Written against the Apollo behind the fence: the device is off the map, the
+  rider is standing in front of it, and the app explains itself. This is the
+  acceptance test for the whole section.
+- Each of the four reasons renders its own sentence; none falls through to a
+  generic "not found".
+- A payload `plateFromQr` reads as nothing — a wifi QR, a URL — reaches
+  "unreadable" without a network call.
+- The resolve endpoint refuses an unauthenticated caller, and rate-limits a
+  scripted one at the same ceiling as `qr-scan`.
+- `rotateMode` wraps over three modes in both directions.
+
+Census (§2.8):
+
+- The missing list **excludes** a device absent 2 hours and **includes** one
+  absent 5 days — the overnight-van regression.
+- Arrivals order by `first_ever_observed_at`. Pin this with a device that moved
+  recently: `first_observed_at_location` resets on movement, so an
+  implementation that reaches for it reports this morning's relocations as new
+  scooters, and every other test still passes.
+- A device acknowledged permanently gone that reappears in the feed is
+  surfaced, and its acknowledgement is **not** deleted.
+- An ingest cycle rewriting `device_state` leaves acknowledgements intact.
+
 ---
 
 ## 6. Risks, and two things not to build
@@ -270,7 +449,10 @@ regression:
 | 1 | **A false report is now permanent.** | §2.6(1)'s void, shipped in the same change — not later. |
 | 2 | **Griefing.** One account suppresses a neighbourhood. | §2.6(2)'s reporter view; consider a per-account rate limit beyond the dedupe window. |
 | 3 | **"Inaccessible" becomes a way to point at a household.** | See below. This is the one that would do real harm. |
-| 4 | Suppression hides a problem instead of surfacing it. | The vehicle stays visible to **admins** and in the export; it is removed from *rider* candidacy only. |
+| 4 | Suppression hides a problem instead of surfacing it. | The vehicle stays visible to **admins** and in the export; it is removed from *rider* candidacy only — and §2.7 lets any rider standing in front of it ask why. |
+| 5 | **The resolve endpoint becomes a plate-enumeration oracle.** It hands out the plate → `vehicle_identifier` mapping the salt exists to withhold. | §4.1(6): `require_session` + an account rate bucket. Never open it, however reasonable the argument sounds. |
+| 6 | **The missing list is noise and nobody reads it.** An hourly threshold lists the overnight van every night. | §2.8's 72-hour floor, taken from the measurement in `device_state.py`'s own header rather than guessed. |
+| 7 | A map-coupled identify modal passes review and fails the only case it was built for. | §4.2(5): the acceptance test is a device with **no marker**. |
 
 **Do not build a map of addresses where scooters disappear.** The report is
 about **a spot being unreachable**, never about who lives there. The Along the
