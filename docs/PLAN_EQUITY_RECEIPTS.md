@@ -11,7 +11,7 @@ Owner's spec (2026-10-06): trip minutes (duration), cost before tax, cost with t
 
 **A Veo receipt has no geographic information.** It does show the **scooter code**, the start and end times, and the costs. So a claim is located by **matching the scooter code and the receipt's times against our feed history**. The ride's start and end points come from what we observed in the feed, not from the rider.
 
-- **Scooter code → vehicle.** Veo publishes each scooter's number in its public `free_bike_status` feed (`rental_uris … &number=<plate>`), and we already derive `vehicle_identifier = HMAC(plate)` from it (`src/vehicle_identity.py`). *Assumption to confirm with a real receipt:* the receipt's scooter code is that same number.
+- **Scooter code = the plate.** The owner confirmed (2026-10-06) that the receipt shows the raw plate number, a 7-digit `101…`/`102…`/`103…` code: the same number Veo publishes in `rental_uris … &number=<plate>`. Live fleet: 102 (6,072), 103 (2,687), 101 (839). `trip_events.vehicle_plate` and `device_history.vehicle_plate` are populated on 100% of rows (7-day check: 480k and 494k), so **matching uses the plate directly, with no hashing**. The HMAC `vehicle_identifier` is still computed and stored, because the public CSV must carry that, never the raw plate. Raw plates are admin-only on our public API, even though Veo publishes them.
 - **History is deep enough:** `device_history` departures since 2026-05-31 and `trip_events` since 2026-07-05, with no pruning. A receipt from weeks ago is still matchable.
 - **Precision:** the feed is sampled every 2 minutes, so observed rental start and end are known to about ±2 min.
 
@@ -42,7 +42,7 @@ If the rider is signed out, the form shows "Sign in to send a receipt" (the endp
 **API:** extend `discount_reports` in a migration that supersedes #105:
 
 - `trip_minutes`, `subtotal_cents`, `total_cents`, `ride_started_at`;
-- `vehicle_ref` (the scooter code as entered) and `vehicle_identifier` (HMAC of it, computed server-side);
+- `vehicle_plate` (the code as entered, validated `^\d{7,10}$` after stripping spaces) and `vehicle_identifier` (HMAC of it, computed server-side; the only form that leaves the admin surface);
 - `matched_start_lat/lng`, `matched_end_lat/lng`, filled from the feed match, not from the rider;
 - `region_name`, `zone_version = 'equity'`;
 - `review_status`, `match_status`, `matched_trip_event_id`;
@@ -68,7 +68,7 @@ Where the ride happened is then established by the feed match. Without all three
 
 ## Phase 2: ride matching from feed history (backend)
 
-- **Vehicle:** `vehicle_identifier = HMAC(scooter code)`. If no vehicle with that identifier has ever been seen, the result is `match_status = unknown_vehicle`, which usually means a typo or a misread code.
+- **Vehicle:** match on `vehicle_plate` = the receipt's code. If that plate has never been seen in the feed, the result is `match_status = unknown_vehicle`, which usually means a typo or a misread code.
 - **Ride:** that vehicle's rental whose observed start (`device_history.departed_at` of the stop it left) is within ±4 min of the receipt's start, and whose release (`trip_events.detected_at`) is within ±4 min of the receipt's end. ±4 min is two feed cycles plus clock skew.
 - **Where:** the matched ride's `from` and `to` points are the start and end. **Equity eligibility** is whether either point lies in an official Equity Area. A ride that started *and* ended outside every area is not owed the discount: the API records `not_equity_ride` and the rider is told why.
 - **`match_status`:**
