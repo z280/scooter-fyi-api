@@ -34,13 +34,27 @@ WHAT THIS IS NOT, AND CANNOT BE MADE INTO.
   might be the vehicle, the app, the weather, or a rider changing their mind
   after unlocking. This module counts; it does not attribute.
 
-THE RADIUS. These counters were populated at the ingest's
-`stationary_threshold_meters` (16 m in config.json). `ANALYTICS_PLAN.md` §0.2
-records that three different circles exist in this codebase and recommends
-standardising on 50 m — the radius `device_state.IN_PLACE_RADIUS_M` uses and
-the one the 37.1%-repeat-rate validation was computed at. Until that decision
-is made and the counters are recounted, the response states the radius it was
-actually measured at, so a reader is never guessing which number they have.
+THE RADIUS, AND WHY THE RESPONSE CARRIES IT. The counter asks whether a rental
+ended within the ingest's `stationary_threshold_meters` of where it was
+unlocked. That was 16 m until 2026-10-06 and is 25 m since (sql/088) — the
+radius sql/072's own validation was computed at.
+
+So the counters SPAN TWO DEFINITIONS and the response's `radius_meters` reports
+the CURRENT one, which is not the one most of the existing total was collected
+under. That is a known hole, recorded on the column comment in sql/088, and it
+closes when the counters are either reset or stamped with the radius they were
+counted at. Until then a lifetime rate is a blend, and this field tells a
+reader which circle the ingest is using today rather than which one produced
+the number — a distinction worth stating plainly rather than papering over.
+
+ONE MORE THING THE NUMBER IS NOT. `device_state.py` computes a no-go from END
+DISPLACEMENT — unlock point to drop point — while sql/072's header describes
+its validation as "never get 25 m from the kerb", a MAXIMUM distance. A round
+trip that returns to the same rack therefore counts as a no-go. That is
+deliberate (sql/087 kept `rentals_no_go` on the old definition so
+`smart_ride_grade` stays calibrated), but it means copy of the form "never left
+the kerb" overstates what is counted by however many loop rides there are. That
+quantity has not been measured.
 """
 
 from __future__ import annotations
