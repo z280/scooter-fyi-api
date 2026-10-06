@@ -41,10 +41,8 @@ COMMENT ON COLUMN device_state.rentals_observed IS
     'with few observations has no grade rather than a flattering one.';
 
 COMMENT ON COLUMN device_state.rentals_no_go IS
-    'Of those, how many ended within 25 m of where the rider unlocked it: the '
-    'scooter did not go. Fleet baseline ~9%. 25 m is this migration''s own '
-    'validation radius (see the header); before 2026-10-06 the ingest counted '
-    'at 16 m, so lifetime totals span both.';
+    'Of those, how many ended within stationary_threshold_meters of where the '
+    'rider unlocked it: the scooter did not go. Fleet baseline ~9%.';
 
 -- Both counters are read together, on every device, for the map payload.
 CREATE INDEX IF NOT EXISTS idx_device_state_rental_outcomes
