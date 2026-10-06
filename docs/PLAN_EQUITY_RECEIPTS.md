@@ -69,17 +69,52 @@ Without all three, the API returns `422 not_rate_checkable`, keeps no row and no
 - **Where it runs:** a scheduled job (`match_discount_reports`), not the request path. It's a time-boxed indexed query, but it shouldn't make the rider wait.
 - **Known limit:** 2-minute snapshots put rental start and end times at ±2 min. Veo can also rotate the bike_id at release; matching uses `vehicle_identifier`, which survives rotation.
 
-## Phase 3: review + points
+## Phase 3: automated analysis + points (the API decides)
 
-- **Admin review queue** (`/admin/discount-reports`): screenshot beside the submitted numbers, with approve/reject on "subtotal and total match the receipt".
-- **On approve:** **+10** (`action = 'discount_receipt'`).
-- **If also `match_status = corroborated`:** **+100** (`discount_receipt_corroborated`), in place of the 10.
-- Points are inserted `pending` at submission and settled on review, so a rider sees them as pending at once. The existing ledger supports this.
-- **Abuse limits:** one award per matched ride, 20 submissions per account per day (the existing limit), and points only after a human has looked at the screenshot.
+Owner's direction (2026-10-06): the API does the analysis and settles points itself. No human is needed in the normal path.
 
-## Phase 4 (optional): reading the screenshot automatically
+**Extract.** Read the screenshot with two independent readers:
 
-OCR or vision extraction of minutes, subtotal and total, to pre-fill the form and pre-check against the image. It would turn the 10-point check from manual into assisted. Deferred: it adds a third-party processor of the receipt image, which needs its own privacy decision.
+- **(A) a vision LLM** (Claude Haiku 4.5, structured output). It returns minutes, unlock fee, per-minute rate, subtotal, tax, total, start and end times, and the vehicle ID if shown.
+- **(B) local OCR** on ovh3 (PaddleOCR or Tesseract) plus a Veo-layout parser.
+
+A works from day one and survives layout changes. B keeps a second opinion that never leaves the server. **Needs the owner's OK:** A makes Anthropic a processor of the receipt image, so the privacy payload and policy say so in the same change.
+
+**Cross-check, recorded per check in `analysis_checks` (JSONB):**
+
+1. Image fields against what the rider typed (minutes, subtotal, total, times).
+2. Reader A against reader B.
+3. Arithmetic: unlock + rate × minutes = subtotal (±1¢), and subtotal + tax = total (±1¢, tax rate from `/meta/pricing`).
+4. Times against the matched ride (Phase 2), when there is one.
+
+**Decide (`analysis_status`):**
+
+- `verified`: checks 1–3 pass and the readers agree → **+10**, settled immediately. If `match_status = corroborated` → **+100** instead.
+- `uncertain`: a reader is missing or they disagree on a field → points stay `pending`, and the report goes to the human portal (Phase 3b).
+- `rejected`: the image contradicts the typed numbers → no points, and the rider is told which field did not match.
+
+**Shadow mode first.** For the first N reports (default 30), the API decides and records but keeps points `pending`, so the owner can compare its calls with their own before letting it settle.
+
+**Abuse limits:**
+
+- 20 submissions per account per day (the existing limit).
+- One award per matched ride.
+- 10-point awards capped at 3 per day.
+- The 100-point tier needs a ride we independently observed, so a doctored image cannot earn it.
+
+## Phase 3b: human portal (fallback + labels)
+
+`/admin/discount-reports` shows the screenshot beside the typed and extracted fields and each check, with approve / reject / correct-a-field.
+
+- It handles `uncertain` reports and shadow-mode spot checks.
+- Every decision is stored as a label (`human_label` JSONB: the correct field values and verdict).
+
+## Phase 4: get better over time (OCR / vision long-term)
+
+- **Evaluation set:** human-labelled receipts become a gold set. Each reader and the overall decision get scored on it: field accuracy, false-verify rate. Shadow mode ends when the false-verify rate on the gold set is about 0.
+- **Prompt and parser iteration** against the gold set comes first. This is cheap and usually enough for one app's receipt layout.
+- **Training (only if volume justifies it):** with a few hundred labelled receipts, fine-tune a document model (e.g. Donut or LayoutLM) to run locally on ovh3. That removes the third-party processor and per-call cost. Not worth it before then, given that 0 receipts have ever been filed.
+- **Needed now:** a few real Veo receipt screenshots, equity and standard, to build reader B's parser and the first test cases.
 
 ## Phase 5: reporting
 
@@ -91,4 +126,4 @@ OCR or vision extraction of minutes, subtotal and total, to pre-fill the form an
 1. **Gate:** minutes + a cost + an Equity Area point. Anything less is declined and not retained.
 2. **Points:** 10 *or* 100 per submission, not 110.
 3. **Matching tolerance:** ±10 min on times, 100 m on points (your spec).
-4. **Points need a human look** at the screenshot (Phase 3) before they settle. Until then they show as pending.
+4. **Points settle automatically** when the API verifies a receipt (Phase 3, owner's direction). Only `uncertain` reports wait for a human, after a short shadow-mode start.
