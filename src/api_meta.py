@@ -95,7 +95,10 @@ _PRIVACY = {
         {
             "data": "favorite_devices",
             "retention": "until you delete them",
-            "detail": "Vehicles you kept in My Scooters: the vehicle "
+            "detail": "My Scooters was retired on 2026-10-06: nothing new "
+                      "can be kept, and kept vehicles are no longer shown. "
+                      "Rows kept before then remain until you delete them. "
+                      "Vehicles you kept in My Scooters: the vehicle "
                       "identifier, your nickname for it, when you last "
                       "proved at the kerb that you were standing at it, and "
                       "whether you want telling when it comes free. WHERE "

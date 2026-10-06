@@ -115,9 +115,20 @@ def test_the_ledger_endpoint_still_needs_a_session(client):
 
 # --- coverage ----------------------------------------------------------------
 
+#: Ledger actions that can no longer be earned. Their rows stay valid in
+#: user_points (and in the action CHECK); they are just not offered.
+#: qr_scan: retired 2026-10-06 with Keep a Scooter (tests/test_retired_routes.py).
+_RETIRED_ACTIONS = {"qr_scan"}
+
+
 def test_every_existing_action_is_published(schedule):
-    for action in _EXISTING_ACTIONS:
+    for action in set(_EXISTING_ACTIONS) - _RETIRED_ACTIONS:
         assert action in schedule, action
+
+
+def test_retired_actions_are_not_offered(schedule):
+    for action in _RETIRED_ACTIONS:
+        assert action not in schedule, action
 
 
 def test_all_five_ride_mode_actions_are_published(schedule):
@@ -154,7 +165,7 @@ def test_no_action_is_published_that_the_schedule_does_not_explain(schedule):
     assert set(schedule) == (
         set(_EXISTING_ACTIONS) | set(_RIDE_MODE_ACTIONS)
         | set(_DEVICE_FEATURE_ACTIONS) | set(_DEVICE_PHOTO_ACTIONS)
-    )
+    ) - _RETIRED_ACTIONS
 
 
 def test_every_report_action_in_the_mapping_is_published(schedule):
@@ -180,7 +191,6 @@ def test_entries_use_only_the_two_documented_shapes(schedule):
 # --- values come from the constants -----------------------------------------
 
 def test_flat_values_match_the_constants(schedule):
-    assert schedule["qr_scan"]["points"] == points.POINTS_QR_SCAN
     assert schedule["gbfs_trip_validated"]["points"] == \
         points.POINTS_GBFS_TRIP_VALIDATED
     assert schedule["waypoint"]["points"] == points.POINTS_PER_WAYPOINT
@@ -229,7 +239,6 @@ def test_nav_distance_formula_fields_match_the_constants(schedule):
         ("POINTS_RIDE_SURVEY", "ride_survey", "points"),
         ("POINTS_NAV_QUALITATIVE", "nav_qualitative_feedback", "points"),
         ("POINTS_NAV_ROUTE_FEEDBACK", "nav_route_feedback", "points"),
-        ("POINTS_QR_SCAN", "qr_scan", "points"),
         ("POINTS_BATTERY_CONTRIBUTION_BASE", "battery_contribution", "base"),
         ("POINTS_BATTERY_CONTRIBUTION_PER_STEP", "battery_contribution",
          "per_step"),

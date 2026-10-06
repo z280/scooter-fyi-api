@@ -65,6 +65,13 @@ from .ratelimit import enforce
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+# RETIRED 2026-10-06 (owner): "Keep a Scooter" / My Scooters was killed for
+# its risks, and the frontend no longer offers it, but these routes were
+# still mounted. Create, read (which returns positions) and edit are moved
+# onto this router, which src/main.py never mounts. DELETE stays on `router`:
+# the privacy policy promises riders an immediate hard delete of anything
+# they kept, and that promise outlives the feature.
+_retired = APIRouter()
 
 _VEHICLE_IDENTIFIER_RE = r"^[0-9a-f]{16}$"
 
@@ -276,7 +283,7 @@ def _favorite_payload(row: tuple, now: datetime) -> dict[str, Any]:
     return out
 
 
-@router.get("/api/v1/profile/favorite-devices")
+@_retired.get("/api/v1/profile/favorite-devices")
 def list_favorites(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
     """Every vehicle this rider keeps, newest first, with its live state.
 
@@ -295,7 +302,7 @@ def list_favorites(user: SessionUser = Depends(require_session)) -> dict[str, An
     }
 
 
-@router.post("/api/v1/profile/favorite-devices", status_code=201)
+@_retired.post("/api/v1/profile/favorite-devices", status_code=201)
 def add_favorite(
     payload: FavoriteIn = Body(...),
     user: SessionUser = Depends(require_session),
@@ -435,7 +442,7 @@ def add_favorite(
     }
 
 
-@router.patch("/api/v1/profile/favorite-devices/{vehicle_identifier}")
+@_retired.patch("/api/v1/profile/favorite-devices/{vehicle_identifier}")
 def patch_favorite(
     vehicle_identifier: str = Path(..., pattern=_VEHICLE_IDENTIFIER_RE),
     payload: FavoritePatch = Body(...),
