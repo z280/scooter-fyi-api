@@ -198,7 +198,7 @@ agent process).
 │   │                            generated from src/points.py so UI copy cannot drift
 │   ├── api_device_recommendations.py  POST .../recommend
 │   ├── api_device_photos.py     device photo upload/list/report + GET /api/v1/photos/mine
-│   ├── api_qr.py                POST /api/v1/devices/qr-scan
+│   ├── api_qr.py                POST /api/v1/devices/qr-scan (RETIRED 2026-10-06, not mounted)
 │   ├── api_ride_screenshots.py  ride transaction screenshot upload/list
 │   ├── api_ride_surveys.py      POST /api/v1/tracked-rides/{id}/survey — Screen 9's
 │   │                            end-of-ride survey + its three point awards (sql/052)
@@ -442,10 +442,9 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `GET /api/v1/profile/ride-specs/{name}` | One saved spec |
 | `PUT /api/v1/profile/ride-specs/{name}` | Create or replace a named spec (opaque JSON blob: requirements + which are `must`); 5 per account |
 | `DELETE /api/v1/profile/ride-specs/{name}` | Delete a named spec |
-| `GET /api/v1/profile/favorite-devices` | Vehicles the caller keeps, with live state; position withheld while in use |
-| `POST /api/v1/profile/favorite-devices` | Keep a vehicle — needs a valid QR scan **and** a fix within 75 m of it; the scan is the identity, so `vehicle_identifier` is optional; 10 per account |
-| `PATCH /api/v1/profile/favorite-devices/{vehicle_identifier}` | Rename, or turn the availability alert on/off |
-| `DELETE /api/v1/profile/favorite-devices/{vehicle_identifier}` | Let one go |
+| `GET /api/v1/profile/favorite-devices/retired` | **My Scooters was retired 2026-10-06.** Lists what the caller kept before then: identifiers, nicknames and dates only, so it can be deleted |
+| `DELETE /api/v1/profile/favorite-devices/{vehicle_identifier}` | Delete one kept vehicle (the privacy policy's promise outlives the feature) |
+| ~~`GET/POST/PATCH /api/v1/profile/favorite-devices…`~~ | Retired 2026-10-06, not mounted (`api_favorites._retired`) |
 | `GET /api/v1/emoji-nouns` | Full emoji → noun-word list, for building a username picker |
 | `GET /api/v1/emoji-nouns/search?q=…` | Partial word match on the emoji-noun list |
 | `GET /api/v1/adjectives` | Full curated adjective list |
@@ -536,7 +535,7 @@ can confirm a route exists. See `sql/052_ride_surveys_routes.sql` /
 | `GET /api/v1/points?limit=&before=` | Your points ledger + running total |
 | `GET /api/v1/points/schedule` | **Public** — authoritative action → points map incl. formulas; UI copy is generated from it |
 | `POST /api/v1/devices/{vehicle_identifier}/recommend` | Yes/no — only accepted with a completed ride on that device in the last 24h |
-| `POST /api/v1/devices/qr-scan` | Validate a scanned QR against the claimed device; awards a first-scan bonus |
+| ~~`POST /api/v1/devices/qr-scan`~~ | Retired 2026-10-06, not mounted: its 100-point bonus was farmable because plates are public. QR scans still work for feature reports (`qr_raw_value`) via `src/qr.py`. |
 
 ### Device photos
 

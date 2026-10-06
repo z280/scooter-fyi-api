@@ -360,7 +360,7 @@ def load() -> AppConfig:
         ),
         device_tracking=DeviceTrackingConfig(
             stationary_threshold_meters=float(
-                raw.get("device_tracking", {}).get("stationary_threshold_meters", 16.0)
+                raw.get("device_tracking", {}).get("stationary_threshold_meters", 25.0)
             ),
         ),
         spatial=SpatialConfig(

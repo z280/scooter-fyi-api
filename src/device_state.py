@@ -335,6 +335,28 @@ ABSENT_LEDGER_RETENTION = timedelta(days=7)
 ABSENT_LEDGER_KEEP_MIN = 1000
 
 
+# THESE ARE NOT THE SAME RING AS `stationary_threshold_meters`, AND THEY ARE
+# DELIBERATELY NOT 25 m. Read this before "finishing" the standardisation.
+#
+# The codebase holds distances that answer DIFFERENT questions, and on
+# 2026-10-06 the owner standardised ONE of them on 25 m:
+#
+#   * `stationary_threshold_meters` (config.json, now 25 m) — "has a parked
+#     vehicle moved from where we last saw it, and did a rental end where it
+#     started?" It is what `rentals_no_go` counts against, and 25 m is the
+#     radius sql/072's own validation was computed at.
+#
+#   * `IN_PLACE_RADIUS_M` / `JITTER_RADIUS_M` below (50 m) — "did this rental
+#     go anywhere at all, or is this GPS noise?" Different question, and the
+#     50 m is measured rather than chosen: see the tables under each. The
+#     jitter note in particular records that the old 16 m rule turned 48,429
+#     non-rental position changes into MOVED in a single day, two thirds of
+#     them in the 16-25 m band — so 25 m sits INSIDE the measured noise floor.
+#     Setting these to 25 m would re-introduce a bug somebody already measured
+#     and fixed.
+#
+# One number for one question, not one number for every question.
+
 # FAILED STARTS AND JITTER (sql/087) — see the module docstring for the
 # branches. All three constants were chosen from the R2 archive, 2026-09-27
 # 08:00Z .. 2026-10-01 08:00Z (95,198 reservation episodes, 4 days), read-only.

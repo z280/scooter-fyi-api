@@ -95,18 +95,19 @@ _PRIVACY = {
         {
             "data": "favorite_devices",
             "retention": "until you delete them",
-            "detail": "Vehicles you kept in My Scooters: the vehicle "
+            "detail": "My Scooters was retired on 2026-10-06. Nothing new "
+                      "can be kept, and kept vehicles are no longer shown "
+                      "or tracked. Rows kept before then held the vehicle "
                       "identifier, your nickname for it, when you last "
                       "proved at the kerb that you were standing at it, and "
-                      "whether you want telling when it comes free. WHERE "
-                      "you were standing is NOT stored — the 75 m check runs "
-                      "when you keep the scooter and the position is then "
-                      "discarded. A kept vehicle's position is withheld "
-                      "while somebody is riding it: you can see where yours "
-                      "is parked, never where it is going. DELETE "
+                      "whether you wanted telling when it came free. Where "
+                      "you were standing was never stored. To delete them: "
+                      "GET /api/v1/profile/favorite-devices/retired lists "
+                      "what you kept (identifiers, nicknames and dates "
+                      "only), and DELETE "
                       "/api/v1/profile/favorite-devices/:vehicle_identifier "
-                      "is an immediate hard delete, and every row cascades "
-                      "when the account is deleted.",
+                      "removes one immediately. Every row is also deleted "
+                      "with your account, or on request by email.",
         },
         {
             "data": "user_preferences",
