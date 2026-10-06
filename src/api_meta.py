@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 _PRIVACY = {
-    "updated": "2026-08-05",
+    "updated": "2026-10-06",
     "contact": "zneill@gmail.com",
     "retention": [
         {
@@ -229,6 +229,23 @@ _PRIVACY = {
                       "current visibility toggles (public username, "
                       "leaderboard participation) -- turning either off "
                       "removes you from the public view immediately.",
+        },
+        {
+            "data": "vehicle_state",
+            "retention": "no personal data; current value only",
+            "detail": "One row per vehicle, derived from the operator's "
+                      "public vehicle feed, describing the vehicle and not "
+                      "whoever rides it. Its newest fields (2026-10) record "
+                      "how far the vehicle got during the rental in "
+                      "progress, its feed id when that rental began, where "
+                      "it was last seen parked, and whether each of its "
+                      "last three rentals went anywhere. They hold no "
+                      "account id or rider identity, and nothing is "
+                      "appended over time: the rental fields are cleared "
+                      "when the rental ends, the outcome record keeps only "
+                      "the last three rentals, and the parked position is "
+                      "overwritten every time the vehicle is seen. There is "
+                      "no history of them for a cleanup job to prune.",
         },
         {
             "data": "device_photos",

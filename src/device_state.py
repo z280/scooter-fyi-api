@@ -934,7 +934,7 @@ def update_for_cycle(
                     # if it covered FAILED_START_DECAY_M; a shorter one
                     # carries it. A release pushes "went somewhere" into the
                     # recent-rentals mask; a non-rental move pushes nothing.
-                    clears = distance > FAILED_START_DECAY_M
+                    clears = distance >= FAILED_START_DECAY_M
                     close_history_ids.append(vid)
                     moved_updates.append((
                         d.vehicle_plate, d.device_id, d.lat, d.lon,

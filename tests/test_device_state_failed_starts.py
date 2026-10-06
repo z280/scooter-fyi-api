@@ -215,6 +215,23 @@ def test_short_ride_carries_the_count_to_the_new_stop(cycle):
     assert cur.rows_for("INSERT INTO device_history")[0][9] == 2
 
 
+@pytest.mark.parametrize("offset_m, clears", [(0.0, True), (-0.01, False)])
+def test_a_ride_of_exactly_the_decay_distance_clears_the_count(cycle, monkeypatch,
+                                                               offset_m, clears):
+    """'Cleared by a relocation of AT LEAST FAILED_START_DECAY_M' (API.md,
+    quality.py): the boundary itself clears. The threshold is pinned to the
+    exact distance _distance_meters reports so float rounding in the
+    degrees->meters conversion cannot decide the test."""
+    drop = _north(600)
+    exact = device_state._distance_meters(_ORIGIN[0], _ORIGIN[1], *drop)
+    monkeypatch.setattr(device_state, "FAILED_START_DECAY_M", exact - offset_m)
+    stats, cur = cycle([_device(drop, device_id="bike-2")],
+                       state=_in_rental(max_m=650.0, fs=2))
+    assert stats.moved == 1
+    row = _update(cur, "first_observed_at_location = %s")
+    assert row[7] is clears
+
+
 def test_decay_distance_is_between_the_owner_knee_and_a_km():
     assert 300 <= device_state.FAILED_START_DECAY_M <= 1000
     assert device_state.IN_PLACE_RADIUS_M == device_state.JITTER_RADIUS_M == 50.0

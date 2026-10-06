@@ -107,3 +107,15 @@ def test_the_published_policy_covers_usage_analytics():
     assert "usage analytics" in lower
     assert "90 days" in _POLICY_HTML
     assert "global privacy control" in lower
+
+
+def test_vehicle_state_fields_are_documented():
+    """sql/087 added five stored device_state fields. They are about the
+    vehicle, not a rider, and are overwritten rather than accumulated, but
+    a new stored field is a retention rule (src/api_meta.py), so both the
+    payload and the published policy say so."""
+    entry = _ENTRIES["vehicle_state"]
+    assert "no personal data" in entry["retention"]
+    for fact in ("last three rentals", "cleared when the rental ends", "overwritten"):
+        assert fact in entry["detail"], fact
+    assert "<td>Vehicle state</td>" in _POLICY_HTML

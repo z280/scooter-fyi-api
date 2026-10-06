@@ -279,7 +279,7 @@ def _if_none_match_hit(request: Request, etag: str) -> bool:
     return etag in (t.strip() for t in inm.split(","))
 
 
-def _rental_outcomes() -> dict[str, tuple[int, int, int]]:
+def _rental_outcomes() -> dict[str, tuple[int, int, int]] | None:
     """{vehicle_identifier: (rentals_observed, rentals_no_go,
     recent_no_go_mask)} for the fleet.
 
@@ -289,6 +289,11 @@ def _rental_outcomes() -> dict[str, tuple[int, int, int]]:
 
     A failure here costs the grade, never the map: the caller degrades to
     "no grade yet" rather than 500ing on a field nobody has to have.
+
+    Returns None (not {}) on failure. An empty map would read as "no failed
+    rentals" for every vehicle, which since sql/087 can turn a vehicle whose
+    only high_risk reason is recent_rentals_no_go into a clean "ok". The
+    caller uses None to stop vouching for anyone this cycle.
     """
     try:
         with connection() as conn:
@@ -300,13 +305,14 @@ def _rental_outcomes() -> dict[str, tuple[int, int, int]]:
                 return {r[0]: (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0))
                         for r in cur.fetchall()}
     except Exception:  # noqa: BLE001
-        log.warning("rental outcomes unavailable — grades omitted this cycle")
-        return {}
+        log.warning("rental outcomes unavailable — grades omitted and "
+                    "reliability capped at 'unknown' this cycle")
+        return None
 
 
-def _outcome(outcomes: dict[str, tuple[int, int, int]],
+def _outcome(outcomes: dict[str, tuple[int, int, int]] | None,
              vid: str | None) -> tuple[int, int, int]:
-    return outcomes.get(vid or "", (0, 0, 0))
+    return (outcomes or {}).get(vid or "", (0, 0, 0))
 
 
 def _devices_current_impl(
@@ -577,6 +583,12 @@ def _devices_current_impl(
             now=now_utc,
             recent_rentals_no_go=recent_no_go,
         )
+        # Fail safe: without the outcomes query recent_no_go above is a 0 we
+        # never observed, so "ok" is a claim this cycle cannot back. high_risk
+        # from any other reason stands; untracked vehicles are already
+        # "unknown".
+        if rental_outcomes is None and reliability == "ok":
+            reliability = "unknown"
         properties: dict[str, Any] = {
             "device_id": r[0],
             "form_factor": r[1],

@@ -96,6 +96,11 @@ def _fake_db(monkeypatch):
         yield _FakeConn()
 
     monkeypatch.setattr(api_public, "connection", _conn)
+    # The fake cursor answers every query with the payload row, which the
+    # rental-outcomes query cannot parse. That used to fail into an empty
+    # map silently; it now (correctly) caps reliability at "unknown", so
+    # say what these tests mean: the query ran and found no rentals.
+    monkeypatch.setattr(api_public, "_rental_outcomes", lambda: {})
     monkeypatch.setattr(
         api_public, "stats_for_cycle",
         lambda cycle_id, snapshot_time: {

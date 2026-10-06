@@ -3,7 +3,10 @@
 A "trip" is a MOVED transition detected in src/device_state.py: a rental
 that went somewhere, counted once at its release (sql/069), or a move without
 a rental of more than 50 m with a rotated bike_id or 100 m without one
-(sql/087). Each one is logged to `trip_events` as it's detected; this module
+(sql/087). "Went somewhere" means ended beyond the stationary threshold
+(16 m) from where it was unlocked: a round trip -- out past 50 m and back
+inside 16 m -- resets dwell but writes no trip_events row, so totals here
+are not "every rental that went somewhere". Each one is logged to `trip_events` as it's detected; this module
 rolls those events up once a day into:
 
     daily_trip_summary          — total trips + distinct vehicles tripped
