@@ -80,6 +80,25 @@ _DEPRECATED_REPORT_TYPE_ALIASES = {"failed_unlock": "not_rideable"}
 # normalisation.
 _ACCEPTED_REPORT_TYPES = _REPORT_TYPES + tuple(_DEPRECATED_REPORT_TYPE_ALIASES)
 
+# HOW LONG A REPORT COUNTS FOR — two answers, by whether anybody stands
+# behind it. The predicates live in api_public.py and api_h3.py (the two
+# renderings of the signal); this is the statement of the rule they implement.
+#
+#   * ANONYMOUS — and every `negative_reports` map-pin row, which has no
+#     account column at all — counts for 24 hours, in the vehicle's h3_10 cell
+#     at report time. Nobody's name is on it, so it ages out on a clock.
+#   * SIGNED IN counts until the vehicle MOVES or comes back at a FULL CHARGE.
+#     A rider who put their account behind "this one does not work" is making
+#     an accountable claim, and the useful question about it is not "how long
+#     ago?" but "has anything happened since?" — a move past the ingest's
+#     stationary threshold, or a battery back at 100%, both mean somebody
+#     dealt with the vehicle. Neither is time.
+#
+# The consequence worth naming: a signed-in report on a scooter nobody touches
+# holds indefinitely, which is the point. A scooter nobody has repaired, moved
+# or charged in a week IS still broken, and the old 24-hour expiry was telling
+# riders otherwise every morning.
+
 # Report types that must NOT drive has_negative_report / reliability_tier.
 # Single source of truth for the exclusion applied in the /devices/current
 # and /h3 aggregate queries. A scooter blocking a sidewalk can still be a

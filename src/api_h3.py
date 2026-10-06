@@ -45,6 +45,7 @@ from .dwell_stats import stats_for_cycle
 from .pg import connection
 from .quality import (
     compute_battery_percent,
+    full_charge_range_meters,
     compute_quality_designation,
     compute_reliability_tier,
     recent_rentals_no_go,
@@ -125,13 +126,37 @@ def h3_aggregates(
                              AND dr.reported_at > %(snap)s - INTERVAL '24 hours'
                              AND dr.reported_at <= %(snap)s
                              AND """ + reliability_report_type_sql("dr") + """
+                       ) OR EXISTS (
+                           -- The signed-in rule, mirrored from
+                           -- api_public.py's /devices/current. It MUST be
+                           -- mirrored: this aggregate and that endpoint are
+                           -- two renderings of one signal, and a rider who
+                           -- sees a cell shaded high-risk and then taps the
+                           -- scooter inside it is owed the same answer twice.
+                           --
+                           -- No 24h window and no cell scoping, for the
+                           -- reasons that comment gives; it clears when the
+                           -- vehicle moves or comes back charged.
+                           SELECT 1 FROM device_reports dr
+                           WHERE dr.vehicle_identifier = r.vehicle_identifier
+                             AND dr.account_id IS NOT NULL
+                             AND dr.reported_at <= %(snap)s
+                             AND """ + reliability_report_type_sql("dr") + """
+                             AND (ds.first_observed_at_location IS NULL
+                                  OR ds.first_observed_at_location <= dr.reported_at)
+                             AND (r.current_range_meters IS NULL
+                                  OR r.current_range_meters < %(full)s)
                        )) AS has_negative_report
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
                 WHERE r.cycle_id = %(cycle)s
                   AND r.spatial_status = 'denver_core'
                 """,
-                {"cycle": cycle_id, "snap": snapshot_time},
+                {
+                    "cycle": cycle_id,
+                    "snap": snapshot_time,
+                    "full": full_charge_range_meters(),
+                },
             )
             device_rows = cur.fetchall()
 
