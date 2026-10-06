@@ -8,11 +8,15 @@ Owner, 2026-10-06. One award per receipt (the highest tier it reaches), once per
 
 | Tier | Condition | Points |
 |---|---|---|
+| `submitted_unmatched` | A real, readable receipt the rider took the trouble to submit, which we **cannot tie to any feed ride**. This is the effort award. | **6** |
 | `valid_matched` | Valid receipt (numbers match its screenshot), correlated to a feed ride, ride **not** in an Equity Area | **10** |
 | `valid_equity` | Same, ride starts or ends in an Equity Area, **no** price discrepancy (charged correctly) | **20** |
 | `proven` | Feed-backed, proven failure to charge the appropriate rate, with readable plan evidence | **50** |
 
-100 was too much next to the existing values (dibs stand-down 300/50, QR scan 100, referral 100). A receipt that is declined (not rate-checkable) or not matched earns nothing.
+100 was too much next to the existing values (dibs stand-down 300/50, referral 100).
+
+- A receipt that is **declined** (not rate-checkable: missing the plate, minutes or a cost) earns nothing and is not retained.
+- The 6-point effort award needs the screenshot to read as a Veo receipt whose numbers agree with the form. It is capped at **3 per account per day**, because it is the one tier a fabricated receipt could reach.
 - Original wording of the proven tier, kept for the record: corroborated by a ride in our history. Owner's original wording: same scooter ID, start and end points within 100 m. Since receipts carry no location, this becomes: the same scooter observed in the feed starting and ending at the receipt's times (±4 min), with the observed points supplying the location.
 
 ## The constraint that shapes everything (owner, 2026-10-06)
@@ -230,6 +234,7 @@ With the feed 2–6 minutes behind, nobody will sit and watch a spinner. Submitt
 | Proven rate error, +50 | Feed-backed, and the charged rate is not the one owed. |
 | Equity Area ride, charged correctly, +20 | Matched, in an Equity Area, no discrepancy. |
 | Valid, +10 | Matched to a feed ride outside any Equity Area. |
+| Thanks, +6 | A real receipt we could not tie to a feed ride. |
 | Not matched | With the reason: plate never seen, no ride of that length that day, or before feed history. |
 | Rejected | The image contradicts the typed numbers, or the plan evidence is missing or unreadable. |
 
@@ -307,7 +312,7 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 ## Defaults chosen (say if any should change)
 
 1. **Gate:** scooter code + start and end times + a cost. Anything less is declined and not retained. Equity eligibility comes from the feed match.
-2. **Points:** 10 valid and matched; 20 matched in an Equity Area with no discrepancy; 50 proven. Highest tier only, one award per ride.
+2. **Points:** 6 submitted but unmatched; 10 valid and matched; 20 matched in an Equity Area with no discrepancy; 50 proven. Highest tier only, one award per ride.
 3. **Matching:** scooter code plus the receipt's start and end times, ±4 min against feed history. The location comes from the feed, because the receipt has none.
 4. **Points settle automatically** when the API verifies a receipt (Phase 3, owner's direction). Only `uncertain` reports wait for a human, after a short shadow-mode start.
 
