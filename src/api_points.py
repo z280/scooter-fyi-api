@@ -98,7 +98,8 @@ def points_schedule() -> dict[str, dict[str, int]]:
     """
     p = points_module
     schedule: dict[str, dict[str, int]] = {
-        "qr_scan": {"points": p.POINTS_QR_SCAN},
+        # qr_scan is not listed: retired 2026-10-06 with Keep a Scooter, and
+        # its endpoint is no longer mounted. Its ledger rows remain valid.
         "gbfs_trip_validated": {"points": p.POINTS_GBFS_TRIP_VALIDATED},
         # Per waypoint uploaded, credited once at ride end as
         # POINTS_PER_WAYPOINT * count — hence a flat per-unit value and no

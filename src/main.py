@@ -33,7 +33,6 @@ from .api_meta import router as meta_router
 from .api_points import router as points_router
 from .api_favorites import router as favorites_router
 from .api_preferences import router as preferences_router
-from .api_qr import router as qr_router
 from .api_rides import router as rides_router
 from .api_ride_routes import router as ride_routes_router
 from .api_ride_screenshots import router as ride_screenshots_router
@@ -136,7 +135,10 @@ app.include_router(device_recommendations_router)
 app.include_router(device_photos_router)
 app.include_router(device_features_router)
 app.include_router(dibs_router)
-app.include_router(qr_router)
+# POST /api/v1/devices/qr-scan is deliberately NOT mounted (retired
+# 2026-10-06 with Keep a Scooter). It paid 100 points per vehicle for a
+# "scan" that only proved the caller knew the plate, and plates are public
+# in Veo's own feed, so it could be scripted across the fleet.
 app.include_router(ride_screenshots_router)
 app.include_router(ride_surveys_router)
 app.include_router(route_feedback_router)
@@ -183,7 +185,6 @@ def root():
             "/api/v1/profile/ride-usuals/{name}",
             "/api/v1/profile/ride-specs",
             "/api/v1/profile/ride-specs/{name}",
-            "/api/v1/profile/favorite-devices",
             "/api/v1/profile/favorite-devices/{vehicle_identifier}",
             "/api/v1/emoji-nouns",
             "/api/v1/emoji-nouns/search?q=…",
@@ -212,7 +213,6 @@ def root():
             "/api/v1/points/schedule",
             "/api/v1/devices/{vehicle_identifier}/recommend",
             "/api/v1/devices/{vehicle_identifier}/photos",
-            "/api/v1/devices/qr-scan",
             "/api/v1/photos/{photo_id}/reports",
             "/api/v1/photos/mine",
             "/api/v1/meta/privacy",

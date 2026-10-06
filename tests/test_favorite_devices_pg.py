@@ -149,6 +149,10 @@ def _client(pg_conn, account_id: int) -> TestClient:
     )
     app = FastAPI()
     app.include_router(api_favorites.router)
+    # Retired 2026-10-06 and not mounted by src/main.py (see
+    # tests/test_retired_routes.py); mounted here so the code that remains
+    # keeps its tests while it exists.
+    app.include_router(api_favorites._retired)
     app.dependency_overrides[require_session] = lambda: user
     return TestClient(app)
 
