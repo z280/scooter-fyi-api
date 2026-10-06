@@ -437,6 +437,7 @@ def submit_ride_survey(
                 award = credit_nav_qualitative_feedback(
                     cur, account_id=user.account_id, vehicle_identifier=vehicle_identifier,
                     lat=start_lat, lng=start_lon, ride_id=str(rid),
+                    text_length=len(payload.nav_qualitative.strip()),
                 )
                 if award is not None:
                     points_awarded.append({"action": award["action"], "points": award["points"]})

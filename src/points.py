@@ -63,10 +63,7 @@ POINTS_GBFS_TRIP_VALIDATED = 20
 # its own thing, and it is worth the whole cap on its own by design.
 POINTS_QR_SCAN = 100
 
-# TODO(needs-user-input): the source spec gave no point value for
-# "complete missing profile information" (item 10's action list). This
-# placeholder is a GUESS and MUST be confirmed or replaced before this
-# ships — search this constant name before launch.
+# Confirmed by the owner 2026-10-06 (the points rationalisation): 10.
 POINTS_PROFILE_COMPLETION = 10
 
 # --- Ride Mode awards (PLAN_RIDE_MODE_API.md phase A2; values locked by
@@ -94,6 +91,14 @@ POINTS_BATTERY_CONTRIBUTION_BASE = 8
 POINTS_BATTERY_CONTRIBUTION_PER_STEP = 2
 POINTS_NAV_ROUTE_FEEDBACK = 4
 POINTS_NAV_QUALITATIVE = 6      # even-points rule: owner corrected 5 -> 6
+# Owner, 2026-10-06 (points rationalisation): "really good qualitative
+# feedback is worth more than saying yes it was fine". A real explanation,
+# at least NAV_QUALITATIVE_DETAILED_MIN_CHARS of it, earns the detailed
+# tier; a short note still earns the base 6 (from the caller's existing
+# 20-character floor). Length is the only machine-checkable proxy for effort,
+# so that is what this measures; no content heuristic.
+POINTS_NAV_QUALITATIVE_DETAILED = 12
+NAV_QUALITATIVE_DETAILED_MIN_CHARS = 60
 POINTS_NAV_DISTANCE_PER_STEP = 2
 POINTS_RIDE_SURVEY = 4
 
@@ -161,7 +166,10 @@ FEATURE_POINT_ACTIONS: tuple[str, ...] = tuple(
 # accepts at most MAX_PHOTOS_PER_DEVICE (3) visible photos across all users,
 # so a vehicle can yield at most 3 × this value however many riders try, and
 # the upload endpoint's 20/hour per-account limit bounds the rest.
-POINTS_DEVICE_PHOTO = 6
+# Raised 6 -> 10 by the owner 2026-10-06 (points rationalisation): camera,
+# framing and an upload is more effort than a survey tap, a little less
+# than a minute-long feature inspection (12).
+POINTS_DEVICE_PHOTO = 10
 
 # Step sizes for the two distance formulas above. Canonical unit is
 # KILOMETRES because that is the unit the rider-facing copy and
@@ -752,16 +760,18 @@ def credit_nav_route_feedback(
 
 def credit_nav_qualitative_feedback(
     cur, *, account_id: int, vehicle_identifier: str | None,
-    lat: float, lng: float, ride_id: str,
+    lat: float, lng: float, ride_id: str, text_length: int = 0,
 ) -> dict[str, Any] | None:
-    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_NAV_QUALITATIVE` (6)
-    for free-text navigation feedback. The CALLER checks
-    `len(nav_qualitative.strip()) >= 20` before calling — "meaningful" is
-    not machine-checkable and no content heuristic is attempted here or
-    upstream."""
+    """PLAN_RIDE_MODE_API.md phase A3, tiered 2026-10-06: free-text
+    navigation feedback earns `POINTS_NAV_QUALITATIVE` (6), or
+    `POINTS_NAV_QUALITATIVE_DETAILED` (12) when `text_length` (stripped) is
+    at least NAV_QUALITATIVE_DETAILED_MIN_CHARS. The CALLER still checks
+    the 20-character floor before calling — "meaningful" is not
+    machine-checkable and no content heuristic is attempted."""
+    detailed = text_length >= NAV_QUALITATIVE_DETAILED_MIN_CHARS
     return credit_points(
         cur, account_id=account_id, action="nav_qualitative_feedback",
-        points=POINTS_NAV_QUALITATIVE,
+        points=POINTS_NAV_QUALITATIVE_DETAILED if detailed else POINTS_NAV_QUALITATIVE,
         lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
         source_table="tracked_rides", source_id=str(ride_id),
     )
