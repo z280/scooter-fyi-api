@@ -107,7 +107,7 @@ Two consequences:
 - cost before tax ($), cost with tax ($);
 - start and end date/time (defaulting to now);
 - **scooter code** as printed on the receipt: typed, or "Scan QR" (reuses qr-scan) if the rider is still at the scooter. Required.
-- *No location fields.* The receipt has none, and the ride's points come from the feed match (Phase 2).
+- **approximate start and end pins on the map** (owner, 2026-10-06), placed with map-pick and optional. The receipt has no location, so these are the rider's own independent evidence: they break ties between candidate rides, and pins within 100 m of the observed points qualify a receipt for the 100-point tier. The feed's observed points remain what establishes Equity Area eligibility.
 - receipt screenshot.
 
 If the rider is signed out, the form shows "Sign in to send a receipt" (the endpoint requires a session, so the evidence has provenance).
@@ -116,7 +116,8 @@ If the rider is signed out, the form shows "Sign in to send a receipt" (the endp
 
 - `trip_minutes`, `subtotal_cents`, `total_cents`, `ride_started_at`;
 - `vehicle_plate` (the code as entered, validated `^\d{7,10}$` after stripping spaces) and `vehicle_identifier` (HMAC of it, computed server-side; the only form that leaves the admin surface);
-- `matched_start_lat/lng`, `matched_end_lat/lng`, filled from the feed match, not from the rider;
+- `pin_start_lat/lng`, `pin_end_lat/lng` (the rider's approximate pins; rounded to 3 decimals anywhere public);
+- `matched_start_lat/lng`, `matched_end_lat/lng`, filled from the feed match;
 - `region_name`, `zone_version = 'equity'`;
 - `review_status`, `match_status`, `matched_trip_event_id`;
 - `expected_cents`, `rate_error_cents`.
@@ -152,7 +153,22 @@ Where the ride happened is then established by the feed match. Without all three
   - `ambiguous`: more than one candidate;
   - `none`;
   - `unknown_vehicle`.
-- **Where it runs:** a scheduled job (`match_discount_reports`), not the request path.
+- **Where it runs: in the request, in real time** (measured 2026-10-06: the plate + date match query takes 36–54 ms warm). If the ride is too recent to be in the feed, the report is stored as `match_status = waiting`, and a per-cycle job (`match_discount_reports`) retries it after every ingest until it resolves or 30 min pass.
+- **Feed freshness:** cycles run every 120 s (p95 240 s), so a finished ride is matchable **2–6 min after it ends.**
+- **Rider pins:**
+  - **Tie-break:** among candidates, keep the ride whose observed from/to are nearest the pins.
+  - **100-point tier:** both pins within 100 m of the observed points, plus the plate, plus duration ±2 min.
+
+### Real-time UX (Phase 2)
+
+On submit, the form shows one of four result cards:
+
+1. **Matched:** "Your 16-min ride on #1018354, about 3:16 → 3:32 PM, ended in Equity Area 003. Charged $5.00; the equity rate is $3.08." Points are shown at once (as *pending* during shadow mode).
+2. **Ride too recent:** "Rides show up about 5 minutes after they end, so we're watching for yours." The card updates live: it polls `GET /api/v1/reports/discount/{id}` every 30 s while open, and the API re-matches each cycle. A rider who leaves finds the result in their account under "My receipts".
+3. **More than one ride fits:** the pins usually settle it automatically. Otherwise: "Did your ride start around **2:40 PM** or **6:18 PM**?" (times only; see privacy below).
+4. **No match, with the reason:** plate never seen (typo?), no ride of that length on that date, or the ride is before feed history (2026-05-31).
+
+**Privacy.** The other rides on that scooter that day are strangers' trips. Candidate choices never show routes or places, only start times rounded to 5 min. The matched ride's route is shown only after the rider confirms it and their pins agree with it.
 - **Known limits:**
   - **Failed starts:** an in-place rental leaves no `trip_events` row. That is now counted as a failed start (sql/087), so a receipt for one matches on the start time plus the in-place release instead.
   - **Missing scooters:** vehicles that drop out of the feed mid-ride (`departure_reason = 'absent'`) match on whichever end was observed, so `partial`.
