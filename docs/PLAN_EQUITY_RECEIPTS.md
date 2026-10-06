@@ -15,6 +15,46 @@ Owner's spec (2026-10-06): trip minutes (duration), cost before tax, cost with t
 - **History is deep enough:** `device_history` departures since 2026-05-31 and `trip_events` since 2026-07-05, with no pruning. A receipt from weeks ago is still matchable.
 - **Precision:** the feed is sampled every 2 minutes, so observed rental start and end are known to about ±2 min.
 
+## What real receipts look like (owner's samples, 2026-10-06)
+
+Six receipts and one Trip summary, from the Veo app:
+
+**Receipt view:**
+- `Ride #<plate> (<N> min)` with the Charge;
+- a Discount line, sometimes itemised, e.g. "veoplus Premium";
+- Subtotal, then "Taxes & Fees" (older receipts say "Tax");
+- Total paid, Charge date (**date only**), Payment method.
+
+There is **no time of day and no location.**
+
+**Trip summary view:** total paid, savings, distance, minutes and **start date and time**, but **no plate.**
+
+The prices follow one pattern:
+
+- Charge = $1 + $0.39/min (every sample).
+- After Veo's discount: $1 + $0.25/min (Sep 2026), never the equity $1 + $0.13/min.
+- Taxes & Fees came to about 9.2–9.5% of the subtotal, against a config rate of 9.15%. The arithmetic check needs a tolerance, or the rate needs revisiting.
+
+Matched against feed history by plate + date + duration (±1 min):
+
+| Receipt | Match | Equity | Charged | Contract equity price |
+|---|---|---|---|---|
+| #1018354, 16 min, Sep 29 | unique, 15:16→15:32 | ends EQ_003 | $5.00 | $3.08 |
+| #1025640, 21 min, Sep 29 | unique, 16:00→16:20 | ends EQ_003 | $6.25 | $3.73 |
+| #1021645, 4 min, Sep 29 | unique, 16:34→16:38 | starts EQ_003 | $2.00 | $1.52 |
+| #1027102, 14 min, Sep 27 | **ambiguous**: two 14-min rides that day | neither | $4.50 | n/a |
+| #1025894, 14 min, May 26 | before feed history (starts 2026-05-31) | — | $3.50 | — |
+| Trip summary, Sep 5 01:52, 7 min, 1.52 mi | **28 candidates** fleet-wide (no plate) | — | — | — |
+
+What follows for the design:
+
+1. **Matching is plate + charge date + duration.** The feed resolved durations within one cycle (16→16, 21→20, 4→4).
+2. **When more than one ride fits**, an optional "about what time did you start?" field resolves it, and so does a Trip summary screenshot, which carries the start time. The form offers both.
+3. **The plate is mandatory.** Without it, a time and distance match 28 rides.
+4. **Rides before 2026-05-31** are told plainly that they are before our history.
+5. **The gate** becomes plate + minutes + subtotal/total, all of which are on every receipt. Start and end times are optional, for disambiguation only.
+6. **Gold set seed.** These six receipts are the first gold-set and bake-off cases, *if the owner agrees to keep them as test fixtures*.
+
 ## What exists already
 
 | Piece | Where | State |
@@ -50,9 +90,11 @@ If the rider is signed out, the form shows "Sign in to send a receipt" (the endp
 
 **The "useful data" gate (server-side, before anything is stored).** A rate error can only be shown with:
 
-- (a) a scooter code,
-- (b) start and end times (trip minutes can be derived from them), and
+- (a) the scooter code (plate),
+- (b) trip minutes, and
 - (c) a pre-tax or with-tax cost.
+
+All three are on every Veo receipt. Start and end times are optional; the receipt has none, so they are used only to break ties.
 
 Where the ride happened is then established by the feed match. Without all three, the API returns `422 not_rate_checkable`, keeps no row and no image (the upload is rejected before the R2 PUT), and the form says: *"Thanks for taking part. We can't check a rate from this, so we haven't kept it."*
 
@@ -69,7 +111,7 @@ Where the ride happened is then established by the feed match. Without all three
 ## Phase 2: ride matching from feed history (backend)
 
 - **Vehicle:** match on `vehicle_plate` = the receipt's code. If that plate has never been seen in the feed, the result is `match_status = unknown_vehicle`, which usually means a typo or a misread code.
-- **Ride:** that vehicle's rental whose observed start (`device_history.departed_at` of the stop it left) is within ±4 min of the receipt's start, and whose release (`trip_events.detected_at`) is within ±4 min of the receipt's end. ±4 min is two feed cycles plus clock skew.
+- **Ride:** that plate's rentals on the charge date (Denver local) whose observed duration, from `device_history.departed_at` to `trip_events.detected_at`, is within ±2 min of the receipt's minutes. If the rider gave an approximate start time or a Trip summary, keep the candidates within ±10 min of it.
 - **Where:** the matched ride's `from` and `to` points are the start and end. **Equity eligibility** is whether either point lies in an official Equity Area. A ride that started *and* ended outside every area is not owed the discount: the API records `not_equity_ride` and the rider is told why.
 - **`match_status`:**
   - `corroborated`: exactly one ride, both times within tolerance;
