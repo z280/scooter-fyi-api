@@ -38,14 +38,26 @@ def test_distance_at_denver_latitude_for_east_displacement():
     assert math.isclose(d, expected, rel_tol=1e-3)
 
 
-def test_threshold_default_is_16m():
-    # The config default — confirming the configured value matches the
-    # contract documented in the schema.
-    assert load().device_tracking.stationary_threshold_meters == 16.0
+def test_threshold_is_the_standardised_25m():
+    """The one ring that was standardised, and the one that must not drift.
+
+    16 m until 2026-10-06. It is what `rentals_no_go` counts against and what
+    the dwell clock resets on, and sql/072's validation — the 9.1% headline —
+    was computed at 25 m while the ingest counted at 16 m. The two now agree.
+
+    This is deliberately NOT the same number as `IN_PLACE_RADIUS_M` or
+    `JITTER_RADIUS_M` (50 m), which answer a different question and carry
+    their own measured basis; `device_state.py` says why at length.
+    """
+    assert load().device_tracking.stationary_threshold_meters == 25.0
 
 
 def test_distance_just_under_and_over_threshold():
-    """A scooter 15.9 m away is 'stationary'; 16.1 m away is 'moved'."""
+    """Just inside the threshold is 'stationary'; just outside it is 'moved'.
+
+    Reads the configured value rather than restating it, so the standardisation
+    only has to be changed in one place.
+    """
     threshold = load().device_tracking.stationary_threshold_meters
     for meters, expected_moved in [(threshold - 0.1, False), (threshold + 0.1, True)]:
         delta_lat = meters / 111_320.0
