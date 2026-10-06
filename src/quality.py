@@ -420,6 +420,32 @@ def _soc_lut() -> tuple[int, ...]:
     return tuple(json.loads(path.read_text())["values"])
 
 
+def full_charge_range_meters() -> int:
+    """The `current_range_meters` a vehicle reads at 100%.
+
+    `compute_battery_percent` is a Python lookup, so SQL cannot ask "is this
+    one charged?" without a number. This is that number, taken from the SAME
+    table the percentage comes from rather than restated — a second constant
+    would be two definitions of 100% that drift the first time the vendor's
+    table does.
+
+    Used by the reliability signal: a signed-in rider's report of a broken
+    scooter holds until the vehicle moves or comes back at a full charge, and
+    "full charge" has to mean exactly what the battery readout means.
+
+    THE TABLE'S TOP VALUE, AND NOT THE LOWEST ONE THAT DISPLAYS AS 100%. Those
+    differ: a range outside the table falls through to linear scaling, so
+    45,292 m (one metre under the top) rounds to 100% on the readout while the
+    table itself only calls 45,293 m full. This returns the stricter number on
+    purpose, because the two mistakes are not equal — holding the flag on a
+    scooter that was serviced costs a rider one cautious tier for a few
+    minutes, where clearing an accountable report on a vehicle nobody touched
+    throws away the signal entirely. A report that outlives the fleet's
+    response is the behaviour being bought here; erring loose would undo it.
+    """
+    return _soc_lut()[-1]
+
+
 # Values seen outside the LUT (vendor table drift); warn once per value.
 _unknown_range_values: set[int] = set()
 

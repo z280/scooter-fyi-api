@@ -33,6 +33,7 @@ from .quality import (
     dwell_percentile_wire,
     smart_ride_grade,
     compute_battery_percent,
+    full_charge_range_meters,
     compute_quality_designation,
     compute_reliability_tier,
     recent_rentals_no_go,
@@ -451,12 +452,32 @@ def _devices_current_impl(
                 )
                 params.extend([min_lon, max_lon, min_lat, max_lat])
 
-            # has_negative_report: true iff there's a report against THIS
-            # vehicle_identifier in the SAME h3_10 cell, ≤24h old — from
-            # either report pipeline (map-pin negative_reports or the §3.1
-            # rider device_reports). The flag goes "stale" (false here) the
-            # moment the scooter moves to a different h3_10, even though the
-            # report rows remain queryable from the private endpoints.
+            # has_negative_report — TWO RULES, because two kinds of report
+            # are worth different amounts.
+            #
+            # ANONYMOUS (and every map-pin `negative_reports` row, which has no
+            # account column at all): the original rule. A report against THIS
+            # vehicle in the SAME h3_10 cell, ≤24h old. Nobody stands behind it,
+            # so it ages out on a clock and goes stale the moment the scooter
+            # moves to another cell.
+            #
+            # SIGNED IN: holds until the scooter MOVES or comes back at a FULL
+            # CHARGE. A rider who put their account behind "this one does not
+            # work" is making an accountable claim, and 24 hours is an arbitrary
+            # answer to it — the honest question is not "how long ago?" but "has
+            # anything happened since?". Two things count as something happening,
+            # and both mean somebody dealt with the vehicle:
+            #
+            #   * It moved. `device_state.first_observed_at_location` is reset on
+            #     any move past the ingest's stationary threshold, so comparing
+            #     it to the report time catches a move WITHIN a cell too — which
+            #     the 24h rule's h3_10 scoping never did.
+            #   * Its battery came back to 100%. A swapped or charged battery is
+            #     a service visit; a scooter nobody has touched does not refill.
+            #
+            # The flag therefore outlives 24 hours for an accountable report and
+            # clears the instant the fleet actually responds, which is the
+            # behaviour both halves of that trade deserve.
             sql = (
                 "SELECT r.device_id, r.form_factor, r.latitude, r.longitude, r.spatial_status, "
                 "       r.vehicle_identifier, r.is_disabled, r.is_reserved, "
@@ -479,6 +500,26 @@ def _devices_current_impl(
                 # Parking complaints (improperly_parked) are excluded here:
                 # they feed the compliance aggregate, not ride reliability.
                 f"             AND {reliability_report_type_sql('dr')} "
+                "       ) OR EXISTS ("
+                # The accountable report. Deliberately NOT scoped to h3_10 and
+                # deliberately not time-boxed: `first_observed_at_location`
+                # already answers "has it moved?" more precisely than a cell
+                # comparison can, and a report that has not been answered does
+                # not become untrue at the 24-hour mark.
+                "           SELECT 1 FROM device_reports dr "
+                "           WHERE dr.vehicle_identifier = r.vehicle_identifier "
+                "             AND dr.account_id IS NOT NULL "
+                f"             AND {reliability_report_type_sql('dr')} "
+                # Not moved since the report. NULL here means device_state has
+                # no row for this vehicle, which is not evidence of a move — so
+                # the flag holds, which is the safe direction for a claim that
+                # the scooter does not work.
+                "             AND (ds.first_observed_at_location IS NULL "
+                "                  OR ds.first_observed_at_location <= dr.reported_at) "
+                # ...and not charged back to full. A NULL range (a pedal bike,
+                # or a feed that dropped the field) likewise clears nothing.
+                "             AND (r.current_range_meters IS NULL "
+                "                  OR r.current_range_meters < %s) "
                 "       )) AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
@@ -505,7 +546,13 @@ def _devices_current_impl(
                 f"WHERE {' AND '.join(where)} "
                 "ORDER BY r.device_id"
             )
-            cur.execute(sql, params)
+            # PARAMETER ORDER, and it is load-bearing. psycopg binds `%s` by
+            # POSITION, and the signed-in reliability clause's placeholder is in
+            # the SELECT list — which the server reads before the WHERE. So the
+            # full-charge threshold goes FIRST, ahead of every filter param
+            # built above. Appending it instead silently shifts every filter by
+            # one and the endpoint starts answering a different question.
+            cur.execute(sql, [full_charge_range_meters(), *params])
             rows = cur.fetchall()
 
     # Peer-relative dwell stats are computed over the FULL denver_core
