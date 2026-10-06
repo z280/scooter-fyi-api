@@ -27,6 +27,7 @@ from .equity_groups import (
     compliance_pass_column,
     unmeasurable_reason_column,
 )
+from .fleet_outcomes import summarize as fleet_outcomes_summary
 from .pg import connection
 from . import battery_model, vehicle_identity
 from .quality import (
@@ -866,6 +867,46 @@ def equity_estimate(
         "percent_all_bikes": _pct(total_bikes, snap.get("total_bike_denver")),
         "percent_all_scooters": _pct(total_scooters, snap.get("total_scooter_denver")),
     }
+
+
+# ---------------------------------------------------------------------------
+# Rider stats: did the rental go anywhere?
+# ---------------------------------------------------------------------------
+@router.get("/api/v1/fleet/outcomes")
+def fleet_outcomes(request: Request, response: Response) -> Any:
+    """Lifetime share of rentals that never left the kerb, fleet and by model.
+
+    The headline number for the stats drawer (the frontend's
+    `docs/ANALYTICS_PLAN.md` tier 1): built entirely from counters sql/072
+    already maintains, so it needs no new storage and no backfill.
+
+    Three things in the payload are not decoration and the client renders all
+    of them:
+
+    * `window: "lifetime"` — these counters have never reset, so this is not
+      "today". A rate whose window is unstated gets read as "now".
+    * `radius_meters` — ANALYTICS_PLAN §0.2 records that this codebase holds
+      three different ideas of how far is "moved" (16 m, 25 m, 50 m). Until
+      that is settled, the number says which circle it was counted at rather
+      than leaving a reader to guess.
+    * `min_rentals_for_rate` with a null `no_go_rate` — a model under the
+      floor keeps its counts and loses its percentage, so the client can say
+      "not enough rides yet" instead of the model vanishing from the list.
+
+    Degrades to zeros rather than 500ing: an empty stats drawer is a worse
+    page, a failed request is a broken one.
+    """
+    data = fleet_outcomes_summary()
+
+    # Cheap and monotonic: the counters only ever climb, so the rental total
+    # is a sufficient version. No comma — _if_none_match_hit splits on them.
+    etag = f'W/"fleet-outcomes:{data["rentals"]}:{data["no_gos"]}"'
+    cache = "public, max-age=300"
+    if _if_none_match_hit(request, etag):
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": cache})
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = cache
+    return data
 
 
 # ---------------------------------------------------------------------------
