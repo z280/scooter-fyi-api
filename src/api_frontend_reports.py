@@ -311,7 +311,10 @@ def submit_device_report(
 # ---------------------------------------------------------------------------
 class DiscountReportIn(BaseModel):
     ride_ended_at: datetime
-    zone_version: str = Field(..., pattern="^(v1|v2)$")
+    # 'equity' = the city's official Equity Area map (sql/088); v1/v2 are the
+    # retired estimate layers, still accepted from old clients.
+    zone_version: str = Field(..., pattern="^(v1|v2|equity)$")
+    region_name: str | None = Field(default=None, pattern=r"^EQ_\d{3}$")
     end_lat: float | None = Field(default=None, ge=-90, le=90)
     end_lng: float | None = Field(default=None, ge=-180, le=180)
     amount_charged_cents: int | None = Field(default=None, ge=0, le=100_000)
@@ -325,7 +328,8 @@ async def _parse_discount_body(request: Request) -> tuple[DiscountReportIn, byte
         form = await request.form()
         fields = {
             k: v for k in
-            ("ride_ended_at", "zone_version", "end_lat", "end_lng", "amount_charged_cents")
+            ("ride_ended_at", "zone_version", "region_name", "end_lat", "end_lng",
+             "amount_charged_cents")
             if (v := form.get(k)) not in (None, "")
         }
         try:
@@ -389,13 +393,14 @@ async def submit_discount_report(
                 cur.execute(
                     """
                     INSERT INTO discount_reports (
-                        account_id, ride_ended_at, zone_version, end_lat, end_lng,
-                        amount_charged_cents, receipt_r2_key,
+                        account_id, ride_ended_at, zone_version, region_name,
+                        end_lat, end_lng, amount_charged_cents, receipt_r2_key,
                         reporter_ip, reporter_user_agent
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, created_at
                     """,
                     (user.account_id, payload.ride_ended_at, payload.zone_version,
+                     payload.region_name,
                      payload.end_lat, payload.end_lng, payload.amount_charged_cents,
                      receipt_key, ip, ua),
                 )
@@ -721,7 +726,7 @@ def reports_export_monthly(
             cur.execute(
                 """
                 SELECT created_at, ride_ended_at, zone_version, end_lat, end_lng,
-                       amount_charged_cents, receipt_r2_key IS NOT NULL
+                       amount_charged_cents, receipt_r2_key IS NOT NULL, region_name
                 FROM discount_reports
                 WHERE created_at >= %s AND created_at < %s
                 ORDER BY created_at
@@ -739,8 +744,11 @@ def reports_export_monthly(
     for reported_at, vid, rtype, lat, lng, authed in device_rows:
         w.writerow(["device", reported_at.isoformat(), vid, rtype,
                     lat, lng, "", str(bool(authed)).lower()])
-    for created_at, _ride_ended, zone, lat, lng, amount, has_receipt in discount_rows:
-        w.writerow(["discount", created_at.isoformat(), "", zone,
+    for created_at, _ride_ended, zone, lat, lng, amount, has_receipt, region in discount_rows:
+        # "equity:EQ_014" when the area is known (sql/088); same column, so
+        # the CSV's shape is unchanged for anyone already parsing it.
+        zone_cell = f"{zone}:{region}" if region else zone
+        w.writerow(["discount", created_at.isoformat(), "", zone_cell,
                     lat, lng, amount if amount is not None else "",
                     str(bool(has_receipt)).lower()])
 
