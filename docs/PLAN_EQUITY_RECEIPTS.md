@@ -34,7 +34,7 @@ The prices follow one pattern:
 
 - Charge = $1 + $0.39/min (every sample).
 - After Veo's discount: $1 + $0.25/min (Sep 2026), never the equity $1 + $0.13/min.
-- Taxes & Fees came to about 9.2–9.5% of the subtotal, against a config rate of 9.15%. The arithmetic check needs a tolerance, or the rate needs revisiting.
+- Taxes & Fees: every sample is exactly the legislated 9.15% **rounded up to the next cent** (see "Tax" above). It is not a different rate.
 
 Matched against feed history by plate + date + duration (±1 min):
 
@@ -88,6 +88,49 @@ Two consequences:
 **Social experiment.** The public aggregate counts `rate_signature` × declared plan by month (no identity), so "who else pays $1 + 25¢ while on Premium?" can be answered from data.
 
 **Matching uses the plan too, but only as a consistency check.** A receipt's Charge line is always the base price ($1 + 39¢/min in every sample), so the minutes are double-checked from the charge: minutes = (charge − $1) / $0.39. That catches a misread duration before it feeds the ride match.
+
+## Tax: know the legislated rate, validate strictly (owner, 2026-10-06)
+
+The question was whether Veo charges a tax that does not exist in law, and whether a rate change explains the May → September difference.
+
+**The legislated rate.** Denver's combined sales tax is **9.15%**: Colorado 2.90% + Denver 5.15% + RTD 1.00% + SCFD 0.10%.
+
+- In effect since **2025-01-01**, when Denver's own rate rose from 4.81% (ballot measure 2Q, Denver Health).
+- Before that it was 8.81%.
+- The 2026 rate is still 9.15% (Avalara, Quaderno and others; see sources).
+- `src/api_meta.py` already serves 9.15%, with this itemisation.
+
+**What the receipts show.** Solving each receipt's "Taxes & Fees" (or "Tax") against its subtotal:
+
+| Rounding rule | Rates fitting all 5 receipts (May–Sep) | Does 9.15% fit? |
+|---|---|---|
+| Round half up (nearest cent) | 9.29% only, which is not a legislated rate | no |
+| Round half to even | 9.29–9.30% | no |
+| **Always round up (ceiling)** | **9.15–9.20%** | **yes, all five** |
+
+- **No rate change between May and September.** All five receipts fit one rate.
+- **They fit the legislated 9.15% exactly, if Veo rounds the tax up to the next cent every time.** For example, $2.00 × 9.15% = 18.3¢ is charged as 19¢.
+- **4 of the 5 are 1¢ above nearest-cent rounding.** The $5.00 receipt (45.75¢ → 46¢) is the same either way.
+- **A flat fee hidden in "Taxes & Fees" does not fit.** It would add the same amount every time, but the $5.00 case has nothing extra.
+
+**The rounding rule (to verify against primary sources).** Colorado DOR guidance (March 2026, after the penny-production halt, and long-standing in GIL-09-016) is reported as: compute to three decimals and round **up only when the third digit is greater than four**, i.e. half up. Denver is a home-rule city that collects its own 5.15%, so its municipal code's rounding rule needs checking too. If both say half up, Veo's ceiling rounding over-collects up to 1¢ on most rides.
+
+**Validation per receipt** (strict, recorded as `tax_finding`):
+
+1. **Rate:** the legislated rate for the ride's date and jurisdiction, from a dated table (`tax_rates`: jurisdiction, components, effective from/to, source URL). Rides are sourced to Denver; a ride ending outside the city, e.g. Glendale, is flagged rather than guessed.
+2. **Compare** the receipt's tax with subtotal × rate under each rule:
+   - `tax_ok`: matches half up (the legal rule).
+   - `tax_rounded_up`: matches ceiling but not half up. Over-collection of 1¢; the amount is recorded.
+   - `tax_unexplained`: matches no legislated rate under any rule. The implied rate range and the excess are recorded, as a possible undisclosed tax or fee.
+3. **The label** is recorded ("Taxes & Fees" vs "Tax"). Older receipts say "Tax".
+
+**Reporting** (Phase 5) adds a tax section:
+
+- counts and totals of `tax_rounded_up` cents;
+- any `tax_unexplained` cases with their implied rates;
+- the legislated-rate table with sources.
+
+This is a separate finding from the Equity rate. It is addressed to the Colorado DOR and Denver Treasury rather than DOTI, and costs riders only cents each, but adds up across the fleet.
 
 ## What exists already
 
@@ -256,3 +299,10 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 2. **Points:** 50 for a proven, feed-backed rate failure; 10 for a valid but unproven submission (to confirm); one award per ride.
 3. **Matching:** scooter code plus the receipt's start and end times, ±4 min against feed history. The location comes from the feed, because the receipt has none.
 4. **Points settle automatically** when the API verifies a receipt (Phase 3, owner's direction). Only `uncertain` reports wait for a human, after a short shadow-mode start.
+
+## Sources (tax)
+
+- Avalara, Denver 2026 combined rate: https://www.avalara.com/us/en/taxrates/state-rates/colorado/cities/denver.html
+- Quaderno, Denver sales tax 2026: https://quaderno.io/guides/denver/sales-tax/
+- Colorado DOR rounding guidance, as reported: https://news.bloombergtax.com/daily-tax-report/colorado-dor-issues-guidance-on-rounding-sales-tax-post-penny-production-halt and https://www.salestaxinstitute.com/resources/colorado-announces-rounding-change-sales-tax-reporting
+- Colorado DOR GIL-09-016: https://tax.colorado.gov/sites/tax/files/documents/GIL-09-016.pdf (primary; blocked automated fetch, so verify by hand)
