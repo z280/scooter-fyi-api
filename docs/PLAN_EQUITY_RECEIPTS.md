@@ -37,7 +37,7 @@ The prices follow one pattern:
 
 Matched against feed history by plate + date + duration (±1 min):
 
-Prices at the time: Charged = after Veo's discount, under the owner's stacked Premium + Resident plan.
+Charged = the subtotal after Veo's discount line. On Sep 27/29 that is the plain Resident rate, $1 + 25¢; the stacking ended after 2026-09-10. On May 26 it is the stacked $0 + 25¢.
 
 | Receipt | Match | Equity | Charged | Contract equity price |
 |---|---|---|---|---|
@@ -59,7 +59,14 @@ What follows for the design:
 
 ## Rate plans: compare the receipt against the rider's own plan (owner, 2026-10-06)
 
-The owner's Sep 29 rides were **deliberate tests**, stopping inside the Equity Area. Veo has since told him that the $1 + 25¢/min he was being charged came from **stacking VeoPlus Premium with the Denver Resident Pass, which was never supposed to be possible.** Two consequences:
+The owner's Sep 29 rides were **deliberate tests**, stopping inside the Equity Area.
+
+Separately, Veo told him that for a period he had been **stacking VeoPlus Premium with the Denver Resident Pass**, which was never supposed to be possible. That gave free unlocks + 25¢/min. Veo removed the stacking after **2026-09-10**. So the samples hold both signatures:
+
+- **May 26 receipt (#1025894):** $3.50 for 14 min = **$0 + 25¢**, the stacked rate.
+- **Sep 27/29 receipts:** **$1 + 25¢**, a single plan (Resident), after the stacking was removed. The Sep 29 Equity Area rides were therefore charged the plain Resident rate instead of $1 + 13¢: `equity_not_applied`, with no stacking caveat.
+
+Two consequences:
 
 1. **The app keeps the stacked plan selectable.** `resident_plus` ("free unlocks + 25¢/min") stays in `RATE_PLANS`. Whether anyone else gets a stacked rate is itself worth learning (the owner's "social experiment").
 2. **A receipt is judged against the rider's own plan, not one fixed rate.** The form asks for the rate plan, pre-filled from the profile's `rate_plan` when signed in, with "Not sure" allowed. The analysis records three prices:
@@ -72,7 +79,7 @@ The owner's Sep 29 rides were **deliberate tests**, stopping inside the Equity A
 
 **`rate_finding`:**
 
-- `equity_not_applied`: the ride touched an Equity Area, the equity price was lower, and it was not charged. The Sep 29 rides land here: charged $1 + 25¢, owed $1 + 13¢, even with the stacking.
+- `equity_not_applied`: the ride touched an Equity Area, the equity price was lower, and it was not charged. The Sep 29 rides land here: charged Resident $1 + 25¢, owed $1 + 13¢.
 - `plan_mismatch`: charged differently from the declared plan, in either direction. A rider being *undercharged* (as with the stacking) is recorded too.
 - `matches_plan`.
 - `plan_unknown`: the rider was not sure. The signature is still recorded.
