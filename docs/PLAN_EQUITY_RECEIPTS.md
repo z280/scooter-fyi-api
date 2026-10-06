@@ -4,8 +4,15 @@
 
 Owner's spec (2026-10-06): trip minutes (duration), cost before tax, cost with tax, start date/time, end date/time, start and end points picked on the map, and a scooter ID entered by hand or from the QR code. The backend tries to align the claim with a trip. If none of the useful data is present, thank the rider and retain nothing. Points:
 
-- **50** (owner, revised 2026-10-06) for a **proven, feed-backed failure by Veo to charge the appropriate rate**. 100 was too much next to the existing values (dibs stand-down 300/50, QR scan 100, referral 100).
-- **10** for a valid submission whose numbers match its own screenshot but which does not prove a rate failure (to confirm with the owner).
+Owner, 2026-10-06. One award per receipt (the highest tier it reaches), once per matched ride:
+
+| Tier | Condition | Points |
+|---|---|---|
+| `valid_matched` | Valid receipt (numbers match its screenshot), correlated to a feed ride, ride **not** in an Equity Area | **10** |
+| `valid_equity` | Same, ride starts or ends in an Equity Area, **no** price discrepancy (charged correctly) | **20** |
+| `proven` | Feed-backed, proven failure to charge the appropriate rate, with readable plan evidence | **50** |
+
+100 was too much next to the existing values (dibs stand-down 300/50, QR scan 100, referral 100). A receipt that is declined (not rate-checkable) or not matched earns nothing.
 - Original wording of the proven tier, kept for the record: corroborated by a ride in our history. Owner's original wording: same scooter ID, start and end points within 100 m. Since receipts carry no location, this becomes: the same scooter observed in the feed starting and ending at the receipt's times (±4 min), with the observed points supplying the location.
 
 ## The constraint that shapes everything (owner, 2026-10-06)
@@ -221,7 +228,8 @@ With the feed 2–6 minutes behind, nobody will sit and watch a spinner. Submitt
 | Checking | Queued, or waiting for the ride to appear in the feed. It re-matches every cycle for up to 30 min, then once an hour for a day. |
 | Needs your help | More than one ride fits and the pins did not settle it: "Did it start around 2:40 PM or 6:18 PM?" (start times only). |
 | Proven rate error, +50 | Feed-backed, and the charged rate is not the one owed. |
-| Valid, +10 | Consistent with its screenshot, but no rate error proven. |
+| Equity Area ride, charged correctly, +20 | Matched, in an Equity Area, no discrepancy. |
+| Valid, +10 | Matched to a feed ride outside any Equity Area. |
 | Not matched | With the reason: plate never seen, no ride of that length that day, or before feed history. |
 | Rejected | The image contradicts the typed numbers, or the plan evidence is missing or unreadable. |
 
@@ -253,7 +261,10 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 
 **Decide (`analysis_status`):**
 
-- `verified`: checks 1–3 pass and the readers agree → **+10**, settled immediately. If the case is also **proven** (a corroborated feed match, `rate_finding` of `equity_not_applied` or an overcharging `plan_mismatch`, and readable plan evidence) → **+50** instead.
+- `verified`: checks 1–3 pass and the readers agree. With a corroborated feed match, the award is settled immediately at the highest tier reached:
+  - **+10**: outside any Equity Area;
+  - **+20**: in an Equity Area, charged correctly;
+  - **+50**: **proven**, i.e. `rate_finding` is `equity_not_applied` or an overcharging `plan_mismatch`, and the plan evidence is readable.
 - `uncertain`: a reader is missing or they disagree on a field → points stay `pending`, and the report goes to the human portal (Phase 3b).
 - `rejected`: the image contradicts the typed numbers → no points, and the rider is told which field did not match.
 
@@ -296,7 +307,7 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 ## Defaults chosen (say if any should change)
 
 1. **Gate:** scooter code + start and end times + a cost. Anything less is declined and not retained. Equity eligibility comes from the feed match.
-2. **Points:** 50 for a proven, feed-backed rate failure; 10 for a valid but unproven submission (to confirm); one award per ride.
+2. **Points:** 10 valid and matched; 20 matched in an Equity Area with no discrepancy; 50 proven. Highest tier only, one award per ride.
 3. **Matching:** scooter code plus the receipt's start and end times, ±4 min against feed history. The location comes from the feed, because the receipt has none.
 4. **Points settle automatically** when the API verifies a receipt (Phase 3, owner's direction). Only `uncertain` reports wait for a human, after a short shadow-mode start.
 
