@@ -2382,6 +2382,28 @@ majority *answer set* at all, but a clear 2/3 on every individual field.
 
 ### `POST /api/v1/reports/discount`
 
+**Equity receipt claims (sql/093, docs/PLAN_EQUITY_RECEIPTS.md Phase 1).** A `multipart/form-data` request carrying `vehicle_plate` (or any claim field) is a receipt claim:
+
+| Field | |
+|---|---|
+| `vehicle_plate` | required: the scooter code as printed, 7–10 digits (spaces ignored). Stored admin-only; public surfaces see only its HMAC `vehicle_identifier`. |
+| `trip_minutes` | required, 1–600 |
+| `subtotal_cents`, `total_cents` | at least one required; `total_cents ≥ subtotal_cents` |
+| `charge_date` | required, `YYYY-MM-DD` as printed (receipts carry no time of day) |
+| `receipt`, `plan_evidence` | required images, ≤ 10 MB each (EXIF-stripped, private bucket, 18-month retention). The plan screenshot is required because the contract applies the Equity Area rate whatever the plan. |
+| `approx_started_at` | optional ISO 8601; only breaks ties between same-length rides |
+| `pin_start_lat/lng`, `pin_end_lat/lng` | optional pairs; the rider's own evidence, never eligibility |
+| `declared_rate_plan` | `resident`, `resident_plus`, `visitor`, `visitor_plus`, `equity` (Access), or `unknown` (default) |
+
+Responses:
+- `200 {id, created_at, status: "received", receipt_stored, plan_evidence_stored}`.
+- `422 {detail: {error: "not_rate_checkable", missing: [...]}}` when the gate (plate + minutes + a cost + charge date) fails. **Nothing is kept**: no row, and no image is uploaded.
+- `422 invalid_field` names the malformed `fields`. `422 receipt_required` and `422 plan_evidence_required` mean an image is missing.
+- `413 image_too_large`, `429` rate limit (20 per account per day), `401` signed out.
+
+The equity price for the minutes, the rate signature (e.g. `$1 + 25c/min`) and the tax check (`tax_ok`, `tax_rounded_up` or `tax_unexplained` against the legislated rate) are recorded at submission. Nothing is judged and no points are awarded in Phase 1; ride matching (Phase 2) and analysis (Phase 3) follow. The legacy JSON shape below still works.
+
+
 Missed equity-discount evidence. **Bearer required** (evidence needs
 provenance), 20/day per account. Send JSON:
 

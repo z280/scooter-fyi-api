@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import h3
@@ -28,6 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 from . import geo
 from .accounts import SessionUser, optional_session, require_session
 from .client_ip import real_client_ip
+from .identity import hash_plate
 from .pg import connection
 from .points import credit_report_points
 from .ratelimit import enforce
@@ -350,6 +353,201 @@ async def _parse_discount_body(request: Request) -> tuple[DiscountReportIn, byte
     return payload, None
 
 
+# ---------------------------------------------------------------------------
+# Equity receipt claims (claim_version 2) — docs/PLAN_EQUITY_RECEIPTS.md
+# Phase 1. A Veo receipt has the plate, minutes, costs and a charge date, but
+# no location and no time of day; where the ride was comes from matching the
+# feed later (Phase 2). The gate runs BEFORE any image is stored, so a claim
+# that cannot show a rate error leaves nothing behind.
+# ---------------------------------------------------------------------------
+_CLAIM_MARKERS = ("vehicle_plate", "trip_minutes", "subtotal_cents", "total_cents", "charge_date")
+_DENVER = ZoneInfo("America/Denver")
+
+
+def _claim_error(status: int, error: str, **extra: Any) -> HTTPException:
+    return HTTPException(status, {"error": error, **extra})
+
+
+async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) -> dict[str, Any]:
+    from .api_meta import _configured_pricing, _tax_rate
+    from . import receipt_claims as rc
+
+    invalid: list[str] = []
+
+    def text(name: str) -> str | None:
+        v = form.get(name)
+        return v.strip() if isinstance(v, str) and v.strip() else None
+
+    def integer(name: str, lo: int, hi: int) -> int | None:
+        raw = text(name)
+        if raw is None:
+            return None
+        try:
+            v = int(raw)
+        except ValueError:
+            invalid.append(name)
+            return None
+        if not lo <= v <= hi:
+            invalid.append(name)
+            return None
+        return v
+
+    def coord(name: str, limit: float) -> float | None:
+        raw = text(name)
+        if raw is None:
+            return None
+        try:
+            v = float(raw)
+        except ValueError:
+            invalid.append(name)
+            return None
+        if not -limit <= v <= limit:
+            invalid.append(name)
+            return None
+        return v
+
+    raw_plate = text("vehicle_plate")
+    plate = rc.normalize_plate(raw_plate)
+    if raw_plate is not None and plate is None:
+        invalid.append("vehicle_plate")
+    minutes = integer("trip_minutes", 1, rc.MAX_TRIP_MINUTES)
+    subtotal = integer("subtotal_cents", 0, 100_000)
+    total = integer("total_cents", 0, 100_000)
+    if subtotal is not None and total is not None and total < subtotal:
+        invalid.append("total_cents")
+
+    charge_date: date | None = None
+    if (raw := text("charge_date")) is not None:
+        try:
+            charge_date = date.fromisoformat(raw)
+        except ValueError:
+            invalid.append("charge_date")
+        else:
+            today = datetime.now(_DENVER).date()
+            if not rc.EARLIEST_CHARGE_DATE <= charge_date <= today + timedelta(days=1):
+                invalid.append("charge_date")
+                charge_date = None
+
+    approx_started_at: datetime | None = None
+    if (raw := text("approx_started_at")) is not None:
+        try:
+            approx_started_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if approx_started_at.tzinfo is None:
+                approx_started_at = approx_started_at.replace(tzinfo=_DENVER)
+        except ValueError:
+            invalid.append("approx_started_at")
+
+    pins = {k: coord(k, 90 if k.endswith("lat") else 180)
+            for k in ("pin_start_lat", "pin_start_lng", "pin_end_lat", "pin_end_lng")}
+    for a, b in (("pin_start_lat", "pin_start_lng"), ("pin_end_lat", "pin_end_lng")):
+        if (pins[a] is None) != (pins[b] is None):
+            invalid.append(a.rsplit("_", 1)[0])
+
+    plan = text("declared_rate_plan") or "unknown"
+    if plan not in rc.DECLARED_RATE_PLANS:
+        invalid.append("declared_rate_plan")
+
+    if invalid:
+        raise _claim_error(422, "invalid_field", fields=sorted(set(invalid)))
+
+    claim = rc.Claim(plate, minutes, subtotal, total, charge_date)
+    missing = rc.missing_for_rate_check(claim)
+    if missing:
+        # Nothing is kept: no row, and the images were never uploaded.
+        raise _claim_error(422, "not_rate_checkable", missing=missing)
+
+    async def image(name: str) -> bytes | None:
+        part = form.get(name)
+        if part is None or isinstance(part, str):
+            return None
+        data = await part.read()
+        if len(data) > MAX_RECEIPT_BYTES:
+            raise _claim_error(413, "image_too_large", field=name, max_bytes=MAX_RECEIPT_BYTES)
+        return data or None
+
+    receipt_bytes = await image("receipt")
+    plan_bytes = await image("plan_evidence")
+    if receipt_bytes is None:
+        raise _claim_error(422, "receipt_required")
+    if plan_bytes is None:
+        # Owner, 2026-10-06: an equity claim must carry proof of the plan,
+        # because the contract applies the rate whatever the tier.
+        raise _claim_error(422, "plan_evidence_required")
+
+    ip = real_client_ip(request)
+    ua = request.headers.get("user-agent")
+    with connection() as conn:
+        with conn.cursor() as cur:
+            enforce(cur, bucket="discount_report_account", key=str(user.account_id),
+                    limit=_LIMIT_DISCOUNT_PER_ACCOUNT[0],
+                    window_seconds=_LIMIT_DISCOUNT_PER_ACCOUNT[1])
+        conn.commit()
+
+    if not receipts_bucket():
+        raise HTTPException(503, "receipt storage not configured")
+    stored: list[str] = []
+    try:
+        receipt_key = store_receipt(user.account_id, receipt_bytes)
+        stored.append(receipt_key)
+        plan_key = store_receipt(user.account_id, plan_bytes)
+        stored.append(plan_key)
+    except ReceiptError as e:
+        for k in stored:
+            try:
+                delete_receipt(k)
+            except ReceiptError:
+                log.exception("failed to clean up %s", k)
+        raise HTTPException(400, str(e))
+
+    math = rc.arithmetic(claim, _tax_rate(_configured_pricing().get("tax_rate")))
+    tax = math["tax"] or {}
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO discount_reports (
+                        account_id, zone_version, claim_version,
+                        vehicle_plate, vehicle_identifier, trip_minutes,
+                        subtotal_cents, total_cents, charge_date, approx_started_at,
+                        pin_start_lat, pin_start_lng, pin_end_lat, pin_end_lng,
+                        declared_rate_plan, receipt_r2_key, plan_evidence_r2_key,
+                        expected_cents, rate_error_cents, rate_signature,
+                        tax_cents, tax_finding, analysis,
+                        reporter_ip, reporter_user_agent
+                    ) VALUES (%s, 'equity', 2, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                              %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (user.account_id, plate, hash_plate(plate), minutes,
+                     subtotal, total, charge_date, approx_started_at,
+                     pins["pin_start_lat"], pins["pin_start_lng"],
+                     pins["pin_end_lat"], pins["pin_end_lng"],
+                     plan, receipt_key, plan_key,
+                     math["expected_cents"], math["rate_error_cents"], math["rate_signature"],
+                     tax.get("tax_cents"), tax.get("finding"), json.dumps(math),
+                     ip, ua),
+                )
+                new_id, created_at = cur.fetchone()
+            conn.commit()
+    except Exception:
+        for k in stored:
+            try:
+                delete_receipt(k)
+            except ReceiptError:
+                log.exception("failed to clean up orphaned %s", k)
+        raise
+
+    log.info("receipt claim id=%d account=%d minutes=%d", new_id, user.account_id, minutes)
+    return {
+        "id": int(new_id),
+        "created_at": created_at.isoformat(),
+        "status": "received",
+        "receipt_stored": True,
+        "plan_evidence_stored": True,
+    }
+
+
 @router.post("/api/v1/reports/discount")
 async def submit_discount_report(
     request: Request,
@@ -361,6 +559,12 @@ async def submit_discount_report(
     The receipt is EXIF-stripped and stored in a private R2 bucket with an
     18-month retention (see /api/v1/meta/privacy).
     """
+    ctype = (request.headers.get("content-type") or "").lower()
+    if ctype.startswith("multipart/form-data"):
+        form = await request.form()
+        if any(form.get(k) not in (None, "") for k in _CLAIM_MARKERS):
+            return await _submit_receipt_claim(request, form, user)
+
     payload, receipt_bytes = await _parse_discount_body(request)
     ip = real_client_ip(request)
     ua = request.headers.get("user-agent")
@@ -688,6 +892,10 @@ def reports_summary(
     return cached
 
 
+def _round3(v: float | None) -> float | str:
+    return "" if v is None else round(float(v), 3)
+
+
 # ---------------------------------------------------------------------------
 # GET /api/v1/reports/export/monthly.csv
 # ---------------------------------------------------------------------------
@@ -725,8 +933,10 @@ def reports_export_monthly(
             device_rows = cur.fetchall()
             cur.execute(
                 """
-                SELECT created_at, ride_ended_at, zone_version, end_lat, end_lng,
-                       amount_charged_cents, receipt_r2_key IS NOT NULL, region_name
+                SELECT created_at, ride_ended_at, zone_version,
+                       COALESCE(end_lat, pin_end_lat), COALESCE(end_lng, pin_end_lng),
+                       COALESCE(amount_charged_cents, subtotal_cents, total_cents),
+                       receipt_r2_key IS NOT NULL, region_name, vehicle_identifier
                 FROM discount_reports
                 WHERE created_at >= %s AND created_at < %s
                 ORDER BY created_at
@@ -744,12 +954,16 @@ def reports_export_monthly(
     for reported_at, vid, rtype, lat, lng, authed in device_rows:
         w.writerow(["device", reported_at.isoformat(), vid, rtype,
                     lat, lng, "", str(bool(authed)).lower()])
-    for created_at, _ride_ended, zone, lat, lng, amount, has_receipt, region in discount_rows:
+    for created_at, _ride_ended, zone, lat, lng, amount, has_receipt, region, vid in discount_rows:
         # "equity:EQ_014" when the area is known (sql/091); same column, so
         # the CSV's shape is unchanged for anyone already parsing it.
         zone_cell = f"{zone}:{region}" if region else zone
-        w.writerow(["discount", created_at.isoformat(), "", zone_cell,
-                    lat, lng, amount if amount is not None else "",
+        # A discount report's point is where a rider says they were (sql/093
+        # pins, or the legacy end point): rounded to 3 decimals (~100 m) in
+        # public, never exact. The vehicle appears only as its HMAC
+        # identifier; the raw plate a receipt carries stays admin-only.
+        w.writerow(["discount", created_at.isoformat(), vid or "", zone_cell,
+                    _round3(lat), _round3(lng), amount if amount is not None else "",
                     str(bool(has_receipt)).lower()])
 
     return Response(

@@ -60,10 +60,12 @@ _PRIVACY = {
         {
             "data": "receipts",
             "retention": "18 months",
-            "detail": "Discount-report receipt images live in a private bucket, "
-                      "EXIF-stripped on upload (full re-encode — GPS and camera "
-                      "metadata cannot survive). Deleted by a daily job after 18 "
-                      "months; the report row outlives the image.",
+            "detail": "Discount-report images (the receipt screenshot and, for "
+                      "an Equity Area claim, the screenshot of your Veo plan) "
+                      "live in a private bucket, EXIF-stripped on upload (full "
+                      "re-encode — GPS and camera metadata cannot survive). "
+                      "Deleted by a daily job after 18 months; the report row "
+                      "outlives the images.",
         },
         {
             "data": "rides",
@@ -77,10 +79,15 @@ _PRIVACY = {
             "data": "reports",
             "retention": "indefinite, aggregated",
             "detail": "Device and discount reports are the audit evidence base "
-                      "and are kept indefinitely. A discount report also records "
-                      "which Equity Area the ride ended in. Public aggregates and "
-                      "the CSV export never include reporter identity (no IP, no "
-                      "email — only an authenticated yes/no flag).",
+                      "and are kept indefinitely. A discount report records which "
+                      "Equity Area the ride ended in, and a receipt claim what the "
+                      "receipt says (scooter code, minutes, costs, charge date), "
+                      "the plan you say you were on, and optionally an approximate "
+                      "start time and where you think the ride started and ended. "
+                      "Public aggregates and the CSV export never include reporter "
+                      "identity (no IP, no email — only an authenticated yes/no "
+                      "flag), never the scooter code itself (only its one-way "
+                      "identifier), and round any point to about 100 m.",
         },
         {
             "data": "accounts",
