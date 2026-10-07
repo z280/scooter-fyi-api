@@ -307,17 +307,21 @@ def cleanup_receipts() -> dict:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, receipt_r2_key FROM discount_reports
-                WHERE receipt_r2_key IS NOT NULL
+                SELECT id, receipt_r2_key, plan_evidence_r2_key FROM discount_reports
+                WHERE (receipt_r2_key IS NOT NULL OR plan_evidence_r2_key IS NOT NULL)
                   AND receipt_deleted_at IS NULL
                   AND created_at < %s
                 """,
                 (cutoff,),
             )
             rows = cur.fetchall()
-            for row_id, key in rows:
+            for row_id, key, plan_key in rows:
                 try:
-                    delete_receipt(key)
+                    # The plan screenshot (sql/093) shares the receipt's
+                    # bucket and its 18 months; one stamp covers both.
+                    for k in (key, plan_key):
+                        if k:
+                            delete_receipt(k)
                 except ReceiptError:
                     log.exception("cleanup_receipts: R2 not configured — aborting")
                     raise
