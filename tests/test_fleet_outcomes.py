@@ -95,12 +95,34 @@ class TestOrdering:
 class TestThePayloadDescribesItself:
     """Each of these is a field a reader would otherwise have to assume."""
 
-    def test_states_that_the_window_is_lifetime(self):
-        # sql/072's counters have never reset. An unlabelled rate reads as
-        # "now", and this one is not: it is every rental since the migration.
+    def test_states_that_the_window_opens_at_the_reset(self):
+        # The owner reset the counters (sql/089, 2026-10-07) so they describe
+        # one radius. An unlabelled rate reads as "now"; this one is every
+        # rental since the reset, and says when that was.
         out = summarize([model("Cosmo", 1_000, 90)])
-        assert out["window"] == "lifetime"
-        assert out["counted_since"] == "sql/072"
+        assert out["window"] == "since_reset"
+        assert out["counted_since"] == "sql/089"
+        assert "counted_since_at" in out
+
+    def test_carries_when_the_reset_ran(self):
+        from src.fleet_outcomes import summarize_rows
+        out = summarize_rows([model("Cosmo", 1_000, 90)], R,
+                             counted_since_at="2026-10-07T18:00:00+00:00")
+        assert out["counted_since_at"] == "2026-10-07T18:00:00+00:00"
+
+    def test_the_named_migration_exists(self):
+        from pathlib import Path
+        from src import fleet_outcomes
+        sql = Path(__file__).resolve().parents[1] / "sql" / fleet_outcomes.COUNTED_SINCE_MIGRATION
+        assert sql.is_file()
+        text = sql.read_text()
+        import re
+        assert re.search(r"rentals_observed\s*=\s*0", text)
+        assert re.search(r"rentals_no_go\s*=\s*0", text)
+        # Table lock first: no row-by-row contention with the live ingest.
+        assert "LOCK TABLE device_state IN EXCLUSIVE MODE" in text
+        # The rolling signal is deliberately left alone.
+        assert "recent_no_go_mask =" not in text
 
     def test_states_the_radius_it_was_counted_at(self):
         # Three circles exist in this codebase (ANALYTICS_PLAN §0.2: 16 m in
@@ -163,10 +185,19 @@ class _FakeCur:
         return False
 
     def execute(self, sql, params=None):
+        self._last = sql
+        if "schema_migrations" in sql:
+            # The window's start: when the sql/089 reset ran.
+            assert params == (fleet_outcomes.COUNTED_SINCE_MIGRATION,)
+            return
         assert "device_state" in sql
         # The aggregation belongs in the database: 8k devices must not cross
         # the wire to be summed in Python.
         assert "SUM(" in sql
+
+    def fetchone(self):
+        from datetime import datetime, timezone
+        return (datetime(2026, 10, 7, 18, 0, tzinfo=timezone.utc),)
 
     def fetchall(self):
         return self._rows
@@ -225,6 +256,8 @@ class TestTheEndpoint:
         assert out["rentals"] == 1800
         assert out["no_gos"] == 281
         assert [m["model"] for m in out["by_model"]] == ["Rover", "Cosmo"]
+        # The window's start is read from the database, not hardcoded.
+        assert out["counted_since_at"] == "2026-10-07T18:00:00+00:00"
 
     def test_labels_the_payload_with_the_live_config_radius(self, db):
         from src.config import load
