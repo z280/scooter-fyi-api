@@ -1,55 +1,55 @@
-"""Rental outcomes inside vs outside Denver's Equity Areas.
+"""Rental outcomes inside vs outside Denver's official Equity Areas.
 
-THE QUESTION. Do rentals started inside the city's official Equity Areas end
-where they began more often than rentals started outside them? It is the
-number a DOTI equity micro-grant asks for, and the frontend plan calls the
-comparison "the single most important sentence this app can produce" — which
-is exactly why it is built on the rollup and nothing weaker.
+THE QUESTION. Do rentals UNLOCKED inside the city's official Equity Areas
+(data/equity.geojson, EQ_001..EQ_030) end where they began more often than
+rentals unlocked outside them? It is the number a DOTI equity micro-grant asks
+for, which is why every caveat below travels in the response, not in a doc.
 
-WHY ONLY THE ROLLUP CAN ANSWER IT (sql/090). device_state's counters are
-per vehicle and cumulative; splitting them by where a vehicle is PARKED NOW
-would credit a vehicle's 400 rentals across the city to whichever side of a
-boundary it happens to be standing on today. rental_outcomes_hourly instead
-records each rental at write time against the r9 cell where it was UNLOCKED,
-so attribution happens when the rental happens. Built on the rollup this is a
-query; built on device_state it would be a claim that does not survive being
-checked.
+ATTRIBUTED AT WRITE TIME, BY POINT (sql/090 + sql/092). device_state's
+counters are per vehicle and cumulative; splitting them by where a vehicle is
+PARKED NOW would credit its past rentals to wherever it stands today.
+rental_outcomes_hourly instead records each rental, at the moment of release,
+against the Equity Area containing its UNLOCK POINT (`equity_area`). The point
+is tested, not its r9 cell: the first version of this cut classified whole
+hexagons, and on production origins that kept 1.5% of rentals "inside", threw
+away about nine in ten rentals that really started in an Equity Area and let
+one area be half the sample (PR #114 review). A point is inside or it is not;
+nothing straddles.
 
-HOW A CELL IS ASSIGNED, AND THE BOUNDARY RULE. A rollup row knows an r9 cell,
-not a point. A cell counts as INSIDE only when its whole hexagon (centre and
-all six vertices) is inside an Equity Area, and OUTSIDE only when all seven
-points are outside every Equity Area. A cell that straddles a boundary is
-counted in neither: it is reported as `boundary_excluded`, because assigning
-it to a side would draw a line more precisely than the data can. (House rule:
-a boundary we cannot resolve is not drawn as though we could.)
+WHAT IS LEFT OUT, AND SAID SO.
+  * `unknown`: rentals with no unlock point to test (a vehicle first seen
+    mid-rental, no fix, or an unreadable boundary file). They are written to
+    rows of their own, so the exclusion is exact: `excluded.unknown_origin`.
+  * `unrecorded`: rentals counted before sql/092, which recorded no area.
+    They are outside the coverage window (`data_since`), not silently dropped.
+  * any radius other than the ingest's current one: one ring per figure.
 
-WHAT ELSE IS LEFT OUT, AND SAID SO.
-  * rows carrying origin_unknown rentals (a vehicle first seen mid-rental, so
-    its cell is where it was first sighted, not where it was unlocked) —
-    excluded whole and counted in `origin_unknown_excluded`;
-  * any radius other than the ingest's current one — one ring per figure.
+WHAT THE NUMBER IS, AND IS NOT.
+  `ended_within_radius_rate`: the share of rentals whose DROP point was within
+  `radius_meters` of the unlock point. A loop ride back to the same rack
+  counts, and loop rides may be more common in some places (parks,
+  residential streets) than others, which alone can move this figure. So the
+  response also carries `never_left_radius_rate`: the share that never got
+  farther than the radius at any point (over rentals whose maximum is known).
+  Neither says why: the vehicle, the app, the weather and a rider changing
+  their mind all look the same here.
 
-WHAT THE NUMBER IS. The share of rentals that ENDED within `radius_meters`
-of where they were unlocked (end displacement, the same definition as
-device_state.rentals_no_go and /api/v1/fleet/outcomes). A loop ride back to
-the same rack counts. Not a cause: the vehicle, the app, the weather or a
-rider changing their mind all look the same here. Every figure travels with
-its window, its sample and its radius, and a side under the floor gets
-counts and no rate.
+UNCERTAINTY. Each rate carries a 95% Wilson interval, and the difference a
+Newcombe (hybrid Wilson) interval. Those assume independent rentals; rentals
+cluster by vehicle and place, so the true uncertainty is wider and the
+response says so. Under MIN_RENTALS_FOR_RATE a side keeps its counts and loses
+its rate, and the difference is computed only when both sides clear it.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
-from typing import Any, Callable
-
-import h3
+from typing import Any
 
 from .config import load
 from .fleet_outcomes import MIN_RENTALS_FOR_RATE
-from .geo import region_for_point
 from .pg import connection
 
 log = logging.getLogger(__name__)
@@ -57,116 +57,173 @@ log = logging.getLogger(__name__)
 #: The windows the endpoint serves, in days.
 WINDOWS = {"7d": 7, "28d": 28}
 
-INSIDE, OUTSIDE, BOUNDARY = "inside", "outside", "boundary"
+#: equity_area values that are not an Equity Area (sql/092).
+OUTSIDE, UNKNOWN, UNRECORDED = "outside", "unknown", "unrecorded"
+
+#: How many official Equity Areas exist (data/equity.geojson).
+OFFICIAL_AREA_COUNT = 30
+
+_Z = 1.959964  # two-sided 95%
+
+CAVEATS = (
+    "Counts rentals that ended within the radius of where they were unlocked; "
+    "a ride that looped back to the same spot counts too (see "
+    "never_left_radius_rate for rentals that never left it). It does not say "
+    "why. Intervals assume independent rentals; rentals cluster by vehicle and "
+    "place, so the real uncertainty is wider. A release with no movement "
+    "(including some reservations the feed cannot tell apart) is counted as a rental."
+)
 
 
-def _in_equity_area(lon: float, lat: float) -> bool:
-    return region_for_point("equity", lon, lat) is not None
-
-
-@lru_cache(maxsize=65_536)
-def classify_cell(cell: int, contains: Callable[[float, float], bool] = _in_equity_area) -> str:
-    """INSIDE / OUTSIDE / BOUNDARY for an r9 cell stored as a BIGINT.
-
-    Centre plus the six vertices: all inside -> INSIDE; none inside ->
-    OUTSIDE; anything else -> BOUNDARY (straddles a line).
-    """
-    hexid = h3.int_to_str(int(cell))
-    points = [h3.cell_to_latlng(hexid), *h3.cell_to_boundary(hexid)]
-    hits = sum(1 for lat, lon in points if contains(lon, lat))
-    if hits == len(points):
-        return INSIDE
-    if hits == 0:
-        return OUTSIDE
-    return BOUNDARY
-
-
-def _rate(no_gos: int, rentals: int) -> float | None:
-    """Share, or None under the floor. Never divides by zero."""
-    if rentals < MIN_RENTALS_FOR_RATE or rentals <= 0:
+def wilson(k: int, n: int) -> tuple[float, float] | None:
+    """95% Wilson score interval for k of n, or None when n is 0."""
+    if n <= 0:
         return None
-    return round(no_gos / rentals, 4)
+    p = k / n
+    denom = 1 + _Z * _Z / n
+    centre = (p + _Z * _Z / (2 * n)) / denom
+    half = _Z * math.sqrt(p * (1 - p) / n + _Z * _Z / (4 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
 
 
-def summarize_cells(
-    rows: list[tuple[int, int, int, int]],
-    *,
-    classify: Callable[[int], str] | None = None,
-) -> dict[str, Any]:
-    """rows: (h3_9, rentals, no_gos, origin_unknown) summed per cell.
+def newcombe(k1: int, n1: int, k2: int, n2: int) -> tuple[float, float] | None:
+    """95% interval for p1 - p2 (Newcombe's hybrid score method, #10)."""
+    a, b = wilson(k1, n1), wilson(k2, n2)
+    if a is None or b is None:
+        return None
+    p1, p2 = k1 / n1, k2 / n2
+    d = p1 - p2
+    lo = d - math.sqrt((p1 - a[0]) ** 2 + (b[1] - p2) ** 2)
+    hi = d + math.sqrt((a[1] - p1) ** 2 + (p2 - b[0]) ** 2)
+    return lo, hi
 
-    The arithmetic, split out so it is testable without a database."""
-    classify = classify or classify_cell
-    sides = {s: {"rentals": 0, "no_gos": 0, "cells": 0} for s in (INSIDE, OUTSIDE, BOUNDARY)}
-    origin_unknown_excluded = 0
-    for cell, rentals, no_gos, origin_unknown in rows:
-        if origin_unknown:
-            origin_unknown_excluded += rentals
-            continue
-        side = sides[classify(cell)]
-        side["rentals"] += rentals
-        side["no_gos"] += no_gos
-        side["cells"] += 1
 
-    for s in (INSIDE, OUTSIDE):
-        sides[s]["no_go_rate"] = _rate(sides[s]["no_gos"], sides[s]["rentals"])
-    rin, rout = sides[INSIDE]["no_go_rate"], sides[OUTSIDE]["no_go_rate"]
+def _side(acc: dict[str, int]) -> dict[str, Any]:
+    n, k = acc["rentals"], acc["no_gos"]
+    mk, km = acc["max_known"], acc["no_gos_max"]
+    rated = n >= MIN_RENTALS_FOR_RATE
+    rated_max = mk >= MIN_RENTALS_FOR_RATE
+    ci = wilson(k, n) if rated else None
+    ci_max = wilson(km, mk) if rated_max else None
     return {
-        "inside": sides[INSIDE],
-        "outside": sides[OUTSIDE],
-        "boundary_excluded": {k: sides[BOUNDARY][k] for k in ("rentals", "no_gos", "cells")},
-        "origin_unknown_excluded": origin_unknown_excluded,
-        # Computed, not left to the reader's eye, and only when BOTH sides
-        # clear the floor: percentage points, inside minus outside.
-        "difference_points": (
-            round((rin - rout) * 100, 2) if rin is not None and rout is not None else None
-        ),
+        "rentals": n,
+        "ended_within_radius": k,
+        "ended_within_radius_rate": round(k / n, 4) if rated else None,
+        "ended_within_radius_ci95": [round(ci[0], 4), round(ci[1], 4)] if ci else None,
+        "max_known": mk,
+        "never_left_radius": km,
+        "never_left_radius_rate": round(km / mk, 4) if rated_max else None,
+        "never_left_radius_ci95": [round(ci_max[0], 4), round(ci_max[1], 4)] if ci_max else None,
+    }
+
+
+def summarize_areas(rows: list[tuple[str, int, int, int, int]]) -> dict[str, Any]:
+    """rows: (equity_area, rentals, no_gos, no_gos_max, max_known), summed per
+    area over the window. The arithmetic, testable without a database."""
+    zero = lambda: {"rentals": 0, "no_gos": 0, "no_gos_max": 0, "max_known": 0}  # noqa: E731
+    inside, outside = zero(), zero()
+    excluded = {"unknown_origin": 0, "unrecorded": 0}
+    by_area: dict[str, dict[str, int]] = {}
+    for area, rentals, no_gos, no_gos_max, max_known in rows:
+        if area == UNKNOWN:
+            excluded["unknown_origin"] += rentals
+            continue
+        if area == UNRECORDED:
+            excluded["unrecorded"] += rentals
+            continue
+        accs = [outside] if area == OUTSIDE else [inside, by_area.setdefault(area, zero())]
+        for acc in accs:
+            acc["rentals"] += rentals
+            acc["no_gos"] += no_gos
+            acc["no_gos_max"] += no_gos_max
+            acc["max_known"] += max_known
+
+    both = inside["rentals"] >= MIN_RENTALS_FOR_RATE and outside["rentals"] >= MIN_RENTALS_FOR_RATE
+    diff = ci = None
+    if both:
+        # From raw counts, not from the rounded rates.
+        p_in = inside["no_gos"] / inside["rentals"]
+        p_out = outside["no_gos"] / outside["rentals"]
+        diff = round((p_in - p_out) * 100, 2)
+        lo_hi = newcombe(inside["no_gos"], inside["rentals"], outside["no_gos"], outside["rentals"])
+        ci = [round(lo_hi[0] * 100, 2), round(lo_hi[1] * 100, 2)] if lo_hi else None
+
+    return {
+        "inside": {**_side(inside), "areas_represented": len(by_area),
+                   "areas_official": OFFICIAL_AREA_COUNT},
+        "outside": _side(outside),
+        # Percentage points, inside minus outside; only when BOTH clear the floor.
+        "difference_points": diff,
+        "difference_points_ci95": ci,
+        # An interval that spans zero is not a difference this data can show.
+        "difference_distinguishable": (ci[0] > 0 or ci[1] < 0) if ci else None,
+        "by_area": [
+            {"area": a, **_side(v)} for a, v in sorted(by_area.items())
+        ],
+        "excluded": excluded,
     }
 
 
 _SQL = """
-SELECT h3_9, SUM(rentals), SUM(no_gos), SUM(origin_unknown)
+SELECT equity_area, SUM(rentals), SUM(no_gos), SUM(no_gos_max), SUM(max_known)
 FROM rental_outcomes_hourly
 WHERE hour >= %s AND hour < %s AND radius_m = %s
-GROUP BY h3_9, (origin_unknown > 0)
+GROUP BY equity_area
+"""
+
+# The first hour the table recorded areas at this radius (sql/092 onward).
+_SQL_SINCE = """
+SELECT MIN(hour) FROM rental_outcomes_hourly
+WHERE radius_m = %s AND equity_area <> 'unrecorded'
 """
 
 
 def summarize(window: str = "7d", *, now: datetime | None = None) -> dict[str, Any]:
-    """The inside/outside comparison over a trailing window. Never raises:
-    a failure is an empty comparison (zeros, null rates), told apart from a
-    real one by the rentals counts."""
+    """The inside/outside comparison over a trailing window. Never raises: a
+    failure is `status: "unavailable"` with empty figures, so it can never be
+    mistaken for a quiet week."""
     days = WINDOWS[window]
     end = (now or datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
     start = end - timedelta(days=days)
-    radius = float(load().device_tracking.stationary_threshold_meters)
-    rows: list[tuple[int, int, int, int]] = []
-    first_hour: str | None = None
+    # NUMERIC(6,2) in the table: compare at the same precision.
+    radius = round(float(load().device_tracking.stationary_threshold_meters), 2)
+    status = "ok"
+    since: datetime | None = None
     try:
         with connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(_SQL, (start, end, radius))
-                rows = [(int(r[0]), int(r[1]), int(r[2]), int(r[3])) for r in cur.fetchall()]
-                cur.execute("SELECT MIN(hour) FROM rental_outcomes_hourly WHERE radius_m = %s", (radius,))
+                rows = [(str(r[0]), int(r[1]), int(r[2]), int(r[3]), int(r[4]))
+                        for r in cur.fetchall()]
+                cur.execute(_SQL_SINCE, (radius,))
                 got = cur.fetchone()
-                first_hour = got[0].isoformat() if got and got[0] else None
-        out = summarize_cells(rows)
+                since = got[0] if got and got[0] else None
+        out = summarize_areas(rows)
     except Exception:  # noqa: BLE001
-        # Database or boundary-layer failure: an empty comparison (zeros,
-        # null rates), never a 500 on a public page.
         log.exception("equity outcomes summary failed")
-        out = summarize_cells([])
+        status = "unavailable"
+        out = summarize_areas([])
+
+    # Coverage: how much of the named window the table actually holds. A
+    # "28-day" figure over two days of data must not be quoted as 28 days.
+    covered_from = max(start, since) if since else None
+    hours_covered = (
+        max(0, int((end - covered_from).total_seconds() // 3600)) if covered_from else 0
+    )
     out.update({
+        "status": status,
         "window": window,
         "window_start": start.isoformat(),
         "window_end": end.isoformat(),
-        # The rollup began on 2026-10-07; a window that reaches back past it
-        # covers less than its name says, and the response says so.
-        "data_since": first_hour,
+        "data_since": since.isoformat() if since else None,
+        "hours_covered": hours_covered,
+        "hours_in_window": days * 24,
+        "window_complete": hours_covered >= days * 24,
         "radius_meters": radius,
         "min_rentals_for_rate": MIN_RENTALS_FOR_RATE,
         "definition": "end_displacement",
-        "attribution": "unlock_point_r9_cell",
+        "attribution": "unlock_point",
         "boundary": "official_equity_areas",
+        "caveats": CAVEATS,
     })
     return out

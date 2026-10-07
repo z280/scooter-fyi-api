@@ -224,10 +224,22 @@ from typing import Any, Iterable
 from . import device_features
 from .config import load
 from .geo import distance_meters as _distance_meters
+from .geo import region_for_point as _region_for_point
 from .ingest import TaggedDevice, _h3_cells
 from .pg import connection
 
 log = logging.getLogger(__name__)
+
+
+def _equity_area_of(lon: float, lat: float) -> str:
+    """'EQ_nnn', 'outside', or 'unknown' when the layer cannot be read.
+    Never raises: a boundary-file problem must not roll back the ingest
+    transaction (and with it every counter this cycle)."""
+    try:
+        return _region_for_point("equity", lon, lat) or "outside"
+    except Exception:  # noqa: BLE001
+        log.warning("equity area lookup failed; rollup row marked unknown", exc_info=True)
+        return "unknown"
 
 #: How long a vehicle must be out of the feed before its open stop is closed
 #: as 'absent' (see ABSENCE in the module docstring). departed_at is always
@@ -893,12 +905,23 @@ def update_for_cycle(
                         prev_rental_started_at is not None and _ever is not None
                         and prev_rental_started_at <= _ever
                     )
+                    origin_point = None
                     if prev_fix_lat is not None and prev_fix_lon is not None:
-                        origin_cell = _h3_cells(float(prev_fix_lat), float(prev_fix_lon))[1]
+                        origin_point = (float(prev_fix_lat), float(prev_fix_lon))
                     elif prev_lat is not None and prev_lon is not None:
-                        origin_cell = _h3_cells(float(prev_lat), float(prev_lon))[1]
+                        origin_point = (float(prev_lat), float(prev_lon))
+                    if origin_point is not None:
+                        origin_cell = _h3_cells(*origin_point)[1]
                     else:
                         origin_cell = d.h3_9_index
+                    # sql/092: the Equity Area of the unlock POINT, decided
+                    # now because the point is gone within ~48 h. A first
+                    # sighting is not an unlock point, so origin_unknown
+                    # rentals are 'unknown' and land in rows of their own.
+                    equity_area = (
+                        "unknown" if origin_unknown or origin_point is None
+                        else _equity_area_of(origin_point[1], origin_point[0])
+                    )
                     if origin_cell is not None:
                         # MAXIMUM displacement: the running max sql/087 kept
                         # during the rental, plus this final fix. NULL when the
@@ -912,6 +935,7 @@ def update_for_cycle(
                             int(origin_cell),
                             d.vehicle_model_name or "Unknown",
                             float(threshold),
+                            equity_area,
                         )
                         acc = outcome_rollup.setdefault(key, [0, 0, 0, 0, 0])
                         acc[0] += 1
@@ -1240,10 +1264,10 @@ def update_for_cycle(
                 cur.executemany(
                     """
                     INSERT INTO rental_outcomes_hourly
-                        (hour, h3_9, model, radius_m,
+                        (hour, h3_9, model, radius_m, equity_area,
                          rentals, no_gos, no_gos_max, max_known, origin_unknown)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (hour, h3_9, model, radius_m) DO UPDATE SET
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (hour, h3_9, model, radius_m, equity_area) DO UPDATE SET
                         rentals    = rental_outcomes_hourly.rentals    + EXCLUDED.rentals,
                         no_gos     = rental_outcomes_hourly.no_gos     + EXCLUDED.no_gos,
                         no_gos_max = rental_outcomes_hourly.no_gos_max + EXCLUDED.no_gos_max,

@@ -885,12 +885,11 @@ def fleet_outcomes_equity(response: Response, window: str = "7d") -> Any:
     """Share of rentals that ended where they began, inside vs outside the
     city's official Equity Areas, over a trailing window (7d or 28d).
 
-    Attributed at write time to the r9 cell where each rental was UNLOCKED
-    (rental_outcomes_hourly, sql/090), never to where a vehicle is parked now.
-    Cells straddling an Equity Area boundary are excluded and reported; each
-    side under the floor keeps its counts and loses its rate, and the
-    difference is computed only when both sides clear it. See
-    src/fleet_equity.py for the method and its caveats.
+    Each rental is attributed at write time to the Equity Area containing its
+    UNLOCK POINT (rental_outcomes_hourly.equity_area, sql/092), never to where
+    a vehicle is parked now. Unknown origins are excluded exactly and
+    reported; coverage, 95% intervals and caveats travel in the response.
+    See src/fleet_equity.py for the method.
     """
     if window not in EQUITY_WINDOWS:
         raise HTTPException(400, f"window must be one of {sorted(EQUITY_WINDOWS)}")

@@ -1,111 +1,97 @@
-"""The equity cut: rentals inside vs outside the official Equity Areas, from
-rental_outcomes_hourly (sql/090), attributed to the unlock-point r9 cell.
-
-Cell classification is tested against the REAL boundary file
-(data/equity.geojson, 30 polygons) with the codebase's own point-in-polygon
-test, not a toy polygon: the whole point is that a cell is only "inside" when
-its whole hexagon is.
-"""
+"""The equity cut: rentals unlocked inside vs outside the official Equity
+Areas, from rental_outcomes_hourly's per-POINT equity_area (sql/092)."""
 
 from __future__ import annotations
 
-import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
-
-import h3
-import pytest
 
 from src import fleet_equity
-from src.fleet_equity import BOUNDARY, INSIDE, OUTSIDE, classify_cell, summarize_cells
+from src.fleet_equity import newcombe, summarize_areas, wilson
 from src.fleet_outcomes import MIN_RENTALS_FOR_RATE as FLOOR
-from src.geo import geometry_contains
-
-EQUITY = json.loads((Path(__file__).resolve().parents[1] / "data" / "equity.geojson").read_text())
 
 
-def contains(lon: float, lat: float) -> bool:
-    return any(geometry_contains(f["geometry"], lon, lat) for f in EQUITY["features"])
+def test_wilson_matches_a_textbook_value():
+    lo, hi = wilson(81, 263)  # Newcombe (1998) example: 0.2553–0.3662
+    assert round(lo, 4) == 0.2553 and round(hi, 4) == 0.3662
+    assert wilson(0, 0) is None
 
 
-def cell_at(lat: float, lon: float) -> int:
-    return int(h3.latlng_to_cell(lat, lon, 9), 16)
+def test_newcombe_matches_a_textbook_value():
+    lo, hi = newcombe(56, 70, 48, 80)  # Newcombe (1998) #10: 0.0524–0.3339
+    assert round(lo, 4) == 0.0524 and round(hi, 4) == 0.3339
 
 
-def _find(kind: str) -> int:
-    """A real r9 cell of the given kind near downtown Denver."""
-    for i in range(-60, 61, 3):
-        for j in range(-60, 61, 3):
-            c = cell_at(39.74 + i * 0.002, -104.99 + j * 0.002)
-            if classify_cell(c, contains) == kind:
-                return c
-    raise AssertionError(f"no {kind} cell found")
-
-
-def test_a_whole_hexagon_inside_an_equity_area_is_inside():
-    c = _find(INSIDE)
-    hexid = h3.int_to_str(c)
-    pts = [h3.cell_to_latlng(hexid), *h3.cell_to_boundary(hexid)]
-    assert all(contains(lon, lat) for lat, lon in pts)
-
-
-def test_a_hexagon_on_a_boundary_is_neither_side():
-    c = _find(BOUNDARY)
-    hexid = h3.int_to_str(c)
-    pts = [h3.cell_to_latlng(hexid), *h3.cell_to_boundary(hexid)]
-    hits = [contains(lon, lat) for lat, lon in pts]
-    assert any(hits) and not all(hits)
-
-
-def test_a_hexagon_clear_of_every_area_is_outside():
-    c = _find(OUTSIDE)
-    hexid = h3.int_to_str(c)
-    pts = [h3.cell_to_latlng(hexid), *h3.cell_to_boundary(hexid)]
-    assert not any(contains(lon, lat) for lat, lon in pts)
-
-
-def _classifier(mapping):
-    return lambda cell: mapping[cell]
-
-
-def test_the_comparison_is_computed_only_when_both_sides_clear_the_floor():
-    rows = [(1, 1000, 120, 0), (2, 1000, 60, 0)]
-    out = summarize_cells(rows, classify=_classifier({1: INSIDE, 2: OUTSIDE}))
-    assert out["inside"]["no_go_rate"] == 0.12
-    assert out["outside"]["no_go_rate"] == 0.06
+def test_every_equity_area_counts_inside_and_is_listed():
+    rows = [
+        ("EQ_003", 600, 72, 30, 600),
+        ("EQ_018", 400, 48, 20, 400),
+        ("outside", 5000, 300, 150, 5000),
+    ]
+    out = summarize_areas(rows)
+    assert out["inside"]["rentals"] == 1000
+    assert out["inside"]["ended_within_radius"] == 120
+    assert out["inside"]["ended_within_radius_rate"] == 0.12
+    assert out["inside"]["areas_represented"] == 2
+    assert out["inside"]["areas_official"] == 30
+    assert [a["area"] for a in out["by_area"]] == ["EQ_003", "EQ_018"]
+    assert out["outside"]["ended_within_radius_rate"] == 0.06
     assert out["difference_points"] == 6.0
-    thin = summarize_cells([(1, FLOOR - 1, 9, 0), (2, 1000, 60, 0)],
-                           classify=_classifier({1: INSIDE, 2: OUTSIDE}))
-    assert thin["inside"]["no_go_rate"] is None
-    assert thin["inside"]["rentals"] == FLOOR - 1, "counts stay when the rate is withheld"
-    assert thin["difference_points"] is None
+    lo, hi = out["difference_points_ci95"]
+    assert lo < 6.0 < hi and lo > 0
+    assert out["difference_distinguishable"] is True
 
 
-def test_boundary_cells_and_unobserved_origins_are_excluded_and_reported():
-    rows = [(1, 500, 50, 0), (3, 300, 30, 0), (2, 400, 20, 0), (1, 40, 4, 5)]
-    out = summarize_cells(rows, classify=_classifier({1: INSIDE, 2: OUTSIDE, 3: BOUNDARY}))
-    assert out["inside"]["rentals"] == 500
-    assert out["boundary_excluded"] == {"rentals": 300, "no_gos": 30, "cells": 1}
-    assert out["origin_unknown_excluded"] == 40
+def test_never_left_radius_is_reported_beside_ended_within_radius():
+    out = summarize_areas([("EQ_001", 500, 60, 10, 400), ("outside", 500, 30, 25, 500)])
+    assert out["inside"]["never_left_radius_rate"] == 0.025  # 10 / 400 known
+    assert out["inside"]["ended_within_radius_rate"] == 0.12
 
 
-def test_nothing_counted_is_nothing_counted():
-    out = summarize_cells([], classify=_classifier({}))
-    assert out["inside"]["rentals"] == 0 and out["inside"]["no_go_rate"] is None
-    assert out["difference_points"] is None
+def test_an_overlapping_interval_is_not_called_a_difference():
+    out = summarize_areas([("EQ_001", 250, 26, 0, 0), ("outside", 250, 24, 0, 0)])
+    assert out["difference_points"] == 0.8
+    assert out["difference_distinguishable"] is False
 
 
-def test_the_payload_states_window_sample_radius_and_method(monkeypatch):
-    from contextlib import contextmanager
+def test_the_difference_needs_both_sides_over_the_floor():
+    out = summarize_areas([("EQ_001", FLOOR - 1, 9, 0, 0), ("outside", 1000, 60, 0, 0)])
+    assert out["inside"]["ended_within_radius_rate"] is None
+    assert out["inside"]["rentals"] == FLOOR - 1, "counts stay when the rate is withheld"
+    assert out["inside"]["ended_within_radius_ci95"] is None
+    assert out["difference_points"] is None and out["difference_points_ci95"] is None
+    assert out["difference_distinguishable"] is None
 
+
+def test_unknown_and_unrecorded_origins_are_excluded_exactly():
+    out = summarize_areas([
+        ("EQ_001", 300, 30, 0, 0),
+        ("unknown", 17, 5, 0, 0),
+        ("unrecorded", 452, 26, 7, 452),
+        ("outside", 300, 15, 0, 0),
+    ])
+    assert out["excluded"] == {"unknown_origin": 17, "unrecorded": 452}
+    assert out["inside"]["rentals"] == 300 and out["outside"]["rentals"] == 300
+    assert [a["area"] for a in out["by_area"]] == ["EQ_001"]
+
+
+def test_the_difference_is_taken_from_counts_not_rounded_rates():
+    # 1/3 vs 1/7 rounds to 0.3333 / 0.1429; the raw difference is 19.05 pp.
+    out = summarize_areas([("EQ_001", 300, 100, 0, 0), ("outside", 700, 100, 0, 0)])
+    assert out["difference_points"] == 19.05
+
+
+def _fake(rows, since, *, raise_on_execute=False):
     class _Cur:
         def __init__(self): self.n = 0
         def execute(self, sql, params=None):
+            if raise_on_execute:
+                raise RuntimeError("db down")
             self.n += 1
             if self.n == 1:
-                assert "rental_outcomes_hourly" in sql and "radius_m = %s" in sql
-        def fetchall(self): return []
-        def fetchone(self): return (datetime(2026, 10, 7, 4, tzinfo=timezone.utc),)
+                assert "GROUP BY equity_area" in sql and params[2] == 25.0
+        def fetchall(self): return rows
+        def fetchone(self): return (since,)
         def __enter__(self): return self
         def __exit__(self, *a): return False
 
@@ -117,16 +103,38 @@ def test_the_payload_states_window_sample_radius_and_method(monkeypatch):
     @contextmanager
     def _conn():
         yield _Conn()
+    return _conn
 
-    monkeypatch.setattr(fleet_equity, "connection", _conn)
+
+def test_the_payload_states_window_coverage_sample_radius_and_method(monkeypatch):
+    since = datetime(2026, 10, 7, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(fleet_equity, "connection", _fake([], since))
     out = fleet_equity.summarize("28d", now=datetime(2026, 10, 10, 12, 30, tzinfo=timezone.utc))
+    assert out["status"] == "ok"
     assert out["window"] == "28d"
-    assert out["window_end"] == "2026-10-10T12:00:00+00:00"
     assert out["window_start"] == "2026-09-12T12:00:00+00:00"
-    assert out["data_since"] == "2026-10-07T04:00:00+00:00"
+    assert out["window_end"] == "2026-10-10T12:00:00+00:00"
+    assert out["data_since"] == "2026-10-07T05:00:00+00:00"
+    assert out["hours_covered"] == 3 * 24 + 7
+    assert out["hours_in_window"] == 28 * 24
+    assert out["window_complete"] is False
     assert out["radius_meters"] == 25.0
-    assert out["min_rentals_for_rate"] == FLOOR
-    assert (out["definition"], out["attribution"]) == ("end_displacement", "unlock_point_r9_cell")
+    assert (out["definition"], out["attribution"]) == ("end_displacement", "unlock_point")
+    assert "looped back" in out["caveats"] and "does not say" in out["caveats"]
+
+
+def test_a_full_window_is_complete(monkeypatch):
+    since = datetime(2026, 10, 7, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(fleet_equity, "connection", _fake([], since))
+    out = fleet_equity.summarize("7d", now=datetime(2026, 10, 20, 0, tzinfo=timezone.utc))
+    assert out["window_complete"] is True and out["hours_covered"] == 168
+
+
+def test_a_failure_says_unavailable_rather_than_looking_like_a_quiet_week(monkeypatch):
+    monkeypatch.setattr(fleet_equity, "connection", _fake([], None, raise_on_execute=True))
+    out = fleet_equity.summarize("7d")
+    assert out["status"] == "unavailable"
+    assert out["inside"]["rentals"] == 0 and out["difference_points"] is None
 
 
 def test_the_route_rejects_an_unknown_window():
@@ -136,31 +144,3 @@ def test_the_route_rejects_an_unknown_window():
     app = FastAPI()
     app.include_router(api_public.router)
     assert TestClient(app).get("/api/v1/fleet/outcomes/equity?window=1y").status_code == 400
-
-
-def test_a_boundary_layer_failure_is_an_empty_comparison_not_a_500(monkeypatch):
-    from contextlib import contextmanager
-
-    class _Cur:
-        def execute(self, *a, **k): pass
-        def fetchall(self): return [(cell_at(39.74, -104.99), 500, 50, 0)]
-        def fetchone(self): return (None,)
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-
-    class _Conn:
-        def cursor(self): return _Cur()
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-
-    @contextmanager
-    def _conn():
-        yield _Conn()
-
-    def boom(cell):
-        raise FileNotFoundError("/app/data/equity.geojson")
-
-    monkeypatch.setattr(fleet_equity, "connection", _conn)
-    monkeypatch.setattr(fleet_equity, "classify_cell", boom)
-    out = fleet_equity.summarize("7d")
-    assert out["inside"]["rentals"] == 0 and out["difference_points"] is None
