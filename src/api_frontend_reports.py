@@ -382,11 +382,11 @@ async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) 
         raw = text(name)
         if raw is None:
             return None
-        try:
-            v = int(raw)
-        except ValueError:
+        # ASCII digits only: int() also takes "1_6" and other scripts' digits.
+        if not re.fullmatch(r"[0-9]{1,7}", raw):
             invalid.append(name)
             return None
+        v = int(raw)
         if not lo <= v <= hi:
             invalid.append(name)
             return None
@@ -447,6 +447,12 @@ async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) 
     if plan not in rc.DECLARED_RATE_PLANS:
         invalid.append("declared_rate_plan")
 
+    # A tie-breaker for a ride charged on charge_date: within a day of it.
+    if approx_started_at is not None and charge_date is not None:
+        local_day = approx_started_at.astimezone(_DENVER).date()
+        if abs((local_day - charge_date).days) > 1:
+            invalid.append("approx_started_at")
+
     if invalid:
         raise _claim_error(422, "invalid_field", fields=sorted(set(invalid)))
 
@@ -460,6 +466,10 @@ async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) 
         part = form.get(name)
         if part is None or isinstance(part, str):
             return None
+        # Refuse on the declared size before reading the spooled part into
+        # memory (this runs before the rate limit).
+        if (part.size or 0) > MAX_RECEIPT_BYTES:
+            raise _claim_error(413, "image_too_large", field=name, max_bytes=MAX_RECEIPT_BYTES)
         data = await part.read()
         if len(data) > MAX_RECEIPT_BYTES:
             raise _claim_error(413, "image_too_large", field=name, max_bytes=MAX_RECEIPT_BYTES)
@@ -484,20 +494,28 @@ async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) 
         conn.commit()
 
     if not receipts_bucket():
-        raise HTTPException(503, "receipt storage not configured")
+        raise _claim_error(503, "storage_unavailable")
     stored: list[str] = []
+    current = "receipt"
     try:
         receipt_key = store_receipt(user.account_id, receipt_bytes)
         stored.append(receipt_key)
+        current = "plan_evidence"
         plan_key = store_receipt(user.account_id, plan_bytes)
         stored.append(plan_key)
-    except ReceiptError as e:
+    except Exception as e:
+        # ANY failure (an unreadable image, or the R2 PUT itself) must not
+        # leave the first image behind: cleanup_receipts only finds images
+        # through table rows, so an orphan would outlive the 18 months.
         for k in stored:
             try:
                 delete_receipt(k)
-            except ReceiptError:
+            except Exception:  # noqa: BLE001
                 log.exception("failed to clean up %s", k)
-        raise HTTPException(400, str(e))
+        if isinstance(e, ReceiptError):
+            raise _claim_error(400, "unreadable_image", field=current)
+        log.exception("receipt claim upload failed")
+        raise _claim_error(502, "storage_unavailable")
 
     math = rc.arithmetic(claim, _tax_rate(_configured_pricing().get("tax_rate")))
     tax = math["tax"] or {}
@@ -935,7 +953,7 @@ def reports_export_monthly(
                 """
                 SELECT created_at, ride_ended_at, zone_version,
                        COALESCE(end_lat, pin_end_lat), COALESCE(end_lng, pin_end_lng),
-                       COALESCE(amount_charged_cents, subtotal_cents, total_cents),
+                       COALESCE(amount_charged_cents, total_cents, subtotal_cents),
                        receipt_r2_key IS NOT NULL, region_name, vehicle_identifier
                 FROM discount_reports
                 WHERE created_at >= %s AND created_at < %s
@@ -953,7 +971,7 @@ def reports_export_monthly(
     ])
     for reported_at, vid, rtype, lat, lng, authed in device_rows:
         w.writerow(["device", reported_at.isoformat(), vid, rtype,
-                    lat, lng, "", str(bool(authed)).lower()])
+                    _round3(lat), _round3(lng), "", str(bool(authed)).lower()])
     for created_at, _ride_ended, zone, lat, lng, amount, has_receipt, region, vid in discount_rows:
         # "equity:EQ_014" when the area is known (sql/091); same column, so
         # the CSV's shape is unchanged for anyone already parsing it.

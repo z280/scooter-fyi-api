@@ -45,7 +45,7 @@ DECLARED_RATE_PLANS = (
 
 #: Receipts print the raw plate: 7 digits today (101…/102…/103…); room for
 #: growth. Spaces are stripped before the check.
-_PLATE = re.compile(r"^\d{7,10}$")
+_PLATE = re.compile(r"^[0-9]{7,10}$")  # ASCII only: \d accepts other scripts' digits, which the DB CHECK rejects
 
 MAX_TRIP_MINUTES = 600
 

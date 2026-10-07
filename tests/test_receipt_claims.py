@@ -145,6 +145,9 @@ def test_the_receipt_is_required(ctx):
     ("vehicle_plate", "10183"), ("trip_minutes", "0"), ("trip_minutes", "abc"),
     ("charge_date", "2999-01-01"), ("charge_date", "2023-12-31"), ("charge_date", "29/09/2026"),
     ("declared_rate_plan", "gold"), ("total_cents", "400"),
+    ("vehicle_plate", "\u0661\u0660\u0661\u0668\u0663\u0665\u0664"),  # Arabic-Indic digits
+    ("trip_minutes", "1_6"), ("approx_started_at", "0001-01-01T00:00:00"),
+    ("approx_started_at", "2026-10-05T15:00:00-06:00"),
 ])
 def test_malformed_fields_are_named(ctx, field, value):
     client, state = ctx
@@ -208,3 +211,40 @@ def test_the_legacy_shape_still_works(ctx):
     r = client.post("/api/v1/reports/discount", json={
         "ride_ended_at": _NOW.isoformat(), "zone_version": "equity"})
     assert r.status_code == 200, r.text
+
+
+def test_a_storage_failure_on_the_second_image_removes_the_first(ctx, monkeypatch):
+    client, state = ctx
+    from src import api_frontend_reports
+    puts = {"n": 0}
+
+    def flaky(account_id, data):
+        puts["n"] += 1
+        if puts["n"] == 2:
+            raise ConnectionError("R2 timed out")
+        state["order"].append("R2_PUT")
+        return "first.png"
+
+    monkeypatch.setattr(api_frontend_reports, "store_receipt", flaky)
+    r = client.post("/api/v1/reports/discount", data=CLAIM, files=IMAGES)
+    assert r.status_code == 502 and r.json()["detail"]["error"] == "storage_unavailable"
+    assert state["order"] == ["RATELIMIT", "R2_PUT", "R2_DELETE"]
+    assert not [s for s, _ in state["sql"] if s.startswith("INSERT")]
+
+
+def test_an_unreadable_image_names_the_field(ctx, monkeypatch):
+    client, state = ctx
+    from src import api_frontend_reports
+    from src.receipts import ReceiptError
+
+    def bad(account_id, data):
+        if data == b"\x89PNG-plan":
+            raise ReceiptError("upload is not a readable image")
+        state["order"].append("R2_PUT")
+        return "ok.png"
+
+    monkeypatch.setattr(api_frontend_reports, "store_receipt", bad)
+    r = client.post("/api/v1/reports/discount", data=CLAIM, files=IMAGES)
+    assert r.status_code == 400
+    assert r.json()["detail"] == {"error": "unreadable_image", "field": "plan_evidence"}
+    assert state["order"] == ["RATELIMIT", "R2_PUT", "R2_DELETE"]

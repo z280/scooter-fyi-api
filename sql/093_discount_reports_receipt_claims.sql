@@ -89,7 +89,9 @@ CREATE INDEX IF NOT EXISTS idx_discount_reports_plate_date
     ON discount_reports (vehicle_plate, charge_date) WHERE vehicle_plate IS NOT NULL;
 
 -- The rider's own list (My receipts, Phase 2).
-CREATE INDEX IF NOT EXISTS idx_discount_reports_account
+-- (idx_discount_reports_account on (account_id) already exists from sql/013;
+-- a new name, or IF NOT EXISTS would silently skip this one.)
+CREATE INDEX IF NOT EXISTS idx_discount_reports_account_created
     ON discount_reports (account_id, created_at DESC);
 
 COMMENT ON COLUMN discount_reports.vehicle_plate IS
