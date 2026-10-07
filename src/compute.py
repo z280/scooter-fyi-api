@@ -80,10 +80,15 @@ def _load_boundaries_into_duck(con) -> None:
         # ST_Read returns one row per feature with property columns + geom
         # We add an ordinal via row_number().
         # Filter rule: drop rows where filter_nonnull_field IS NULL (e.g. CD At-Large).
+        # A TEMP TABLE, read once. This was a VIEW, and every per-feature
+        # INSERT below re-ran ST_Read over the whole file: quadratic in the
+        # layer's features, ~100 s a cycle across the twelve layers, which
+        # (with the points load) pushed the 2-minute ingest past 2 minutes so
+        # every other scheduled run was skipped (2026-10-07).
         view = f"_layer_{layer.region_type}"
-        con.execute(f"DROP VIEW IF EXISTS {view};")
+        con.execute(f"DROP TABLE IF EXISTS {view};")
         con.execute(
-            f"CREATE TEMP VIEW {view} AS "
+            f"CREATE TEMP TABLE {view} AS "
             f"SELECT row_number() OVER () AS _ordinal, * FROM ST_Read('{layer.file}');"
         )
 
@@ -115,7 +120,7 @@ def _load_boundaries_into_duck(con) -> None:
                 [layer.region_category, layer.region_type, name, ordinal],
             )
 
-        con.execute(f"DROP VIEW {view};")
+        con.execute(f"DROP TABLE {view};")
 
     con.execute("CREATE INDEX IF NOT EXISTS idx_b_geom ON boundaries USING RTREE (geom);")
 
@@ -237,16 +242,29 @@ def _load_points_into_duck(con, devices: list[TaggedDevice], snapshot_time: date
     if not devices:
         return
 
-    # Batched executemany
-    rows = [
-        (d.device_id, d.form_factor, d.vehicle_use_type, d.lat, d.lon, d.spatial_status)
-        for d in devices
-    ]
-    con.executemany(
-        "INSERT INTO points (device_id, form_factor, vehicle_use_type, lat, lon, spatial_status, geom) "
-        "VALUES (?, ?, ?, ?, ?, ?, ST_Point(?, ?))",
-        [(r[0], r[1], r[2], r[3], r[4], r[5], r[4], r[3]) for r in rows],
-    )
+    # One vectorised INSERT from an Arrow table. executemany converted every
+    # parameter through DuckDB's Python layer, which tries `import pandas`
+    # (not installed) for each value: 16 failed imports per row, each a walk
+    # of sys.path, ~75 s for a 7,800-vehicle feed (2026-10-07).
+    import pyarrow as pa  # requirements.txt; imported here so a lean test env can import compute
+
+    pts = pa.table({
+        "device_id": pa.array([d.device_id for d in devices], pa.string()),
+        "form_factor": pa.array([d.form_factor for d in devices], pa.string()),
+        "vehicle_use_type": pa.array([d.vehicle_use_type for d in devices], pa.string()),
+        "lat": pa.array([d.lat for d in devices], pa.float64()),
+        "lon": pa.array([d.lon for d in devices], pa.float64()),
+        "spatial_status": pa.array([d.spatial_status for d in devices], pa.string()),
+    })
+    con.register("_points_in", pts)
+    try:
+        con.execute(
+            "INSERT INTO points (device_id, form_factor, vehicle_use_type, lat, lon, spatial_status, geom) "
+            "SELECT device_id, form_factor, vehicle_use_type, lat, lon, spatial_status, ST_Point(lon, lat) "
+            "FROM _points_in"
+        )
+    finally:
+        con.unregister("_points_in")
     con.execute("CREATE INDEX IF NOT EXISTS idx_p_geom ON points USING RTREE (geom);")
 
 
