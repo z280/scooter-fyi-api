@@ -1037,7 +1037,7 @@ GET /api/v1/h3/aggregates?res=9
 
 ### Fleet analytics (`/api/v1/analytics/*`)
 
-The owner's fleet dashboard (docs/PLAN_FLEET_ANALYTICS.md). All endpoints are public and cached for 5 minutes. Every response carries `window_start`/`window_end` (UTC), `timezone` (`America/Denver`; day, week and month buckets are Denver-local, and each `bucket` is ISO 8601 with its offset), a `definition`, and its sample sizes.
+The owner's fleet dashboard (docs/PLAN_FLEET_ANALYTICS.md). All endpoints are public and cached for 5 minutes. Every response carries `window_start`/`window_end` (UTC), `timezone` (`America/Denver`; day, week and month buckets are Denver-local and start on a whole local boundary; hour buckets are true hours, so Nov 1's repeated 01:00 is two buckets; each `bucket` is ISO 8601 with its offset, and an incomplete one has `partial: true`), a `definition`, and its sample sizes.
 
 | Endpoint | Parameters | Returns |
 |---|---|---|
@@ -1046,10 +1046,10 @@ The owner's fleet dashboard (docs/PLAN_FLEET_ANALYTICS.md). All endpoints are pu
 | `GET /analytics/devices-by-region` | `region_type` (a layer), `days`; optionally `region_name` + `granularity` | `regions[{region, now, average, cycles}]`, sorted by average; with `region_name`, also its `series` |
 | `GET /analytics/equity-compliance` | `days`, `granularity` | `series[{bucket, percent, cycles, meets_threshold}]`, `threshold_percent` (30, Exhibit B), `buckets_meeting_threshold` |
 | `GET /analytics/dwell` | `region_type` (incl. `city`), `days` | `regions[{region, by_model{model: {dwells, average_minutes}}}]`; the average is null under 30 stops |
-| `GET /analytics/fleet-status` | `days`, `granularity`, optional `model` | `series[{bucket, available, in_use, out_of_service, off_map, cycles}]`; `off_map` is null before 2026-10-07 and not split by model |
+| `GET /analytics/fleet-status` | `days` (≤30: the source keeps 30 days), `granularity`, optional `model` | `series[{bucket, available, in_use, out_of_service, off_map, cycles}]`; `off_map` is null before 2026-10-07 and not split by model |
 | `GET /analytics/fleet-counts` | — | `visible_now`, `visible_now_by_model`, `ever_seen_total`, `ever_seen_by_model`, `ever_seen_since` |
 
-A `400` means a bad parameter; a `404` means an unknown region.
+A `400` means a bad parameter; a `404` means an unknown region. Failed starts and dwell end at `data_through`, because closes settle for 6 h before they are counted.
 
 **Definitions** (also returned inline):
 - A ride is a `trip_events` move, placed by its start and timed at detection.

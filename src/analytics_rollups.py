@@ -4,16 +4,23 @@ Rides, failed starts and dwell, summed by hour (or day) x region x model, so
 the dashboard can slice months of history by neighbourhood without a
 point-in-polygon test per request. Each source row is placed ONCE, here.
 
-INCREMENTAL AND IDEMPOTENT. Each rollup keeps a watermark in
-analytics_rollup_state and advances it in the same transaction as the sums it
-adds, so a crash re-processes nothing twice and skips nothing:
+INCREMENTAL AND IDEMPOTENT. Sums and the position they have reached commit
+in one transaction, so a crash re-processes nothing twice and skips nothing:
 
-  rides           trip_events.id: append-only, one writer (the ingest), so
-                  ids commit in order.
-  failed starts,  device_history.departed_at, processed only up to now - 6 h.
-  dwell           departed_at is stamped later than the stop it closes, and the
-                  absent rule backdates it by up to ABSENT_STOP_AFTER (1 h);
-                  the lag keeps a late stamp from landing behind the watermark.
+  rides           trip_events.id watermark: append-only, one writer (the
+                  ingest; overlapping cycles serialize on device_state's row
+                  locks before inserting), so ids commit in order.
+  failed starts,  the CLOSE QUEUE (sql/094 analytics_stop_closes): a trigger
+  dwell           queues every stop close in commit order, a reopen removes a
+                  close not yet folded in, and the rollup consumes closes
+                  after a 6 h settle. departed_at itself is not a watermark:
+                  the absent rule and close_ghost_stops stamp it arbitrarily
+                  far in the past. Stops closed before the migration are
+                  swept once by departed_at, up to the cutover.
+  region devices  snapshot_metadata_core.snapshot_time windows, joined to
+                  regional_metrics_narrow on cycle_id (its primary key: a
+                  range scan on regional_metrics_narrow itself walks ~1 GB of
+                  index per cycle on PG 15).
 
 `refresh(cycle_id, snapshot_time)` runs at the end of every ingest cycle
 (src/cycle.py), bounded per call, and never raises. `backfill()` (CLI
@@ -177,28 +184,7 @@ def refresh_rides(cur, batch: int = BATCH) -> int:
     return len(rows)
 
 
-def refresh_stops(cur, now: datetime, step: timedelta = STOP_WINDOW) -> int:
-    """Failed starts and dwell share one pass over newly-closed stops.
-
-    By TIME WINDOW, not row count: everything with departed_at in
-    (watermark, watermark + step] is taken whole, so no batch boundary can
-    split a run of equal timestamps (a row cap would have to special-case
-    that). A window is a few thousand stops; the backfill just takes more of
-    them."""
-    _, wtime = _watermark(cur, "stops")
-    start = wtime or _EPOCH
-    upto = min(now - DEPARTURE_LAG, start + step)
-    if upto <= start:
-        return 0
-    cur.execute(
-        """
-        SELECT snapshot_time, departed_at, vehicle_model_name, lat, lon, dwell_failed_starts
-        FROM device_history
-        WHERE departed_at > %s AND departed_at <= %s
-        """,
-        (start, upto),
-    )
-    rows = cur.fetchall()
+def _fold_stops(cur, rows: list[tuple]) -> None:
     failed, dwell = aggregate_stops(rows)
     if failed:
         cur.executemany(
@@ -224,10 +210,60 @@ def refresh_stops(cur, now: datetime, step: timedelta = STOP_WINDOW) -> int:
             """,
             [(*k, *v) for k, v in sorted(dwell.items())],
         )
-    _set_watermark(cur, "stops", None, upto)
-    # Report progress even for an empty window, so the backfill keeps going
-    # until it reaches the lag line rather than stopping at the first gap.
-    return max(len(rows), 1)
+
+
+def _cutover(cur) -> datetime | None:
+    cur.execute("SELECT watermark_time FROM analytics_rollup_state WHERE name = 'stops_cutover'")
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def refresh_stops(cur, now: datetime, step: timedelta = STOP_WINDOW, batch: int = BATCH) -> int:
+    """Failed starts and dwell. Two sources, one rule each, so no stop is
+    counted by both: stops whose departed_at is <= the migration cutover are
+    swept once by departed_at window (the legacy sweep); stops whose
+    departed_at is after it come from the close queue."""
+    cutover = _cutover(cur)
+    done = 0
+    # Legacy sweep, by time window (no batch boundary can split equal
+    # timestamps), bounded by the cutover and the settle lag so a stop that
+    # was still open at the cutover and closed with a backdated departed_at
+    # has closed before its window is read.
+    _, wtime = _watermark(cur, "stops")
+    start = wtime or _EPOCH
+    if cutover is not None and start < cutover:
+        upto = min(cutover, now - DEPARTURE_LAG, start + step)
+        if upto > start:
+            cur.execute(
+                """
+                SELECT snapshot_time, departed_at, vehicle_model_name, lat, lon, dwell_failed_starts
+                FROM device_history WHERE departed_at > %s AND departed_at <= %s
+                """,
+                (start, upto),
+            )
+            rows = cur.fetchall()
+            _fold_stops(cur, rows)
+            _set_watermark(cur, "stops", None, upto)
+            done += max(len(rows), 1)
+    # The close queue: closes that have settled for DEPARTURE_LAG.
+    cur.execute(
+        """
+        SELECT c.seq, h.snapshot_time, h.departed_at, h.vehicle_model_name, h.lat, h.lon,
+               h.dwell_failed_starts
+        FROM analytics_stop_closes c JOIN device_history h ON h.id = c.stop_id
+        WHERE c.closed_at <= %s
+        ORDER BY c.seq LIMIT %s
+        """,
+        (now - DEPARTURE_LAG, batch),
+    )
+    queued = cur.fetchall()
+    if queued:
+        rows = [r[1:] for r in queued
+                if r[2] is not None and (cutover is None or r[2] > cutover)]
+        _fold_stops(cur, rows)
+        cur.execute("DELETE FROM analytics_stop_closes WHERE seq = ANY(%s)", ([r[0] for r in queued],))
+        done += len(queued)
+    return done
 
 
 def refresh_region_devices(cur, step: timedelta = REGION_WINDOW) -> int:
@@ -246,9 +282,11 @@ def refresh_region_devices(cur, step: timedelta = REGION_WINDOW) -> int:
     cur.execute(
         """
         INSERT INTO analytics_region_devices_hourly (hour, region_type, region_name, devices_sum, cycles)
-        SELECT date_trunc('hour', snapshot_time), region_type, region_name, SUM(count_total), COUNT(*)
-        FROM regional_metrics_narrow
-        WHERE region_type = ANY(%s) AND snapshot_time > %s AND snapshot_time <= %s
+        SELECT date_trunc('hour', s.snapshot_time), r.region_type, r.region_name,
+               SUM(r.count_total), COUNT(*)
+        FROM snapshot_metadata_core s
+        JOIN regional_metrics_narrow r ON r.cycle_id = s.cycle_id
+        WHERE r.region_type = ANY(%s) AND s.snapshot_time > %s AND s.snapshot_time <= %s
         GROUP BY 1, 2, 3
         ON CONFLICT (hour, region_type, region_name) DO UPDATE SET
             devices_sum = analytics_region_devices_hourly.devices_sum + EXCLUDED.devices_sum,
@@ -263,15 +301,21 @@ def refresh_region_devices(cur, step: timedelta = REGION_WINDOW) -> int:
 
 def record_off_map(cur, cycle_id: Any, snapshot_time: datetime) -> None:
     """Vehicles seen in the last 7 days but not in this cycle's feed."""
+    # Only if device_state actually processed this cycle: otherwise no
+    # vehicle carries this last_cycle_id and the whole week's fleet would be
+    # stored as "off-map". Denver-core vehicles only, the same population as
+    # the cycle's available / in-use / out-of-service counts.
     cur.execute(
         """
         UPDATE device_status_snapshots SET off_map = (
             SELECT COUNT(*) FROM device_state
             WHERE last_observed_at >= %s AND last_cycle_id IS DISTINCT FROM %s
+              AND current_spatial_status = 'denver_core'
         )
         WHERE cycle_id = %s
+          AND EXISTS (SELECT 1 FROM device_state_processed_cycles WHERE cycle_id = %s)
         """,
-        (snapshot_time - OFF_MAP_WINDOW, cycle_id, cycle_id),
+        (snapshot_time - OFF_MAP_WINDOW, cycle_id, cycle_id, cycle_id),
     )
 
 
@@ -304,13 +348,22 @@ def refresh(cycle_id: Any = None, snapshot_time: datetime | None = None,
                     if not cur.fetchone()[0]:
                         conn.commit()          # keep off_map; the backfill has the rollups
                         return out
+                if not backfill:
+                    # A cycle's slice is ~0.1 s; anything slower is a bug, and
+                    # it must not hold the ingest's process.
+                    cur.execute("SET LOCAL statement_timeout = '5s'")
                 out["rides"] = refresh_rides(cur, BATCH if backfill else CYCLE_BATCH)
-                out["stops"] = refresh_stops(cur, now, STOP_WINDOW if backfill else CYCLE_STOP_WINDOW)
+                out["stops"] = refresh_stops(cur, now, STOP_WINDOW if backfill else CYCLE_STOP_WINDOW,
+                                             BATCH if backfill else CYCLE_BATCH)
                 out["region_devices"] = refresh_region_devices(
                     cur, REGION_WINDOW if backfill else CYCLE_REGION_WINDOW)
             conn.commit()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        if backfill:
+            raise   # a failed pass must not read as "caught up"
         log.exception("analytics rollup refresh failed")
+        from .sentry import capture_exception
+        capture_exception(e)
     return out
 
 

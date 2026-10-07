@@ -163,11 +163,6 @@ def run_once() -> str | None:
             log.exception("ride_watch update failed for cycle %s", cycle_id)
             capture_exception(e)
 
-        # Fleet analytics rollups (sql/094): fold this cycle's new rides and
-        # closed stops into the dashboard's sums, and record off-map. Derived
-        # and bounded; analytics_rollups.refresh never raises.
-        analytics_rollups.refresh(cycle_id, snapshot_time)
-
         _set_status(
             cycle_id,
             data_storage_complete_ts=_now(),
@@ -185,6 +180,12 @@ def run_once() -> str | None:
             transmission_status=tx_status,
             job_status="complete",
         )
+
+        # Fleet analytics rollups (sql/094): fold this cycle's new rides and
+        # settled stop closes into the dashboard's sums, and record off-map.
+        # LAST, after storage and transmit, so nothing the cycle publishes can
+        # wait on it; bounded (5 s statement timeout) and never raises.
+        analytics_rollups.refresh(cycle_id, snapshot_time)
 
         log.info(
             "cycle %s complete: denver=%d v1=%d v2=%d",

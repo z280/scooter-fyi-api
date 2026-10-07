@@ -18,11 +18,11 @@
 | 7 | Hourly lines: available, in use, out of service, off-map | `device_status_snapshots` (+ new `off_map`) | since 2026-09-07; off-map from deploy | live query |
 | 8 | Number cards: devices visible now; devices ever seen, by model | latest `device_status_snapshots`; `device_state` | now / all time | live query |
 
-**Regions:** `city` (all of Denver), `neighborhood` (78), `council_district` (13) and `community_network` (13). These are the official layers already loaded as boundaries; no new boundary is drawn.
+**Regions:** `city` (all of Denver), `neighborhood` (78), `council_district` (11) and `community_network` (13). These are the official layers already loaded as boundaries; no new boundary is drawn.
 
 ## Definitions the charts must state
 
-- **A ride** is a `trip_events` row: a vehicle that moved from one stop to another. It is placed by where it **started** and bucketed by when the move was **detected**, which is within one 2-minute cycle of the drop.
+- **A ride** is a `trip_events` row: a vehicle that moved from one stop to another. It is placed by where it **started** and bucketed by when the move was **detected**, which is within one 2-minute cycle of the drop. The `city` totals include rides that started just outside Denver (about 1.3%), matching `daily_trip_summary`.
 - **A failed start** is a rental that ended where it began (the failed-start rule in `device_state.py`). It is counted when its stop closes. **Caveat:** failed starts have been under-reported since 2026-08-10 (in-place releases plus GPS jitter; a fix is in progress), so the chart marks that date rather than presenting the drop as real.
 - **"Devices on the map" by neighbourhood** counts every vehicle the feed shows in the neighbourhood, whatever its status. Veo keeps rented and out-of-service vehicles in the feed. A per-status, per-neighbourhood split was never recorded.
 - **Equity compliance** is the share of the Denver fleet inside the official Equity Areas, per cycle, averaged per hour. The line marks Exhibit B's 30%. The *daily* compliance verdict (6–9 AM) stays the existing `/compliance/daily`; this chart is context for it, not a second verdict.
@@ -34,15 +34,19 @@
 
 These are incremental and idempotent, refreshed at the end of every ingest cycle. A refresh failure is logged and never fails the cycle. A one-time `analytics_backfill` CLI fills the history.
 - **`analytics_rides_hourly`** (hour, region_type, region_name, model): rides. Watermark: `trip_events.id`, which is append-only with a single writer.
-- **`analytics_failed_starts_hourly`** (same key): failed starts, plus the stops that had any. Watermark: `departed_at`, processed with a **6-hour lag**, because the absent rule backdates `departed_at` by up to `ABSENT_STOP_AFTER` (1 h).
-- **`analytics_dwell_daily`** (Denver day, region_type, region_name, model): dwells and the sum of dwell seconds. Same watermark and lag. Dwells over 30 days are excluded as data errors.
+- **`analytics_failed_starts_hourly`** (same key): failed starts, plus the stops that had any.
+- **`analytics_dwell_daily`** (Denver day, region_type, region_name, model): dwells and the sum of dwell seconds. Dwells over 30 days are excluded.
+- **Both are fed from a close queue** (`analytics_stop_closes`), not a `departed_at` watermark. `departed_at` can be stamped weeks in the past (by `close_ghost_stops`, or after a device_state outage). A trigger queues every close in commit order. A reopen (in-place release) removes a close that hasn't been folded in yet. The rollup consumes the queue after a **6-hour settle**. Stops closed before the migration are swept once by `departed_at`, up to the cutover.
+- **`analytics_region_devices_hourly`**: vehicles per region per hour, as a sum plus a cycle count. It is read from `regional_metrics_narrow` by `cycle_id`, through `snapshot_metadata_core`. A range scan of `regional_metrics_narrow` itself walked about 1 GB of index per cycle.
 - **`analytics_rollup_state`**: one watermark row per rollup.
+
+**Ingest safety:** the refresh runs **last** in the cycle, after storage and transmit. It takes small slices under a 5-second statement timeout, skips while the backfill holds the advisory lock, and never raises. Measured cost is about 0.1 s per cycle.
 
 A row's regions come from its point, via `geo.region_for_point` for each layer, at write time. The `city` row counts everything.
 
 ## API (all public, cached 5 min)
 
-Common parameters are `days` (1–120), `granularity` (`hour|day|week|month`), `region_type`, `region_name` and `tz` (fixed to Denver). Every response carries `window_start`, `window_end`, `data_through`, `granularity`, `region`, its definitions and its sample sizes.
+Common parameters are `days` (1–31 for hourly buckets, otherwise 1–366; fleet status is capped at its 30 days of history), `granularity` (`hour|day|week|month`), `region_type`, `region_name` and `tz` (fixed to Denver). Every response carries `window_start`, `window_end`, `data_through`, `granularity`, `region`, its definitions and its sample sizes.
 - `GET /api/v1/analytics/rides`
 - `GET /api/v1/analytics/failed-starts`
 - `GET /api/v1/analytics/devices-by-region`

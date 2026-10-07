@@ -81,6 +81,50 @@ CREATE TABLE IF NOT EXISTS analytics_rollup_state (
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- CLOSE QUEUE for failed starts and dwell. A stop's departed_at is NOT a
+-- usable watermark: the absent rule stamps it with the vehicle's last
+-- observed time, and close_ghost_stops (a backstop re-run any time) or a
+-- device_state outage can stamp it days or weeks behind "now", so a
+-- departed_at watermark would skip those closes forever. Instead every close
+-- is queued here in commit order by a trigger; the rollup consumes the queue
+-- (deleting what it folds in, in the same transaction) after a 6 h settle,
+-- and an in-place-release REOPEN (departed_at back to NULL) removes a close
+-- that has not been folded in yet, so the reopened stop is counted once,
+-- when it finally closes. A reopen after the settle double-counts that stop;
+-- in-place releases are short rentals, so that is rare. No index on the large
+-- device_history table is needed: the queue holds ~6 h of closes.
+CREATE TABLE IF NOT EXISTS analytics_stop_closes (
+    seq       BIGSERIAL PRIMARY KEY,
+    stop_id   BIGINT      NOT NULL,
+    closed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS idx_analytics_stop_closes_stop ON analytics_stop_closes (stop_id);
+
+CREATE OR REPLACE FUNCTION analytics_queue_stop_close() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.departed_at IS NOT NULL
+       AND (TG_OP = 'INSERT' OR OLD.departed_at IS NULL) THEN
+        INSERT INTO analytics_stop_closes (stop_id) VALUES (NEW.id);
+    ELSIF TG_OP = 'UPDATE' AND NEW.departed_at IS NULL AND OLD.departed_at IS NOT NULL THEN
+        DELETE FROM analytics_stop_closes WHERE stop_id = NEW.id;
+    END IF;
+    RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS trg_analytics_queue_stop_close ON device_history;
+CREATE TRIGGER trg_analytics_queue_stop_close
+    AFTER INSERT OR UPDATE OF departed_at ON device_history
+    FOR EACH ROW EXECUTE FUNCTION analytics_queue_stop_close();
+
+-- Stops closed before this migration are not in the queue. The backfill
+-- folds them in by departed_at up to this cutover; the queue takes stops
+-- whose departed_at is after it. (One rule each, so nothing is counted by
+-- both.)
+INSERT INTO analytics_rollup_state (name, watermark_time)
+VALUES ('stops_cutover', NOW())
+ON CONFLICT (name) DO NOTHING;
+
 -- Vehicles seen in the last 7 days but absent from this cycle's feed (rented
 -- out past the feed, in the shop, or gone). Written per cycle from this
 -- migration on; NULL for earlier cycles, which is "not recorded", not zero.

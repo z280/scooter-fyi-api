@@ -32,13 +32,17 @@ def db(pg, monkeypatch):
     api_analytics._cache.clear()
     with pg.cursor() as cur:
         for t in ("analytics_rides_hourly", "analytics_failed_starts_hourly", "analytics_dwell_daily",
-                  "analytics_region_devices_hourly", "analytics_rollup_state",
+                  "analytics_region_devices_hourly", "analytics_rollup_state", "analytics_stop_closes",
                   "regional_metrics_narrow", "device_status_snapshots"):
             cur.execute(f"DELETE FROM {t}")
         # Start the watermarks just before the fixture's rows, as a backfill
         # from the real epoch would reach them.
+        # Legacy sweep already done (cutover in the past, swept up to it);
+        # region snapshots start just before the fixture's rows.
+        cut = T - timedelta(days=3)
         cur.execute("INSERT INTO analytics_rollup_state (name, watermark_time) VALUES "
-                    "('stops', %s), ('region_devices', %s)", (T - timedelta(hours=1), T - timedelta(hours=1)))
+                    "('stops_cutover', %s), ('stops', %s), ('region_devices', %s)",
+                    (cut, cut, T - timedelta(hours=1)))
     pg.commit()
     return pg
 
@@ -78,6 +82,8 @@ def test_rides_stops_and_region_devices_flow_into_the_endpoints(db):
                     "reserved, out_of_service, models) VALUES (%s, %s, 100, 80, 15, 5, %s)",
                     (str(cid), T + timedelta(minutes=2),
                      '{"Cosmo": {"available": 50, "reserved": 10, "out_of_service": 3}}'))
+        # The closes the trigger queued have settled.
+        cur.execute("UPDATE analytics_stop_closes SET closed_at = %s", (T,))
     db.commit()
 
     got = ar.backfill(max_passes=20)
@@ -88,6 +94,7 @@ def test_rides_stops_and_region_devices_flow_into_the_endpoints(db):
     assert rides["rides"] == 3 and rides["models"] == ["Astro", "Cosmo"]
     assert rides["series"][0]["by_model"] == {"Astro": 1, "Cosmo": 2}
     assert rides["series"][0]["bucket"].endswith(("-06:00", "-07:00"))   # Denver local
+    assert rides["data_through"] is not None
     by_region = c.get("/api/v1/analytics/rides?days=2&region_type=neighborhood&region_name=NB_Test").json()
     assert by_region["rides"] == 3
 
@@ -135,6 +142,8 @@ def test_off_map_counts_recent_vehicles_missing_from_this_cycle(db):
     with db.cursor() as cur:
         for c in (cid, old):
             cur.execute("INSERT INTO observation_cycles (cycle_id, job_status) VALUES (%s, 'complete')", (str(c),))
+        cur.execute("INSERT INTO device_state_processed_cycles (cycle_id, snapshot_time, eligible_count, "
+                    "counts_as_observation) VALUES (%s, %s, 1, true)", (str(cid), NOW))
         cur.execute("INSERT INTO device_status_snapshots (cycle_id, snapshot_time, total, available, "
                     "reserved, out_of_service, models) VALUES (%s, %s, 1, 1, 0, 0, '{}')", (str(cid), NOW))
         for vid, cycle, seen in (("here", cid, NOW), ("gone", old, NOW - timedelta(days=2)),
@@ -169,3 +178,87 @@ def test_a_cycle_skips_the_rollups_while_the_backfill_holds_the_lock(db):
     finally:
         holder.close()
     assert ar.refresh()["rides"] == 1
+
+
+
+def _stop(cur, vid, arrived, departed, failed=0):
+    cur.execute(
+        "INSERT INTO device_history (vehicle_identifier, snapshot_time, departed_at, lat, lon, "
+        "spatial_status, form_factor, device_id_observed, dwell_failed_starts, vehicle_model_name) "
+        "VALUES (%s, %s, %s, 39.74, -104.98, 'denver_core', 'scooter', %s, %s, 'Cosmo') RETURNING id",
+        (vid, arrived, departed, vid, failed))
+    return cur.fetchone()[0]
+
+
+def _city_failed(db):
+    with db.cursor() as cur:
+        cur.execute("SELECT COALESCE(SUM(failed_starts), 0) FROM analytics_failed_starts_hourly "
+                    "WHERE region_type = 'city'")
+        return cur.fetchone()[0]
+
+
+def test_a_close_backdated_by_weeks_is_counted_once(db):
+    """close_ghost_stops / a device_state outage stamp departed_at far in the
+    past. A departed_at watermark skipped those forever; the queue does not."""
+    with db.cursor() as cur:
+        sid = _stop(cur, "ghost", T - timedelta(days=2, hours=1), None)
+        cur.execute("UPDATE device_history SET departed_at = %s, dwell_failed_starts = 3 WHERE id = %s",
+                    (T - timedelta(days=2), sid))
+        cur.execute("UPDATE analytics_stop_closes SET closed_at = %s", (T,))
+    db.commit()
+    ar.refresh()
+    ar.refresh()
+    assert _city_failed(db) == 3
+
+
+def test_a_reopened_stop_is_counted_once_when_it_finally_closes(db):
+    with db.cursor() as cur:
+        sid = _stop(cur, "inplace", T - timedelta(hours=3), T - timedelta(hours=2), failed=1)
+        # In-place release: the close is undone before it settles...
+        cur.execute("UPDATE device_history SET departed_at = NULL WHERE id = %s", (sid,))
+        # ...and the stop really closes later.
+        cur.execute("UPDATE device_history SET departed_at = %s WHERE id = %s", (T, sid))
+        cur.execute("SELECT COUNT(*) FROM analytics_stop_closes WHERE stop_id = %s", (sid,))
+        assert cur.fetchone()[0] == 1
+        cur.execute("UPDATE analytics_stop_closes SET closed_at = %s", (T,))
+    db.commit()
+    ar.refresh()
+    assert _city_failed(db) == 1
+
+
+def test_unsettled_closes_wait_and_legacy_stops_are_not_counted_twice(db):
+    with db.cursor() as cur:
+        # departed_at before the cutover: the legacy sweep's, not the queue's.
+        _stop(cur, "old", T - timedelta(days=4, hours=1), T - timedelta(days=4), failed=5)
+        cur.execute("UPDATE analytics_rollup_state SET watermark_time = %s WHERE name = 'stops'",
+                    (T - timedelta(days=5),))
+        # A fresh close: queued now, not settled.
+        _stop(cur, "fresh", T, NOW - timedelta(minutes=5), failed=7)
+    db.commit()
+    for _ in range(10):
+        ar.refresh(backfill=True)
+    assert _city_failed(db) == 5   # legacy once; the fresh close still settling
+    with db.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM analytics_stop_closes")
+        assert cur.fetchone()[0] == 2   # both queued; neither consumed (old is pre-cutover, kept until settled)
+
+
+def test_off_map_is_not_recorded_when_device_state_missed_the_cycle(db):
+    cid = uuid.uuid4()
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO observation_cycles (cycle_id, job_status) VALUES (%s, 'complete')", (str(cid),))
+        cur.execute("INSERT INTO device_status_snapshots (cycle_id, snapshot_time, total, available, "
+                    "reserved, out_of_service, models) VALUES (%s, %s, 1, 1, 0, 0, '{}')", (str(cid), NOW))
+    db.commit()
+    ar.refresh(cid, NOW)
+    with db.cursor() as cur:
+        cur.execute("SELECT off_map FROM device_status_snapshots WHERE cycle_id = %s", (str(cid),))
+        assert cur.fetchone()[0] is None
+
+
+def test_the_backfill_raises_instead_of_reporting_caught_up(db, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("statement timeout")
+    monkeypatch.setattr(ar, "refresh_rides", boom)
+    with pytest.raises(RuntimeError):
+        ar.backfill(max_passes=2)

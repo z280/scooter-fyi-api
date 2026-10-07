@@ -20,6 +20,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from . import geo
@@ -41,6 +43,8 @@ MIN_DWELLS_FOR_AVERAGE = 30
 #: (in-place releases + GPS jitter; fix in progress).
 FAILED_STARTS_UNDERCOUNT_SINCE = "2026-08-10"
 CACHE_SECONDS = 300
+#: device_status_snapshots keeps 30 days (compute.py prunes it).
+FLEET_STATUS_RETENTION_DAYS = 30
 
 _cache: dict[tuple, tuple[float, Any]] = {}
 _cache_lock = threading.Lock()
@@ -60,13 +64,70 @@ def _cached(key: tuple, build: Callable[[], Any]) -> Any:
     return value
 
 
-def _window(days: int, granularity: str) -> tuple[datetime, datetime]:
+DEN = ZoneInfo(TZ)
+
+
+def _window(days: int, granularity: str, cap: int | None = None) -> tuple[datetime, datetime]:
+    """[start, end): end is the top of the current UTC hour. For day, week and
+    month the start is pulled back to a whole Denver-local bucket boundary,
+    so the first bar is never a partial one that reads as a dip."""
     if granularity not in GRANULARITIES:
         raise HTTPException(400, f"granularity must be one of {list(GRANULARITIES)}")
-    if not 1 <= days <= MAX_DAYS[granularity]:
-        raise HTTPException(400, f"days must be 1-{MAX_DAYS[granularity]} for granularity '{granularity}'")
+    limit = min(MAX_DAYS[granularity], cap or MAX_DAYS[granularity])
+    if not 1 <= days <= limit:
+        raise HTTPException(400, f"days must be 1-{limit} for granularity '{granularity}'")
     end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    return end - timedelta(days=days), end
+    start = end - timedelta(days=days)
+    if granularity != "hour":
+        local = start.astimezone(DEN)
+        d = local.date()
+        if granularity == "week":
+            d = d - timedelta(days=d.weekday())        # ISO weeks start Monday
+        elif granularity == "month":
+            d = d.replace(day=1)
+        start = datetime(d.year, d.month, d.day, tzinfo=DEN).astimezone(timezone.utc)
+    return start, end
+
+
+def _bucket_sql(col: str, granularity: str) -> tuple[str, tuple]:
+    """SQL for a bucket start. HOURS are grouped in UTC: on the fall-back
+    night Denver's 01:00 happens twice, and grouping on local time would
+    merge two real hours into one bar."""
+    if granularity == "hour":
+        return f"date_trunc('hour', {col})", ()
+    return f"date_trunc(%s, {col} AT TIME ZONE %s)", (granularity, TZ)
+
+
+def _bucket_start(v: datetime, granularity: str) -> datetime:
+    """An aware bucket start. Hour buckets come back aware (UTC); day/week/
+    month come back as naive Denver-local midnights, which are never
+    ambiguous in Denver (DST changes at 02:00)."""
+    if granularity == "hour":
+        return v.astimezone(DEN)
+    return v.replace(tzinfo=DEN)
+
+
+def _bucket_end(b: datetime, granularity: str) -> datetime:
+    if granularity == "hour":
+        return b + timedelta(hours=1)
+    if granularity == "day":
+        n = b.date() + timedelta(days=1)
+    elif granularity == "week":
+        n = b.date() + timedelta(days=7)
+    else:
+        n = (b.date().replace(day=28) + timedelta(days=4)).replace(day=1)
+    return datetime(n.year, n.month, n.day, tzinfo=DEN)
+
+
+def _bucket_fields(v: datetime, granularity: str, through: datetime) -> dict[str, Any]:
+    """{"bucket": ISO start with offset, "partial": True only if the bucket
+    runs past what the data covers}: a partial last bar is labelled, never
+    passed off as a drop."""
+    b = _bucket_start(v, granularity)
+    out: dict[str, Any] = {"bucket": b.isoformat()}
+    if _bucket_end(b, granularity) > through:
+        out["partial"] = True
+    return out
 
 
 def _region(region_type: str, region_name: str | None) -> tuple[str, str]:
@@ -93,28 +154,22 @@ def _meta(start: datetime, end: datetime, granularity: str | None, **extra: Any)
     return out
 
 
-def _bucket_iso(local_naive: datetime) -> str:
-    """A Denver-local bucket start, as an ISO string WITH its offset."""
-    from zoneinfo import ZoneInfo
-    return local_naive.replace(tzinfo=ZoneInfo(TZ)).isoformat()
-
-
 def _rollup_series(table: str, value_cols: tuple[str, ...], rt: str, rn: str,
-                   start: datetime, end: datetime, granularity: str) -> tuple[list, list, dict]:
+                   start: datetime, end: datetime, granularity: str,
+                   through: datetime) -> tuple[list, list, dict]:
     sums = ", ".join(f"SUM({c})" for c in value_cols)
+    bexpr, bparams = _bucket_sql("hour", granularity)
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT date_trunc(%s, hour AT TIME ZONE %s) AS b, model, {sums}
+            SELECT {bexpr} AS b, model, {sums}
             FROM {table}
             WHERE region_type = %s AND region_name = %s AND hour >= %s AND hour < %s
             GROUP BY b, model ORDER BY b
             """,
-            (granularity, TZ, rt, rn, start, end),
+            (*bparams, rt, rn, start, min(end, through)),
         )
         rows = cur.fetchall()
-        cur.execute(f"SELECT MAX(hour) FROM {table}")
-        through = cur.fetchone()[0]
     buckets: dict[datetime, dict[str, list[int]]] = {}
     models: set[str] = set()
     totals = [0] * len(value_cols)
@@ -127,15 +182,39 @@ def _rollup_series(table: str, value_cols: tuple[str, ...], rt: str, rn: str,
     for b in sorted(buckets):
         per = buckets[b]
         series.append({
-            "bucket": _bucket_iso(b),
+            **_bucket_fields(b, granularity, min(end, through)),
             "by_model": {m: v[0] for m, v in sorted(per.items())},
             "total": sum(v[0] for v in per.values()),
             **({value_cols[1]: sum(v[1] for v in per.values())} if len(value_cols) > 1 else {}),
         })
-    return series, sorted(models), {
-        "totals": dict(zip(value_cols, totals)),
-        "data_through": (through + timedelta(hours=1)).isoformat() if through else None,
-    }
+    return series, sorted(models), {"totals": dict(zip(value_cols, totals))}
+
+
+def _rides_through() -> datetime | None:
+    """Rides are folded every cycle: through = the top of the hour after the
+    newest folded ride's hour, never later than now."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT MAX(hour) FROM analytics_rides_hourly WHERE region_type = 'city'")
+        h = cur.fetchone()[0]
+    return h + timedelta(hours=1) if h else None
+
+
+def _stops_through() -> datetime | None:
+    """How far failed starts and dwell are complete: closes settle for
+    DEPARTURE_LAG before they are folded, and the legacy sweep may not have
+    reached the cutover yet."""
+    from .analytics_rollups import DEPARTURE_LAG
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT name, watermark_time FROM analytics_rollup_state "
+                    "WHERE name IN ('stops', 'stops_cutover')")
+        st = dict(cur.fetchall())
+    lag_line = datetime.now(timezone.utc) - DEPARTURE_LAG
+    cutover, swept = st.get("stops_cutover"), st.get("stops")
+    if cutover is None:
+        return swept
+    if swept is None or swept < cutover:
+        return swept
+    return lag_line
 
 
 @router.get("/api/v1/analytics/rides")
@@ -149,12 +228,13 @@ def analytics_rides(
     rt, rn = _region(region_type, region_name)
 
     def build():
+        through = min(end, _rides_through() or start)
         series, models, extra = _rollup_series(
-            "analytics_rides_hourly", ("rides",), rt, rn, start, end, granularity)
+            "analytics_rides_hourly", ("rides",), rt, rn, start, end, granularity, through)
         return {
             **_meta(start, end, granularity, region={"type": rt, "name": rn}),
             "models": models, "series": series, "rides": extra["totals"]["rides"],
-            "data_through": extra["data_through"],
+            "data_through": through.isoformat(),
             "definition": "A ride is a vehicle that moved from one stop to another (trip_events), "
                           "placed by where it started and counted when the move was detected.",
         }
@@ -174,17 +254,19 @@ def analytics_failed_starts(
     rt, rn = _region(region_type, region_name)
 
     def build():
+        through = min(end, _stops_through() or start)
         series, models, extra = _rollup_series(
             "analytics_failed_starts_hourly", ("failed_starts", "stops_with_failures"),
-            rt, rn, start, end, granularity)
+            rt, rn, start, end, granularity, through)
         return {
             **_meta(start, end, granularity, region={"type": rt, "name": rn}),
             "models": models, "series": series,
             "failed_starts": extra["totals"]["failed_starts"],
             "stops_with_failures": extra["totals"]["stops_with_failures"],
-            "data_through": extra["data_through"],
+            "data_through": through.isoformat(),
             "definition": "A failed start is a rental that ended where it began, counted when the "
-                          "vehicle's stop closes, at that stop.",
+                          "vehicle's stop closes, at that stop. Closes are folded in after a 6-hour "
+                          "settle, so the series ends at data_through.",
             "caveat": f"Failed starts have been under-reported since {FAILED_STARTS_UNDERCOUNT_SINCE} "
                       "(a counting fix is in progress); a drop after that date is not an improvement.",
             "undercount_since": FAILED_STARTS_UNDERCOUNT_SINCE,
@@ -192,6 +274,21 @@ def analytics_failed_starts(
 
     response.headers["Cache-Control"] = f"public, max-age={CACHE_SECONDS}"
     return _cached(("failed", days, granularity, rt, rn, end), build)
+
+
+def _region_now(region_type: str) -> tuple[datetime | None, dict[str, int]]:
+    """The latest cycle's per-region counts. Found via snapshot_metadata_core
+    (indexed on snapshot_time) and read by cycle_id (regional_metrics_narrow's
+    key): MAX(snapshot_time) on regional_metrics_narrow itself scanned ~5 GB."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT cycle_id, snapshot_time FROM snapshot_metadata_core "
+                    "ORDER BY snapshot_time DESC LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            return None, {}
+        cur.execute("SELECT region_name, count_total FROM regional_metrics_narrow "
+                    "WHERE cycle_id = %s AND region_type = %s", (row[0], region_type))
+        return row[1], {r[0]: int(r[1] or 0) for r in cur.fetchall()}
 
 
 @router.get("/api/v1/analytics/devices-by-region")
@@ -209,15 +306,8 @@ def analytics_devices_by_region(
         _region(region_type, region_name)
 
     def build():
+        latest, now_counts = _cached(("bynow", region_type, end), lambda: _region_now(region_type))
         with connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT MAX(snapshot_time) FROM regional_metrics_narrow WHERE region_type = %s",
-                        (region_type,))
-            latest = cur.fetchone()[0]
-            now_counts: dict[str, int] = {}
-            if latest:
-                cur.execute("SELECT region_name, count_total FROM regional_metrics_narrow "
-                            "WHERE region_type = %s AND snapshot_time = %s", (region_type, latest))
-                now_counts = {r[0]: int(r[1] or 0) for r in cur.fetchall()}
             cur.execute(
                 """
                 SELECT region_name, SUM(devices_sum), SUM(cycles)
@@ -230,16 +320,18 @@ def analytics_devices_by_region(
             avg = {r[0]: (int(r[1]), int(r[2])) for r in cur.fetchall()}
             series = None
             if region_name:
+                bexpr, bparams = _bucket_sql("hour", granularity)
                 cur.execute(
-                    """
-                    SELECT date_trunc(%s, hour AT TIME ZONE %s) AS b, SUM(devices_sum), SUM(cycles)
+                    f"""
+                    SELECT {bexpr} AS b, SUM(devices_sum), SUM(cycles)
                     FROM analytics_region_devices_hourly
                     WHERE region_type = %s AND region_name = %s AND hour >= %s AND hour < %s
                     GROUP BY b ORDER BY b
                     """,
-                    (granularity, TZ, region_type, region_name, start, end),
+                    (*bparams, region_type, region_name, start, end),
                 )
-                series = [{"bucket": _bucket_iso(b), "average": round(int(s_) / int(n), 1), "cycles": int(n)}
+                series = [{**_bucket_fields(b, granularity, end),
+                           "average": round(int(s_) / int(n), 1), "cycles": int(n)}
                           for b, s_, n in cur.fetchall() if n]
         names = sorted(set(now_counts) | set(avg))
         regions = [{
@@ -276,20 +368,20 @@ def analytics_equity_compliance(
     start, end = _window(days, granularity)
 
     def build():
+        bexpr, bparams = _bucket_sql("snapshot_time", granularity)
         with connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT date_trunc(%s, snapshot_time AT TIME ZONE %s) AS b,
-                       AVG(percent_all_devices_equity), COUNT(*)
+                f"""
+                SELECT {bexpr} AS b, AVG(percent_all_devices_equity), COUNT(*)
                 FROM snapshot_metadata_core
                 WHERE snapshot_time >= %s AND snapshot_time < %s
                   AND percent_all_devices_equity IS NOT NULL
                 GROUP BY b ORDER BY b
                 """,
-                (granularity, TZ, start, end),
+                (*bparams, start, end),
             )
             rows = cur.fetchall()
-        series = [{"bucket": _bucket_iso(b), "percent": round(float(p), 2), "cycles": int(n),
+        series = [{**_bucket_fields(b, granularity, end), "percent": round(float(p), 2), "cycles": int(n),
                    "meets_threshold": float(p) >= EQUITY_THRESHOLD_PCT} for b, p, n in rows]
         met = sum(1 for s in series if s["meets_threshold"])
         return {
@@ -315,11 +407,13 @@ def analytics_dwell(
     if region_type not in REGION_TYPES:
         raise HTTPException(400, f"region_type must be one of {list(REGION_TYPES)}")
     end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    start = end - timedelta(days=days)
+    start = datetime.combine(end.astimezone(DEN).date() - timedelta(days=days - 1),
+                             datetime.min.time(), tzinfo=DEN).astimezone(timezone.utc)
 
     def build():
-        from zoneinfo import ZoneInfo
-        start_day = start.astimezone(ZoneInfo(TZ)).date()
+        # Exactly `days` Denver days ending today (whole days: the rollup is
+        # by day), not a partial extra day at the front.
+        first_day = end.astimezone(DEN).date() - timedelta(days=days - 1)
         with connection() as conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -328,11 +422,10 @@ def analytics_dwell(
                 WHERE region_type = %s AND day >= %s
                 GROUP BY region_name, model
                 """,
-                (region_type, start_day),
+                (region_type, first_day),
             )
             rows = cur.fetchall()
-            cur.execute("SELECT watermark_time FROM analytics_rollup_state WHERE name = 'stops'")
-            got = cur.fetchone()
+        through = _stops_through()
         by_region: dict[str, dict[str, Any]] = {}
         models: set[str] = set()
         for region, model, n, secs in rows:
@@ -347,7 +440,7 @@ def analytics_dwell(
             "models": sorted(models),
             "regions": [{"region": r, "by_model": dict(sorted(v.items()))} for r, v in sorted(by_region.items())],
             "min_dwells_for_average": MIN_DWELLS_FOR_AVERAGE,
-            "data_through": got[0].isoformat() if got and got[0] else None,
+            "data_through": through.isoformat() if through else None,
             "definition": "Dwell is how long a vehicle stayed at a stop, from arrival to departure, "
                           "for stops that closed in the window (Denver days); open stops and stops "
                           "over 30 days are not counted. Placed at the stop.",
@@ -363,14 +456,17 @@ def analytics_fleet_status(
     model: str | None = Query(None, max_length=40),
 ) -> dict[str, Any]:
     """Average vehicles available, in use, out of service and off-map per bucket."""
-    start, end = _window(days, granularity)
+    # device_status_snapshots is pruned to 30 days (compute.py), so a longer
+    # window would only ever show 30 days under a bigger label.
+    start, end = _window(days, granularity, cap=FLEET_STATUS_RETENTION_DAYS)
 
     def build():
+        bexpr, bparams = _bucket_sql("snapshot_time", granularity)
         with connection() as conn, conn.cursor() as cur:
             if model:
                 cur.execute(
-                    """
-                    SELECT date_trunc(%s, snapshot_time AT TIME ZONE %s) AS b,
+                    f"""
+                    SELECT {bexpr} AS b,
                            AVG((models -> %s ->> 'available')::numeric),
                            AVG((models -> %s ->> 'reserved')::numeric),
                            AVG((models -> %s ->> 'out_of_service')::numeric),
@@ -379,30 +475,32 @@ def analytics_fleet_status(
                     WHERE snapshot_time >= %s AND snapshot_time < %s AND models ? %s
                     GROUP BY b ORDER BY b
                     """,
-                    (granularity, TZ, model, model, model, start, end, model),
+                    (*bparams, model, model, model, start, end, model),
                 )
             else:
                 cur.execute(
-                    """
-                    SELECT date_trunc(%s, snapshot_time AT TIME ZONE %s) AS b,
+                    f"""
+                    SELECT {bexpr} AS b,
                            AVG(available), AVG(reserved), AVG(out_of_service), AVG(off_map), COUNT(*)
                     FROM device_status_snapshots
                     WHERE snapshot_time >= %s AND snapshot_time < %s
                     GROUP BY b ORDER BY b
                     """,
-                    (granularity, TZ, start, end),
+                    (*bparams, start, end),
                 )
             rows = cur.fetchall()
         r1 = lambda v: None if v is None else round(float(v), 1)  # noqa: E731
         return {
             **_meta(start, end, granularity, model=model),
-            "series": [{"bucket": _bucket_iso(b), "available": r1(a), "in_use": r1(u),
+            "series": [{**_bucket_fields(b, granularity, end), "available": r1(a), "in_use": r1(u),
                         "out_of_service": r1(o), "off_map": r1(off), "cycles": int(n)}
                        for b, a, u, o, off, n in rows],
             "definition": "Averages per bucket of the feed's own status counts at each 2-minute "
                           "cycle. In use = reserved (Veo keeps rented vehicles in the feed). "
-                          "Off-map = seen in the last 7 days but absent from the feed; recorded "
-                          "from 2026-10-07, null before (not zero), and not split by model.",
+                          "Off-map = Denver vehicles seen in the last 7 days but absent from the "
+                          "feed; recorded from 2026-10-07, null before (not zero), and not split "
+                          "by model. History is the last 30 days (the source is pruned at 30).",
+            "retention_days": FLEET_STATUS_RETENTION_DAYS,
         }
 
     response.headers["Cache-Control"] = f"public, max-age={CACHE_SECONDS}"
@@ -432,9 +530,10 @@ def analytics_fleet_counts(response: Response) -> dict[str, Any]:
             "ever_seen_total": sum(n for _, n in ever),
             "ever_seen_by_model": dict(ever),
             "ever_seen_since": since.isoformat() if since else None,
-            "definition": "Visible now: every vehicle in the latest feed cycle, any status. Ever "
-                          "seen: every distinct vehicle (by plate) since tracking began, by the "
-                          "model it last reported.",
+            "definition": "Visible now: every vehicle in Denver (the buffered city polygon) in "
+                          "the latest feed cycle, any status. Ever seen: every distinct vehicle "
+                          "(by plate) since tracking began, anywhere in the feed, by the model it "
+                          "last reported ('Unknown' when the feed never named it).",
         }
 
     response.headers["Cache-Control"] = f"public, max-age={CACHE_SECONDS}"

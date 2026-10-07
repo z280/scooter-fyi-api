@@ -111,3 +111,43 @@ def test_bad_parameters_are_400s(client, url):
 def test_an_unknown_region_is_a_404(client):
     r = client.get("/api/v1/analytics/rides?region_type=neighborhood&region_name=NB_Atlantis")
     assert r.status_code == 404
+
+
+
+# --- buckets and windows -------------------------------------------------------------
+
+def test_the_fall_back_hour_is_two_buckets_not_one():
+    from src import api_analytics as aa
+    a = datetime(2026, 11, 1, 7, tzinfo=timezone.utc)   # 01:00 MDT
+    b = datetime(2026, 11, 1, 8, tzinfo=timezone.utc)   # 01:00 MST
+    fa = aa._bucket_fields(a, "hour", b + timedelta(hours=2))
+    fb = aa._bucket_fields(b, "hour", b + timedelta(hours=2))
+    assert fa["bucket"] == "2026-11-01T01:00:00-06:00"
+    assert fb["bucket"] == "2026-11-01T01:00:00-07:00"
+    assert aa._bucket_sql("hour", "hour")[0] == "date_trunc('hour', hour)"   # grouped in UTC
+
+
+def test_day_week_month_windows_start_on_a_local_boundary(monkeypatch):
+    from src import api_analytics as aa
+    for g, check in (("day", lambda d: (d.hour, d.minute) == (0, 0)),
+                     ("week", lambda d: d.weekday() == 0 and d.hour == 0),
+                     ("month", lambda d: d.day == 1 and d.hour == 0)):
+        start, end = aa._window(30, g)
+        assert check(start.astimezone(aa.DEN)), g
+        assert end - start >= timedelta(days=30)
+
+
+def test_an_incomplete_last_bucket_is_marked_partial():
+    from src import api_analytics as aa
+    through = datetime(2026, 10, 7, 18, tzinfo=timezone.utc)          # 12:00 Denver
+    today = datetime(2026, 10, 7)                                      # naive local midnight
+    yesterday = datetime(2026, 10, 6)
+    assert aa._bucket_fields(today, "day", through).get("partial") is True
+    assert "partial" not in aa._bucket_fields(yesterday, "day", through)
+
+
+def test_fleet_status_is_capped_at_its_30_days_of_history():
+    from fastapi import HTTPException
+    from src import api_analytics as aa
+    with pytest.raises(HTTPException):
+        aa._window(60, "day", cap=aa.FLEET_STATUS_RETENTION_DAYS)
