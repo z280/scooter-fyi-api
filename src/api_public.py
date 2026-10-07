@@ -303,7 +303,13 @@ def _rental_outcomes() -> dict[str, tuple[int, int, int]] | None:
                 cur.execute(
                     "SELECT vehicle_identifier, rentals_observed, rentals_no_go, "
                     "recent_no_go_mask "
-                    "FROM device_state WHERE rentals_observed > 0")
+                    # NOT `WHERE rentals_observed > 0`. sql/089 zeroed the
+                    # lifetime counters and deliberately kept the mask; filtering
+                    # on the counter would hide every vehicle's mask until its
+                    # next rental, and a vehicle whose only high_risk reason is
+                    # recent_rentals_no_go would read "ok" in the meantime.
+                    "FROM device_state "
+                    "WHERE rentals_observed > 0 OR recent_no_go_mask <> 0")
                 return {r[0]: (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0))
                         for r in cur.fetchall()}
     except Exception:  # noqa: BLE001

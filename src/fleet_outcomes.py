@@ -24,12 +24,12 @@ mind. That is what makes the number worth publishing at all.
 WHAT THIS IS NOT, AND CANNOT BE MADE INTO.
 
 * **It is cumulative, not a time series.** These counters count up from zero
-  since sql/072 and never reset, so this module can report the fleet's lifetime
-  rate and cannot report last Tuesday's. The day-by-day story needs an hourly
+  since they were reset by sql/089 (2026-10-07), so this module can report the
+  rate since then and cannot report last Tuesday's. The day-by-day story needs an hourly
   rollup written at the same moment the counters increment
   (`ANALYTICS_PLAN.md` §1, tier 2). Every figure here is explicitly labelled
-  lifetime for that reason — a number whose window is unstated will be read as
-  "now".
+  "since the reset", with the reset's own timestamp, for that reason — a number
+  whose window is unstated will be read as "now".
 * **It is not a cause.** A no-go is an attempt that went nowhere. The cause
   might be the vehicle, the app, the weather, or a rider changing their mind
   after unlocking. This module counts; it does not attribute.
@@ -39,13 +39,11 @@ ended within the ingest's `stationary_threshold_meters` of where it was
 unlocked. That was 16 m until 2026-10-06 and is 25 m since (sql/088) — the
 radius sql/072's own validation was computed at.
 
-So the counters SPAN TWO DEFINITIONS and the response's `radius_meters` reports
-the CURRENT one, which is not the one most of the existing total was collected
-under. That is a known hole, recorded on the column comment in sql/088, and it
-closes when the counters are either reset or stamped with the radius they were
-counted at. Until then a lifetime rate is a blend, and this field tells a
-reader which circle the ingest is using today rather than which one produced
-the number — a distinction worth stating plainly rather than papering over.
+Until 2026-10-07 the counters SPANNED TWO DEFINITIONS, with no way to tell
+which share was which. The owner decided to reset them, and sql/089 did, so
+everything counted since describes ONE ring. `radius_meters` is therefore now
+the radius that produced the number, and `counted_since` / `counted_since_at`
+name the reset and when it ran (read from schema_migrations, not assumed).
 
 ONE MORE THING THE NUMBER IS NOT. `device_state.py` computes a no-go from END
 DISPLACEMENT — unlock point to drop point — while sql/072's header describes
@@ -93,6 +91,21 @@ def _radius_meters() -> float:
     return float(load().device_tracking.stationary_threshold_meters)
 
 
+#: The migration that started the counters' current window. Its applied_at,
+#: read from schema_migrations, is published as `counted_since_at`.
+COUNTED_SINCE_MIGRATION = "089_reset_rental_outcome_counters.sql"
+
+
+def _counted_since_at(cur) -> str | None:
+    """When the reset actually ran in THIS database, as ISO 8601, or None."""
+    cur.execute(
+        "SELECT applied_at FROM schema_migrations WHERE filename = %s",
+        (COUNTED_SINCE_MIGRATION,),
+    )
+    row = cur.fetchone()
+    return row[0].isoformat() if row and row[0] else None
+
+
 _SQL = """
 SELECT COALESCE(current_vehicle_model_name, 'Unknown') AS model,
        COALESCE(SUM(rentals_observed), 0)      AS rentals,
@@ -112,9 +125,11 @@ def summarize() -> dict[str, Any]:
     dashboard rather than a 500, and the caller distinguishes the two by the
     `rentals` count being zero.
     """
+    since_at: str | None = None
     try:
         with connection() as conn:
             with conn.cursor() as cur:
+                since_at = _counted_since_at(cur)
                 cur.execute(_SQL)
                 rows = [
                     {
@@ -129,11 +144,12 @@ def summarize() -> dict[str, Any]:
         log.exception("fleet outcomes summary failed")
         rows = []
 
-    return summarize_rows(rows, _radius_meters())
+    return summarize_rows(rows, _radius_meters(), counted_since_at=since_at)
 
 
 def summarize_rows(
-    rows: list[dict[str, Any]], radius_meters: float
+    rows: list[dict[str, Any]], radius_meters: float,
+    counted_since_at: str | None = None,
 ) -> dict[str, Any]:
     """The arithmetic, split out so it is testable without a database."""
     rentals = sum(r["rentals"] for r in rows)
@@ -157,9 +173,10 @@ def summarize_rows(
     )
 
     return {
-        # Stated, not implied. These counters have no window.
-        "window": "lifetime",
-        "counted_since": "sql/072",
+        # Stated, not implied. The window opens at the sql/089 reset.
+        "window": "since_reset",
+        "counted_since": "sql/089",
+        "counted_since_at": counted_since_at,
         # The circle a "no-go" was measured against — see the module header on
         # why this is in the payload rather than assumed by the reader.
         "radius_meters": radius_meters,
