@@ -179,8 +179,8 @@ jobs:
           ADMIN_EMAILS: ${{ secrets.ADMIN_EMAILS }}
           POSTMARK_TOKEN: ${{ secrets.POSTMARK_TOKEN }}
           POSTMARK_FROM: ${{ secrets.POSTMARK_FROM }}
-          # Equity receipt reading (docs/PLAN_EQUITY_RECEIPTS.md Phase 3): the
-          # owner's dedicated OpenRouter key for this project only.
+          # The owner's OpenRouter key, one name for every use (first: equity
+          # receipt reading, docs/PLAN_EQUITY_RECEIPTS.md Phase 3).
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           MAGIC_LINK_URL_TEMPLATE: ${{ secrets.MAGIC_LINK_URL_TEMPLATE }}
           COMMS_TOKEN: ${{ secrets.COMMS_TOKEN }}
@@ -234,8 +234,8 @@ jobs:
             POSTMARK_TOKEN=$POSTMARK_TOKEN
             POSTMARK_FROM=$POSTMARK_FROM
             # Blank = receipts are read OCR-only and anything needing the
-            # vision model is "uncertain" (Phase 3); nothing else depends on it.
-            OPENROUTER_RECEIPTS_API_KEY=$OPENROUTER_KEY
+            # vision model is "uncertain" (Phase 3).
+            OPENROUTER_KEY=$OPENROUTER_KEY
             MAGIC_LINK_URL_TEMPLATE=$MAGIC_LINK_URL_TEMPLATE
             # z280-comms. Both are read by docker-compose.yml; a blank
             # COMMS_TOKEN leaves the SMS door closed and /auth/config

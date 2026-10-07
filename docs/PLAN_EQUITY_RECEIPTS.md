@@ -248,12 +248,12 @@ Owner's direction (2026-10-06): the API does the analysis and settles points its
 
 **Extract.** Read the screenshot with two independent readers:
 
-- **(A) a vision LLM via OpenRouter** (owner's decision, 2026-10-06): a dedicated OpenRouter key for this project only, and the **cheapest model that passes the gold set**. It returns the plate, minutes, charge, discount (and its label), subtotal, tax (and its label: "Taxes & Fees" or "Tax"), total and charge date, using structured output (JSON schema). From a Trip summary it returns the start date and time, minutes and distance instead. These are the fields `tests/fixtures/receipts/labels.json` scores it on.
+- **(A) a vision LLM via OpenRouter** (owner's decision, 2026-10-06): the owner's OpenRouter key (`OPENROUTER_KEY`), and the **cheapest model that passes the gold set**. It returns the plate, minutes, charge, discount (and its label), subtotal, tax (and its label: "Taxes & Fees" or "Tax"), total and charge date, using structured output (JSON schema). From a Trip summary it returns the start date and time, minutes and distance instead. These are the fields `tests/fixtures/receipts/labels.json` scores it on.
   - **Bake-off candidates** (OpenRouter list prices 2026-10-06, $/M tokens in/out): `qwen/qwen3.7-flash` (0.03/0.13), `google/gemma-3-12b-it` (0.05/0.15), `google/gemini-2.5-flash-lite` (0.05/0.20 batch), `openai/gpt-5-nano` (0.05/0.40). At about 1.5k tokens in and 200 out, each costs well under $0.001 per receipt.
   - **Choosing:** run every candidate on every gold receipt and pick the cheapest with perfect money-field accuracy. Re-run the bake-off when the gold set grows or a model is retired.
   - **Escalation:** when the cheap model and local OCR disagree, ask one stronger model once before falling back to `uncertain`.
   - **Privacy:** every request sets OpenRouter provider preferences `data_collection: "deny"`, and zero-data-retention routing where the chosen model supports it. The privacy payload and policy name OpenRouter and the routed provider as processors of the receipt image.
-  - **The key:** `OPENROUTER_RECEIPTS_API_KEY` in the API's environment, written by a script the owner runs (never printed or pasted into a chat). With the key absent, Phase 3 runs OCR-only and anything that needs the model is `uncertain`.
+  - **The key:** `OPENROUTER_KEY` in the API's environment, from the owner's `OPENROUTER_KEY` Actions secret (added 2026-10-07; never printed or pasted into a chat). One name for every OpenRouter use the API grows, not a receipts-only key, so its spend limit covers them all. With the key absent, Phase 3 runs OCR-only and anything that needs the model is `uncertain`.
 - **(B) local OCR** on ovh3 (PaddleOCR or Tesseract) plus a Veo-layout parser.
 
 A works from day one and survives layout changes. B keeps a second opinion that never leaves the server.
