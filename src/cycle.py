@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import psycopg
 
-from . import compute, device_state, ingest, ride_watch, transmit
+from . import analytics_rollups, compute, device_state, ingest, ride_watch, transmit
 from .pg import connection
 from .sentry import capture_exception, set_cycle_tag
 
@@ -162,6 +162,11 @@ def run_once() -> str | None:
         except Exception as e:  # noqa: BLE001
             log.exception("ride_watch update failed for cycle %s", cycle_id)
             capture_exception(e)
+
+        # Fleet analytics rollups (sql/094): fold this cycle's new rides and
+        # closed stops into the dashboard's sums, and record off-map. Derived
+        # and bounded; analytics_rollups.refresh never raises.
+        analytics_rollups.refresh(cycle_id, snapshot_time)
 
         _set_status(
             cycle_id,

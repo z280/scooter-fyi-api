@@ -1035,6 +1035,30 @@ GET /api/v1/h3/aggregates?res=9
 
 ---
 
+### Fleet analytics (`/api/v1/analytics/*`)
+
+The owner's fleet dashboard (docs/PLAN_FLEET_ANALYTICS.md). All endpoints are public and cached for 5 minutes. Every response carries `window_start`/`window_end` (UTC), `timezone` (`America/Denver`; day, week and month buckets are Denver-local, and each `bucket` is ISO 8601 with its offset), a `definition`, and its sample sizes.
+
+| Endpoint | Parameters | Returns |
+|---|---|---|
+| `GET /analytics/rides` | `days`, `granularity` (`hour` ≤31 days, otherwise ≤366), `region_type` (`city` \| `neighborhood` \| `council_district` \| `community_network`), `region_name` (required unless `city`) | `series[{bucket, total, by_model}]`, `models`, `rides`, `data_through` |
+| `GET /analytics/failed-starts` | as above | the same, plus `failed_starts`, `stops_with_failures`, `caveat`, `undercount_since` (2026-08-10) |
+| `GET /analytics/devices-by-region` | `region_type` (a layer), `days`; optionally `region_name` + `granularity` | `regions[{region, now, average, cycles}]`, sorted by average; with `region_name`, also its `series` |
+| `GET /analytics/equity-compliance` | `days`, `granularity` | `series[{bucket, percent, cycles, meets_threshold}]`, `threshold_percent` (30, Exhibit B), `buckets_meeting_threshold` |
+| `GET /analytics/dwell` | `region_type` (incl. `city`), `days` | `regions[{region, by_model{model: {dwells, average_minutes}}}]`; the average is null under 30 stops |
+| `GET /analytics/fleet-status` | `days`, `granularity`, optional `model` | `series[{bucket, available, in_use, out_of_service, off_map, cycles}]`; `off_map` is null before 2026-10-07 and not split by model |
+| `GET /analytics/fleet-counts` | — | `visible_now`, `visible_now_by_model`, `ever_seen_total`, `ever_seen_by_model`, `ever_seen_since` |
+
+A `400` means a bad parameter; a `404` means an unknown region.
+
+**Definitions** (also returned inline):
+- A ride is a `trip_events` move, placed by its start and timed at detection.
+- A failed start is counted when its stop closes. The counter has been under-reported since 2026-08-10.
+- "Devices by region" counts vehicles on the map, whatever their status.
+- Dwell runs from arrival to departure for closed stops.
+
+The rollups are `sql/094`. The ingest refreshes them in small slices each cycle; the one-time backfill is `cli analytics_backfill`.
+
 ### `GET /api/v1/fleet/outcomes`
 
 Share of rentals that **ended** within `radius_meters` of where they were unlocked (END displacement: a loop ride back to the same rack counts), fleet-wide and by model, from `device_state`'s per-vehicle counters **since their reset** (sql/089). Fields: `window` (`"since_reset"`), `counted_since` (`"sql/089"`), `counted_since_at` (when the reset ran, ISO 8601), `radius_meters`, `rentals`, `no_gos`, `no_go_rate` (null under `min_rentals_for_rate`), `vehicles`, `by_model[]`. A no-go is an attempt that went nowhere; this counts, it does not attribute a cause. Cached 5 min with an ETag that includes the window start.

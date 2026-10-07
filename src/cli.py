@@ -126,6 +126,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .analytics import cleanup_telemetry, rollup_analytics
+from .analytics_rollups import backfill as analytics_backfill
 from .archive import run_archive
 from . import job_runs
 from .area_leaders import refresh_universe as refresh_area_universe
@@ -959,6 +960,10 @@ COMMANDS = {
     "rollup_analytics":      rollup_analytics,
     "cleanup_telemetry":     cleanup_telemetry,
     "migrate":               lambda: run_migrations(),
+    # docs/PLAN_FLEET_ANALYTICS.md: fill the fleet-analytics rollups once.
+    # Resumable (each pass commits its watermark); the ingest keeps them
+    # current afterwards.
+    "analytics_backfill":    analytics_backfill,
 }
 
 
