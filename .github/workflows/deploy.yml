@@ -43,6 +43,11 @@ jobs:
       VEO_TEST_PG_DSN: postgresql://test:test@127.0.0.1:5432/test
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The migration-number check compares this branch against the base,
+          # and a depth-1 checkout has no base to compare to. Without this the
+          # upstream half of that check silently does nothing.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"          # matches the Dockerfile base
@@ -54,6 +59,23 @@ jobs:
       # Applies every sql/ file in order against a clean database. This is the
       # only place migrations are exercised end-to-end: the deploy has no
       # migration step, and production only ever applies them forward.
+      # BEFORE applying them, because applying is exactly what hides the
+      # problem: src/pg.py tracks migrations by FILENAME, so two files sharing
+      # a number both apply and the step passes. Ordering is then decided by
+      # whichever suffix sorts first, and a database that already applied one
+      # of them picks up the other on a later deploy — so CI's effective order
+      # is not production's. This has happened twice (061 and 069 on main, both
+      # benign; and PR #105's 088 against main's).
+      #
+      # GITHUB_TOKEN is the one Actions provides, which can list this repo's
+      # open PRs. That is all the cross-PR half needs — no org PAT.
+      - name: Check migration numbers
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MIGRATION_BASE_REF: origin/${{ github.base_ref || 'main' }}
+        run: python scripts/check_migration_numbers.py
       - name: Apply migrations
         run: python -m src.cli migrate
       - name: Test
