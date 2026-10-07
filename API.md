@@ -1035,6 +1035,26 @@ GET /api/v1/h3/aggregates?res=9
 
 ---
 
+### `GET /api/v1/fleet/outcomes`
+
+Share of rentals that **ended** within `radius_meters` of where they were unlocked (END displacement: a loop ride back to the same rack counts), fleet-wide and by model, from `device_state`'s per-vehicle counters **since their reset** (sql/089). Fields: `window` (`"since_reset"`), `counted_since` (`"sql/089"`), `counted_since_at` (when the reset ran, ISO 8601), `radius_meters`, `rentals`, `no_gos`, `no_go_rate` (null under `min_rentals_for_rate`), `vehicles`, `by_model[]`. A no-go is an attempt that went nowhere; this counts, it does not attribute a cause. Cached 5 min with an ETag that includes the window start.
+
+### `GET /api/v1/fleet/outcomes/equity?window=7d|28d`
+
+The same share **inside vs outside the city's official Equity Areas** (`data/equity.geojson`), over a trailing window, from `rental_outcomes_hourly` (sql/090). Each rental is attributed **at write time** to the r9 cell where it was **unlocked**, never to where a vehicle is parked now. A cell counts as inside only if its whole hexagon (centre + 6 vertices) is inside an Equity Area and outside only if all seven points are outside; cells straddling a boundary are excluded and reported. Rows with rentals whose unlock point was never observed are excluded and counted.
+
+| Field | Meaning |
+|---|---|
+| `inside`, `outside` | `{rentals, no_gos, cells, no_go_rate}`; `no_go_rate` is null under `min_rentals_for_rate` (counts stay) |
+| `difference_points` | inside rate minus outside rate, in percentage points; null unless BOTH sides clear the floor |
+| `boundary_excluded` | `{rentals, no_gos, cells}` in cells straddling an Equity Area boundary |
+| `origin_unknown_excluded` | rentals left out because their unlock point was never observed |
+| `window`, `window_start`, `window_end` | the trailing window (hour-aligned, UTC) |
+| `data_since` | the first hour the rollup holds; a window reaching earlier covers less than its name |
+| `radius_meters`, `definition`, `attribution`, `boundary` | `25`, `"end_displacement"`, `"unlock_point_r9_cell"`, `"official_equity_areas"` |
+
+`400` for any other `window`. Never a 500: a failure returns zeros and null rates. Cached 10 min.
+
 ### `GET /api/v1/leaderboard/map`
 
 FEATURE_PLAN §11's H3 r8 "area leader" report -- the 🏆 Leaderboard
