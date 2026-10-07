@@ -84,6 +84,17 @@ def pg(monkeypatch):
         pytest.skip(f"VEO_TEST_PG_DSN unreachable ({dsn})")
 
     conn = psycopg.connect(dsn)
+    # EVERY MIGRATION, ON EVERY TEST, in filename order — which means a test that
+    # COMMITS a row legal under the current schema but illegal under an EARLIER
+    # migration breaks this replay for every pg test that runs after it, anywhere
+    # in the suite. `ADD CONSTRAINT` validates existing rows, so the failure is a
+    # setup error reading "is violated by some row", in files that have nothing to
+    # do with the culprit. It has happened once: a planless receipt claim (legal
+    # from sql/095, illegal under sql/093) committed by
+    # `test_receipt_claims_pg.py` took 19 tests in THIS file down with it.
+    #
+    # So: assert on what an INSERT does, then roll back. Asserting that a row is
+    # accepted never needs a commit.
     with conn.cursor() as cur:
         for path in sorted(SQL_DIR.glob("*.sql")):
             cur.execute(path.read_text())

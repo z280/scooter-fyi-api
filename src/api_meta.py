@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 _PRIVACY = {
-    "updated": "2026-10-06",
+    "updated": "2026-10-07",
     "contact": "zneill@gmail.com",
     "retention": [
         {
@@ -60,12 +60,15 @@ _PRIVACY = {
         {
             "data": "receipts",
             "retention": "18 months",
-            "detail": "Discount-report images (the receipt screenshot and, for "
-                      "an Equity Area claim, the screenshot of your Veo plan) "
-                      "live in a private bucket, EXIF-stripped on upload (full "
-                      "re-encode — GPS and camera metadata cannot survive). "
-                      "Deleted by a daily job after 18 months; the report row "
-                      "outlives the images.",
+            "detail": "The receipt screenshot you upload lives in a private "
+                      "bucket, EXIF-stripped on upload (full re-encode — GPS and "
+                      "camera metadata cannot survive). Deleted by a daily job "
+                      "after 18 months; the report row outlives the image. We no "
+                      "longer ask for a screenshot of your Veo plan: you tell us "
+                      "the plan and we take your word for it. We may read the "
+                      "figures off an image you upload, on your device or on our "
+                      "servers; either way only an image you chose to send is "
+                      "ever read, and we never read anything we were not given.",
         },
         {
             "data": "rides",
@@ -82,8 +85,9 @@ _PRIVACY = {
                       "and are kept indefinitely. A discount report records which "
                       "Equity Area the ride ended in, and a receipt claim what the "
                       "receipt says (scooter code, minutes, costs, charge date), "
-                      "the plan you say you were on, and optionally an approximate "
-                      "start time and where you think the ride started and ended. "
+                      "the plan you say you were on — on trust, with no screenshot "
+                      "asked for — and optionally an approximate start time and "
+                      "where you think the ride started and ended. "
                       "Public aggregates and the CSV export never include reporter "
                       "identity (no IP, no email — only an authenticated yes/no "
                       "flag), never the scooter code itself (only its one-way "

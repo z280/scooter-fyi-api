@@ -2390,16 +2390,18 @@ majority *answer set* at all, but a clear 2/3 on every individual field.
 | `trip_minutes` | required, 1–600 |
 | `subtotal_cents`, `total_cents` | at least one required; `total_cents ≥ subtotal_cents` |
 | `charge_date` | required, `YYYY-MM-DD` as printed (receipts carry no time of day) |
-| `receipt`, `plan_evidence` | required images, ≤ 10 MB each (EXIF-stripped, private bucket, 18-month retention). The plan screenshot is required because the contract applies the Equity Area rate whatever the plan. |
+| `receipt` | required image, ≤ 10 MB (EXIF-stripped, private bucket, 18-month retention) |
 | `approx_started_at` | optional ISO 8601; only breaks ties between same-length rides |
 | `pin_start_lat/lng`, `pin_end_lat/lng` | optional pairs; the rider's own evidence, never eligibility |
-| `declared_rate_plan` | `resident`, `resident_plus`, `visitor`, `visitor_plus`, `equity` (Access), or `unknown` (default) |
+| `declared_rate_plan` | `resident`, `resident_plus`, `visitor`, `visitor_plus`, `equity` (Access), or `unknown` (default). **Taken on trust** — see below |
 
 Responses:
-- `200 {id, created_at, status: "received", receipt_stored, plan_evidence_stored}`.
+- `200 {id, created_at, status: "received", receipt_stored}`.
 - `422 {detail: {error: "not_rate_checkable", missing: [...]}}` when the gate (plate + minutes + a cost + charge date) fails. **Nothing is kept**: no row, and no image is uploaded.
-- `422 invalid_field` names the malformed `fields`. `422 receipt_required` and `422 plan_evidence_required` mean an image is missing.
+- `422 invalid_field` names the malformed `fields`. `422 receipt_required` means the image is missing.
 - `413 image_too_large`, `429` rate limit (20 per account per day), `401` signed out.
+
+**No plan screenshot (sql/095).** One was required 2026-10-06..07, on the reasoning that the Equity Area rate applies whatever tier you are on, so the tier is what makes a claim stand. Nothing automated ever read it: a claim is checked against the FEED — the equity price below, then Phase 2's corroboration against our own trip observations — so it was a second image of someone's account page, held 18 months, with no evidentiary return. `declared_rate_plan` is taken on trust (owner, 2026-10-07). A `plan_evidence` part is **ignored, not rejected**, so an older client keeps working; its bytes are never read and never stored.
 
 The equity price for the minutes, the rate signature (e.g. `$1 + 25c/min`) and the tax check (`tax_ok`, `tax_rounded_up` or `tax_unexplained` against the legislated rate) are recorded at submission. Nothing is judged and no points are awarded in Phase 1; ride matching (Phase 2) and analysis (Phase 3) follow. The legacy JSON shape below still works.
 

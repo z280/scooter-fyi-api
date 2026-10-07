@@ -59,6 +59,33 @@ ALTER TABLE discount_reports
     ADD COLUMN IF NOT EXISTS tax_finding          TEXT,
     ADD COLUMN IF NOT EXISTS analysis             JSONB;
 
+-- NOT VALID, ADDED 2026-10-07 AND THE ONLY EDIT THIS FILE HAS HAD.
+--
+-- This migration is REPLAYED, not just applied: 25 test fixtures run
+-- `sorted(SQL_DIR.glob("*.sql"))` against a database that already holds data,
+-- and `run_migrations` keys `schema_migrations` on the filename so production
+-- never re-runs this one. Replaying history against present-day data is
+-- therefore a thing this file has to survive.
+--
+-- It could not. `sql/095` drops the plan-evidence requirement, so a claim filed
+-- after that is legal and carries a NULL `plan_evidence_r2_key` — and the line
+-- below demanded one. A validating ADD CONSTRAINT checks existing rows, so the
+-- replay died here, with "is violated by some row", BEFORE sql/095 could relax
+-- the rule again. Every pg test in the suite failed at setup, in files with
+-- nothing to do with receipts.
+--
+-- NOT VALID skips the check against rows that are ALREADY there and still
+-- enforces it on every insert and update. So:
+--   * a fresh database has no existing rows, making this exactly equivalent to
+--     what it was before;
+--   * a replay over real data gets past this line, and sql/095 then re-adds the
+--     constraint it supersedes WITH validation, so nothing ends up unchecked;
+--   * production, which applied this file in its original form, is untouched.
+--
+-- Deliberately NOT a rewrite of the rule itself. This file is the record that
+-- the plan screenshot was once required, which was true for a day; sql/095 is
+-- the record that it stopped being. Deleting the clause here would erase the
+-- first fact to make the second one tidier.
 ALTER TABLE discount_reports DROP CONSTRAINT IF EXISTS discount_reports_claim_shape_check;
 ALTER TABLE discount_reports ADD CONSTRAINT discount_reports_claim_shape_check CHECK (
     claim_version = 1 AND ride_ended_at IS NOT NULL
@@ -68,7 +95,7 @@ ALTER TABLE discount_reports ADD CONSTRAINT discount_reports_claim_shape_check C
        AND (subtotal_cents IS NOT NULL OR total_cents IS NOT NULL)
        AND charge_date IS NOT NULL
        AND plan_evidence_r2_key IS NOT NULL
-);
+) NOT VALID;
 
 ALTER TABLE discount_reports DROP CONSTRAINT IF EXISTS discount_reports_claim_values_check;
 ALTER TABLE discount_reports ADD CONSTRAINT discount_reports_claim_values_check CHECK (

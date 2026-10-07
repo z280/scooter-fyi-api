@@ -476,13 +476,17 @@ async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) 
         return data or None
 
     receipt_bytes = await image("receipt")
-    plan_bytes = await image("plan_evidence")
     if receipt_bytes is None:
         raise _claim_error(422, "receipt_required")
-    if plan_bytes is None:
-        # Owner, 2026-10-06: an equity claim must carry proof of the plan,
-        # because the contract applies the rate whatever the tier.
-        raise _claim_error(422, "plan_evidence_required")
+    # NO PLAN SCREENSHOT. It was required (owner, 2026-10-06) because the Equity
+    # Area rate applies whatever tier you are on, so the tier is what makes a
+    # claim stand — but nothing automated ever read it. The claim is checked
+    # against the FEED: the arithmetic below prices the minutes at the Equity
+    # Area rate, and Phases 2-3 corroborate against our own trip observations.
+    # `declared_rate_plan` carries what the rider says, and we trust it (owner,
+    # 2026-10-07). A `plan_evidence` part on the request is IGNORED rather than
+    # rejected, so an older client keeps working; its bytes are never read and
+    # never stored. See sql/095.
 
     ip = real_client_ip(request)
     ua = request.headers.get("user-agent")
@@ -496,24 +500,21 @@ async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) 
     if not receipts_bucket():
         raise _claim_error(503, "storage_unavailable")
     stored: list[str] = []
-    current = "receipt"
     try:
         receipt_key = store_receipt(user.account_id, receipt_bytes)
         stored.append(receipt_key)
-        current = "plan_evidence"
-        plan_key = store_receipt(user.account_id, plan_bytes)
-        stored.append(plan_key)
     except Exception as e:
-        # ANY failure (an unreadable image, or the R2 PUT itself) must not
-        # leave the first image behind: cleanup_receipts only finds images
-        # through table rows, so an orphan would outlive the 18 months.
+        # A failed PUT must leave nothing behind: cleanup_receipts only finds
+        # images through table rows, so an orphan would outlive the 18 months.
+        # One image now, but the loop stays — the insert below can still fail
+        # after this succeeds, and that path shares it.
         for k in stored:
             try:
                 delete_receipt(k)
             except Exception:  # noqa: BLE001
                 log.exception("failed to clean up %s", k)
         if isinstance(e, ReceiptError):
-            raise _claim_error(400, "unreadable_image", field=current)
+            raise _claim_error(400, "unreadable_image", field="receipt")
         log.exception("receipt claim upload failed")
         raise _claim_error(502, "storage_unavailable")
 
@@ -529,19 +530,19 @@ async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) 
                         vehicle_plate, vehicle_identifier, trip_minutes,
                         subtotal_cents, total_cents, charge_date, approx_started_at,
                         pin_start_lat, pin_start_lng, pin_end_lat, pin_end_lng,
-                        declared_rate_plan, receipt_r2_key, plan_evidence_r2_key,
+                        declared_rate_plan, receipt_r2_key,
                         expected_cents, rate_error_cents, rate_signature,
                         tax_cents, tax_finding, analysis,
                         reporter_ip, reporter_user_agent
                     ) VALUES (%s, 'equity', 2, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                              %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                              %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
                     RETURNING id, created_at
                     """,
                     (user.account_id, plate, hash_plate(plate), minutes,
                      subtotal, total, charge_date, approx_started_at,
                      pins["pin_start_lat"], pins["pin_start_lng"],
                      pins["pin_end_lat"], pins["pin_end_lng"],
-                     plan, receipt_key, plan_key,
+                     plan, receipt_key,
                      math["expected_cents"], math["rate_error_cents"], math["rate_signature"],
                      tax.get("tax_cents"), tax.get("finding"), json.dumps(math),
                      ip, ua),
@@ -562,7 +563,6 @@ async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) 
         "created_at": created_at.isoformat(),
         "status": "received",
         "receipt_stored": True,
-        "plan_evidence_stored": True,
     }
 
 
