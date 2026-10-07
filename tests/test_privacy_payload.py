@@ -119,3 +119,81 @@ def test_vehicle_state_fields_are_documented():
     for fact in ("last three rentals", "cleared when the rental ends", "overwritten"):
         assert fact in entry["detail"], fact
     assert "<td>Vehicle state</td>" in _POLICY_HTML
+
+
+# ---------------------------------------------------------------------------
+# What changed on 2026-10-07: the plan screenshot went away, and reading an
+# uploaded image is disclosed for the first time.
+#
+# These are the two disclosures most likely to go stale, for opposite reasons.
+# The plan screenshot is a thing we STOPPED collecting, and a policy that still
+# claims to collect it is over-disclosing — harmless to a reader but a sign the
+# document is not maintained. Server-side reading is a thing we may START doing,
+# and a policy that does not mention it is UNDER-disclosing, which is the kind
+# that matters. `sql/093` added the plan screenshot and `sql/094` removed it
+# without the published policy ever mentioning either; that gap is what these
+# tests exist to stop recurring.
+# ---------------------------------------------------------------------------
+
+
+
+
+def _prose(html: str) -> str:
+    """The policy as a reader sees it: tags removed, entities decoded, runs of
+    whitespace collapsed, lowercased.
+
+    Phrase assertions CANNOT be made against raw HTML. A sentence in this
+    document is wrapped at the source width and carries `<strong>` tags, so
+    "the rate plan you say you were on" is really "the rate plan you say you
+    were\non</strong>" in the file. Asserting on the raw markup means either a
+    false failure or a test weakened to single words until it stops saying
+    anything. Single-word checks above still read the raw HTML, which is fine
+    for a word; anything longer comes through here."""
+    import html as _html
+    import re
+
+    text = re.sub(r"<[^>]+>", " ", html)
+    return re.sub(r"\s+", " ", _html.unescape(text)).strip().lower()
+
+
+_POLICY_PROSE = _prose(_POLICY_HTML)
+
+
+def test_the_policy_says_no_plan_screenshot_is_asked_for():
+    assert "do not ask for a screenshot of your veo plan" in _POLICY_PROSE
+    # And it says what stands in its place, so "we don't collect it" does not
+    # read as "we don't need to know".
+    assert "the rate plan you say you were on" in _POLICY_PROSE
+
+
+def test_the_policy_describes_what_a_receipt_claim_stores():
+    """The claim fields reached the payload in #117 but never the policy."""
+    for stored in ("scooter code", "trip minutes", "charge date"):
+        assert stored in _POLICY_PROSE, stored
+
+
+def test_the_policy_discloses_reading_an_uploaded_image():
+    """On-device or on our servers — and the policy must not promise one.
+
+    Phase 8 of the frontend plan once said the image never leaves the device.
+    The owner's rule (2026-10-07) is that either is allowed for something a
+    rider explicitly uploads, preferring on-device. A policy asserting the
+    stronger promise would be a promise the software does not keep."""
+    assert "read the figures off an image you upload" in _POLICY_PROSE
+    assert "on our servers" in _POLICY_PROSE
+    # The limit that makes it acceptable: only what the rider sent.
+    assert "only to an image you chose to upload" in _POLICY_PROSE
+
+
+def test_the_policy_names_the_provider_that_reads_receipts():
+    """A sub-processor that sees a rider's receipt has to be named BEFORE it
+    sees one. `OPENROUTER_RECEIPTS_API_KEY` is wired into the deploy already."""
+    assert "OpenRouter" in _POLICY_HTML
+
+
+def test_the_payload_agrees_with_the_policy_about_plan_screenshots():
+    detail = " ".join(_ENTRIES["receipts"]["detail"].lower().split())
+    assert "no longer ask for a screenshot of your veo plan" in detail
+    # And the payload carries the same reading disclosure, so a reader of
+    # either document learns the same thing.
+    assert "on your device or on our servers" in detail

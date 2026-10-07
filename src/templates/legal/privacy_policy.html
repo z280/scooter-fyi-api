@@ -28,7 +28,7 @@
 </header>
 <main>
 <h1>Privacy Policy</h1>
-<p class="updated">Last updated: October 6, 2026</p>
+<p class="updated">Last updated: October 7, 2026</p>
 
 <p>This Privacy Policy explains how <strong>Mile High Technology
 Consulting, LLC</strong>, doing business as <strong>"scooter.fyi"</strong>
@@ -80,6 +80,17 @@ browser user-agent string the report arrived with</td>
 <td>Building the public compliance/reliability dataset; correcting the
 vehicle catalog. IP and user-agent are kept to detect abuse of the report
 forms, which accept anonymous submissions</td></tr>
+<tr><td>Receipt claims</td><td>When you tell us a ride was charged at the
+wrong rate: the scooter code as printed, the trip minutes, the cost before
+and with tax, the charge date, and <strong>the rate plan you say you were
+on</strong>. Optionally an approximate start time, and pins for where you
+think the ride started and ended. Plus the receipt screenshot you choose to
+upload.<br><br><strong>We do not ask for a screenshot of your Veo plan.</strong>
+We take your word for which plan you are on, and check the claim against
+the public vehicle feed instead</td>
+<td>Checking the charge against the rate the city's contract requires in
+an Equity Area. Public surfaces never carry the scooter code itself (only
+a one-way identifier of it) and round any location to about 100&nbsp;m</td></tr>
 <tr><td>Ride history</td><td>Ride start/end time, duration, distance,
 estimated cost, route polyline, any GPS waypoints you upload, the ride-mode
 options you chose for that ride, the ride minutes and rate-plan tier you
@@ -123,6 +134,15 @@ Aggregate publications never include your identity, IP address, or
 email.</li>
 <li>Detect and prevent abuse (rate limiting, fraudulent reports).</li>
 <li>Respond to support requests.</li>
+<li><strong>Read the figures off an image you upload.</strong> When you
+send us a receipt, we may extract the numbers printed on it &mdash; the
+minutes, the costs, the date &mdash; so a claim can be checked. That
+reading may happen on your own device, or on our servers, and where it
+happens can change as the software improves; we prefer your device and
+fall back to our servers when a receipt cannot be read there. Either way
+it applies <strong>only to an image you chose to upload</strong>. We never
+read anything you did not send us, and we never scan images for anything
+other than the receipt fields named above.</li>
 </ul>
 <p>We do not sell your personal information, and we do not share it with
 third parties for their own marketing purposes.</p>
@@ -140,6 +160,12 @@ account email, only if you use "Sign in with Google"</td></tr>
 storage (receipt images, model-report photos)</td><td>Network-level
 request metadata; receipt images and model-report photos in a private,
 non-public bucket</td></tr>
+<tr><td>OpenRouter</td><td>Reading the figures off an uploaded receipt,
+when that reading happens on our servers rather than on your
+device</td><td>The receipt image you uploaded, or the text read from it.
+Nothing else &mdash; not your email, not your account, not your ride
+history. Used only for receipt claims, and only when server-side reading
+is switched on</td></tr>
 <tr><td>Sentry</td><td>Error monitoring</td><td>Application error
 reports, which may incidentally include request metadata</td></tr>
 </table>
@@ -160,7 +186,10 @@ day.</td></tr>
 <tr><td>Receipt images</td><td>18 months</td><td>Stored in a private
 bucket, fully re-encoded on upload to strip EXIF/GPS/camera metadata.
 Deleted automatically after 18 months; the report record itself is kept
-(without the image) for the audit history.</td></tr>
+(without the image) for the audit history. For one day in October 2026 a
+claim also required a screenshot of your Veo plan; we stopped asking, and
+any plan screenshot already stored is deleted on the same 18-month
+clock as the receipt it came with.</td></tr>
 <tr><td>Ride history</td><td>Until you delete it</td><td>Route polylines
 are the most sensitive data we hold. Deleting a ride (or all your rides)
 is an immediate, permanent hard delete — no soft-delete, no backup

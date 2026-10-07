@@ -87,10 +87,11 @@ CLAIM = {
     "vehicle_plate": "1018354", "trip_minutes": "16", "subtotal_cents": "500",
     "total_cents": "546", "charge_date": "2026-09-29", "declared_rate_plan": "resident",
 }
-IMAGES = {
-    "receipt": ("r.png", b"\x89PNG-receipt", "image/png"),
-    "plan_evidence": ("p.png", b"\x89PNG-plan", "image/png"),
-}
+IMAGES = {"receipt": ("r.png", b"\x89PNG-receipt", "image/png")}
+# What an OLDER CLIENT still sends. sql/094 dropped the plan screenshot, and the
+# endpoint ignores the part rather than rejecting it, so a client built before
+# that keeps working — these tests prove the bytes are neither read nor stored.
+LEGACY_IMAGES = {**IMAGES, "plan_evidence": ("p.png", b"\x89PNG-plan", "image/png")}
 
 
 def _insert(state):
@@ -104,18 +105,22 @@ def test_a_complete_claim_is_stored_with_its_arithmetic(ctx):
     r = client.post("/api/v1/reports/discount", data=CLAIM, files=IMAGES)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["status"] == "received" and body["plan_evidence_stored"] is True
+    assert body["status"] == "received" and body["receipt_stored"] is True
+    assert "plan_evidence_stored" not in body
     p = _insert(state)
     assert p[1] == "1018354" and p[2] and p[2] != "1018354"     # plate + its HMAC
     assert p[3:7] == (16, 500, 546, date(2026, 9, 29))
     assert p[12] == "resident"
-    analysis = json.loads(p[20])
-    assert (p[15], p[16], p[17]) == (308, 192, "$1 + 25c/min")
-    assert (p[18], p[19]) == (46, "tax_ok")
+    # Indices shifted down one when `plan_evidence_r2_key` left the INSERT
+    # (sql/094): receipt_r2_key is now the last key column.
+    analysis = json.loads(p[19])
+    assert (p[14], p[15], p[16]) == (308, 192, "$1 + 25c/min")
+    assert (p[17], p[18]) == (46, "tax_ok")
     assert analysis["expected_cents"] == 308
-    assert p[13] == "receipt.jpg" and p[14] == "receipt.jpg"   # both keys (stubbed)
-    # Rate limit before either upload; both images stored.
-    assert state["order"] == ["RATELIMIT", "R2_PUT", "R2_PUT"]
+    assert p[13] == "receipt.jpg"                              # the one key (stubbed)
+    # Rate limit before the upload, and exactly ONE image stored: no plan
+    # screenshot is asked for or kept (sql/094).
+    assert state["order"] == ["RATELIMIT", "R2_PUT"]
 
 
 def test_an_unusable_claim_keeps_nothing(ctx):
@@ -127,18 +132,37 @@ def test_an_unusable_claim_keeps_nothing(ctx):
     assert state["order"] == [] and state["sql"] == []
 
 
-def test_plan_evidence_is_required(ctx):
+def test_no_plan_screenshot_is_asked_for(ctx):
     client, state = ctx
-    r = client.post("/api/v1/reports/discount", data=CLAIM, files={"receipt": IMAGES["receipt"]})
-    assert r.status_code == 422 and r.json()["detail"]["error"] == "plan_evidence_required"
-    assert state["order"] == []
+    # The receipt alone is a complete claim now: the rider tells us the plan and
+    # we take their word for it (owner, 2026-10-07). This used to be a 422
+    # `plan_evidence_required`.
+    r = client.post("/api/v1/reports/discount", data=CLAIM, files=IMAGES)
+    assert r.status_code == 200, r.text
+    assert state["order"] == ["RATELIMIT", "R2_PUT"]
+
+
+def test_an_older_client_still_works_and_its_plan_image_is_discarded(ctx):
+    client, state = ctx
+    r = client.post("/api/v1/reports/discount", data=CLAIM, files=LEGACY_IMAGES)
+    assert r.status_code == 200, r.text
+    # Ignored, not rejected — and never uploaded. One PUT, not two: an image we
+    # stored but never read would be the privacy cost sql/094 exists to remove.
+    assert state["order"] == ["RATELIMIT", "R2_PUT"]
+    p = _insert(state)
+    assert p[13] == "receipt.jpg"
+    # Exactly one image key in the row: the plan part produced no second key.
+    assert p.count("receipt.jpg") == 1
 
 
 def test_the_receipt_is_required(ctx):
     client, state = ctx
+    # A part the endpoint never looks for, purely to make the request multipart
+    # (which is what marks it a claim) while carrying no receipt.
     r = client.post("/api/v1/reports/discount", data=CLAIM,
-                    files={"plan_evidence": IMAGES["plan_evidence"]})
+                    files={"unused": ("u.txt", b"x", "text/plain")})
     assert r.status_code == 422 and r.json()["detail"]["error"] == "receipt_required"
+    assert state["order"] == []
 
 
 @pytest.mark.parametrize("field,value", [
@@ -177,7 +201,7 @@ def test_pins_and_approximate_time_are_stored(ctx):
     assert p[8:12] == (39.7511, -105.0012, 39.7402, -104.9733)
 
 
-def test_a_failed_insert_deletes_both_images(ctx, monkeypatch):
+def test_a_failed_insert_deletes_the_stored_image(ctx, monkeypatch):
     client, state = ctx
     from contextlib import contextmanager
     from src import api_frontend_reports
@@ -202,7 +226,9 @@ def test_a_failed_insert_deletes_both_images(ctx, monkeypatch):
     monkeypatch.setattr(api_frontend_reports, "connection", _conn)
     with pytest.raises(RuntimeError):
         client.post("/api/v1/reports/discount", data=CLAIM, files=IMAGES)
-    assert state["order"].count("R2_DELETE") == 2
+    # One image now, so one delete — and it must still happen: cleanup_receipts
+    # finds images only through table rows, so an orphan outlives its 18 months.
+    assert state["order"].count("R2_DELETE") == 1
 
 
 def test_the_legacy_shape_still_works(ctx):
@@ -213,23 +239,22 @@ def test_the_legacy_shape_still_works(ctx):
     assert r.status_code == 200, r.text
 
 
-def test_a_storage_failure_on_the_second_image_removes_the_first(ctx, monkeypatch):
+def test_a_storage_outage_keeps_nothing(ctx, monkeypatch):
+    # Replaces a test for a failure on the SECOND image: there is no second
+    # image since sql/094. An R2 outage (not an unreadable file — that is the
+    # next test) must leave no row and nothing in the bucket.
     client, state = ctx
     from src import api_frontend_reports
-    puts = {"n": 0}
 
-    def flaky(account_id, data):
-        puts["n"] += 1
-        if puts["n"] == 2:
-            raise ConnectionError("R2 timed out")
-        state["order"].append("R2_PUT")
-        return "first.png"
+    def down(account_id, data):
+        raise ConnectionError("R2 timed out")
 
-    monkeypatch.setattr(api_frontend_reports, "store_receipt", flaky)
+    monkeypatch.setattr(api_frontend_reports, "store_receipt", down)
     r = client.post("/api/v1/reports/discount", data=CLAIM, files=IMAGES)
     assert r.status_code == 502 and r.json()["detail"]["error"] == "storage_unavailable"
-    assert state["order"] == ["RATELIMIT", "R2_PUT", "R2_DELETE"]
-    assert not [s for s, _ in state["sql"] if s.startswith("INSERT")]
+    # Nothing was ever stored, so there is nothing to delete.
+    assert state["order"] == ["RATELIMIT"]
+    assert not [sql for sql, _ in state["sql"] if sql.startswith("INSERT")]
 
 
 def test_an_unreadable_image_names_the_field(ctx, monkeypatch):
@@ -238,7 +263,7 @@ def test_an_unreadable_image_names_the_field(ctx, monkeypatch):
     from src.receipts import ReceiptError
 
     def bad(account_id, data):
-        if data == b"\x89PNG-plan":
+        if data == b"\x89PNG-receipt":
             raise ReceiptError("upload is not a readable image")
         state["order"].append("R2_PUT")
         return "ok.png"
@@ -246,5 +271,7 @@ def test_an_unreadable_image_names_the_field(ctx, monkeypatch):
     monkeypatch.setattr(api_frontend_reports, "store_receipt", bad)
     r = client.post("/api/v1/reports/discount", data=CLAIM, files=IMAGES)
     assert r.status_code == 400
-    assert r.json()["detail"] == {"error": "unreadable_image", "field": "plan_evidence"}
-    assert state["order"] == ["RATELIMIT", "R2_PUT", "R2_DELETE"]
+    assert r.json()["detail"] == {"error": "unreadable_image", "field": "receipt"}
+    # Nothing stored, so nothing to clean up — and no row.
+    assert state["order"] == ["RATELIMIT"]
+    assert state["sql"] == []
