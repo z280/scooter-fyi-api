@@ -1,4 +1,4 @@
-"""sql/088: missed-discount reports against the official Equity Area map.
+"""sql/091: missed-discount reports against the official Equity Area map.
 
 The frontend's equity card submits zone_version 'equity' plus the area it
 ended in. Reuses the fake DB of test_discount_report_upload_order.py.

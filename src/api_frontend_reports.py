@@ -311,7 +311,7 @@ def submit_device_report(
 # ---------------------------------------------------------------------------
 class DiscountReportIn(BaseModel):
     ride_ended_at: datetime
-    # 'equity' = the city's official Equity Area map (sql/088); v1/v2 are the
+    # 'equity' = the city's official Equity Area map (sql/091); v1/v2 are the
     # retired estimate layers, still accepted from old clients.
     zone_version: str = Field(..., pattern="^(v1|v2|equity)$")
     region_name: str | None = Field(default=None, pattern=r"^EQ_\d{3}$")
@@ -745,7 +745,7 @@ def reports_export_monthly(
         w.writerow(["device", reported_at.isoformat(), vid, rtype,
                     lat, lng, "", str(bool(authed)).lower()])
     for created_at, _ride_ended, zone, lat, lng, amount, has_receipt, region in discount_rows:
-        # "equity:EQ_014" when the area is known (sql/088); same column, so
+        # "equity:EQ_014" when the area is known (sql/091); same column, so
         # the CSV's shape is unchanged for anyone already parsing it.
         zone_cell = f"{zone}:{region}" if region else zone
         w.writerow(["discount", created_at.isoformat(), "", zone_cell,
