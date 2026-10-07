@@ -179,6 +179,9 @@ jobs:
           ADMIN_EMAILS: ${{ secrets.ADMIN_EMAILS }}
           POSTMARK_TOKEN: ${{ secrets.POSTMARK_TOKEN }}
           POSTMARK_FROM: ${{ secrets.POSTMARK_FROM }}
+          # Equity receipt reading (docs/PLAN_EQUITY_RECEIPTS.md Phase 3): the
+          # owner's dedicated OpenRouter key for this project only.
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           MAGIC_LINK_URL_TEMPLATE: ${{ secrets.MAGIC_LINK_URL_TEMPLATE }}
           COMMS_TOKEN: ${{ secrets.COMMS_TOKEN }}
           COMMS_BASE_URL: ${{ secrets.COMMS_BASE_URL }}
@@ -194,7 +197,7 @@ jobs:
           # allowlist is what carries them to the REMOTE script. A secret
           # added to `env:` but not to this line expands to an empty string
           # in the heredoc below, silently, and the deploy still goes green.
-          envs: POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,SENTRY_DSN,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,AUTH_ALLOWED_GITHUB_ORGS,SESSION_SECRET,VEHICLE_IDENTIFIER_SALT,CLOUDFLARE_TUNNEL_TOKEN,R2_RECEIPTS_BUCKET,R2_MAP_BUCKET,R2_MAP_ACCESS_KEY_ID,R2_MAP_SECRET_ACCESS_KEY,GOOGLE_OAUTH_CLIENT_ID,ADMIN_EMAILS,POSTMARK_TOKEN,POSTMARK_FROM,MAGIC_LINK_URL_TEMPLATE,COMMS_TOKEN,COMMS_BASE_URL,GH_TOKEN,GH_ACTOR,REPO
+          envs: POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET_NAME,SENTRY_DSN,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,AUTH_ALLOWED_GITHUB_ORGS,SESSION_SECRET,VEHICLE_IDENTIFIER_SALT,CLOUDFLARE_TUNNEL_TOKEN,R2_RECEIPTS_BUCKET,R2_MAP_BUCKET,R2_MAP_ACCESS_KEY_ID,R2_MAP_SECRET_ACCESS_KEY,GOOGLE_OAUTH_CLIENT_ID,ADMIN_EMAILS,POSTMARK_TOKEN,POSTMARK_FROM,MAGIC_LINK_URL_TEMPLATE,COMMS_TOKEN,COMMS_BASE_URL,OPENROUTER_KEY,GH_TOKEN,GH_ACTOR,REPO
           script: |
             set -e
             cd /opt/veo-audit
@@ -230,6 +233,9 @@ jobs:
             ADMIN_EMAILS=$ADMIN_EMAILS
             POSTMARK_TOKEN=$POSTMARK_TOKEN
             POSTMARK_FROM=$POSTMARK_FROM
+            # Blank = receipts are read OCR-only and anything needing the
+            # vision model is "uncertain" (Phase 3); nothing else depends on it.
+            OPENROUTER_RECEIPTS_API_KEY=$OPENROUTER_KEY
             MAGIC_LINK_URL_TEMPLATE=$MAGIC_LINK_URL_TEMPLATE
             # z280-comms. Both are read by docker-compose.yml; a blank
             # COMMS_TOKEN leaves the SMS door closed and /auth/config
