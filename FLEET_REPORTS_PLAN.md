@@ -356,7 +356,7 @@ contradiction.
 | `improperly_parked` fire-and-forget | `src/devices.ts:2399` (contract), `:2468-2474` (the call) |
 | Why a `not_rideable` report overrides the tier | `src/devices.ts:1646` (comment) |
 | Reliability tiers and their reasons | `src/reliability.ts` |
-| The Phase 2 planner that must exclude these | `src/along-the-way.ts` — **not on frontend `main`**; it exists only on PR #94's branch (`claude/along-way-upgrades-feature-piml2p`). See §4.2 |
+| The Phase 2 planner that must exclude these | `src/along-the-way.ts` — **check whether it is on frontend `main` yet.** When this was written it existed only on PR #94's branch; that PR may since have merged. See §4.2 |
 | Camera surface; hands back the raw payload and nothing else | `src/qr-scan.ts:182` — `openQrScanner` |
 | The mode dial: union, spec table, wrapping rotate | `src/qr-utility.ts:30-80` |
 | Client-side plate read — a lookup key, never a decision | `src/qr-utility.ts:118` — `plateFromQr` |
@@ -497,11 +497,12 @@ contradiction.
 2. **Show suppression honestly.** A suppressed device is kept out of the
    rider's available set, and the card says *why* — "reported inaccessible",
    not "high risk".
-3. **Exclude from the planner.** **This one edits a file that is not on the
-   frontend mainline yet** — `along-the-way.ts` lives on PR #94's branch, so
-   either wait for that to merge or make the change there. Following this plan
-   against the frontend commit named in the header gives you nothing to edit.
-   Its `toCandidates()` already
+3. **Exclude from the planner.** **Check where `along-the-way.ts` lives before
+   you start.** When this was written it existed only on PR #94's branch, not on
+   the frontend commit named in this header — so following the plan literally
+   gave you nothing to edit. If #94 has merged, it is on `main` and this is an
+   ordinary edit; if not, make the change on that branch. Its `toCandidates()`
+   already
    drops `is_disabled` / `is_reserved`; suppressed vehicles go the same way —
    **excluded, not penalised**. A ranking that can be outvoted will eventually
    send somebody over a fence.
