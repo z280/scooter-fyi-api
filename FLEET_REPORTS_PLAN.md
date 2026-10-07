@@ -369,10 +369,16 @@ contradiction.
 1. **Migration.** Add `inaccessible` to `device_reports.report_type`'s CHECK
    constraint, and the matching points action if one is wanted.
 
-   **THE NEXT FREE NUMBER IS 088 — but verify it yourself.** `ls sql/` on
-   current `main`; the highest is `087_device_state_failed_start_rentals.sql`.
-   A number written in a plan drifts, and this program has been bitten by that
-   before.
+   **THE NEXT FREE NUMBER WAS 088 WHEN THIS WAS WRITTEN, AND IS NOT ANY MORE.**
+   `main` now carries `sql/088_standardise_movement_radius.sql`, so the next free
+   number is **089 — and verify that too**, with `git ls-tree origin/main sql/`
+   rather than a local `ls`, which can be stale. This is the second time this
+   plan has been wrong about it.
+
+   Check the OPEN PULL REQUESTS as well, not just `main`: #105 adds its own
+   `sql/088_discount_reports_equity_areas.sql`, which already collides with
+   main's 088. Two branches picking the same number is the failure mode here,
+   and `main` alone will not show it to you.
 
    **Read `sql/029` BEFORE `sql/037`.** An earlier revision of this item said
    to copy 037's shape "exactly"; that is wrong for this change. 037's
