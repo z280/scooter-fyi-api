@@ -3,7 +3,7 @@
 Valhalla runs alongside this service on the compose network with no host port;
 it is never exposed publicly — riders reach it only through /api/v1/route.
 
-Two endpoints are used:
+Three endpoints are used:
 
 * ``/route``             — bicycle routing, optionally with alternates.
 * ``/trace_attributes``  — snap a shape back onto the graph to recover the
@@ -11,6 +11,10 @@ Two endpoints are used:
                            (§2C) and how ride GPS traces are checked for
                            adherence (§3G); Valhalla exposes no way id on a
                            plain route response.
+* ``/sources_to_targets`` — the many-to-many cost matrix. The hand-off planner
+                           needs every (first hop, pickup) pair priced before it
+                           can rank anything, and asking ``/route`` N×M times
+                           would be N×M round trips for shapes it throws away.
 
 Responses use Valhalla's native JSON rather than ``format: "osrm"``: the native
 shape is an encoded polyline at precision 6, which ``src/polyline.py`` already
@@ -124,6 +128,78 @@ def route(points: list[tuple[float, float]],
     return _post("/route", payload)
 
 
+def matrix(sources: list[tuple[float, float]],
+           targets: list[tuple[float, float]],
+           costing_options: dict[str, Any],
+           costing: str = "pedestrian",
+           radius: int | None = None) -> dict[str, Any]:
+    """Time and distance for every ``sources`` × ``targets`` pair.
+
+    ``costing`` defaults to "pedestrian" because the matrix's first caller is
+    the hand-off planner's walk legs — "how far to each candidate scooter" is
+    the question that needs N×M answers. Riding legs pass "bicycle", the same
+    mode `route` uses, so a ridden figure comes from the same costing that will
+    later draw its shape.
+
+    NO ELEVATION, and no `directions_options` beyond units: the matrix returns
+    scalars, not shapes, so there is nothing for an elevation interval to sample
+    and no maneuvers to generate. Asking would buy graph work for fields that
+    never appear in the response.
+
+    SIZE. Stock Valhalla service limits cap matrix requests, and the planner's
+    own bounds sit well inside them — its cold-start selection is 8 first hops
+    by 12 pickups, so ~20 locations and a few hundred pairs. A caller wanting
+    materially more should check the live instance first: ``status(verbose=True)``
+    reports the actions it serves, and the container's generated config holds the
+    pair ceiling. Exceeding it is a 400 from Valhalla, surfaced as
+    `ValhallaError` — not a silent truncation.
+    """
+    payload: dict[str, Any] = {
+        "sources": _locations(sources, radius),
+        "targets": _locations(targets, radius),
+        "costing": costing,
+        "costing_options": {costing: dict(costing_options)},
+        # Kilometres, as everywhere else in this module; `matrix_pairs` converts
+        # to metres so no caller has to remember which unit it got.
+        "directions_options": {"units": "kilometers"},
+    }
+    return _post("/sources_to_targets", payload)
+
+
+def matrix_pairs(
+    response: dict[str, Any],
+) -> dict[tuple[int, int], tuple[float, float]]:
+    """``(source_index, target_index) -> (seconds, metres)``.
+
+    UNREACHABLE PAIRS ARE OMITTED, not zeroed. Valhalla reports a pair it could
+    not connect with a null ``time``/``distance``, and the one thing a caller
+    must not do is read that as "no distance" — zero seconds to a scooter across
+    a river would rank it first. A missing key forces the caller to decide,
+    which is the right amount of friction here.
+
+    Indices come from Valhalla's own ``from_index``/``to_index`` rather than the
+    enumeration order of the nested lists, because the two agree only while the
+    response is dense and nothing documents that it must be.
+    """
+    out: dict[tuple[int, int], tuple[float, float]] = {}
+    for row in response.get("sources_to_targets") or []:
+        # Many-to-many nests one row per source; a degenerate response may hand
+        # back a bare cell. Both are accepted.
+        cells = row if isinstance(row, list) else [row]
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            seconds = cell.get("time")
+            km = cell.get("distance")
+            if seconds is None or km is None:
+                continue
+            i, j = cell.get("from_index"), cell.get("to_index")
+            if i is None or j is None:
+                continue
+            out[(int(i), int(j))] = (float(seconds), float(km) * 1000.0)
+    return out
+
+
 #: What `trace_attributes` asks for when the caller doesn't say. Way id and
 #: length are what shade scoring needs; everything else is wasted payload.
 DEFAULT_TRACE_ATTRIBUTES = ("edge.way_id", "edge.length")
@@ -161,8 +237,28 @@ def trace_attributes(shape: list[tuple[float, float]],
     return body.get("edges", []) or []
 
 
-def status() -> dict[str, Any]:
-    """Liveness/version probe used by the health endpoint."""
+def status(verbose: bool = False) -> dict[str, Any]:
+    """Liveness/version probe used by the health endpoint.
+
+    ``verbose=True`` additionally returns ``available_actions`` — the endpoints
+    this instance actually serves. That is the cheap way to confirm
+    ``sources_to_targets`` is enabled on the live container before trusting
+    `matrix` in production, rather than discovering it from a 404. It costs
+    Valhalla a tile-directory walk, so the health probe leaves it off.
+
+    THE VERBOSE FLAG GOES IN A JSON BODY, not the query string. An earlier
+    version sent ``?verbose=true``, where the value is the *string* "true" —
+    Valhalla's option parser wants a JSON boolean and does not accept that, so
+    the flag was silently ignored and the pre-flight check could never answer
+    the question it exists to ask. Routing it through ``_post`` fixes a second
+    thing for free: a 4xx now surfaces as `ValhallaError` like every other call
+    in this module, instead of escaping as `httpx.HTTPStatusError`.
+
+    The plain liveness probe stays a GET with no body, so the health endpoint
+    is unchanged.
+    """
+    if verbose:
+        return _post("/status", {"verbose": True})
     cfg = load().valhalla
     url = f"{cfg.base_url.rstrip('/')}/status"
     resp = httpx.get(url, timeout=cfg.timeout_seconds)
