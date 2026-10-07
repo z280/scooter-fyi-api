@@ -1751,7 +1751,8 @@ Bearer required. GET returns:
   "display_name": "Queen Brave 🦉",
   "ruling_color": "#c53637",
   "ruling_border_color": "#026fd7",
-  "badges": [ { "id": "first_report", "label": "Filed a report", "earned_at": "2026-07-01T18:00:00+00:00" } ]
+  "badges": [ { "id": "first_report", "label": "Filed a report", "earned_at": "2026-07-01T18:00:00+00:00" } ],
+  "ride_totals": { "rides": 12, "distance_meters": 61154, "distance_from_rides": 9 }
 }
 ```
 
@@ -1777,9 +1778,41 @@ untouched, `"theme": null` clears the theme:
 | `home_lat` / `home_lng` | number \| null | Set together. |
 | `work_lat` / `work_lng` | number \| null | Set together. |
 
-`public_username` and `badges` are server-computed and
+`public_username`, `badges` and `ride_totals` are server-computed and
 ignored if sent — see the username endpoints below to change your
 username.
+
+**`ride_totals` — your lifetime ride count and distance.** Recomputed on every
+read, like `badges`, and over the same union of [tracked
+rides](#tracked-rides-gbfs-detected) and [off-feed rides](#off-feed-rides) where
+you reported an end.
+
+| Field | Meaning |
+|---|---|
+| `rides` | How many rides you have ended. |
+| `distance_meters` | Their total distance, whole metres. |
+| `distance_from_rides` | **How many of those rides carried a distance at all.** |
+
+`distance_from_rides` is the denominator and it is not decoration: a distance is
+`NULL` on a ride that recorded none, and it is summed as **unknown rather than as
+zero**. A client showing "38 miles" drawn from 9 of 12 rides should be able to say
+so — presenting a partial total as a complete one is the kind of figure that gets
+noticed once and then never trusted again.
+
+**There is no money here, and that is deliberate.** The frontend also shows what a
+rider paid above a competitive market, and that figure is **not linear**: it
+compares each ride against a pass ladder, and the cheapest pass covering two
+15-minute rides is not the cheapest pass covering one 30-minute ride, so summing
+minutes here and quoting once would give a different, smaller number than the
+per-ride truth. The ladder is also a frontend constant; a copy of it in Python
+would be a second pricing table. So that figure stays a client computation over
+whatever window of rides the client already fetched.
+
+**It is here rather than on its own endpoint** because it is the same kind of
+thing `badges` is — a server-computed, read-only fact about your own history — and
+a surface that already fetches the profile should not need a second call to say
+"that was your 12th ride". `GET /api/v1/tracked-rides`'s `count` cannot answer it:
+that is the page size, not a total.
 
 **Profile completion awards 10 points, once.** Checked on every PUT.
 Criteria are email **and** `rate_plan` **and** `phone_number` **and** at

@@ -15,6 +15,10 @@ from psycopg.pq import DiagnosticField
 from src import api_profile
 from src.accounts import InvalidUsernameChoice, SessionUser, require_session
 
+
+def _STUB_TOTALS(cur, aid):  # noqa: N802 - a constant-ish stub, named like one
+    return {"rides": 0, "distance_meters": 0, "distance_from_rides": 0}
+
 _USER = SessionUser(
     account_id=1, email="rider@example.com", scopes=("rider",),
     expires_at=datetime.now(timezone.utc),
@@ -113,6 +117,11 @@ def _put_client(monkeypatch, current_email, current_phone, raise_on=None,
 
     monkeypatch.setattr(api_profile, "connection", _fake_connection)
     monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid: [])
+    # Stubbed for the same reason `compute_badges` is: it runs its own query, and
+    # the fake connection replays a FIXED queue of fetch results — an extra real
+    # query shifts every later one and the whole file fails with an IndexError
+    # that says nothing about what changed.
+    monkeypatch.setattr(api_profile, "compute_ride_totals", _STUB_TOTALS)
     return TestClient(_app()), conn
 
 
@@ -125,6 +134,11 @@ def _get_client(monkeypatch, row):
 
     monkeypatch.setattr(api_profile, "connection", _fake_connection)
     monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid: [])
+    # Stubbed for the same reason `compute_badges` is: it runs its own query, and
+    # the fake connection replays a FIXED queue of fetch results — an extra real
+    # query shifts every later one and the whole file fails with an IndexError
+    # that says nothing about what changed.
+    monkeypatch.setattr(api_profile, "compute_ride_totals", _STUB_TOTALS)
     return TestClient(_app())
 
 
@@ -278,6 +292,11 @@ def test_put_newly_completing_the_profile_awards_points(monkeypatch):
 
     monkeypatch.setattr(api_profile, "connection", _fake_connection)
     monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid: [])
+    # Stubbed for the same reason `compute_badges` is: it runs its own query, and
+    # the fake connection replays a FIXED queue of fetch results — an extra real
+    # query shifts every later one and the whole file fails with an IndexError
+    # that says nothing about what changed.
+    monkeypatch.setattr(api_profile, "compute_ride_totals", _STUB_TOTALS)
     r = TestClient(_app()).put("/api/v1/profile", json={"phone_number": "+13035551234"})
     assert r.status_code == 200, r.text
     points_insert = next(c for c in conn.cur.executed if c[0].startswith("INSERT INTO user_points"))
@@ -395,3 +414,63 @@ def test_put_still_allows_swapping_an_unverified_number_on_an_email_less_account
     c, _ = _put_client(monkeypatch, None, "+13035550101", current_phone_verified_at=None)
     r = c.put("/api/v1/profile", json={"phone_number": "+13035550102"})
     assert r.status_code == 200
+
+
+# ---------- ride_totals (frontend plan §11.8) --------------------------------
+
+def test_get_profile_includes_ride_totals(monkeypatch):
+    """Here rather than on a new endpoint, for the same reason `badges` is: a
+    server-computed, read-only fact about the account's own history. A surface
+    that already fetches the profile should not need a second call to say "that
+    was your 12th ride"."""
+    conn = _FakeConn([_PROFILE_ROW])
+
+    @contextmanager
+    def _fake_connection():
+        yield conn
+
+    monkeypatch.setattr(api_profile, "connection", _fake_connection)
+    monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid: [])
+    monkeypatch.setattr(
+        api_profile,
+        "compute_ride_totals",
+        lambda cur, aid: {
+            "rides": 12,
+            "distance_meters": 61_154,
+            "distance_from_rides": 9,
+        },
+    )
+    r = TestClient(_app()).get("/api/v1/profile")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ride_totals"] == {
+        "rides": 12,
+        "distance_meters": 61_154,
+        "distance_from_rides": 9,
+    }
+    # The denominator travels with the figure, which is the whole point of it: a
+    # lifetime distance drawn from 9 of 12 rides, presented as covering all 12, is
+    # the kind of number that gets noticed once and then never trusted again.
+    assert body["ride_totals"]["distance_from_rides"] < body["ride_totals"]["rides"]
+
+
+def test_ride_totals_is_scoped_to_the_caller(monkeypatch):
+    """The account id comes from the session, never from the request — the same
+    rule every owner-scoped read in this file follows."""
+    seen = []
+    conn = _FakeConn([_PROFILE_ROW])
+
+    @contextmanager
+    def _fake_connection():
+        yield conn
+
+    monkeypatch.setattr(api_profile, "connection", _fake_connection)
+    monkeypatch.setattr(api_profile, "compute_badges", lambda cur, aid: [])
+
+    def _spy(cur, aid):
+        seen.append(aid)
+        return {"rides": 0, "distance_meters": 0, "distance_from_rides": 0}
+
+    monkeypatch.setattr(api_profile, "compute_ride_totals", _spy)
+    TestClient(_app()).get("/api/v1/profile")
+    assert seen == [_USER.account_id]
