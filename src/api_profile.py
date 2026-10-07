@@ -13,7 +13,8 @@ email, phone_number, show_public_username, show_in_leaderboards,
 home_lat/home_lng, work_lat/work_lng.
 
 Server-computed, read-only: badges
-(recomputed on every read — see src/badges.py), public_username (minted
+(recomputed on every read — see src/badges.py), ride_totals (likewise, and
+for the same reason — see src/ride_totals.py), public_username (minted
 by accounts.assign_public_username at account creation / CLI backfill).
 public_username itself is never a field on ProfileUpdate — change it via
 the two dedicated endpoints below, not by smuggling it through the
@@ -69,6 +70,7 @@ from .api_auth import (
     send_code_sms,
 )
 from .badges import compute_badges
+from .ride_totals import compute_ride_totals
 from .comms import comms_credentials
 from .pg import connection
 from .points import maybe_credit_profile_completion
@@ -170,6 +172,12 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
         "work_lat": work_lat,
         "work_lng": work_lng,
         "badges": compute_badges(cur, user.account_id),
+        # Frontend plan §11.8's closing sentence. Here rather than on a new
+        # endpoint for the same reason `badges` is: it is a server-computed,
+        # read-only fact about the account's own history, recomputed on every
+        # read, and a surface that already fetches the profile should not need a
+        # second call to say "that was your 12th ride".
+        "ride_totals": compute_ride_totals(cur, user.account_id),
     }
 
 
