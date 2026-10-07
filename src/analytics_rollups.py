@@ -58,6 +58,8 @@ BATCH = 20_000
 CYCLE_BATCH = 2_000
 CYCLE_STOP_WINDOW = timedelta(minutes=30)
 CYCLE_REGION_WINDOW = timedelta(hours=2)
+#: Every statement of a cycle's refresh, off_map included (~0.1 s normally).
+CYCLE_STATEMENT_TIMEOUT = "5s"
 
 #: Closed stops are taken a time window at a time (see refresh_stops).
 STOP_WINDOW = timedelta(hours=6)
@@ -212,34 +214,41 @@ def _fold_stops(cur, rows: list[tuple]) -> None:
         )
 
 
-def _cutover(cur) -> datetime | None:
-    cur.execute("SELECT watermark_time FROM analytics_rollup_state WHERE name = 'stops_cutover'")
+def _cutover(cur) -> tuple[datetime | None, int | None]:
+    """(time, newest stop id) at the migration cutover."""
+    cur.execute("SELECT watermark_time, watermark_id FROM analytics_rollup_state "
+                "WHERE name = 'stops_cutover'")
     row = cur.fetchone()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else (None, None)
 
 
 def refresh_stops(cur, now: datetime, step: timedelta = STOP_WINDOW, batch: int = BATCH) -> int:
-    """Failed starts and dwell. Two sources, one rule each, so no stop is
-    counted by both: stops whose departed_at is <= the migration cutover are
-    swept once by departed_at window (the legacy sweep); stops whose
-    departed_at is after it come from the close queue."""
-    cutover = _cutover(cur)
+    """Failed starts and dwell. Two sources, split by IDENTITY so no stop is
+    counted by both and none is lost: stops already closed at the migration
+    cutover are swept once by departed_at window (the legacy sweep), minus
+    the stops that were still open then (analytics_open_at_cutover); those,
+    and every stop since, come from the close queue whatever departed_at
+    they end up with."""
+    cutover, cutover_id = _cutover(cur)
     done = 0
     # Legacy sweep, by time window (no batch boundary can split equal
-    # timestamps), bounded by the cutover and the settle lag so a stop that
-    # was still open at the cutover and closed with a backdated departed_at
-    # has closed before its window is read.
+    # timestamps). Every stop closed before the cutover has departed_at <=
+    # cutover, and the set is fixed, so no settle lag is needed here.
     _, wtime = _watermark(cur, "stops")
     start = wtime or _EPOCH
     if cutover is not None and start < cutover:
-        upto = min(cutover, now - DEPARTURE_LAG, start + step)
+        upto = min(cutover, start + step)
         if upto > start:
             cur.execute(
                 """
-                SELECT snapshot_time, departed_at, vehicle_model_name, lat, lon, dwell_failed_starts
-                FROM device_history WHERE departed_at > %s AND departed_at <= %s
+                SELECT h.snapshot_time, h.departed_at, h.vehicle_model_name, h.lat, h.lon,
+                       h.dwell_failed_starts
+                FROM device_history h
+                WHERE h.departed_at > %s AND h.departed_at <= %s
+                  AND h.id <= %s
+                  AND NOT EXISTS (SELECT 1 FROM analytics_open_at_cutover o WHERE o.stop_id = h.id)
                 """,
-                (start, upto),
+                (start, upto, cutover_id if cutover_id is not None else 2**62),
             )
             rows = cur.fetchall()
             _fold_stops(cur, rows)
@@ -258,8 +267,10 @@ def refresh_stops(cur, now: datetime, step: timedelta = STOP_WINDOW, batch: int 
     )
     queued = cur.fetchall()
     if queued:
-        rows = [r[1:] for r in queued
-                if r[2] is not None and (cutover is None or r[2] > cutover)]
+        # Every queued close counts, whatever its departed_at: the queue only
+        # holds stops the legacy sweep excludes (open at the cutover) or that
+        # began after it.
+        rows = [r[1:] for r in queued if r[2] is not None]
         _fold_stops(cur, rows)
         cur.execute("DELETE FROM analytics_stop_closes WHERE seq = ANY(%s)", ([r[0] for r in queued],))
         done += len(queued)
@@ -339,6 +350,10 @@ def refresh(cycle_id: Any = None, snapshot_time: datetime | None = None,
     try:
         with connection() as conn:
             with conn.cursor() as cur:
+                if not backfill:
+                    # Before ANY database work, off_map included: a row lock
+                    # or a slow count must not hold the ingest process.
+                    cur.execute(f"SET LOCAL statement_timeout = '{CYCLE_STATEMENT_TIMEOUT}'")
                 if cycle_id is not None and snapshot_time is not None:
                     record_off_map(cur, cycle_id, snapshot_time)
                 if backfill:
@@ -348,10 +363,6 @@ def refresh(cycle_id: Any = None, snapshot_time: datetime | None = None,
                     if not cur.fetchone()[0]:
                         conn.commit()          # keep off_map; the backfill has the rollups
                         return out
-                if not backfill:
-                    # A cycle's slice is ~0.1 s; anything slower is a bug, and
-                    # it must not hold the ingest's process.
-                    cur.execute("SET LOCAL statement_timeout = '5s'")
                 out["rides"] = refresh_rides(cur, BATCH if backfill else CYCLE_BATCH)
                 out["stops"] = refresh_stops(cur, now, STOP_WINDOW if backfill else CYCLE_STOP_WINDOW,
                                              BATCH if backfill else CYCLE_BATCH)

@@ -112,17 +112,35 @@ BEGIN
     RETURN NEW;
 END $$;
 
+-- The trigger FIRST: CREATE TRIGGER takes a SHARE ROW EXCLUSIVE lock on
+-- device_history, which waits for in-flight writers and holds new ones until
+-- this migration commits, so the snapshot below and the trigger see exactly
+-- the same state (no close can slip between them).
 DROP TRIGGER IF EXISTS trg_analytics_queue_stop_close ON device_history;
 CREATE TRIGGER trg_analytics_queue_stop_close
     AFTER INSERT OR UPDATE OF departed_at ON device_history
     FOR EACH ROW EXECUTE FUNCTION analytics_queue_stop_close();
 
--- Stops closed before this migration are not in the queue. The backfill
--- folds them in by departed_at up to this cutover; the queue takes stops
--- whose departed_at is after it. (One rule each, so nothing is counted by
--- both.)
-INSERT INTO analytics_rollup_state (name, watermark_time)
-VALUES ('stops_cutover', NOW())
+-- WHICH SOURCE COUNTS A STOP is decided by identity, not by departed_at:
+--   * stops already closed at the cutover -> the one-time legacy sweep;
+--   * stops still OPEN at the cutover (listed here, ~one per vehicle) and
+--     every later stop -> the close queue, whatever departed_at they get.
+-- departed_at alone cannot decide it: a stop open at the cutover can close
+-- later with a departed_at backdated before the cutover (close_ghost_stops,
+-- or the absent rule after an outage), and a departed_at rule would either
+-- count it twice or lose it (zneill-agent, #121).
+CREATE TABLE IF NOT EXISTS analytics_open_at_cutover (stop_id BIGINT PRIMARY KEY);
+INSERT INTO analytics_open_at_cutover (stop_id)
+SELECT id FROM device_history WHERE departed_at IS NULL
+ON CONFLICT DO NOTHING;
+
+-- The cutover: its time bounds the legacy sweep's departed_at windows, and
+-- its id (the newest stop at the cutover) keeps stops created after it out
+-- of the sweep, so the queue alone owns them. Residual, documented: a stop
+-- closed BEFORE the cutover that is reopened and re-closed after it is in
+-- both (an in-place release straddling the deploy); one stop at most each.
+INSERT INTO analytics_rollup_state (name, watermark_id, watermark_time)
+SELECT 'stops_cutover', COALESCE(MAX(id), 0), NOW() FROM device_history
 ON CONFLICT (name) DO NOTHING;
 
 -- Vehicles seen in the last 7 days but absent from this cycle's feed (rented

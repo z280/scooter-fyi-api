@@ -33,6 +33,7 @@ def db(pg, monkeypatch):
     with pg.cursor() as cur:
         for t in ("analytics_rides_hourly", "analytics_failed_starts_hourly", "analytics_dwell_daily",
                   "analytics_region_devices_hourly", "analytics_rollup_state", "analytics_stop_closes",
+                  "analytics_open_at_cutover",
                   "regional_metrics_narrow", "device_status_snapshots"):
             cur.execute(f"DELETE FROM {t}")
         # Start the watermarks just before the fixture's rows, as a backfill
@@ -40,9 +41,11 @@ def db(pg, monkeypatch):
         # Legacy sweep already done (cutover in the past, swept up to it);
         # region snapshots start just before the fixture's rows.
         cut = T - timedelta(days=3)
-        cur.execute("INSERT INTO analytics_rollup_state (name, watermark_time) VALUES "
-                    "('stops_cutover', %s), ('stops', %s), ('region_devices', %s)",
-                    (cut, cut, T - timedelta(hours=1)))
+        cur.execute("SELECT COALESCE(MAX(id), 0) FROM device_history")
+        cut_id = cur.fetchone()[0]
+        cur.execute("INSERT INTO analytics_rollup_state (name, watermark_id, watermark_time) VALUES "
+                    "('stops_cutover', %s, %s), ('stops', NULL, %s), ('region_devices', NULL, %s)",
+                    (cut_id, cut, cut, T - timedelta(hours=1)))
     pg.commit()
     return pg
 
@@ -226,21 +229,84 @@ def test_a_reopened_stop_is_counted_once_when_it_finally_closes(db):
     assert _city_failed(db) == 1
 
 
-def test_unsettled_closes_wait_and_legacy_stops_are_not_counted_twice(db):
+def _pre_cutover(db, cur, sid):
+    """Make stop `sid` look like it closed before the migration: inside the
+    cutover id, and never queued (the trigger did not exist yet)."""
+    cur.execute("UPDATE analytics_rollup_state SET watermark_id = %s WHERE name = 'stops_cutover'", (sid,))
+    cur.execute("DELETE FROM analytics_stop_closes WHERE stop_id = %s", (sid,))
+
+
+def test_legacy_stops_are_swept_once_and_never_by_the_queue(db):
     with db.cursor() as cur:
-        # departed_at before the cutover: the legacy sweep's, not the queue's.
-        _stop(cur, "old", T - timedelta(days=4, hours=1), T - timedelta(days=4), failed=5)
+        sid = _stop(cur, "old", T - timedelta(days=4, hours=1), T - timedelta(days=4), failed=5)
+        _pre_cutover(db, cur, sid)
         cur.execute("UPDATE analytics_rollup_state SET watermark_time = %s WHERE name = 'stops'",
                     (T - timedelta(days=5),))
-        # A fresh close: queued now, not settled.
-        _stop(cur, "fresh", T, NOW - timedelta(minutes=5), failed=7)
     db.commit()
     for _ in range(10):
         ar.refresh(backfill=True)
-    assert _city_failed(db) == 5   # legacy once; the fresh close still settling
+    assert _city_failed(db) == 5
+
+
+def test_a_stop_open_at_cutover_closed_later_with_an_old_departure_counts_once(db):
+    """zneill-agent's P1: open at the cutover, then closed AFTER the legacy
+    sweep finished with departed_at backdated before the cutover (ghost-stop
+    cleanup after an outage). It must be counted exactly once, by the queue."""
     with db.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM analytics_stop_closes")
-        assert cur.fetchone()[0] == 2   # both queued; neither consumed (old is pre-cutover, kept until settled)
+        sid = _stop(cur, "open-at-cut", T - timedelta(days=6), None)
+        _pre_cutover(db, cur, sid)
+        cur.execute("INSERT INTO analytics_open_at_cutover (stop_id) VALUES (%s)", (sid,))
+    db.commit()
+    for _ in range(10):                       # legacy sweep reaches the cutover
+        ar.refresh(backfill=True)
+    assert _city_failed(db) == 0
+    with db.cursor() as cur:                  # the backdated close, after the sweep
+        cur.execute("UPDATE device_history SET departed_at = %s, dwell_failed_starts = 4 WHERE id = %s",
+                    (T - timedelta(days=5), sid))
+        cur.execute("UPDATE analytics_stop_closes SET closed_at = %s", (T,))
+    db.commit()
+    for _ in range(3):
+        ar.refresh(backfill=True)
+    assert _city_failed(db) == 4
+
+
+def test_a_stop_created_after_cutover_is_the_queues_alone(db):
+    with db.cursor() as cur:
+        _stop(cur, "born-closed", T - timedelta(days=4, hours=1), T - timedelta(days=4), failed=2)
+        cur.execute("UPDATE analytics_rollup_state SET watermark_time = %s WHERE name = 'stops'",
+                    (T - timedelta(days=5),))
+        cur.execute("UPDATE analytics_stop_closes SET closed_at = %s", (T,))
+    db.commit()
+    for _ in range(10):
+        ar.refresh(backfill=True)
+    assert _city_failed(db) == 2
+
+
+def test_a_locked_off_map_row_cannot_hold_the_cycle(db, monkeypatch):
+    """zneill-agent's P2: the statement timeout covers off_map too."""
+    import os
+    import time
+    import psycopg
+    cid = uuid.uuid4()
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO observation_cycles (cycle_id, job_status) VALUES (%s, 'complete')", (str(cid),))
+        cur.execute("INSERT INTO device_status_snapshots (cycle_id, snapshot_time, total, available, "
+                    "reserved, out_of_service, models) VALUES (%s, %s, 1, 1, 0, 0, '{}')", (str(cid), NOW))
+        cur.execute("INSERT INTO device_state_processed_cycles (cycle_id, snapshot_time, eligible_count, "
+                    "counts_as_observation) VALUES (%s, %s, 1, true)", (str(cid), NOW))
+    db.commit()
+    monkeypatch.setattr(ar, "CYCLE_STATEMENT_TIMEOUT", "300ms")
+    holder = psycopg.connect(os.environ["VEO_TEST_PG_DSN"])
+    try:
+        with holder.cursor() as cur:
+            cur.execute("SELECT 1 FROM device_status_snapshots WHERE cycle_id = %s FOR UPDATE", (str(cid),))
+        t = time.monotonic()
+        ar.refresh(cid, NOW)                  # must give up, not wait for the lock
+        assert time.monotonic() - t < 3
+    finally:
+        holder.rollback()
+        holder.close()
+    db.rollback()
 
 
 def test_off_map_is_not_recorded_when_device_state_missed_the_cycle(db):
