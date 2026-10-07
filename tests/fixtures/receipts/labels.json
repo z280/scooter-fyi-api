@@ -1,0 +1,56 @@
+{
+  "_about": "Gold set seed for the equity receipt reader (docs/PLAN_EQUITY_RECEIPTS.md, Phase 4). The owner's own Veo screenshots, kept with the owner's permission (2026-10-06). Money in cents. 'expected' is what a reader must extract from the image; 'match' and 'finding' are what feed history and the rules concluded (2026-10-06), for end-to-end tests.",
+  "receipts": [
+    {
+      "file": "receipt-1021645-2026-09-29.png", "kind": "receipt",
+      "expected": {"plate": "1021645", "minutes": 4, "charge_cents": 256, "discount_cents": 56, "discount_label": null,
+                   "subtotal_cents": 200, "tax_cents": 19, "tax_label": "Taxes & Fees", "total_cents": 219,
+                   "charge_date": "2026-09-29", "payment_method": "Veo Cash", "status_bar_time": "16:37"},
+      "match": {"status": "corroborated", "start_local": "16:34", "end_local": "16:38", "start_equity_area": "EQ_003", "end_equity_area": null},
+      "finding": {"rate_signature": "$1 + 25c/min", "plan": "resident", "rate_finding": "equity_not_applied", "equity_price_cents": 152, "tax_finding": "tax_rounded_up"}
+    },
+    {
+      "file": "receipt-1025640-2026-09-29.png", "kind": "receipt",
+      "expected": {"plate": "1025640", "minutes": 21, "charge_cents": 919, "discount_cents": 294, "discount_label": null,
+                   "subtotal_cents": 625, "tax_cents": 58, "tax_label": "Taxes & Fees", "total_cents": 683,
+                   "charge_date": "2026-09-29", "payment_method": "Veo Cash", "status_bar_time": "16:19"},
+      "match": {"status": "corroborated", "start_local": "16:00", "end_local": "16:20", "start_equity_area": null, "end_equity_area": "EQ_003"},
+      "finding": {"rate_signature": "$1 + 25c/min", "plan": "resident", "rate_finding": "equity_not_applied", "equity_price_cents": 373, "tax_finding": "tax_rounded_up"}
+    },
+    {
+      "file": "receipt-1018354-2026-09-29-premium.png", "kind": "receipt",
+      "expected": {"plate": "1018354", "minutes": 16, "charge_cents": 724, "discount_cents": 224, "discount_label": "veoplus Premium",
+                   "subtotal_cents": 500, "tax_cents": 46, "tax_label": "Taxes & Fees", "total_cents": 546,
+                   "charge_date": "2026-09-29", "payment_method": "Veo Cash", "status_bar_time": "15:31"},
+      "match": {"status": "corroborated", "start_local": "15:16", "end_local": "15:32", "start_equity_area": null, "end_equity_area": "EQ_003"},
+      "finding": {"rate_signature": "$1 + 25c/min", "plan": "resident", "rate_finding": "equity_not_applied", "equity_price_cents": 308, "tax_finding": "tax_ok_either_rounding"}
+    },
+    {
+      "file": "receipt-1027102-2026-09-27.png", "kind": "receipt",
+      "expected": {"plate": "1027102", "minutes": 14, "charge_cents": 646, "discount_cents": 196, "discount_label": null,
+                   "subtotal_cents": 450, "tax_cents": 42, "tax_label": "Taxes & Fees", "total_cents": 492,
+                   "charge_date": "2026-09-27", "payment_method": "Veo Cash", "status_bar_time": "05:02"},
+      "match": {"status": "ambiguous", "candidates_local": ["14:40-14:54", "18:18-18:32"], "note": "neither candidate touches an Equity Area; screenshot was taken the next morning"},
+      "finding": {"rate_signature": "$1 + 25c/min", "plan": "resident", "rate_finding": "matches_plan", "tax_finding": "tax_rounded_up"}
+    },
+    {
+      "file": "receipt-1025894-2026-05-26.png", "kind": "receipt", "duplicate_of": "receipt-1025894-2026-05-26.jpg",
+      "expected": {"plate": "1025894", "minutes": 14, "charge_cents": 646, "discount_cents": 296, "discount_label": null,
+                   "subtotal_cents": 350, "tax_cents": 33, "tax_label": "Tax", "total_cents": 383,
+                   "charge_date": "2026-05-26", "payment_method": "Veo Cash", "status_bar_time": "12:44"},
+      "match": {"status": "before_feed_history", "note": "feed history starts 2026-05-31"},
+      "finding": {"rate_signature": "$0 + 25c/min", "plan": "resident_plus (stacked Premium + Resident, removed after 2026-09-10)", "tax_finding": "tax_rounded_up"}
+    },
+    {
+      "file": "receipt-1025894-2026-05-26.jpg", "kind": "receipt", "note": "same screen as the .png, JPEG-encoded: reader robustness",
+      "expected": {"plate": "1025894", "minutes": 14, "charge_cents": 646, "discount_cents": 296, "discount_label": null,
+                   "subtotal_cents": 350, "tax_cents": 33, "tax_label": "Tax", "total_cents": 383,
+                   "charge_date": "2026-05-26", "payment_method": "Veo Cash", "status_bar_time": "12:44"}
+    },
+    {
+      "file": "trip-summary-2026-09-05.png", "kind": "trip_summary",
+      "expected": {"plate": null, "minutes": 7, "distance_miles": 1.52, "start": "2026-09-05T01:52", "total_cents": 192, "savings_cents": 198},
+      "match": {"status": "ambiguous", "note": "no plate: 28 fleet rides fit start 01:48-01:56, 4-10 min, 0.8-2.6 km"}
+    }
+  ]
+}

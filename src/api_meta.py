@@ -77,9 +77,10 @@ _PRIVACY = {
             "data": "reports",
             "retention": "indefinite, aggregated",
             "detail": "Device and discount reports are the audit evidence base "
-                      "and are kept indefinitely. Public aggregates and the CSV "
-                      "export never include reporter identity (no IP, no email "
-                      "— only an authenticated yes/no flag).",
+                      "and are kept indefinitely. A discount report also records "
+                      "which Equity Area the ride ended in. Public aggregates and "
+                      "the CSV export never include reporter identity (no IP, no "
+                      "email — only an authenticated yes/no flag).",
         },
         {
             "data": "accounts",
