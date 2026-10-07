@@ -46,6 +46,14 @@
 -- anything is inserted. If one somehow does, a loud failed migration is the
 -- right outcome — it is a row that was never meant to be storable.
 
+-- REPLAY SAFETY IS A JOINT PROPERTY OF THIS FILE AND sql/093, and the other
+-- half of it lives there: 093's claim-shape constraint is now added NOT VALID,
+-- so a replay over a database already holding a planless claim gets past it and
+-- reaches the validated constraint below. This file is what makes that sound —
+-- it re-adds the constraint WITH validation, so nothing is left unchecked once
+-- the replay finishes. Changing either half without the other breaks the 25 pg
+-- fixtures that replay `sql/`.
+
 SET lock_timeout = '10s';
 
 ALTER TABLE discount_reports DROP CONSTRAINT IF EXISTS discount_reports_claim_shape_check;

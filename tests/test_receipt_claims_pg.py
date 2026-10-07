@@ -76,3 +76,53 @@ def test_the_database_refuses_an_unusable_claim(pg, bad, why):
                 _insert(cur, aid, bad)
     finally:
         pg.rollback()
+
+
+def test_the_full_sql_set_replays_over_a_committed_planless_claim(pg):
+    """The replay contract, which is what sql/093's NOT VALID exists for.
+
+    25 test fixtures run `sorted(SQL_DIR.glob("*.sql"))` against a database
+    that already holds data, and `run_migrations` keys `schema_migrations` on
+    the filename, so production never re-runs an old file. Replaying history
+    against present-day data is therefore something every migration has to
+    survive — and sql/093 did not: it demanded a plan screenshot that sql/095
+    stopped requiring, and a validating ADD CONSTRAINT checks existing rows, so
+    the replay died there with "is violated by some row" before sql/095 could
+    relax the rule again. Every pg test in the suite failed at setup.
+
+    This COMMITS deliberately. The other tests in this file roll back, which
+    kept them from poisoning the shared database but left the contract broken
+    for anyone else — including production, which carries exactly this row
+    shape the moment the feature ships.
+    """
+    from pathlib import Path
+
+    sql_dir = Path(__file__).resolve().parents[1] / "sql"
+    files = sorted(sql_dir.glob("*.sql"))
+    assert files, "no migrations found — the path is wrong, not the schema"
+
+    with pg.cursor() as cur:
+        aid = _account(cur)
+        _insert(cur, aid, "(%s, 'equity', 2, '1018354', 16, 500, '2026-09-29', NULL)")
+    pg.commit()
+    try:
+        # Exactly what every pg fixture does at setup, in one transaction —
+        # some migrations use LOCK TABLE and cannot run autocommit.
+        with pg.cursor() as cur:
+            for path in files:
+                cur.execute(path.read_text())
+        pg.commit()
+        # And the end state is still strict: the replay finishes with sql/095's
+        # VALIDATED constraint, not 093's NOT VALID one, so a genuinely
+        # unusable claim is still refused.
+        with pg.cursor() as cur:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                _insert(cur, aid, "(%s, 'equity', 2, 'ABC', 16, 500, '2026-09-29', NULL)")
+        pg.rollback()
+    finally:
+        with pg.cursor() as cur:
+            cur.execute(
+                "DELETE FROM discount_reports WHERE account_id = %s AND claim_version = 2",
+                (aid,),
+            )
+        pg.commit()
