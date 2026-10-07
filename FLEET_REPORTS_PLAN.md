@@ -1,7 +1,22 @@
 # Fleet Reports — reports that stick, and the stewardship that requires
 
-**Status:** specified, not started. Written 2026-10-06 against `main`
-(`c421ac1` api / `22f4532` frontend).
+**Status:** specified, not started. Revised 2026-10-07 against `main`
+(`e442e2c` api / `5aac9ba` frontend).
+
+**Read §2.2 first if you are here to implement.** The first revision of this
+plan got the current behaviour wrong: it described reports-until-movement as new
+work when the accountable half already ships, and its §4.1(3) would have
+unclocked the *anonymous* branches — making unaccountable reports permanent,
+which is the plan's own risk 2. §2.2, §2.3 and §4.1(3) are rewritten, and the
+retractions are left in place rather than quietly corrected, because the
+original claims are the ones another agent would otherwise re-derive.
+
+**Every `file:line` in §3 is now machine-checked against the commits named
+above.** The first revision's were not — they were written against a working
+copy and were off by 19 lines in `api_frontend_reports.py`, which is how the
+superseded predicate got quoted as current. A citation in this document is a
+claim about a specific commit; re-check them before trusting them if `main` has
+moved.
 
 **Scope:** two repositories. `z280/scooter-fyi-api` owns the report vocabulary,
 the persistence rule, the public flag, the resolve endpoint and the admin
@@ -40,11 +55,24 @@ closest of five, and it is wrong.
 | **Will it ride?** | `not_rideable`, `dead_battery`, `damaged` → `has_negative_report` → `reliability_tier` |
 | **Can I get to it?** | *nothing* |
 
-`not_rideable` was actively harmful here. It is in the set that flips
-`has_negative_report` server-side, so a perfectly good Apollo is now marked
-unreliable — and because `reliability_tier` is scoped to the **vehicle**, that
-mark follows it after Veo retrieves it and redeploys it three blocks away. The
-scooter is punished for where somebody else parked it.
+`not_rideable` was the wrong claim here. It is in the set that flips
+`has_negative_report` server-side, so a perfectly good Apollo is marked
+unreliable on the strength of where it is parked.
+
+**An earlier revision of this paragraph overstated it**, and the overstatement
+is worth keeping visible because it was the one claim in §1 with no `file:line`
+behind it. It said the mark "follows it after Veo retrieves it and redeploys it
+three blocks away". It does not. `compute_reliability_tier` takes
+`has_negative_report` and `number_failed_starts`, and **both reset on
+movement** — every `has_negative_report` branch clears on a move, and
+`sql/004` marks `number_failed_starts` "reset on movement" in as many words. A
+retrieval and redeployment clears it.
+
+What is true is narrower and still enough: for exactly as long as the scooter
+sits behind that fence, the fleet's most-wanted model carries a false claim
+about its *hardware* — and the rider who filed it had no way to say the true
+thing instead. The argument for this plan does not need the mark to outlive the
+situation.
 
 `improperly_parked` is the right *category* and still the wrong answer. It is
 the lone member of `NON_RELIABILITY_REPORT_TYPES`, and its comment states the
@@ -78,50 +106,103 @@ construction hoarding, in a building.
   private property — don't go in"*. A label that sends somebody over a fence to
   prove a point is worse than no label.
 
-### 2.2 Reports stand until the device MOVES, not for 24 hours
+### 2.2 Reports stand until the device MOVES — MOSTLY ALREADY TRUE
 
-This is already half-built, and the bug is one `AND` away from being right.
-`api_public.py`'s `has_negative_report` reads:
+**An earlier revision of this section was wrong, and wrong in the most
+expensive way a plan can be: it proposed as new work something the codebase
+already does, and quoted a predicate that is not the one that matters.** It
+showed the `negative_reports` branch — 24 hours plus an h3_10 cell test — and
+read it as "the" rule. There are **three** branches, and the third already
+implements this decision.
+
+`api_frontend_reports.py:83` states the shipped rule in prose, and
+`api_public.py:490-523` implements it:
+
+| Source | How long it counts |
+|---|---|
+| `negative_reports` (map-pin rows, no account column at all) | 24 hours, in the vehicle's h3_10 cell |
+| `device_reports` with no `account_id` | 24 hours, in the cell |
+| **`device_reports` with an `account_id`** | **until the vehicle MOVES or comes back at a FULL CHARGE** — not time-boxed, not cell-scoped |
+
+And the reasoning is already written down, in words this plan was about to
+reinvent: *"the useful question about it is not 'how long ago?' but 'has
+anything happened since?'"*, and *"a signed-in report on a scooter nobody
+touches holds indefinitely, which is the point."*
+
+**So the split is deliberate: accountable reports persist, anonymous ones age
+out because nobody's name is on them.** That is a griefing control, and it is
+this plan's own risk 2 solved in advance.
+
+**WHAT THIS MEANS FOR THE WORK.** Do **not** remove the 24-hour interval. The
+two branches that carry it are the anonymous ones, and unclocking them makes
+unaccountable reports permanent — exactly the abuse §2.6(2) warns about. What
+actually remains on this axis is narrower than the original section claimed:
+
+1. **The new `inaccessible` type must reach the accountable branch**, which it
+   does for free: that branch filters on `reliability_report_type_sql`, so
+   adding the type to `NON_RELIABILITY_REPORT_TYPES` **excludes** it from
+   `has_negative_report` (correct — it is not a rideability claim) and §2.5's
+   separate suppression flag is what must pick it up.
+2. **`improperly_parked` persistence is NOT free.** The original section said
+   the movement rule "applies to every report type, `improperly_parked`
+   included". It cannot, as written: that type is excluded from every branch by
+   `reliability_report_type_sql`. Parking persistence has to ride §2.5's
+   suppression flag, not `has_negative_report`.
+3. **The full-charge clause is wrong** — §2.4, which is now this plan's one
+   real finding about expiry.
+
+### 2.3 "Moved" means moved — and the shipped mechanism is better than the one this plan proposed
+
+**Also retracted.** The original rule was *"the h3_10 index differs AND the
+device is ≥50 m from the reported point"*, justified by jitter flipping a cell
+index near a boundary. Two things are wrong with it.
+
+**The accountable branch does not use cells at all.** It uses
+`ds.first_observed_at_location <= dr.reported_at` — `device_state`'s
+"reset on movement" column, which the ingest advances when a vehicle moves past
+its stationary threshold. `api_public.py:505` says why, and it is the better
+argument: *"`first_observed_at_location` already answers 'has it moved?' more
+precisely than a cell comparison can"*. A cell test cannot see a 60 m move
+within one cell; this does. **Adopting the proposed rule would have been a
+regression dressed as a fix.**
+
+**And the coordinates it leans on are nullable.** `sql/013` declares `lat`,
+`lng` and `h3_10_index` all nullable, with a comment that the cell is
+"anchored to the SCOOTER's current cell when coords are absent". An
+`AND`-joined distance test is therefore NULL for a coordinate-less report, and
+the report would never clear at all.
+
+**So: no change here.** The movement signal is `first_observed_at_location`,
+already shipped, and the NULL handling is already right — `IS NULL` holds the
+flag, "which is the safe direction for a claim that the scooter does not work".
+A later refinement should start from that column, not from cells.
+
+### 2.4 Battery is an EVENT, never a level — and this one IS a live bug
+
+This is the decision that survives review, and it is now precisely located
+rather than hypothetical. The accountable branch ends with
+(`api_public.py:521-523`):
 
 ```sql
-WHERE nr.vehicle_identifier = r.vehicle_identifier
-  AND nr.h3_10_index        = r.h3_10_index          -- clears when it MOVES
-  AND nr.reported_at >= NOW() - INTERVAL '24 hours'  -- ...and also on a clock
+AND (r.current_range_meters IS NULL
+     OR r.current_range_meters < %s)   -- "...and not charged back to full"
 ```
 
-The cell condition is exactly the rule we want, and the comment above it
-already says so. **The interval is what lets a scooter sit untouched in a yard
-and quietly rehabilitate itself overnight.**
+That is a **level** test. **The Apollo that prompted this plan is the
+counterexample, and it defeats the shipped rule, not a hypothetical one:** it
+sits at 100% behind the fence, so `current_range_meters < threshold` is false
+the moment the report is filed, and the report clears instantly. A fully
+charged scooter is effectively unreportable today.
 
-**Drop the interval. Keep the cell test.** A report stands until the thing
-actually moves. This applies to every report type, `improperly_parked`
-included: a badly parked scooter that nobody has touched is still badly parked
-tomorrow.
+Only a **rise** is evidence a human touched the vehicle. The fix is to compare
+against the charge **at report time** — which means `device_reports` has to
+record it, so this needs a column, not just a predicate change. For the case
+that prompted the plan no rise is possible and movement is the only honest
+signal, which is why §2.3's mechanism carries the weight.
 
-### 2.3 "Moved" means moved, not GPS jitter
-
-h3 resolution 10 averages **~76 m edge, ~15,000 m²** (computed with the
-`h3-js` already in the frontend). That is comfortably clear of GPS noise, so
-a cell change is a good primary signal.
-
-The gap is a vehicle parked near a **cell boundary**, where jitter alone can
-flip the index and clear a live report. Reports already carry `lat`/`lng`
-(`DeviceReportIn`), so:
-
-> **Moved = the h3_10 index differs AND the device is ≥50 m from the reported
-> point.** Both, not either.
-
-### 2.4 Battery is an EVENT, never a level
-
-The obvious second clearing rule — *"≥90% charge means somebody serviced it"* —
-**is wrong, and the Apollo that prompted this plan is the counterexample.** It
-is already at 100%, so a level threshold clears its own report the instant it
-is filed. A fully charged scooter would be permanently unreportable.
-
-Only a **rise** is evidence that a human touched the vehicle. If this is
-implemented at all, it is "battery increased by ≥X points since the report",
-never "battery is above X". For the case that prompted the plan, no rise is
-possible and **movement is the only honest signal**.
+**§5's "a device at 100% battery can be reported and the report stands" test
+fails today.** That is the regression test for this section, and it is the one
+test in this plan that already has a bug to catch.
 
 ### 2.5 Suppression is its own axis — do NOT overload `reliability_tier`
 
@@ -241,11 +322,14 @@ contradiction.
 | Thing | Where |
 |---|---|
 | The five report types | `src/api_frontend_reports.py:53` — `_REPORT_TYPES` |
-| Types excluded from reliability | same file `:87` — `NON_RELIABILITY_REPORT_TYPES` |
-| The SQL predicate for that exclusion | same file `:90` — `reliability_report_type_sql()` |
-| Applied in the devices query | `src/api_public.py:460` |
-| Applied in the h3 aggregate | `src/api_h3.py:125` |
-| `has_negative_report`, 24h + h3_10 | `src/api_public.py:433-462` |
+| **How long a report counts — the shipped rule, in prose** | same file `:83-101`. Read this before §2.2 |
+| Types excluded from reliability | same file `:106` — `NON_RELIABILITY_REPORT_TYPES` |
+| The SQL predicate for that exclusion | same file `:109` — `reliability_report_type_sql()` |
+| `has_negative_report` — **three** branches | `src/api_public.py:490-524` |
+| The accountable branch (no clock, no cell) | `src/api_public.py:505-523` |
+| The full-charge level test §2.4 must replace | `src/api_public.py:521-523` |
+| Applied in the h3 aggregate, **snapshot-bounded** | `src/api_h3.py:42` (type filter), `:120`/`:126` (windows) |
+| `device_reports` schema — nullable `lat`/`lng`/`h3_10_index`, **no resolution state** | `sql/013_frontend_reports.sql:15-30` |
 | Deprecated-alias seam (worth copying) | `api_frontend_reports.py:56-82` — how a rename ships across two repos that cannot deploy atomically |
 | Points awarded per report type | `src/points.py:195` |
 | Admin pages, OAuth-gated | `src/api_admin.py` — `cycles`, `failures`, `scheduler`, `regions`, `admins`, `analytics`, `campaigns` |
@@ -255,7 +339,7 @@ contradiction.
 | Plate extraction and the match check | `src/qr.py:32` `extract_plate`, `:40` `validate_scan` |
 | Why the client cannot resolve a hidden device | `src/identity.py:59-69` — salted HMAC, "anyone without it cannot" |
 | QR payload registry | `sql/032_device_qr_codes.sql` |
-| Fleet census columns | `sql/004_device_history.sql:26-28` — `first_ever_observed_at` (never reset), `last_observed_at`, and the `first_observed_at_location` trap two lines above |
+| Fleet census columns | `sql/004_device_history.sql:27-28` — `first_ever_observed_at` (never reset), `last_observed_at`. The `first_observed_at_location` trap is `:25`, "reset on movement" — and it is also §2.3's movement signal |
 | Why "absent" is not "missing" | `src/device_state.py:243-257` — `ABSENT_STOP_AFTER` and the fleet measurement behind it |
 
 ### Frontend — `z280/denver-scooter-fyi`
@@ -263,9 +347,9 @@ contradiction.
 | Thing | Where |
 |---|---|
 | `DeviceReportType` + `submitDeviceReport` | `src/reports.ts:15` |
-| "🚫 Not rideable" chip in the device popup | `src/devices.ts:1673` |
-| `improperly_parked` fire-and-forget | `src/devices.ts:2443` |
-| Why a `not_rideable` report overrides the tier | `src/devices.ts:1621` (comment) |
+| The report chips in the device popup | `src/devices.ts:1698` |
+| `improperly_parked` fire-and-forget | `src/devices.ts:2399` (contract), `:2468-2474` (the call) |
+| Why a `not_rideable` report overrides the tier | `src/devices.ts:1646` (comment) |
 | Reliability tiers and their reasons | `src/reliability.ts` |
 | The Phase 2 planner that must exclude these | `src/along-the-way.ts` — see §4.2 |
 | Camera surface; hands back the raw payload and nothing else | `src/qr-scan.ts:182` — `openQrScanner` |
@@ -290,14 +374,16 @@ contradiction.
    A number written in a plan drifts, and this program has been bitten by that
    before.
 
-   **Follow `sql/037`'s shape exactly**, which is the house pattern for this
-   table: drop the constraint *before* rewriting rows and re-add it after,
-   because the constraint would otherwise reject the very UPDATE that migrates
-   the data — and drop `IF EXISTS` under **both** historical names
+   **Read `sql/029` BEFORE `sql/037`.** An earlier revision of this item said
+   to copy 037's shape "exactly"; that is wrong for this change. 037's
+   drop-then-re-add exists because it *rewrites rows*, and the old constraint
+   would reject the very UPDATE doing the migration. **Adding a permitted value
+   rewrites nothing**, so it needs no unguarded drop — and `sql/029` is the file
+   that documents why an unguarded drop/re-add on this constraint is a
+   replay-safety bug. Still drop `IF EXISTS` under **both** historical names
    (`device_reports_report_type_allowed` and the older inline
    `device_reports_report_type_check`), since instances predating `sql/023`
-   carry the other one. `sql/029`'s header documents the replay-safety bug this
-   shape fixes; re-read it before writing the file.
+   carry the other one.
 
 2. **Accept the type.** Add to `_REPORT_TYPES` **and**
    `NON_RELIABILITY_REPORT_TYPES`. No alias is needed — this is a new value,
@@ -305,9 +391,40 @@ contradiction.
    ordering between these two repos, which this change also has (ship the API
    first; the button 422s against an old backend otherwise).
 
-3. **Persistence.** Remove the `INTERVAL '24 hours'` clause from both
-   `has_negative_report` subqueries in `api_public.py`, and add the ≥50 m
-   displacement test from §2.3. Check `api_h3.py:125` for the same window.
+3. **Persistence — MOSTLY ALREADY SHIPPED, and the original instruction here
+   was actively harmful.** It said to remove the `INTERVAL '24 hours'` from both
+   `has_negative_report` subqueries and add a ≥50 m displacement test. Do
+   **neither**:
+
+   - The two clocked branches are the **anonymous** ones (`negative_reports`,
+     and `device_reports` with a NULL `account_id`). Unclocking them makes
+     unaccountable reports permanent — this plan's own risk 2, and the abuse
+     §2.6(2) exists to contain. The accountable branch is already unclocked.
+   - The ≥50 m cell rule would **regress** the shipped
+     `first_observed_at_location` test (§2.3), and leans on nullable
+     coordinates.
+   - `api_h3.py`'s windows are bounded against the **snapshot** time
+     (`%(snap)s - INTERVAL '24 hours'`), not `NOW()`. Removing them would
+     retroactively reshade historical cells, changing aggregates for days that
+     have already been published. Leave them alone.
+
+   What remains is §2.4's battery fix, and §4.1(3a) below.
+
+3a. **Record the charge at report time.** §2.4 needs a *rise*, which cannot be
+   computed from a level alone — `device_reports` has to store the range (or
+   battery) as it stood when the report was filed. New nullable column in the
+   same migration as §4.1(1); the predicate then compares `r.current_range_meters`
+   against that row's recorded value instead of a fixed threshold. A NULL
+   recorded value must behave exactly as the current NULL branch does: clear
+   nothing.
+
+3b. **Add resolution state, or §4.1(4) and §2.6(1) cannot be built.** Both
+   speak of "unresolved" reports, and `sql/013` has no column for it — no
+   `resolved_at`, no `voided_by`, nothing. Without it there is no way to express
+   an admin voiding a report, and `suppressed` has no "unresolved" to compute
+   from. Add `resolved_at`, `resolved_by` and a short `resolution` note, in the
+   same migration. **This was missing from every earlier revision of this plan**
+   and is the one gap that blocks two other items outright.
 
 4. **Suppression flag.** Add `suppressed` + `suppressed_reason` to
    `/devices/current`, computed from unresolved reports of **any** type under
@@ -399,15 +516,25 @@ contradiction.
 
 ## 5. Tests
 
-- A report with no movement is **still live a week later** — the case the
-  24-hour window silently dropped.
-- Moving the device **one h3_10 cell but only 20 m** (boundary jitter) does
-  **not** clear a report; moving it 200 m does.
+- A **signed-in** report with no movement is still live a week later. This
+  already passes; write it anyway, because §2.2's rule is now load-bearing for
+  the rest of the plan and nothing currently pins it.
+- An **anonymous** report still ages out at 24 hours. This is the guard against
+  the change §4.1(3) was originally going to make, and the only test that fails
+  if somebody unclocks those branches.
+- A `improperly_parked` report does not touch `has_negative_report` at all (it
+  is excluded by type), and persists only through §2.5's suppression flag.
 - An `inaccessible` report does **not** change `reliability_tier`, and **does**
   set `suppressed`.
 - An `improperly_parked` report likewise suppresses without touching the tier.
-- A device at **100% battery** can be reported and the report stands — §2.4's
-  regression, written against the scooter that prompted the plan.
+- **A device at 100% battery can be reported and the report stands.** This
+  FAILS TODAY — the shipped full-charge clause clears it immediately
+  (`api_public.py:521-523`). It is the one test in this plan with a live bug to
+  catch, written against the scooter that prompted it.
+- A report whose recorded charge is NULL clears nothing, exactly as the current
+  NULL branch behaves.
+- Voiding a report requires the resolution columns of §4.1(3b); a test that
+  passes without them means `suppressed` is computing from something else.
 - A suppressed vehicle appears in **no** `rankPlans` output: not as a first
   hop, not as a pickup, not at any rank.
 - Voiding a report clears suppression immediately and is attributable.
