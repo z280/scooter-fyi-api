@@ -27,6 +27,8 @@ from .equity_groups import (
     compliance_pass_column,
     unmeasurable_reason_column,
 )
+from .fleet_equity import WINDOWS as EQUITY_WINDOWS
+from .fleet_equity import summarize as fleet_equity_summary
 from .fleet_outcomes import summarize as fleet_outcomes_summary
 from .pg import connection
 from . import battery_model, vehicle_identity
@@ -878,6 +880,23 @@ def equity_estimate(
 # ---------------------------------------------------------------------------
 # Rider stats: did the rental go anywhere?
 # ---------------------------------------------------------------------------
+@router.get("/api/v1/fleet/outcomes/equity")
+def fleet_outcomes_equity(response: Response, window: str = "7d") -> Any:
+    """Share of rentals that ended where they began, inside vs outside the
+    city's official Equity Areas, over a trailing window (7d or 28d).
+
+    Each rental is attributed at write time to the Equity Area containing its
+    UNLOCK POINT (rental_outcomes_hourly.equity_area, sql/092), never to where
+    a vehicle is parked now. Unknown origins are excluded exactly and
+    reported; coverage, 95% intervals and caveats travel in the response.
+    See src/fleet_equity.py for the method.
+    """
+    if window not in EQUITY_WINDOWS:
+        raise HTTPException(400, f"window must be one of {sorted(EQUITY_WINDOWS)}")
+    response.headers["Cache-Control"] = "public, max-age=600"
+    return fleet_equity_summary(window)
+
+
 @router.get("/api/v1/fleet/outcomes")
 def fleet_outcomes(request: Request, response: Response) -> Any:
     """Share of rentals that ended where they began, fleet and by model, since

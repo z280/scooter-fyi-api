@@ -1035,6 +1035,28 @@ GET /api/v1/h3/aggregates?res=9
 
 ---
 
+### `GET /api/v1/fleet/outcomes`
+
+Share of rentals that **ended** within `radius_meters` of where they were unlocked (END displacement: a loop ride back to the same rack counts), fleet-wide and by model, from `device_state`'s per-vehicle counters **since their reset** (sql/089). Fields: `window` (`"since_reset"`), `counted_since` (`"sql/089"`), `counted_since_at` (when the reset ran, ISO 8601), `radius_meters`, `rentals`, `no_gos`, `no_go_rate` (null under `min_rentals_for_rate`), `vehicles`, `by_model[]`. A no-go is an attempt that went nowhere; this counts, it does not attribute a cause. Cached 5 min with an ETag that includes the window start.
+
+### `GET /api/v1/fleet/outcomes/equity?window=7d|28d`
+
+The same share **inside vs outside the city's official Equity Areas** (`data/equity.geojson`, EQ_001–EQ_030), over a trailing window, from `rental_outcomes_hourly`. Each rental is attributed **at write time** to the Equity Area containing its **unlock point** (`equity_area`, sql/092), never to where a vehicle is parked now. Rentals with no unlock point to test are stored in rows of their own and excluded exactly.
+
+| Field | Meaning |
+|---|---|
+| `inside`, `outside` | `rentals`, `cells`, `ended_within_radius`, `ended_within_radius_rate` (+ `_ci95`), `max_known`, `never_left_radius`, `never_left_radius_rate` (+ `_ci95`). Rates are null under `min_rentals_for_rate`; counts stay. Intervals are 95% **cluster-robust** (each unlock-point r9 cell a cluster), null under 30 cells. `inside` also has `areas_represented` of `areas_official`. `outside` is **in Denver** (a council district) and in no Equity Area. |
+| `difference_points` | inside minus outside `ended_within_radius_rate`, percentage points, from raw counts; null unless BOTH sides clear the floor |
+| `difference_points_ci95`, `difference_distinguishable` | cluster-robust 95% interval; `false` when it spans zero, null when either side has under 30 cells |
+| `by_area[]` | the same figures per Equity Area that had rentals |
+| `excluded` | `unknown_origin` (first seen mid-rental, no fix, or unreadable boundary file), `outside_city` (unlocked outside the City and County of Denver), `unrecorded` (before sql/092) |
+| `window`, `window_start`, `window_end` | the trailing window (hour-aligned, UTC, end-exclusive) |
+| `data_since`, `hours_covered`, `hours_in_window`, `window_complete` | how much of the named window the table holds: **do not label a figure "28-day" unless `window_complete`** |
+| `status` | `ok`; `degraded` when unknown origins exceed 20% of rentals (e.g. a broken boundary file); `unavailable` (database failure; figures empty) |
+| `radius_meters`, `definition`, `attribution`, `boundary`, `caveats` | `25`, `"end_displacement"`, `"unlock_point"`, `"official_equity_areas"`, and the sentence that must travel with any quoted figure |
+
+`ended_within_radius` counts a ride that looped back to its start; `never_left_radius` is the stricter "never got farther than the radius" (over rentals whose maximum is known). The table holds no vehicle, so vehicle-level clustering is not captured and the intervals are still a lower bound on the uncertainty. `400` for any other `window`. Never a 500. `Cache-Control: public, max-age=600` (no server-side cache).
+
 ### `GET /api/v1/leaderboard/map`
 
 FEATURE_PLAN §11's H3 r8 "area leader" report -- the 🏆 Leaderboard
