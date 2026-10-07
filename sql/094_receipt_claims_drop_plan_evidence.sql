@@ -21,9 +21,30 @@
 -- write-never, read-by-cleanup. A later migration can drop it once the last
 -- key has aged out.
 --
--- Only the CHECK changes: the shape rule stops demanding the key. Everything
--- else about a v2 claim — the plate, the minutes, a cost, the charge date — is
--- untouched, and is still enforced here as well as in the endpoint.
+-- The shape rule stops demanding the key. Everything else about a v2 claim —
+-- the plate, the minutes, a cost, the charge date — is still enforced here as
+-- well as in the endpoint.
+--
+-- AND IT CLOSES A NULL HOLE sql/093 LEFT OPEN, found while rewriting this. A
+-- CHECK constraint accepts a NULL result; only an explicit FALSE rejects. So
+-- `trip_minutes BETWEEN 1 AND 600` with a NULL minutes evaluated to NULL, the
+-- whole v2 conjunction to NULL, `FALSE OR NULL` to NULL — and the row was
+-- ACCEPTED. Verified against Postgres 16 before writing this: that insert
+-- returned `INSERT 0 1`. The same was true of a NULL `vehicle_plate` through
+-- the regex. sql/093's own comment says this constraint "holds the gate and the
+-- plan-evidence rule in the database itself", and for two of its four fields it
+-- did not. The explicit IS NOT NULL tests make the conjunction FALSE instead of
+-- NULL, which is what makes that sentence true.
+--
+-- `(subtotal_cents IS NOT NULL OR total_cents IS NOT NULL)` and `charge_date IS
+-- NOT NULL` were already written as explicit null tests, so those two were
+-- always sound; they are unchanged.
+--
+-- This validates existing rows, so a v2 row already carrying a NULL plate or
+-- NULL minutes would fail the migration. None can exist: the endpoint's gate
+-- (`receipt_claims.missing_for_rate_check`) refuses a claim without both before
+-- anything is inserted. If one somehow does, a loud failed migration is the
+-- right outcome — it is a row that was never meant to be storable.
 
 SET lock_timeout = '10s';
 
@@ -31,7 +52,9 @@ ALTER TABLE discount_reports DROP CONSTRAINT IF EXISTS discount_reports_claim_sh
 ALTER TABLE discount_reports ADD CONSTRAINT discount_reports_claim_shape_check CHECK (
     claim_version = 1 AND ride_ended_at IS NOT NULL
     OR claim_version = 2
+       AND vehicle_plate IS NOT NULL
        AND vehicle_plate ~ '^[0-9]{7,10}$'
+       AND trip_minutes IS NOT NULL
        AND trip_minutes BETWEEN 1 AND 600
        AND (subtotal_cents IS NOT NULL OR total_cents IS NOT NULL)
        AND charge_date IS NOT NULL
