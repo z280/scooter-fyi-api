@@ -224,7 +224,7 @@ from typing import Any, Iterable
 from . import device_features
 from .config import load
 from .geo import distance_meters as _distance_meters
-from .ingest import TaggedDevice
+from .ingest import TaggedDevice, _h3_cells
 from .pg import connection
 
 log = logging.getLogger(__name__)
@@ -763,6 +763,9 @@ def update_for_cycle(
             rental_start_updates: list[tuple] = []   # sql/069
             rental_hold_updates: list[tuple] = []
             rental_outcome_updates: list[tuple] = []  # sql/072
+            # sql/090: (hour, h3_9, model, radius) -> [rentals, no_gos,
+            # no_gos_max, max_known], summed here and upserted once per key.
+            outcome_rollup: dict[tuple, list[int]] = {}
             in_place_release_updates: list[tuple] = []  # sql/087
             reopen_stops: list[tuple] = []   # (vid, closed_at, failed_start 0/1)
 
@@ -878,6 +881,45 @@ def update_for_cycle(
                     rental_outcome_updates.append((1 if no_go else 0, vid))
                     if no_go:
                         stats.rentals_no_go += 1
+                    # sql/090: the same outcome, with when, where and at what
+                    # radius. WHERE is the unlock point (last fix before the
+                    # rental), so a rental is attributed to the place it was
+                    # attempted, not wherever the vehicle sits later. A vehicle
+                    # FIRST SEEN mid-rental never showed us its unlock point:
+                    # its last_fix is its first sighting, so the row is
+                    # attributed there and counted in origin_unknown, which
+                    # anything attributing rentals to places must exclude.
+                    origin_unknown = (
+                        prev_rental_started_at is not None and _ever is not None
+                        and prev_rental_started_at <= _ever
+                    )
+                    if prev_fix_lat is not None and prev_fix_lon is not None:
+                        origin_cell = _h3_cells(float(prev_fix_lat), float(prev_fix_lon))[1]
+                    elif prev_lat is not None and prev_lon is not None:
+                        origin_cell = _h3_cells(float(prev_lat), float(prev_lon))[1]
+                    else:
+                        origin_cell = d.h3_9_index
+                    if origin_cell is not None:
+                        # MAXIMUM displacement: the running max sql/087 kept
+                        # during the rental, plus this final fix. NULL when the
+                        # origin was unknown; then only max_known stays 0.
+                        rental_max = (
+                            None if prev_rental_max is None or from_fix == float("inf")
+                            else max(float(prev_rental_max), from_fix)
+                        )
+                        key = (
+                            snapshot_time.replace(minute=0, second=0, microsecond=0),
+                            int(origin_cell),
+                            d.vehicle_model_name or "Unknown",
+                            float(threshold),
+                        )
+                        acc = outcome_rollup.setdefault(key, [0, 0, 0, 0, 0])
+                        acc[0] += 1
+                        acc[1] += 1 if no_go else 0
+                        acc[4] += 1 if origin_unknown else 0
+                        if rental_max is not None:
+                            acc[3] += 1
+                            acc[2] += 1 if rental_max <= threshold else 0
 
                 # IN-PLACE RELEASE (sql/087). The rental never left
                 # IN_PLACE_RADIUS_M of its origin and ended inside it. The
@@ -1190,6 +1232,25 @@ def update_for_cycle(
                     WHERE vehicle_identifier = %s
                     """,
                     rental_outcome_updates,
+                )
+
+            # sql/090, same transaction as the counters above, so the rollup
+            # and the per-vehicle totals can never disagree about a rental.
+            if outcome_rollup:
+                cur.executemany(
+                    """
+                    INSERT INTO rental_outcomes_hourly
+                        (hour, h3_9, model, radius_m,
+                         rentals, no_gos, no_gos_max, max_known, origin_unknown)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (hour, h3_9, model, radius_m) DO UPDATE SET
+                        rentals    = rental_outcomes_hourly.rentals    + EXCLUDED.rentals,
+                        no_gos     = rental_outcomes_hourly.no_gos     + EXCLUDED.no_gos,
+                        no_gos_max = rental_outcomes_hourly.no_gos_max + EXCLUDED.no_gos_max,
+                        max_known  = rental_outcomes_hourly.max_known  + EXCLUDED.max_known,
+                        origin_unknown = rental_outcomes_hourly.origin_unknown + EXCLUDED.origin_unknown
+                    """,
+                    [(*k, *v) for k, v in sorted(outcome_rollup.items())],
                 )
 
             # IN_RENTAL, every later cycle — liveness, plus how far from the
