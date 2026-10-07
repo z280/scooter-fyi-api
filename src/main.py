@@ -41,6 +41,7 @@ from .api_route_feedback import router as route_feedback_router
 from .api_device_history import router as device_history_router
 from .api_private import router as private_router
 from .api_profile import router as profile_router
+from .api_analytics import router as analytics_router
 from .api_public import router as public_router
 from .api_reports import router as reports_router
 from .api_telemetry import router as telemetry_router
@@ -154,6 +155,7 @@ app.include_router(route_router)
 app.include_router(geocode_router)
 app.include_router(leaderboard_router)
 app.include_router(telemetry_router)
+app.include_router(analytics_router)
 
 
 @app.get("/", include_in_schema=False)

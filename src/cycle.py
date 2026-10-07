@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import psycopg
 
-from . import compute, device_state, ingest, ride_watch, transmit
+from . import analytics_rollups, compute, device_state, ingest, ride_watch, transmit
 from .pg import connection
 from .sentry import capture_exception, set_cycle_tag
 
@@ -180,6 +180,12 @@ def run_once() -> str | None:
             transmission_status=tx_status,
             job_status="complete",
         )
+
+        # Fleet analytics rollups (sql/094): fold this cycle's new rides and
+        # settled stop closes into the dashboard's sums, and record off-map.
+        # LAST, after storage and transmit, so nothing the cycle publishes can
+        # wait on it; bounded (5 s statement timeout) and never raises.
+        analytics_rollups.refresh(cycle_id, snapshot_time)
 
         log.info(
             "cycle %s complete: denver=%d v1=%d v2=%d",
