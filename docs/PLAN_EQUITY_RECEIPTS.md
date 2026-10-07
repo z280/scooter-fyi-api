@@ -2,7 +2,7 @@
 
 **Goal.** A rider who thinks a ride in an Equity Area was charged the wrong rate can submit the receipt for review. We collect enough to check the rate, try to match the claim to a ride we observed, reward useful submissions, and decline to keep anything that cannot show a rate error.
 
-Owner's spec (2026-10-06): trip minutes (duration), cost before tax, cost with tax, start date/time, end date/time, start and end points picked on the map, and a scooter ID entered by hand or from the QR code. The backend tries to align the claim with a trip. If none of the useful data is present, thank the rider and retain nothing. Points:
+Owner's spec (2026-10-06): trip minutes (duration), cost before tax, cost with tax, start date/time, end date/time, start and end points picked on the map, and a scooter ID entered by hand or from the QR code. (The owner's sample receipts later showed that a Veo receipt carries only a **charge date**, with no time of day, so start and end times became optional; see "What real receipts look like".) The backend tries to align the claim with a trip. If none of the useful data is present, thank the rider and retain nothing. Points:
 
 Owner, 2026-10-06. One award per receipt (the highest tier it reaches), once per matched ride:
 
@@ -21,7 +21,7 @@ Owner, 2026-10-06. One award per receipt (the highest tier it reaches), once per
 
 ## The constraint that shapes everything (owner, 2026-10-06)
 
-**A Veo receipt has no geographic information.** It does show the **scooter code**, the start and end times, and the costs. So a claim is located by **matching the scooter code and the receipt's times against our feed history**. The ride's start and end points come from what we observed in the feed, not from the rider.
+**A Veo receipt has no geographic information**, and (as the samples below show) **no time of day either**. It shows the **scooter code** (the plate), the trip minutes, the costs and a **charge date**. So a claim is located by **matching the plate, the charge date and the duration against our feed history**. The ride's start and end points come from what we observed in the feed, not from the rider.
 
 - **Scooter code = the plate.** The owner confirmed (2026-10-06) that the receipt shows the raw plate number, a 7-digit `101…`/`102…`/`103…` code: the same number Veo publishes in `rental_uris … &number=<plate>`. Live fleet: 102 (6,072), 103 (2,687), 101 (839). `trip_events.vehicle_plate` and `device_history.vehicle_plate` are populated on 100% of rows (7-day check: 480k and 494k), so **matching uses the plate directly, with no hashing**. The HMAC `vehicle_identifier` is still computed and stored, because the public CSV must carry that, never the raw plate. Raw plates are admin-only on our public API, even though Veo publishes them.
 - **History is deep enough:** `device_history` departures since 2026-05-31 and `trip_events` since 2026-07-05, with no pruning. A receipt from weeks ago is still matchable.
@@ -160,7 +160,8 @@ This is a separate finding from the Equity rate. It is addressed to the Colorado
 
 - trip minutes;
 - cost before tax ($), cost with tax ($);
-- start and end date/time (defaulting to now);
+- **charge date** as printed on the receipt (required);
+- **approximate start time**: optional, only to break ties when more than one ride fits. A Trip summary screenshot, which shows the start time, can supply it instead;
 - **scooter code** as printed on the receipt: typed, or "Scan QR" (reuses qr-scan) if the rider is still at the scooter. Required.
 - **approximate start and end pins on the map** (owner, 2026-10-06), placed with map-pick and optional. The receipt has no location, so these are the rider's own independent evidence: they break ties between candidate rides, and pins far (more than 300 m) from the observed points send the case to "Needs your help" rather than letting it be proven. The feed's observed points remain what establishes Equity Area eligibility.
 - receipt screenshot;
@@ -174,7 +175,7 @@ If the rider is signed out, the form shows "Sign in to send a receipt" (the endp
 
 **API:** extend `discount_reports` in a migration that supersedes #105:
 
-- `trip_minutes`, `subtotal_cents`, `total_cents`, `ride_started_at`;
+- `trip_minutes`, `subtotal_cents`, `total_cents`, `charge_date`, and `approx_started_at` (nullable, rider-supplied);
 - `vehicle_plate` (the code as entered, validated `^\d{7,10}$` after stripping spaces) and `vehicle_identifier` (HMAC of it, computed server-side; the only form that leaves the admin surface);
 - `pin_start_lat/lng`, `pin_end_lat/lng` (the rider's approximate pins; rounded to 3 decimals anywhere public);
 - `matched_start_lat/lng`, `matched_end_lat/lng`, filled from the feed match;
@@ -247,7 +248,7 @@ Owner's direction (2026-10-06): the API does the analysis and settles points its
 
 **Extract.** Read the screenshot with two independent readers:
 
-- **(A) a vision LLM via OpenRouter** (owner's decision, 2026-10-06): a dedicated OpenRouter key for this project only, and the **cheapest model that passes the gold set**. It returns minutes, unlock fee, per-minute rate, subtotal, tax, total, start and end times, and the vehicle ID if shown, using structured output (JSON schema).
+- **(A) a vision LLM via OpenRouter** (owner's decision, 2026-10-06): a dedicated OpenRouter key for this project only, and the **cheapest model that passes the gold set**. It returns the plate, minutes, charge, discount (and its label), subtotal, tax (and its label: "Taxes & Fees" or "Tax"), total and charge date, using structured output (JSON schema). From a Trip summary it returns the start date and time, minutes and distance instead. These are the fields `tests/fixtures/receipts/labels.json` scores it on.
   - **Bake-off candidates** (OpenRouter list prices 2026-10-06, $/M tokens in/out): `qwen/qwen3.7-flash` (0.03/0.13), `google/gemma-3-12b-it` (0.05/0.15), `google/gemini-2.5-flash-lite` (0.05/0.20 batch), `openai/gpt-5-nano` (0.05/0.40). At about 1.5k tokens in and 200 out, each costs well under $0.001 per receipt.
   - **Choosing:** run every candidate on every gold receipt and pick the cheapest with perfect money-field accuracy. Re-run the bake-off when the gold set grows or a model is retired.
   - **Escalation:** when the cheap model and local OCR disagree, ask one stronger model once before falling back to `uncertain`.
@@ -311,9 +312,9 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 
 ## Defaults chosen (say if any should change)
 
-1. **Gate:** scooter code + start and end times + a cost. Anything less is declined and not retained. Equity eligibility comes from the feed match.
+1. **Gate:** plate + trip minutes + a cost (plus the charge date). Anything less is declined and not retained. Equity eligibility comes from the feed match.
 2. **Points:** 6 submitted but unmatched; 10 valid and matched; 20 matched in an Equity Area with no discrepancy; 50 proven. Highest tier only, one award per ride.
-3. **Matching:** scooter code plus the receipt's start and end times, ±4 min against feed history. The location comes from the feed, because the receipt has none.
+3. **Matching:** plate + charge date + duration (±2 min) against feed history, with the optional approximate start time (±10 min) or rider pins to break ties. The location comes from the feed, because the receipt has none.
 4. **Points settle automatically** when the API verifies a receipt (Phase 3, owner's direction). Only `uncertain` reports wait for a human, after a short shadow-mode start.
 
 ## Sources (tax)
