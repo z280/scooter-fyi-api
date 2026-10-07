@@ -51,3 +51,34 @@ def test_unknown_zone_versions_are_still_rejected(ctx):
     r = client.post("/api/v1/reports/discount", json={
         "ride_ended_at": _NOW.isoformat(), "zone_version": "v3"})
     assert r.status_code == 422
+
+
+def test_a_non_ascii_region_name_is_refused_by_the_API_not_the_database(ctx):
+    """Regression: `\\d` is Unicode-aware, `[0-9]` is not.
+
+    Both Python's `re` and the Rust engine Pydantic uses read `\\d` as any
+    Unicode decimal digit, so `EQ_٠١٤` (Arabic-Indic) satisfied the field while
+    sql/091's `~ '^EQ_[0-9]{3}$'` refused it. The insert then raised a
+    CheckViolation, and this endpoint's `except Exception: ... raise` turned a
+    malformed field into a 500 rather than a validation response. #117 made the
+    receipt-claim path ASCII-only and missed this legacy field.
+
+    The assertion that matters is the SECOND one: refused BEFORE the database,
+    so nothing reaches an insert that was always going to fail.
+    """
+    client, state = ctx
+    r = client.post("/api/v1/reports/discount", json={
+        "ride_ended_at": _NOW.isoformat(), "zone_version": "equity",
+        "region_name": "EQ_٠١٤"})
+    assert r.status_code == 422, r.text
+    assert not [sql for sql, _ in state["sql"] if sql.startswith("INSERT INTO discount_reports")]
+
+
+def test_an_ascii_region_name_still_works(ctx):
+    """The guard above must not have narrowed the field to nothing."""
+    client, state = ctx
+    r = client.post("/api/v1/reports/discount", json={
+        "ride_ended_at": _NOW.isoformat(), "zone_version": "equity",
+        "region_name": "EQ_014"})
+    assert r.status_code == 200, r.text
+    assert _insert(state)[3] == "EQ_014"
