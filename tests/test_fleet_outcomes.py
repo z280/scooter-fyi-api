@@ -116,7 +116,11 @@ class TestThePayloadDescribesItself:
         sql = Path(__file__).resolve().parents[1] / "sql" / fleet_outcomes.COUNTED_SINCE_MIGRATION
         assert sql.is_file()
         text = sql.read_text()
-        assert "rentals_observed = 0" in text and "rentals_no_go    = 0" in text
+        import re
+        assert re.search(r"rentals_observed\s*=\s*0", text)
+        assert re.search(r"rentals_no_go\s*=\s*0", text)
+        # Table lock first: no row-by-row contention with the live ingest.
+        assert "LOCK TABLE device_state IN EXCLUSIVE MODE" in text
         # The rolling signal is deliberately left alone.
         assert "recent_no_go_mask =" not in text
 

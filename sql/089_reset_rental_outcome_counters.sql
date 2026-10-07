@@ -41,7 +41,18 @@
 -- migrations run once by filename (src/pg.py), and this one exists precisely
 -- so that a database which applied sql/072 learns of the reset.
 
-SET lock_timeout = '10s';
+-- LOCKING. Migrations run at API boot, in one transaction, while the ingest
+-- runs every 2 minutes and holds ~9k device_state row locks (SELECT ... FOR
+-- UPDATE) for most of its cycle. A plain UPDATE would contend with it row by
+-- row in a different order: a timeout fails the boot, a deadlock aborts one
+-- side. Taking the TABLE lock first instead lets reads through, waits for the
+-- in-flight cycle to commit, makes the next cycle queue behind the reset, and
+-- cannot deadlock. The timeout covers one full ingest cycle. An ingest that
+-- queued behind the reset re-reads each row and adds to 0, so no rental
+-- completed after the reset is lost.
+SET lock_timeout = '150s';
+
+LOCK TABLE device_state IN EXCLUSIVE MODE;
 
 UPDATE device_state
    SET rentals_observed = 0,
@@ -49,9 +60,9 @@ UPDATE device_state
  WHERE rentals_observed <> 0 OR rentals_no_go <> 0;
 
 COMMENT ON COLUMN device_state.rentals_observed IS
-    'Rentals seen to completion since the reset in sql/089 (2026-10-07). Counts '
-    'up from zero: a vehicle with few observations has no grade rather than a '
-    'flattering one.';
+    'Rentals seen to completion since the reset in sql/089 (when it ran: '
+    'schema_migrations.applied_at). Counts up from zero: a vehicle with few '
+    'observations has no grade rather than a flattering one.';
 
 COMMENT ON COLUMN device_state.rentals_no_go IS
     'Of those, how many ended within the ingest''s movement radius (25 m, '

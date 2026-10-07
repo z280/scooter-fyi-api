@@ -880,7 +880,8 @@ def equity_estimate(
 # ---------------------------------------------------------------------------
 @router.get("/api/v1/fleet/outcomes")
 def fleet_outcomes(request: Request, response: Response) -> Any:
-    """Lifetime share of rentals that never left the kerb, fleet and by model.
+    """Share of rentals that ended where they began, fleet and by model, since
+    the counters were reset (sql/089).
 
     The headline number for the stats drawer (the frontend's
     `docs/ANALYTICS_PLAN.md` tier 1): built entirely from counters sql/072
@@ -889,12 +890,12 @@ def fleet_outcomes(request: Request, response: Response) -> Any:
     Three things in the payload are not decoration and the client renders all
     of them:
 
-    * `window: "lifetime"` — these counters have never reset, so this is not
-      "today". A rate whose window is unstated gets read as "now".
-    * `radius_meters` — ANALYTICS_PLAN §0.2 records that this codebase holds
-      three different ideas of how far is "moved" (16 m, 25 m, 50 m). Until
-      that is settled, the number says which circle it was counted at rather
-      than leaving a reader to guess.
+    * `window: "since_reset"`, `counted_since: "sql/089"` and
+      `counted_since_at` (when the reset ran) — this is not "today", and a
+      rate whose window is unstated gets read as "now".
+    * `radius_meters` — the circle a no-go was counted against (25 m,
+      ANALYTICS_PLAN §0.2). One definition since the reset. A no-go is END
+      displacement, so a round trip back to the same rack counts.
     * `min_rentals_for_rate` with a null `no_go_rate` — a model under the
       floor keeps its counts and loses its percentage, so the client can say
       "not enough rides yet" instead of the model vanishing from the list.
@@ -904,9 +905,12 @@ def fleet_outcomes(request: Request, response: Response) -> Any:
     """
     data = fleet_outcomes_summary()
 
-    # Cheap and monotonic: the counters only ever climb, so the rental total
-    # is a sufficient version. No comma — _if_none_match_hit splits on them.
-    etag = f'W/"fleet-outcomes:{data["rentals"]}:{data["no_gos"]}"'
+    # Within one window the counters only climb, so the totals version it;
+    # the window's start goes in too, so a reset (or a degraded response
+    # with no known start) can never share an ETag with real data. No comma:
+    # _if_none_match_hit splits on them.
+    since = (data.get("counted_since_at") or "none").replace(",", "")
+    etag = f'W/"fleet-outcomes:{since}:{data["rentals"]}:{data["no_gos"]}"'
     cache = "public, max-age=300"
     if _if_none_match_hit(request, etag):
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": cache})
