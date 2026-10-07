@@ -81,7 +81,15 @@ def head_and_base(base: str) -> tuple[dict[str, list[str]], set[str]]:
     somebody else's old filename would be turned off within a day, so only
     numbers THIS branch claims are blocking.
     """
+    # TRACKED FILES ONLY, plus untracked-but-present ones. `ls-files` alone
+    # misses a migration that exists on disk and has not been `git add`ed, which
+    # is the state a developer is in at the moment they would most like to be
+    # told. CI is unaffected either way (a clean checkout has nothing untracked),
+    # so this is purely so the local run answers the same question CI will.
     here = [l.strip() for l in _git("ls-files", "sql").splitlines() if l.strip()]
+    here += [l.strip() for l in
+             _git("ls-files", "--others", "--exclude-standard", "sql").splitlines()
+             if l.strip()]
     try:
         there = [l.strip() for l in
                  _git("ls-tree", "-r", "--name-only", base, "sql").splitlines() if l.strip()]
@@ -97,16 +105,38 @@ def head_and_base(base: str) -> tuple[dict[str, list[str]], set[str]]:
 
 
 def _api(path: str, token: str) -> list[dict]:
-    req = urllib.request.Request(
-        f"{API}{path}",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "check-migration-numbers",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.load(r)
+    """Every page, following `Link: rel="next"`.
+
+    An earlier version sent `per_page=100` and stopped there, so a repo with
+    more than 100 open PRs — or a PR whose 101st changed file was the colliding
+    migration — was silently under-checked. A check whose failure mode is
+    "quietly looked at less than you think" is the failure mode this whole
+    script exists to remove, so it pages properly rather than documenting a cap.
+    """
+    out: list[dict] = []
+    url = f"{API}{path}"
+    while url:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "check-migration-numbers",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            page = json.load(r)
+            out.extend(page if isinstance(page, list) else [page])
+            url = _next_link(r.headers.get("Link", ""))
+    return out
+
+
+def _next_link(header: str) -> str | None:
+    """The `rel="next"` URL from a GitHub Link header, or None on the last page."""
+    for part in header.split(","):
+        if 'rel="next"' in part and "<" in part and ">" in part:
+            return part[part.index("<") + 1:part.index(">")]
+    return None
 
 
 def open_pr_migrations(repo: str, token: str, skip_pr: str | None) -> dict[str, list[str]]:

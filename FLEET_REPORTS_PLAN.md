@@ -11,12 +11,17 @@ which is the plan's own risk 2. §2.2, §2.3 and §4.1(3) are rewritten, and the
 retractions are left in place rather than quietly corrected, because the
 original claims are the ones another agent would otherwise re-derive.
 
-**Every `file:line` in §3 is now machine-checked against the commits named
-above.** The first revision's were not — they were written against a working
-copy and were off by 19 lines in `api_frontend_reports.py`, which is how the
+**Every `file:line` in §3 is machine-checked against the commits named above —
+and that claim is narrower than it first read.** The checker matches citations
+carrying a LINE NUMBER. Bare filename references were never checked, which is
+how `src/along-the-way.ts` sat in §3 and §4.2 as though it were on the frontend
+mainline when it exists only on PR #94's branch. Both rows now say so.
+
+The first revision's line numbers were not checked at all — written against a
+working copy, off by 19 lines in `api_frontend_reports.py`, which is how the
 superseded predicate got quoted as current. A citation in this document is a
-claim about a specific commit; re-check them before trusting them if `main` has
-moved.
+claim about a specific commit; re-check them if `main` has moved, and do not
+read a bare filename as having been verified.
 
 **Scope:** two repositories. `z280/scooter-fyi-api` owns the report vocabulary,
 the persistence rule, the public flag, the resolve endpoint and the admin
@@ -351,7 +356,7 @@ contradiction.
 | `improperly_parked` fire-and-forget | `src/devices.ts:2399` (contract), `:2468-2474` (the call) |
 | Why a `not_rideable` report overrides the tier | `src/devices.ts:1646` (comment) |
 | Reliability tiers and their reasons | `src/reliability.ts` |
-| The Phase 2 planner that must exclude these | `src/along-the-way.ts` — see §4.2 |
+| The Phase 2 planner that must exclude these | `src/along-the-way.ts` — **not on frontend `main`**; it exists only on PR #94's branch (`claude/along-way-upgrades-feature-piml2p`). See §4.2 |
 | Camera surface; hands back the raw payload and nothing else | `src/qr-scan.ts:182` — `openQrScanner` |
 | The mode dial: union, spec table, wrapping rotate | `src/qr-utility.ts:30-80` |
 | Client-side plate read — a lookup key, never a decision | `src/qr-utility.ts:118` — `plateFromQr` |
@@ -492,7 +497,11 @@ contradiction.
 2. **Show suppression honestly.** A suppressed device is kept out of the
    rider's available set, and the card says *why* — "reported inaccessible",
    not "high risk".
-3. **Exclude from the planner.** `along-the-way.ts`'s `toCandidates()` already
+3. **Exclude from the planner.** **This one edits a file that is not on the
+   frontend mainline yet** — `along-the-way.ts` lives on PR #94's branch, so
+   either wait for that to merge or make the change there. Following this plan
+   against the frontend commit named in the header gives you nothing to edit.
+   Its `toCandidates()` already
    drops `is_disabled` / `is_reserved`; suppressed vehicles go the same way —
    **excluded, not penalised**. A ranking that can be outvoted will eventually
    send somebody over a fence.

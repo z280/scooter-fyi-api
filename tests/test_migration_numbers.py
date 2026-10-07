@@ -77,3 +77,22 @@ def test_numbers_are_compared_as_written_not_as_ints():
     # migration, so a stray two-digit file must not merge into 088's group.
     g = mod.numbered(["sql/088_a.sql", "sql/88_b.sql"])
     assert mod.collisions(g) == {}
+
+
+def test_next_link_parses_githubs_link_header():
+    h = ('<https://api.github.com/x?page=2>; rel="next", '
+         '<https://api.github.com/x?page=9>; rel="last"')
+    assert mod._next_link(h) == "https://api.github.com/x?page=2"
+
+
+def test_next_link_is_none_on_the_last_page():
+    # The loop terminates on this. Returning anything truthy here would page
+    # forever against the same URL.
+    assert mod._next_link('<https://api.github.com/x?page=1>; rel="prev"') is None
+    assert mod._next_link("") is None
+
+
+def test_next_link_ignores_a_rel_that_merely_contains_next():
+    # "prev" and "next" both end in the same letters in some servers' output;
+    # only the quoted rel="next" counts.
+    assert mod._next_link('<https://api.github.com/x?page=3>; rel="nextpage"') is None
