@@ -82,6 +82,7 @@ services:
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
       ADMIN_EMAILS: ${ADMIN_EMAILS}
       POSTMARK_TOKEN: ${POSTMARK_TOKEN}
+      OPENROUTER_RECEIPTS_API_KEY: ${OPENROUTER_RECEIPTS_API_KEY:-}
       POSTMARK_FROM: ${POSTMARK_FROM}
       MAGIC_LINK_URL_TEMPLATE: ${MAGIC_LINK_URL_TEMPLATE}
       # z280-comms — SMS sign-in codes. Blank token = the SMS door 503s and
@@ -147,6 +148,9 @@ services:
       denver_spatial_db:
         condition: service_healthy
     environment:
+      # Equity receipt reading runs as a scheduled job too (Phase 2/3 re-match
+      # and analysis); same key as pipeline_worker.
+      OPENROUTER_RECEIPTS_API_KEY: ${OPENROUTER_RECEIPTS_API_KEY:-}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
