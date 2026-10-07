@@ -148,6 +148,32 @@ def test_pairs_accept_a_bare_cell_row():
 # --- status(verbose) -------------------------------------------------------
 
 
+def test_verbose_status_sends_a_json_BOOLEAN_in_the_body(captured):
+    # `?verbose=true` sends the STRING "true", which Valhalla's option parser
+    # does not accept as a boolean — the flag was silently ignored, so the
+    # matrix pre-flight could never answer the question it exists to ask.
+    valhalla.status(verbose=True)
+    assert captured["path"] == "/status"
+    assert captured["payload"] == {"verbose": True}
+    # A real bool, not the string the query-string form would have sent.
+    assert isinstance(captured["payload"]["verbose"], bool)
+
+
+def test_verbose_status_surfaces_errors_as_ValhallaError(monkeypatch):
+    # Going through `_post` also brings this call under the module's own error
+    # type, instead of letting an httpx.HTTPStatusError escape.
+    def boom(path, payload):
+        raise valhalla.ValhallaError("nope", code=1, status=400)
+
+    monkeypatch.setattr(valhalla, "_post", boom)
+    try:
+        valhalla.status(verbose=True)
+    except valhalla.ValhallaError:
+        pass
+    else:
+        raise AssertionError("expected ValhallaError")
+
+
 def test_status_asks_for_available_actions_only_when_verbose(monkeypatch):
     seen = {}
 
@@ -167,5 +193,4 @@ def test_status_asks_for_available_actions_only_when_verbose(monkeypatch):
     valhalla.status()
     assert seen["params"] is None, "the health probe must not pay for a tile walk"
 
-    valhalla.status(verbose=True)
-    assert seen["params"] == {"verbose": "true"}
+    # ...and the verbose call does not go through GET at all any more.

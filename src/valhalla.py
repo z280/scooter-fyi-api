@@ -245,11 +245,23 @@ def status(verbose: bool = False) -> dict[str, Any]:
     ``sources_to_targets`` is enabled on the live container before trusting
     `matrix` in production, rather than discovering it from a 404. It costs
     Valhalla a tile-directory walk, so the health probe leaves it off.
+
+    THE VERBOSE FLAG GOES IN A JSON BODY, not the query string. An earlier
+    version sent ``?verbose=true``, where the value is the *string* "true" —
+    Valhalla's option parser wants a JSON boolean and does not accept that, so
+    the flag was silently ignored and the pre-flight check could never answer
+    the question it exists to ask. Routing it through ``_post`` fixes a second
+    thing for free: a 4xx now surfaces as `ValhallaError` like every other call
+    in this module, instead of escaping as `httpx.HTTPStatusError`.
+
+    The plain liveness probe stays a GET with no body, so the health endpoint
+    is unchanged.
     """
+    if verbose:
+        return _post("/status", {"verbose": True})
     cfg = load().valhalla
     url = f"{cfg.base_url.rstrip('/')}/status"
-    params = {"verbose": "true"} if verbose else None
-    resp = httpx.get(url, params=params, timeout=cfg.timeout_seconds)
+    resp = httpx.get(url, timeout=cfg.timeout_seconds)
     resp.raise_for_status()
     return resp.json()
 
