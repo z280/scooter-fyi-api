@@ -884,8 +884,15 @@ def update_for_cycle(
                     # sql/090: the same outcome, with when, where and at what
                     # radius. WHERE is the unlock point (last fix before the
                     # rental), so a rental is attributed to the place it was
-                    # attempted, not wherever the vehicle sits later. The
-                    # release cell stands in only when the origin is unknown.
+                    # attempted, not wherever the vehicle sits later. A vehicle
+                    # FIRST SEEN mid-rental never showed us its unlock point:
+                    # its last_fix is its first sighting, so the row is
+                    # attributed there and counted in origin_unknown, which
+                    # anything attributing rentals to places must exclude.
+                    origin_unknown = (
+                        prev_rental_started_at is not None and _ever is not None
+                        and prev_rental_started_at <= _ever
+                    )
                     if prev_fix_lat is not None and prev_fix_lon is not None:
                         origin_cell = _h3_cells(float(prev_fix_lat), float(prev_fix_lon))[1]
                     elif prev_lat is not None and prev_lon is not None:
@@ -906,9 +913,10 @@ def update_for_cycle(
                             d.vehicle_model_name or "Unknown",
                             float(threshold),
                         )
-                        acc = outcome_rollup.setdefault(key, [0, 0, 0, 0])
+                        acc = outcome_rollup.setdefault(key, [0, 0, 0, 0, 0])
                         acc[0] += 1
                         acc[1] += 1 if no_go else 0
+                        acc[4] += 1 if origin_unknown else 0
                         if rental_max is not None:
                             acc[3] += 1
                             acc[2] += 1 if rental_max <= threshold else 0
@@ -1233,13 +1241,14 @@ def update_for_cycle(
                     """
                     INSERT INTO rental_outcomes_hourly
                         (hour, h3_9, model, radius_m,
-                         rentals, no_gos, no_gos_max, max_known)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                         rentals, no_gos, no_gos_max, max_known, origin_unknown)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (hour, h3_9, model, radius_m) DO UPDATE SET
                         rentals    = rental_outcomes_hourly.rentals    + EXCLUDED.rentals,
                         no_gos     = rental_outcomes_hourly.no_gos     + EXCLUDED.no_gos,
                         no_gos_max = rental_outcomes_hourly.no_gos_max + EXCLUDED.no_gos_max,
-                        max_known  = rental_outcomes_hourly.max_known  + EXCLUDED.max_known
+                        max_known  = rental_outcomes_hourly.max_known  + EXCLUDED.max_known,
+                        origin_unknown = rental_outcomes_hourly.origin_unknown + EXCLUDED.origin_unknown
                     """,
                     [(*k, *v) for k, v in sorted(outcome_rollup.items())],
                 )

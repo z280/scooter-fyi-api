@@ -28,7 +28,7 @@ def _rollup(cur) -> list[tuple]:
 def test_a_rental_that_went_nowhere_is_a_no_go_on_both_definitions(cycle):
     stats, cur = cycle([_device(_north(4), device_id="bike-2")], state=_in_rental(max_m=6.0))
     (row,) = _rollup(cur)
-    assert row == (HOUR, ORIGIN_CELL, "Unknown", R, 1, 1, 1, 1)
+    assert row == (HOUR, ORIGIN_CELL, "Unknown", R, 1, 1, 1, 1, 0)
 
 
 def test_a_round_trip_is_an_end_displacement_no_go_but_not_a_maximum_one(cycle):
@@ -36,7 +36,7 @@ def test_a_round_trip_is_an_end_displacement_no_go_but_not_a_maximum_one(cycle):
     displacement), "never left the kerb" must not (it left)."""
     stats, cur = cycle([_device(_north(5))], state=_in_rental(max_m=400.0))
     (row,) = _rollup(cur)
-    assert row[4:] == (1, 1, 0, 1)
+    assert row[4:] == (1, 1, 0, 1, 0)
     # The per-vehicle counter is unchanged in meaning: still a no-go.
     assert cur.rows_for("rentals_no_go = rentals_no_go + %s")[0][0] == 1
 
@@ -44,7 +44,7 @@ def test_a_round_trip_is_an_end_displacement_no_go_but_not_a_maximum_one(cycle):
 def test_a_real_trip_is_no_no_go(cycle):
     stats, cur = cycle([_device(_north(1600))], state=_in_rental(max_m=1700.0))
     (row,) = _rollup(cur)
-    assert row[4:] == (1, 0, 0, 1)
+    assert row[4:] == (1, 0, 0, 1, 0)
 
 
 def test_attributed_to_where_it_was_unlocked_not_where_it_ended(cycle):
@@ -59,7 +59,7 @@ def test_an_unknown_maximum_is_not_guessed(cycle):
     no maximum judgement either way."""
     stats, cur = cycle([_device(_north(4), device_id="bike-2")], state=_in_rental(max_m=None))
     (row,) = _rollup(cur)
-    assert row[4:] == (1, 1, 0, 0)
+    assert row[4:] == (1, 1, 0, 0, 0)
 
 
 def test_every_row_carries_the_radius_it_was_counted_at(cycle):
@@ -82,3 +82,25 @@ def test_written_in_the_same_transaction_after_the_counters(cycle):
     i_rollup = next(i for i, s in enumerate(sqls) if "INSERT INTO rental_outcomes_hourly" in s)
     assert i_rollup > i_counter
     assert "ON CONFLICT (hour, h3_9, model, radius_m) DO UPDATE" in sqls[i_rollup]
+
+
+def test_the_unlock_fix_decides_the_cell_not_the_stored_stop(cycle):
+    """The production path: last_fix (where it was unlocked) in a different r9
+    cell from the stored stop position. The row goes to the fix's cell."""
+    state = _in_rental(max_m=1700.0)
+    fix = _north(400)
+    state["last_fix_lat"], state["last_fix_lon"] = fix
+    assert _h3_cells(*fix)[1] != ORIGIN_CELL
+    _, cur = cycle([_device(_north(2000))], state=state)
+    (row,) = _rollup(cur)
+    assert row[1] == _h3_cells(*fix)[1]
+
+
+def test_a_vehicle_first_seen_mid_rental_is_flagged_origin_unknown(cycle):
+    """Its unlock point was never observed: counted, but marked so a
+    per-place figure can exclude it."""
+    state = _in_rental(max_m=None)
+    state["first_ever_observed_at"] = state["rental_started_at"]
+    _, cur = cycle([_device(_north(1600))], state=state)
+    (row,) = _rollup(cur)
+    assert row[4] == 1 and row[8] == 1

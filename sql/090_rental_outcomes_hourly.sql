@@ -20,15 +20,18 @@
 --             Hourly because the story has a shape within a day; rolling up
 --             to days and weeks is free, the reverse is impossible.
 --   h3_9      the cell where the rider UNLOCKED it (the last fix before the
---             rental), falling back to the release cell only when the origin
---             is unknown (a vehicle first seen mid-rental). Origin, because a
+--             rental). For a vehicle FIRST SEEN mid-rental the unlock point
+--             was never observed, so its rental is attributed to where it was
+--             first sighted and counted in origin_unknown (below), which an
+--             equity cut excludes. Origin, because a
 --             no-go happens where the vehicle was, and because attributing at
 --             write time is what makes an equity cut honest: a vehicle's
 --             CURRENT location says nothing about where its past rentals were.
 --             Resolution 9 rather than 10: a rate needs a denominator, and r10
 --             cells would mostly be single digits.
 --   model     vehicle_model_name, 'Unknown' when the feed omits it.
---   radius_m  stationary_threshold_meters at write time (25 m today). ON EVERY
+--   radius_m  stationary_threshold_meters at write time (25 m today), NUMERIC
+--             so a fractional radius still matches exactly. ON EVERY
 --             ROW, and in the key. The lifetime counters spanned 16 m and 25 m
 --             with no way to tell which share was which, until sql/089 had to
 --             reset them; a table built from scratch does not repeat that, and
@@ -48,6 +51,10 @@
 --   max_known   rentals for which the maximum is known (NULL for a rental whose
 --               origin was unknown, or that began before sql/087). no_gos_max is
 --               only meaningful over these.
+--   origin_unknown  rentals whose unlock point was never observed (the vehicle's
+--               first-ever sighting was already mid-rental), so h3_9 is where it
+--               was first seen, not where it was unlocked. Anything attributing
+--               rentals to PLACES (the equity cut) excludes these.
 --
 -- NO PERSONAL DATA: no vehicle identifier, no account, no position finer than
 -- an r9 cell (~0.1 km²).
@@ -58,18 +65,22 @@ CREATE TABLE IF NOT EXISTS rental_outcomes_hourly (
     hour        TIMESTAMPTZ NOT NULL,
     h3_9        BIGINT      NOT NULL,
     model       TEXT        NOT NULL,
-    radius_m    REAL        NOT NULL,
+    radius_m    NUMERIC(6,2) NOT NULL,
     rentals     INTEGER     NOT NULL DEFAULT 0 CHECK (rentals >= 0),
     no_gos      INTEGER     NOT NULL DEFAULT 0 CHECK (no_gos >= 0),
     no_gos_max  INTEGER     NOT NULL DEFAULT 0 CHECK (no_gos_max >= 0),
     max_known   INTEGER     NOT NULL DEFAULT 0 CHECK (max_known >= 0),
+    origin_unknown INTEGER  NOT NULL DEFAULT 0 CHECK (origin_unknown >= 0),
     PRIMARY KEY (hour, h3_9, model, radius_m),
-    CHECK (no_gos <= rentals AND max_known <= rentals AND no_gos_max <= max_known)
+    CHECK (no_gos <= rentals AND max_known <= rentals AND no_gos_max <= max_known
+           AND origin_unknown <= rentals)
 );
 
--- Time-window reads (the drawer's series, the equity cut over a window).
-CREATE INDEX IF NOT EXISTS idx_rental_outcomes_hourly_hour
-    ON rental_outcomes_hourly (hour);
+-- Time windows are served by the primary key (it leads with hour). Places over
+-- a long window (the per-place, per-week figure; the equity cut over months)
+-- need the cell first.
+CREATE INDEX IF NOT EXISTS idx_rental_outcomes_hourly_cell_hour
+    ON rental_outcomes_hourly (h3_9, hour);
 
 COMMENT ON TABLE rental_outcomes_hourly IS
     'Completed rentals per (hour, unlock-point h3_9 cell, model, radius), written '
