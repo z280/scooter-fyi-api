@@ -145,10 +145,17 @@ def test_the_equity_area_is_decided_from_the_unlock_point_lon_lat(cycle):
     assert LOOKUPS == [(fix[1], fix[0])]
 
 
-def test_an_unlock_point_in_no_area_is_outside(cycle, monkeypatch):
-    monkeypatch.setattr(device_state, "_region_for_point", lambda *a: None)
+def test_an_unlock_point_in_denver_but_no_area_is_outside(cycle, monkeypatch):
+    monkeypatch.setattr(device_state, "_region_for_point",
+                        lambda layer, lon, lat: "CD_5" if layer == "council_district" else None)
     _, cur = cycle([_device(_north(1600))], state=_in_rental(max_m=1700.0))
     assert _rollup(cur)[0][AREA] == "outside"
+
+
+def test_an_unlock_point_outside_denver_is_outside_city(cycle, monkeypatch):
+    monkeypatch.setattr(device_state, "_region_for_point", lambda *a: None)
+    _, cur = cycle([_device(_north(1600))], state=_in_rental(max_m=1700.0))
+    assert _rollup(cur)[0][AREA] == "outside_city"
 
 
 def test_a_boundary_layer_failure_marks_unknown_and_never_rolls_back_the_cycle(cycle, monkeypatch):

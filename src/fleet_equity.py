@@ -34,11 +34,20 @@ WHAT THE NUMBER IS, AND IS NOT.
   Neither says why: the vehicle, the app, the weather and a rider changing
   their mind all look the same here.
 
-UNCERTAINTY. Each rate carries a 95% Wilson interval, and the difference a
-Newcombe (hybrid Wilson) interval. Those assume independent rentals; rentals
-cluster by vehicle and place, so the true uncertainty is wider and the
-response says so. Under MIN_RENTALS_FOR_RATE a side keeps its counts and loses
-its rate, and the difference is computed only when both sides clear it.
+UNCERTAINTY. Rentals are not independent draws: they cluster by place (and
+by vehicle). Each rate's 95% interval is therefore CLUSTER-ROBUST, treating
+each unlock-point r9 cell as a cluster (the linearised variance of a ratio
+estimator over cells), and the difference's interval adds the two sides'
+variances. `difference_distinguishable` is true only when that interval
+excludes zero AND both sides span at least MIN_CLUSTERS cells; with fewer
+cells there is no honest interval and the flag is null. Vehicle-level
+clustering is not captured (the table holds no vehicle), so even these
+intervals are a lower bound on the uncertainty, and the caveats say so. Under
+MIN_RENTALS_FOR_RATE a side keeps its counts and loses its rate.
+
+ONLY DENVER. 'outside' means in Denver (a council district) and in no Equity
+Area; unlock points outside the City and County ('outside_city') are not
+part of a city comparison and are excluded and reported.
 """
 
 from __future__ import annotations
@@ -58,10 +67,15 @@ log = logging.getLogger(__name__)
 WINDOWS = {"7d": 7, "28d": 28}
 
 #: equity_area values that are not an Equity Area (sql/092).
-OUTSIDE, UNKNOWN, UNRECORDED = "outside", "unknown", "unrecorded"
+OUTSIDE, OUTSIDE_CITY, UNKNOWN, UNRECORDED = "outside", "outside_city", "unknown", "unrecorded"
 
-#: How many official Equity Areas exist (data/equity.geojson).
-OFFICIAL_AREA_COUNT = 30
+#: Fewest cells a side needs before a cluster-robust interval means anything.
+MIN_CLUSTERS = 30
+
+#: Above this share of unknown origins the comparison is reported "degraded":
+#: a broken boundary file would otherwise push everything into "unknown"
+#: while the status still said ok.
+DEGRADED_UNKNOWN_SHARE = 0.2
 
 _Z = 1.959964  # two-sided 95%
 
@@ -69,106 +83,134 @@ CAVEATS = (
     "Counts rentals that ended within the radius of where they were unlocked; "
     "a ride that looped back to the same spot counts too (see "
     "never_left_radius_rate for rentals that never left it). It does not say "
-    "why. Intervals assume independent rentals; rentals cluster by vehicle and "
-    "place, so the real uncertainty is wider. A release with no movement "
-    "(including some reservations the feed cannot tell apart) is counted as a rental."
+    "why. Intervals treat each map cell as a cluster but cannot see vehicles, "
+    "so the real uncertainty is wider still. Only rentals unlocked in Denver "
+    "are compared. A release with no movement (including some reservations "
+    "the feed cannot tell apart) is counted as a rental."
 )
 
 
-def wilson(k: int, n: int) -> tuple[float, float] | None:
-    """95% Wilson score interval for k of n, or None when n is 0."""
-    if n <= 0:
+def official_area_count() -> int | None:
+    """How many Equity Areas the boundary file holds; None if unreadable."""
+    try:
+        from .geo import region_names
+        return len(region_names("equity"))
+    except Exception:  # noqa: BLE001
         return None
-    p = k / n
-    denom = 1 + _Z * _Z / n
-    centre = (p + _Z * _Z / (2 * n)) / denom
-    half = _Z * math.sqrt(p * (1 - p) / n + _Z * _Z / (4 * n * n)) / denom
-    return max(0.0, centre - half), min(1.0, centre + half)
 
 
-def newcombe(k1: int, n1: int, k2: int, n2: int) -> tuple[float, float] | None:
-    """95% interval for p1 - p2 (Newcombe's hybrid score method, #10)."""
-    a, b = wilson(k1, n1), wilson(k2, n2)
-    if a is None or b is None:
+def cluster_ratio(clusters: list[tuple[int, int]]) -> tuple[float, float] | None:
+    """(p, variance) of p = sum(k) / sum(n) with each (k, n) a cluster, by
+    linearisation: m/(m-1) * sum((k - p n)^2) / N^2. None under MIN_CLUSTERS
+    clusters or with no rentals."""
+    clusters = [(k, n) for k, n in clusters if n > 0]
+    m, total = len(clusters), sum(n for _, n in clusters)
+    if m < MIN_CLUSTERS or total <= 0:
         return None
-    p1, p2 = k1 / n1, k2 / n2
-    d = p1 - p2
-    lo = d - math.sqrt((p1 - a[0]) ** 2 + (b[1] - p2) ** 2)
-    hi = d + math.sqrt((a[1] - p1) ** 2 + (p2 - b[0]) ** 2)
-    return lo, hi
+    p = sum(k for k, _ in clusters) / total
+    var = m / (m - 1) * sum((k - p * n) ** 2 for k, n in clusters) / (total * total)
+    return p, var
 
 
-def _side(acc: dict[str, int]) -> dict[str, Any]:
+def _ci(est: tuple[float, float] | None) -> list[float] | None:
+    if est is None:
+        return None
+    p, var = est
+    half = _Z * math.sqrt(var)
+    return [round(max(0.0, p - half), 4), round(min(1.0, p + half), 4)]
+
+
+def _zero() -> dict[str, Any]:
+    return {"rentals": 0, "no_gos": 0, "no_gos_max": 0, "max_known": 0, "cells": {}}
+
+
+def _add(acc: dict[str, Any], cell: int, rentals: int, no_gos: int, no_gos_max: int, max_known: int) -> None:
+    acc["rentals"] += rentals
+    acc["no_gos"] += no_gos
+    acc["no_gos_max"] += no_gos_max
+    acc["max_known"] += max_known
+    c = acc["cells"].setdefault(cell, [0, 0, 0, 0])
+    c[0] += rentals
+    c[1] += no_gos
+    c[2] += no_gos_max
+    c[3] += max_known
+
+
+def _side(acc: dict[str, Any]) -> dict[str, Any]:
     n, k = acc["rentals"], acc["no_gos"]
     mk, km = acc["max_known"], acc["no_gos_max"]
+    cells = acc["cells"].values()
     rated = n >= MIN_RENTALS_FOR_RATE
     rated_max = mk >= MIN_RENTALS_FOR_RATE
-    ci = wilson(k, n) if rated else None
-    ci_max = wilson(km, mk) if rated_max else None
     return {
         "rentals": n,
+        "cells": len(acc["cells"]),
         "ended_within_radius": k,
         "ended_within_radius_rate": round(k / n, 4) if rated else None,
-        "ended_within_radius_ci95": [round(ci[0], 4), round(ci[1], 4)] if ci else None,
+        "ended_within_radius_ci95": _ci(cluster_ratio([(c[1], c[0]) for c in cells])) if rated else None,
         "max_known": mk,
         "never_left_radius": km,
         "never_left_radius_rate": round(km / mk, 4) if rated_max else None,
-        "never_left_radius_ci95": [round(ci_max[0], 4), round(ci_max[1], 4)] if ci_max else None,
+        "never_left_radius_ci95": _ci(cluster_ratio([(c[2], c[3]) for c in cells])) if rated_max else None,
     }
 
 
-def summarize_areas(rows: list[tuple[str, int, int, int, int]]) -> dict[str, Any]:
-    """rows: (equity_area, rentals, no_gos, no_gos_max, max_known), summed per
-    area over the window. The arithmetic, testable without a database."""
-    zero = lambda: {"rentals": 0, "no_gos": 0, "no_gos_max": 0, "max_known": 0}  # noqa: E731
-    inside, outside = zero(), zero()
-    excluded = {"unknown_origin": 0, "unrecorded": 0}
-    by_area: dict[str, dict[str, int]] = {}
-    for area, rentals, no_gos, no_gos_max, max_known in rows:
+def summarize_areas(rows: list[tuple[str, int, int, int, int, int]]) -> dict[str, Any]:
+    """rows: (equity_area, h3_9, rentals, no_gos, no_gos_max, max_known),
+    summed per (area, cell) over the window. Pure: testable without a database."""
+    inside, outside = _zero(), _zero()
+    excluded = {"unknown_origin": 0, "outside_city": 0, "unrecorded": 0}
+    by_area: dict[str, dict[str, Any]] = {}
+    for area, cell, rentals, no_gos, no_gos_max, max_known in rows:
         if area == UNKNOWN:
             excluded["unknown_origin"] += rentals
-            continue
-        if area == UNRECORDED:
+        elif area == OUTSIDE_CITY:
+            excluded["outside_city"] += rentals
+        elif area == UNRECORDED:
             excluded["unrecorded"] += rentals
-            continue
-        accs = [outside] if area == OUTSIDE else [inside, by_area.setdefault(area, zero())]
-        for acc in accs:
-            acc["rentals"] += rentals
-            acc["no_gos"] += no_gos
-            acc["no_gos_max"] += no_gos_max
-            acc["max_known"] += max_known
+        elif area == OUTSIDE:
+            _add(outside, cell, rentals, no_gos, no_gos_max, max_known)
+        else:
+            _add(inside, cell, rentals, no_gos, no_gos_max, max_known)
+            _add(by_area.setdefault(area, _zero()), cell, rentals, no_gos, no_gos_max, max_known)
 
     both = inside["rentals"] >= MIN_RENTALS_FOR_RATE and outside["rentals"] >= MIN_RENTALS_FOR_RATE
-    diff = ci = None
+    diff = ci = distinguishable = None
     if both:
         # From raw counts, not from the rounded rates.
         p_in = inside["no_gos"] / inside["rentals"]
         p_out = outside["no_gos"] / outside["rentals"]
         diff = round((p_in - p_out) * 100, 2)
-        lo_hi = newcombe(inside["no_gos"], inside["rentals"], outside["no_gos"], outside["rentals"])
-        ci = [round(lo_hi[0] * 100, 2), round(lo_hi[1] * 100, 2)] if lo_hi else None
+        e_in = cluster_ratio([(c[1], c[0]) for c in inside["cells"].values()])
+        e_out = cluster_ratio([(c[1], c[0]) for c in outside["cells"].values()])
+        if e_in is not None and e_out is not None:
+            half = _Z * math.sqrt(e_in[1] + e_out[1])
+            lo, hi = (p_in - p_out - half) * 100, (p_in - p_out + half) * 100
+            ci = [round(lo, 2), round(hi, 2)]
+            # An interval that spans zero is not a difference this data can show.
+            distinguishable = lo > 0 or hi < 0
 
+    compared = inside["rentals"] + outside["rentals"]
+    unknown = excluded["unknown_origin"]
+    degraded = (compared + unknown) > 0 and unknown / (compared + unknown) > DEGRADED_UNKNOWN_SHARE
     return {
-        "inside": {**_side(inside), "areas_represented": len(by_area),
-                   "areas_official": OFFICIAL_AREA_COUNT},
+        "inside": {**_side(inside), "areas_represented": len(by_area)},
         "outside": _side(outside),
         # Percentage points, inside minus outside; only when BOTH clear the floor.
         "difference_points": diff,
         "difference_points_ci95": ci,
-        # An interval that spans zero is not a difference this data can show.
-        "difference_distinguishable": (ci[0] > 0 or ci[1] < 0) if ci else None,
-        "by_area": [
-            {"area": a, **_side(v)} for a, v in sorted(by_area.items())
-        ],
+        "difference_distinguishable": distinguishable,
+        "by_area": [{"area": a, **_side(v)} for a, v in sorted(by_area.items())],
         "excluded": excluded,
+        "_degraded": degraded,
     }
 
 
 _SQL = """
-SELECT equity_area, SUM(rentals), SUM(no_gos), SUM(no_gos_max), SUM(max_known)
+SELECT equity_area, h3_9, SUM(rentals), SUM(no_gos), SUM(no_gos_max), SUM(max_known)
 FROM rental_outcomes_hourly
 WHERE hour >= %s AND hour < %s AND radius_m = %s
-GROUP BY equity_area
+GROUP BY equity_area, h3_9
 """
 
 # The first hour the table recorded areas at this radius (sql/092 onward).
@@ -181,7 +223,8 @@ WHERE radius_m = %s AND equity_area <> 'unrecorded'
 def summarize(window: str = "7d", *, now: datetime | None = None) -> dict[str, Any]:
     """The inside/outside comparison over a trailing window. Never raises: a
     failure is `status: "unavailable"` with empty figures, so it can never be
-    mistaken for a quiet week."""
+    mistaken for a quiet week; `degraded` when unknown origins exceed
+    DEGRADED_UNKNOWN_SHARE of the rentals (e.g. a broken boundary file)."""
     days = WINDOWS[window]
     end = (now or datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
     start = end - timedelta(days=days)
@@ -193,16 +236,20 @@ def summarize(window: str = "7d", *, now: datetime | None = None) -> dict[str, A
         with connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(_SQL, (start, end, radius))
-                rows = [(str(r[0]), int(r[1]), int(r[2]), int(r[3]), int(r[4]))
+                rows = [(str(r[0]), int(r[1]), int(r[2]), int(r[3]), int(r[4]), int(r[5]))
                         for r in cur.fetchall()]
                 cur.execute(_SQL_SINCE, (radius,))
                 got = cur.fetchone()
                 since = got[0] if got and got[0] else None
         out = summarize_areas(rows)
+        if out.pop("_degraded"):
+            status = "degraded"
     except Exception:  # noqa: BLE001
         log.exception("equity outcomes summary failed")
         status = "unavailable"
         out = summarize_areas([])
+        out.pop("_degraded")
+    out["inside"]["areas_official"] = official_area_count()
 
     # Coverage: how much of the named window the table actually holds. A
     # "28-day" figure over two days of data must not be quoted as 28 days.

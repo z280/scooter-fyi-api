@@ -18,7 +18,9 @@
 --
 -- VALUES.
 --   'EQ_001' .. 'EQ_030'  the official Equity Area containing the unlock point.
---   'outside'             the unlock point is in no Equity Area.
+--   'outside'             in Denver (a council district) but in no Equity Area.
+--   'outside_city'        in no council district: not in the City and County
+--                         of Denver, so not part of a city comparison.
 --   'unknown'             no unlock point to test: the vehicle was first seen
 --                         mid-rental (origin_unknown), no fix was available, or
 --                         the boundary layer could not be read. Excluded from
@@ -32,7 +34,9 @@
 -- DEPLOY WINDOW. Old code's ON CONFLICT names the old key and fails against
 -- the new one. A device_state cycle that fails rolls back whole, vehicles
 -- stay IN_RENTAL in device_state, and the next cycle (2 min) records the
--- release: at worst one cycle is retried, nothing is lost or double counted.
+-- release: at worst a release is recorded one cycle late (with that cycle's
+-- time), and a release plus re-rent inside the failed window is merged into
+-- one rental. Nothing is double counted.
 
 SET lock_timeout = '10s';
 
@@ -48,7 +52,8 @@ ALTER TABLE rental_outcomes_hourly
 ALTER TABLE rental_outcomes_hourly ALTER COLUMN equity_area DROP DEFAULT;
 
 COMMENT ON COLUMN rental_outcomes_hourly.equity_area IS
-    'Official Equity Area of the unlock point (EQ_nnn), outside, unknown (no '
+    'Official Equity Area of the unlock point (EQ_nnn), outside (in Denver), '
+    'outside_city, unknown (no '
     'unlock point to test), or unrecorded (before sql/092). See sql/092.';
 
 RESET lock_timeout;

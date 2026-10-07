@@ -28,6 +28,7 @@ def test_window_radius_and_areas_are_applied_in_sql(pg, monkeypatch):
             ("2026-10-09T11:00:00+00", 2, "Rover", 25, "EQ_018", 100, 10, 5, 100, 0),
             ("2026-10-09T11:00:00+00", 3, "Cosmo", 25, "outside", 300, 15, 10, 300, 0),
             ("2026-10-09T12:00:00+00", 1, "Halo", 25, "unknown", 50, 5, 0, 0, 50),
+            ("2026-10-09T12:00:00+00", 9, "Cosmo", 25, "outside_city", 40, 2, 0, 0, 0),
             ("2026-10-09T12:00:00+00", 2, "Cosmo", 16, "outside", 999, 999, 0, 0, 0),   # another radius
             ("2026-09-01T12:00:00+00", 2, "Cosmo", 25, "outside", 777, 7, 0, 0, 0),     # outside window
             ("2026-10-07T04:00:00+00", 2, "Cosmo", 25, "unrecorded", 452, 26, 7, 452, 0),
@@ -47,7 +48,8 @@ def test_window_radius_and_areas_are_applied_in_sql(pg, monkeypatch):
     assert out["inside"]["rentals"] == 400 and out["inside"]["ended_within_radius"] == 40
     assert out["inside"]["areas_represented"] == 2
     assert out["outside"]["rentals"] == 400 and out["outside"]["ended_within_radius"] == 20
-    assert out["excluded"] == {"unknown_origin": 50, "unrecorded": 452}
+    assert out["excluded"] == {"unknown_origin": 50, "outside_city": 40, "unrecorded": 452}
+    assert out["inside"]["cells"] == 2 and out["outside"]["cells"] == 2
     assert out["difference_points"] == 5.0
     # data_since ignores pre-sql/092 rows.
     assert out["data_since"].startswith("2026-09-01T12:00:00")

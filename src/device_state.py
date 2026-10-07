@@ -232,11 +232,16 @@ log = logging.getLogger(__name__)
 
 
 def _equity_area_of(lon: float, lat: float) -> str:
-    """'EQ_nnn', 'outside', or 'unknown' when the layer cannot be read.
+    """'EQ_nnn'; 'outside' (in Denver, in no Equity Area); 'outside_city' (in
+    no council district, i.e. not in the City and County of Denver, so not
+    part of a city comparison); or 'unknown' when a layer cannot be read.
     Never raises: a boundary-file problem must not roll back the ingest
     transaction (and with it every counter this cycle)."""
     try:
-        return _region_for_point("equity", lon, lat) or "outside"
+        area = _region_for_point("equity", lon, lat)
+        if area:
+            return area
+        return "outside" if _region_for_point("council_district", lon, lat) else "outside_city"
     except Exception:  # noqa: BLE001
         log.warning("equity area lookup failed; rollup row marked unknown", exc_info=True)
         return "unknown"
