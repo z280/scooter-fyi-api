@@ -90,7 +90,7 @@ def pg(monkeypatch):
     # in the suite. `ADD CONSTRAINT` validates existing rows, so the failure is a
     # setup error reading "is violated by some row", in files that have nothing to
     # do with the culprit. It has happened once: a planless receipt claim (legal
-    # from sql/094, illegal under sql/093) committed by
+    # from sql/095, illegal under sql/093) committed by
     # `test_receipt_claims_pg.py` took 19 tests in THIS file down with it.
     #
     # So: assert on what an INSERT does, then roll back. Asserting that a row is

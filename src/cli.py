@@ -319,7 +319,7 @@ def cleanup_receipts() -> dict:
                 try:
                     # `plan_key` is HISTORICAL and this loop is the reason it
                     # still exists. Plan screenshots were required only
-                    # 2026-10-06..07 (sql/094 dropped the requirement) and are
+                    # 2026-10-06..07 (sql/095 dropped the requirement) and are
                     # never written now, but claims filed in that window carry
                     # a key — and this job finds images ONLY through table rows,
                     # so dropping the column would orphan those objects in the

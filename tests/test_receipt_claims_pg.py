@@ -1,4 +1,4 @@
-"""sql/093 + sql/094 on real Postgres: the claim-shape CHECK holds the gate even
+"""sql/093 + sql/095 on real Postgres: the claim-shape CHECK holds the gate even
 if a code path forgot it, and no longer demands a plan screenshot.
 SKIPS unless VEO_TEST_PG_DSN is set.
 
@@ -7,7 +7,7 @@ red once. The `pg` fixture REPLAYS EVERY MIGRATION IN sql/ ON EVERY TEST, in
 filename order. A committed row that is legal under the current schema but
 illegal under an earlier migration therefore breaks that replay for every pg
 test that runs afterwards, anywhere in the suite: sql/093's `ADD CONSTRAINT`
-validates existing rows, and a planless v2 claim — exactly what sql/094 exists
+validates existing rows, and a planless v2 claim — exactly what sql/095 exists
 to allow — makes it fail with "is violated by some row". An earlier draft of
 this file committed one and took the whole `test` job down with it.
 
@@ -39,7 +39,7 @@ def _insert(cur, aid: int, values: str) -> None:
 
 
 def test_a_planless_claim_is_accepted_now(pg):
-    """sql/094: the plan screenshot is no longer part of the shape rule."""
+    """sql/095: the plan screenshot is no longer part of the shape rule."""
     try:
         with pg.cursor() as cur:
             aid = _account(cur)
@@ -57,11 +57,11 @@ def test_a_planless_claim_is_accepted_now(pg):
     ("(%s, 'equity', 2, '1018354', 601, 500, '2026-09-29', NULL)", "minutes above 600"),
     ("(%s, 'equity', 2, '1018354', 16, NULL, '2026-09-29', NULL)", "no cost at all"),
     ("(%s, 'equity', 2, '1018354', 16, 500, NULL, NULL)", "no charge date"),
-    # THE NULL HOLE sql/094 CLOSED. A CHECK accepts a NULL result, so
+    # THE NULL HOLE sql/095 CLOSED. A CHECK accepts a NULL result, so
     # `trip_minutes BETWEEN 1 AND 600` with NULL minutes made the whole v2
     # conjunction NULL and the row was accepted — `INSERT 0 1`, verified against
     # Postgres 16. Same for a NULL plate through the regex. These two fail only
-    # because sql/094 added the explicit IS NOT NULL tests.
+    # because sql/095 added the explicit IS NOT NULL tests.
     ("(%s, 'equity', 2, NULL, 16, 500, '2026-09-29', NULL)", "a NULL plate"),
     ("(%s, 'equity', 2, '1018354', NULL, 500, '2026-09-29', NULL)", "NULL minutes"),
 ])

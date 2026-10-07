@@ -88,7 +88,7 @@ CLAIM = {
     "total_cents": "546", "charge_date": "2026-09-29", "declared_rate_plan": "resident",
 }
 IMAGES = {"receipt": ("r.png", b"\x89PNG-receipt", "image/png")}
-# What an OLDER CLIENT still sends. sql/094 dropped the plan screenshot, and the
+# What an OLDER CLIENT still sends. sql/095 dropped the plan screenshot, and the
 # endpoint ignores the part rather than rejecting it, so a client built before
 # that keeps working — these tests prove the bytes are neither read nor stored.
 LEGACY_IMAGES = {**IMAGES, "plan_evidence": ("p.png", b"\x89PNG-plan", "image/png")}
@@ -112,14 +112,14 @@ def test_a_complete_claim_is_stored_with_its_arithmetic(ctx):
     assert p[3:7] == (16, 500, 546, date(2026, 9, 29))
     assert p[12] == "resident"
     # Indices shifted down one when `plan_evidence_r2_key` left the INSERT
-    # (sql/094): receipt_r2_key is now the last key column.
+    # (sql/095): receipt_r2_key is now the last key column.
     analysis = json.loads(p[19])
     assert (p[14], p[15], p[16]) == (308, 192, "$1 + 25c/min")
     assert (p[17], p[18]) == (46, "tax_ok")
     assert analysis["expected_cents"] == 308
     assert p[13] == "receipt.jpg"                              # the one key (stubbed)
     # Rate limit before the upload, and exactly ONE image stored: no plan
-    # screenshot is asked for or kept (sql/094).
+    # screenshot is asked for or kept (sql/095).
     assert state["order"] == ["RATELIMIT", "R2_PUT"]
 
 
@@ -147,7 +147,7 @@ def test_an_older_client_still_works_and_its_plan_image_is_discarded(ctx):
     r = client.post("/api/v1/reports/discount", data=CLAIM, files=LEGACY_IMAGES)
     assert r.status_code == 200, r.text
     # Ignored, not rejected — and never uploaded. One PUT, not two: an image we
-    # stored but never read would be the privacy cost sql/094 exists to remove.
+    # stored but never read would be the privacy cost sql/095 exists to remove.
     assert state["order"] == ["RATELIMIT", "R2_PUT"]
     p = _insert(state)
     assert p[13] == "receipt.jpg"
@@ -241,7 +241,7 @@ def test_the_legacy_shape_still_works(ctx):
 
 def test_a_storage_outage_keeps_nothing(ctx, monkeypatch):
     # Replaces a test for a failure on the SECOND image: there is no second
-    # image since sql/094. An R2 outage (not an unreadable file — that is the
+    # image since sql/095. An R2 outage (not an unreadable file — that is the
     # next test) must leave no row and nothing in the bucket.
     client, state = ctx
     from src import api_frontend_reports

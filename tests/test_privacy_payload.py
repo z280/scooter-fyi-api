@@ -130,7 +130,7 @@ def test_vehicle_state_fields_are_documented():
 # claims to collect it is over-disclosing — harmless to a reader but a sign the
 # document is not maintained. Server-side reading is a thing we may START doing,
 # and a policy that does not mention it is UNDER-disclosing, which is the kind
-# that matters. `sql/093` added the plan screenshot and `sql/094` removed it
+# that matters. `sql/093` added the plan screenshot and `sql/095` removed it
 # without the published policy ever mentioning either; that gap is what these
 # tests exist to stop recurring.
 # ---------------------------------------------------------------------------

@@ -486,7 +486,7 @@ async def _submit_receipt_claim(request: Request, form: Any, user: SessionUser) 
     # `declared_rate_plan` carries what the rider says, and we trust it (owner,
     # 2026-10-07). A `plan_evidence` part on the request is IGNORED rather than
     # rejected, so an older client keeps working; its bytes are never read and
-    # never stored. See sql/094.
+    # never stored. See sql/095.
 
     ip = real_client_ip(request)
     ua = request.headers.get("user-agent")
