@@ -77,8 +77,9 @@ imply a protection we do not provide. We never read a saved place into
 analytics, into any aggregate, or into anyone else&rsquo;s view of the
 app. To show a saved place&rsquo;s street address, the app sends its
 coordinates to our own server, which looks the address up in a geocoder we
-run ourselves (see &ldquo;Technical&rdquo; below); no outside service sees
-them.<br><br><strong>Older copies still in plain text.</strong> Before 8
+run ourselves (see &ldquo;Technical&rdquo; below). They are not sent directly
+to an outside geocoding service; like every request, they pass through our
+host, Cloudflare (see &sect;3).<br><br><strong>Older copies still in plain text.</strong> Before 8
 October 2026 an account could hold a home and a work location, and a list
 of favourites, in ordinary (unencrypted) fields. Those copies are still in
 our database for accounts that had them: when you next open your profile
