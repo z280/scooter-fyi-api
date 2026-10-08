@@ -144,10 +144,10 @@
     "base_url": "http://valhalla:8002",
     "timeout_seconds": 10.0,
     "graph_bbox": {
-      "west": -105.060,
-      "south": 39.650,
-      "east": -104.880,
-      "north": 39.790
+      "west": -105.150,
+      "south": 39.580,
+      "east": -104.550,
+      "north": 39.950
     },
     "elevation_interval": 30,
     "retry_radius_meters": 100,
