@@ -24,7 +24,7 @@ from src.config import load
 _IN_LAT, _IN_LON = 39.747, -104.992
 # Inside envelope.denver_core (the bbox we FILTER on) but outside the routing
 # graph — the whole reason `in_coverage` exists.
-_OUT_LAT, _OUT_LON = 39.860, -105.150
+_OUT_LAT, _OUT_LON = 39.860, -105.180   # west of the graph (-105.15), inside the search box
 
 
 def _feature(props: dict, lat: float = _IN_LAT, lon: float = _IN_LON) -> dict:
@@ -242,14 +242,16 @@ def test_bbox_is_denver_core_in_photon_lon_first_order(monkeypatch):
     TestClient(_app()).get("/api/v1/geocode/search", params={"q": "champa"})
     url, params, timeout = calls[0]
     assert url == "http://photon-test:2322/api"
-    box = load().denver_core
-    assert params["bbox"] == (f"{box.lon_min:.6f},{box.lat_min:.6f},"
-                              f"{box.lon_max:.6f},{box.lat_max:.6f}")
+    w, so, e, n = api_geocode.search_box()
+    assert params["bbox"] == f"{w:.6f},{so:.6f},{e:.6f},{n:.6f}"
     # Wider than the routing graph on every side, deliberately: filtering on
     # graph_bbox would make in_coverage vacuous.
     graph = load().valhalla
-    assert box.lon_min < graph.bbox_west and box.lon_max > graph.bbox_east
-    assert box.lat_min < graph.bbox_south and box.lat_max > graph.bbox_north
+    assert w < graph.bbox_west and e > graph.bbox_east
+    assert so < graph.bbox_south and n > graph.bbox_north
+    # And never narrower than the denver_core envelope it started from.
+    box = load().denver_core
+    assert w <= box.lon_min and e >= box.lon_max and so <= box.lat_min and n >= box.lat_max
     assert timeout == api_geocode.SIDECAR_TIMEOUT_SECONDS == 3.0
 
 

@@ -135,9 +135,9 @@ def test_unknown_profile_rejected():
 def test_out_of_graph_coordinate_is_rejected_not_clamped():
     """A silently relocated origin would yield a confident, wrong battery
     estimate — so this must 400 rather than snap to the nearest edge."""
-    # Inside the app's DENVER_BOUNDS but outside the routing graph's clip.
+    # North of the routing graph's clip (the basemap's 39.95).
     with pytest.raises(HTTPException) as exc:
-        api_route.route(from_="39.88,-105.10", to="39.70,-104.95", profile="safe")
+        api_route.route(from_="39.97,-104.95", to="39.70,-104.95", profile="safe")
     assert exc.value.status_code == 400
     assert exc.value.detail["error"] == "out_of_coverage"
     assert exc.value.detail["graph_bbox"] == load().valhalla.bbox

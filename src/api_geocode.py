@@ -10,8 +10,9 @@ config alone (`config.json` -> `"geocode": {"upstream": ..., "enabled": ...}`).
 Four things this proxy does that a raw Photon passthrough would not:
 
 * **Denver bbox filter.** Photon's `bbox` param takes `minLon,minLat,maxLon,
-  maxLat` and is filled from the config `envelope.denver_core` bounds —
-  deliberately WIDER than the routing `graph_bbox`. Filtering on `graph_bbox`
+  maxLat` and is filled from `search_box()`: the config `envelope.denver_core`
+  bounds, widened where needed so it is always WIDER than the routing
+  `graph_bbox`. Filtering on `graph_bbox`
   itself would make every returned hit in-coverage and `in_coverage` below
   vacuous.
 * **`in_coverage`**, which is membership in the routing `graph_bbox`
@@ -120,9 +121,25 @@ def denver_core_bbox() -> str:
     order is lon-first, unlike every lat/lon pair elsewhere in this codebase,
     which is exactly the kind of thing that silently returns zero results.
     """
-    box = load().denver_core
-    return (f"{box.lon_min:.6f},{box.lat_min:.6f},"
-            f"{box.lon_max:.6f},{box.lat_max:.6f}")
+    w, so, e, n = search_box()
+    return f"{w:.6f},{so:.6f},{e:.6f},{n:.6f}"
+
+
+#: How far the search box reaches past the routing graph on every side.
+SEARCH_MARGIN_DEG = 0.05
+
+
+def search_box() -> tuple[float, float, float, float]:
+    """(west, south, east, north): the denver_core envelope, widened where
+    needed so it is ALWAYS wider than the routing graph_bbox by
+    SEARCH_MARGIN_DEG. Since the graph grew to the basemap's extent
+    (2026-10-08) it reaches past denver_core in places, and denver_core cannot
+    simply move: the ingest tags vehicles with it. A search box no wider than
+    the graph would make every hit in-coverage and `in_coverage` vacuous."""
+    box, g = load().denver_core, load().valhalla
+    m = SEARCH_MARGIN_DEG
+    return (min(box.lon_min, g.bbox_west - m), min(box.lat_min, g.bbox_south - m),
+            max(box.lon_max, g.bbox_east + m), max(box.lat_max, g.bbox_north + m))
 
 
 # --- cache -------------------------------------------------------------------
