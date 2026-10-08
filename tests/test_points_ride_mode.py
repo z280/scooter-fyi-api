@@ -31,12 +31,15 @@ from src.points import (
     credit_battery_contribution,
     credit_nav_distance_bonus,
     credit_points,
+    h3_8_index_for,
 )
 
 _NOW = datetime.now(timezone.utc)
 _RIDE_ID = "ride-uuid-1"
 _VID = "aaaa000000000000"
 _START = (39.741234, -104.987654)  # deliberately NOT the ride's end point
+# The awards below are rider-located, so what the ledger stores is the centre
+# of _START's hex, not _START. Assertions compare cells (see credit_points).
 
 
 class _FakeCursor:
@@ -225,7 +228,15 @@ def test_battery_contribution_files_source_table_tracked_rides():
     assert action == "battery_contribution"
     assert source_table == "tracked_rides"
     assert source_id == _RIDE_ID
-    assert (lat, lng) == _START, "the award must file at the ride's START point"
+    # Compared as a CELL, not a coordinate: `battery_contribution` is
+    # rider-located, so `credit_points` blunts the stored point to the hex
+    # centre. The claim here is WHICH END of the ride the award files at, and
+    # the hex carries that — it is also the only column anything reads.
+    assert h3_8_index_for(lat, lng) == h3_8_index_for(*_START), (
+        "the award must file at the ride's START point"
+    )
+    # The exact start is not what lands in the ledger.
+    assert (lat, lng) != _START
     assert vid == _VID
     assert account_id == 5
 
@@ -242,7 +253,8 @@ def test_nav_distance_bonus_files_source_table_tracked_rides():
     assert action == "nav_distance_bonus"
     assert source_table == "tracked_rides"
     assert source_id == _RIDE_ID
-    assert (lat, lng) == _START
+    assert h3_8_index_for(lat, lng) == h3_8_index_for(*_START)
+    assert (lat, lng) != _START
 
 
 def test_ride_id_is_stringified_for_the_source_id():

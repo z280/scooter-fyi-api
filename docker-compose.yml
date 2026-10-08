@@ -99,6 +99,18 @@ services:
       # previously-emitted identifier becomes orphaned. Treat like a DB
       # encryption key — back up out of repo.
       VEHICLE_IDENTIFIER_SALT: ${VEHICLE_IDENTIFIER_SALT}
+      # Required: Fernet key for accounts.saved_places_encrypted (sql/096,
+      # src/place_crypto.py). Same discipline as the salt above and for a
+      # stronger reason — this one IS a database encryption key. Lose it and
+      # every rider's saved places are unreadable; there is no recovery and no
+      # dev fallback, by design: a missing key fails the write rather than
+      # silently storing a home address in plaintext.
+      #
+      # _OLD is the rotation door, tried on decrypt only. Rotating means
+      # setting the new key here, leaving the old one in _OLD until everything
+      # has been re-saved, then dropping it. Unset is normal.
+      VEO_PLACES_KEY: ${VEO_PLACES_KEY}
+      VEO_PLACES_KEY_OLD: ${VEO_PLACES_KEY_OLD}
       VEO_CONFIG: /app/config.json
     volumes:
       # config.json is mounted so prod can swap it without rebuilding the image.

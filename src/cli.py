@@ -122,6 +122,8 @@ from __future__ import annotations
 import json
 import logging
 import sys
+
+import h3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -137,6 +139,7 @@ from .battery_model import (
 )
 from .comms_replies import poll_once as poll_comms_replies
 from .config import load
+from .points import RIDER_LOCATED_ACTIONS
 from .cycle import run_once
 from .r2_map import sync_map_assets, sync_photon_index
 from .daily_sla import run_daily
@@ -936,6 +939,109 @@ def backfill_ride_distances_from_donations() -> dict[str, int]:
     return {"fixed": fixed, "skipped": skipped}
 
 
+def scrub_award_locations(dry_run: bool = False) -> dict:
+    """Snap rider-located `user_points` rows to their own H3 cell centre, so
+    the ledger stops holding coordinates precise enough to be an address.
+    `python -m src.cli scrub_award_locations`.
+
+    WHY THIS IS SAFE TO THE POINT OF BEING INVISIBLE. `user_points.lat` and
+    `lng` are written by every award and read by NOTHING — grep the tree: the
+    only column anything selects off this table is `h3_8_index`
+    (src/area_leaders.py, src/api_leaderboard.py, src/api_private.py). Moving a
+    point WITHIN its own hex therefore changes no answer this system can give:
+    territory, leaderboards, area rollups and point totals are all computed
+    from the index, and the index is not recomputed here — it is read off the
+    row and left exactly as it is.
+
+    WHAT IT IS FIXING. `maybe_credit_profile_completion` used to credit its row
+    at the rider's `home_lat`/`home_lng`, and `user_points` is an ordinary
+    plaintext table. So every rider who has ever completed their profile has
+    their doorstep sitting one join from their account id — in precisely the
+    database dump, backup bucket and read replica that sql/096's encryption of
+    `saved_places` exists to keep it out of. The code no longer writes that
+    (the award credits the cell centre now); this is the rows already written.
+
+    The ride-located awards are in the same sweep for the same reason, one step
+    removed: nobody stored those as a home address, but a handful of ride
+    starts for one account describe one anyway.
+
+    IDEMPOTENT WITHOUT A MARKER COLUMN, which is the nice part. A scrubbed row
+    IS one whose lat/lng already equals the centre of its own `h3_8_index`, and
+    `cell_to_latlng` is exactly stable under a second pass — re-centring a
+    centre returns the same float. So the command describes its own completion:
+    run it twice, run it hourly forever, run it against a table the fixed code
+    has been writing to for a year, and the second run updates nothing.
+
+    THE ACTION LIST IS `points.RIDER_LOCATED_ACTIONS`, shared with
+    `credit_points` and not a second copy. That is what stops the two drifting:
+    the writer blunts exactly the actions this sweeps, so a new award added to
+    that set is coarsened going forward AND picked up here for whatever it
+    wrote before the change. A private list here would have let them disagree
+    silently, which is how the ride-located awards kept writing exact points
+    after this command was first written to clean them.
+
+    `dry_run=True` counts what WOULD move without writing, for a look before
+    committing to it.
+    """
+    moved = 0
+    already = 0
+    unreadable = 0
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, lat, lng, h3_8_index
+                FROM user_points
+                WHERE action = ANY(%s)
+                ORDER BY id
+                """,
+                (sorted(RIDER_LOCATED_ACTIONS),),
+            )
+            rows = cur.fetchall()
+
+            updates: list[tuple[float, float, int]] = []
+            for row_id, lat, lng, h3_idx in rows:
+                try:
+                    # Stored as int(cell, 16) by `h3_8_index_for`; the index is
+                    # the authority for where this row is, so the centre comes
+                    # from IT and never from the coordinate being replaced. A
+                    # row whose two disagreed would otherwise be moved to a
+                    # different hex, silently changing its territory.
+                    centre = h3.cell_to_latlng(h3.int_to_str(int(h3_idx)))
+                except Exception:  # noqa: BLE001
+                    # A corrupt index is not something to guess at: leaving the
+                    # row alone keeps it readable and wrong, where moving it
+                    # would make it unreadable and wrong.
+                    log.warning("scrub_award_locations: unreadable h3 index on user_points id=%s", row_id)
+                    unreadable += 1
+                    continue
+                new_lat, new_lng = float(centre[0]), float(centre[1])
+                if lat == new_lat and lng == new_lng:
+                    already += 1
+                    continue
+                updates.append((new_lat, new_lng, row_id))
+
+            if not dry_run and updates:
+                cur.executemany(
+                    "UPDATE user_points SET lat = %s, lng = %s WHERE id = %s",
+                    updates,
+                )
+            moved = len(updates)
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+
+    return {
+        "examined": len(rows),
+        "moved": moved,
+        "already_centred": already,
+        "unreadable_index": unreadable,
+        "dry_run": dry_run,
+    }
+
+
 COMMANDS = {
     "backfill_ride_distances_from_donations": backfill_ride_distances_from_donations,
     "ingest_cycle":          _cli_ingest_cycle,
@@ -959,6 +1065,7 @@ COMMANDS = {
     "backfill_battery_trips": _cli_backfill_battery_trips,
     "poll_comms_replies":    poll_comms_replies,
     "deidentify_donations":  deidentify_donations,
+    "scrub_award_locations": scrub_award_locations,
     "refresh_area_universe": _cli_refresh_area_universe,
     "cleanup_job_runs":      _cli_cleanup_job_runs,
     "process_device_feature_reports": process_device_feature_reports,

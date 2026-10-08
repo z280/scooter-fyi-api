@@ -405,9 +405,16 @@ deleting the ride cascades to its survey, and deleting your account
 removes every survey you wrote.</td></tr>
 <tr><td>Points ledger</td><td>Indefinite; deleted only with your
 account</td><td>Every points award you earn is recorded permanently —
-your account, the location it was earned at (exact, apart from the
-profile-completion award; see &sect;1) and the coarse map area (H3 resolution-8 cell) it falls in, the action and point
-value, and, for device-tied awards, the vehicle. These rows are the leaderboard record
+your account, the location it was earned at, the coarse map area (H3
+resolution-8 cell) it falls in, the action and point value, and, for
+device-tied awards, the vehicle. That location is exact only for
+scooter-position awards (report, QR scan, photo) &mdash; a shared vehicle
+in a public street. Every award earned somewhere <em>you</em> were
+&mdash; completing your profile, anything credited at a ride&rsquo;s start
+or end, and referral and stand-down awards &mdash; stores only the centre
+of the map area, so the row records the neighbourhood and never an
+address. Rider-located awards recorded before 2026-10-08 may still hold an
+exact location; we are removing those. These rows are the leaderboard record
 itself: the area leaderboard is computed directly from them, so unlike
 donated tracks above they are never de-identified — only deleting your
 account removes them. Whether they appear on the public leaderboard is

@@ -206,6 +206,45 @@ REPORT_TYPE_POINTS: dict[str, tuple[str, int]] = {
 }
 
 
+#: The awards whose point is somewhere the RIDER was, rather than somewhere a
+#: VEHICLE was. Their stored coordinate is coarsened to the H3 cell centre by
+#: `credit_points` below.
+#:
+#: `profile_completion` is the direct one: it is credited at the rider's Home or
+#: Work. The rest are credited at a tracked ride's start or end (or, for a
+#: referral, the spot the referral was made) — and a ride that starts at 07:40
+#: on a Tuesday starts on somebody's doorstep. Across a handful of rows that is
+#: a home address too, inferred rather than stored, which is no better.
+#:
+#: Deliberately NOT included: `qr_scan`, `device_photo` and the device-report
+#: awards. Those are credited at the SCOOTER's position — a shared vehicle in a
+#: public street, not a private place — and the exact point is the only record
+#: of where a reported vehicle actually was.
+RIDER_LOCATED_ACTIONS = frozenset({
+    "profile_completion",
+    "battery_contribution",
+    "nav_distance_bonus",
+    "waypoint",
+    "gbfs_trip_validated",
+    "ride_survey",
+    "nav_route_feedback",
+    "nav_qualitative_feedback",
+    "referral",
+    "stand_down",
+})
+
+
+def cell_centre(lat: float, lng: float) -> tuple[float, float]:
+    """The centre of the resolution-8 hex containing this point.
+
+    Stable under repetition: re-centring a centre returns the same floats,
+    which is what lets `src/cli.py:scrub_award_locations` recognise an
+    already-scrubbed row without a marker column.
+    """
+    centre = h3.cell_to_latlng(h3.latlng_to_cell(lat, lng, 8))
+    return (float(centre[0]), float(centre[1]))
+
+
 def h3_8_index_for(lat: float, lng: float) -> int:
     """Same computation as src/ingest.py's h3_8_index, resolution 8 only."""
     return int(h3.latlng_to_cell(lat, lng, 8), 16)
@@ -319,6 +358,23 @@ def credit_points(
     assert points % 2 == 0, f"odd points award: action={action} points={points}"
 
     h3_8 = h3_8_index_for(lat, lng)
+    # WHERE THE COORDINATE IS BLUNTED, and it is here for exactly the reason
+    # the per-ride cap is: every point-awarding path funnels through this
+    # function, so doing it here covers an award nobody has written yet. Doing
+    # it at the call sites instead would leave the same hole the cap comment
+    # above describes — a new award would have to remember to opt in, and the
+    # one that forgot would silently store a doorstep. That is not
+    # hypothetical: the ride-located awards kept writing exact points after
+    # `profile_completion` alone was fixed, because that fix lived in the
+    # caller.
+    #
+    # `h3_8` is computed from the ORIGINAL point above and is unaffected: the
+    # centre lies in the same cell by construction. Since `h3_8_index` is the
+    # only column anything selects off this table (src/area_leaders.py,
+    # src/api_leaderboard.py, src/api_private.py), no answer any reader can
+    # ask for changes — `lat`/`lng` are written and never read.
+    if action in RIDER_LOCATED_ACTIONS:
+        lat, lng = cell_centre(lat, lng)
     cur.execute(
         """
         INSERT INTO user_points (
@@ -723,44 +779,24 @@ def _completion_location(
 ) -> tuple[float, float] | None:
     """A point for the ledger row, or None when the rider has saved nowhere.
 
-    THE RETURNED POINT IS THE H3 CELL CENTRE, NOT THE RIDER'S DOORSTEP, and
-    that is the whole reason this is a function rather than two lines inline.
-
-    `user_points.lat`/`lng` are written by every award and read by nothing:
-    grep the tree — the only column anything selects off this table is
-    `h3_8_index` (src/area_leaders.py, src/api_leaderboard.py,
-    src/api_private.py). For every other award the stored point is a vehicle
-    or a ride start, so storing it exactly costs nothing. For this one it is
-    where the rider LIVES, and `user_points` is an ordinary plaintext table —
-    which would put an exact home address one join away from an account id,
-    in the same dump the `saved_places` encryption exists to keep it out of.
-
-    Snapping to the cell centre keeps `h3_8_index` bit-for-bit identical, so
-    territory, leaderboards and every reader behave exactly as before, and
-    the ledger stops carrying a coordinate nobody reads and nobody should.
-
-    Resolution 8 is roughly 0.46 km² — the hex says which part of town, which
-    is all the leaderboard ever asked of it.
+    The point is returned RAW. `credit_points` blunts it to the cell centre
+    before storing, because `profile_completion` is in `RIDER_LOCATED_ACTIONS`
+    — so this function only has to answer "where", not "how precisely".
     """
     places = saved_places.clean_places(place_crypto.unseal(blob))
     by_id = {p["id"]: p for p in places}
     for slot in (saved_places.SLOT_HOME_ID, saved_places.SLOT_WORK_ID):
         hit = by_id.get(slot)
         if hit is not None:
-            return _cell_centre(hit["lat"], hit["lon"])
+            return (float(hit["lat"]), float(hit["lon"]))
 
     # The legacy columns, for a row the lazy migration has not reached. Goes
     # when they do.
     for lat, lng in ((home_lat, home_lng), (work_lat, work_lng)):
         if lat is not None and lng is not None:
-            return _cell_centre(float(lat), float(lng))
+            return (float(lat), float(lng))
     return None
 
-
-def _cell_centre(lat: float, lng: float) -> tuple[float, float]:
-    """The centre of the resolution-8 hex containing this point."""
-    centre = h3.cell_to_latlng(h3.latlng_to_cell(lat, lng, 8))
-    return (float(centre[0]), float(centre[1]))
 
 
 # --- Ride Mode survey awards (docs/implemented/PLAN_RIDE_MODE_API.md phase A3; src/api_ride_surveys.py) -----
