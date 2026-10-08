@@ -84,9 +84,14 @@ def _in_city(lat: float, lon: float) -> bool | None:
 
 def city_coverage(origin: tuple[float, float], dest: tuple[float, float]) -> dict:
     """{"outside_city": {"from": bool|None, "to": bool|None},
-        "outside_city_warning": str|None} for a route response."""
+        "outside_city_warning": str|None} for a route response.
+
+    All or nothing: if EITHER lookup fails, both ends are null and there is
+    no warning. A half-known answer is not one (zneill-agent, #126)."""
     f, t = _in_city(*origin), _in_city(*dest)
-    outside = {"from": None if f is None else not f, "to": None if t is None else not t}
+    if f is None or t is None:
+        return {"outside_city": {"from": None, "to": None}, "outside_city_warning": None}
+    outside = {"from": not f, "to": not t}
     return {
         "outside_city": outside,
         "outside_city_warning": OUTSIDE_CITY_WARNING if (outside["from"] or outside["to"]) else None,

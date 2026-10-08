@@ -44,3 +44,20 @@ def test_an_unreadable_boundary_shows_no_warning_rather_than_a_wrong_one(monkeyp
     monkeypatch.setattr(geo, "region_for_point", boom)
     got = api_route.city_coverage((39.86, -104.67), (39.75, -105.00))
     assert got == {"outside_city": {"from": None, "to": None}, "outside_city_warning": None}
+
+
+def test_one_failed_lookup_makes_the_whole_answer_unknown(monkeypatch):
+    """zneill-agent's case: the origin lookup fails, the destination is
+    outside. No half-known warning."""
+    import src.geo as geo
+    calls = {"n": 0}
+
+    def flaky(layer, lon, lat):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("boundary read failed")
+        return None   # destination: outside the city
+
+    monkeypatch.setattr(geo, "region_for_point", flaky)
+    got = api_route.city_coverage((39.74, -104.99), (39.93, -104.98))
+    assert got == {"outside_city": {"from": None, "to": None}, "outside_city_warning": None}
