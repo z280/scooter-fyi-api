@@ -51,17 +51,28 @@ So each claim moves through three short transactions:
 
   1. READ + OBSERVE. Select the candidates, classify them against this cycle's
      feed, stamp `taken_at`. Commit. No row stays locked.
-  2. RESERVE. One UPDATE per claim that re-tests every gate — `mine_at` among
-     them — and stamps `notify_attempt_at`. It returns nothing if the rider
-     said "mine" in the meantime, which is the `mine_at` re-check the send
-     path needs, done atomically rather than as a read that could go stale
-     between the looking and the sending. Commit.
+  2. RESERVE. One UPDATE per claim that re-tests every gate — `mine_at` and
+     the expiry among them — and stamps `notify_attempt_at`. It returns
+     nothing if the rider said "mine", released the claim, or ran out of
+     twenty-five minutes in the meantime, which is the re-check the send path
+     needs, done atomically rather than as a read that could go stale between
+     the looking and the sending. The expiry is tested against NOW() rather
+     than the feed's observation time, because it asks whether we may send at
+     this instant. Commit.
   3. SEND, with no transaction open, then RECORD the outcome in a third.
 
 What remains is a genuine race of the send's own duration: a `/mine` landing
 after the reservation gets a text anyway. That is irreducible without locking
 across the gateway, which is the thing being removed — and it now fails in the
 harmless direction, because `/mine` returns immediately instead of waiting.
+
+RELEASING A CLAIM DISARMS THE WATCH, and it is the client that has to say so.
+`POST /api/v1/dibs/{id}/release` sets `expires_at = NOW()`, which drops the
+row out of the candidate read and fails the reservation; the app routes every
+giving-up through it (`dibs.ts`'s release hook — the map popup's release,
+switching scooters, backing out of a walk, "it won't ride"). Before that hook
+existed four of those five told the server nothing, so the row stayed live and
+this module would have texted about a claim the rider had abandoned.
 
 A VERIFIED PHONE IS REQUIRED, and `accounts.phone_verified_at` is the only
 thing that counts. A number typed into a profile is a number nobody has
@@ -172,7 +183,7 @@ def alert_text(claim: WatchedClaim, now: datetime) -> str:
     )
 
 
-def _candidates(snapshot_time: datetime) -> list[WatchedClaim]:
+def _candidates() -> list[WatchedClaim]:
     """Transaction 1a: the claims this cycle might have to text about.
 
     NO `FOR UPDATE`. Nothing is decided off this read — the reservation below
@@ -191,10 +202,20 @@ def _candidates(snapshot_time: datetime) -> list[WatchedClaim]:
                   AND notified_at IS NULL
                   AND notify_skipped IS NULL
                   AND mine_at IS NULL
-                  AND expires_at > %s
-                  AND (notify_attempt_at IS NULL OR notify_attempt_at < %s)
+                  -- THE DATABASE'S CLOCK, for both. Whether a claim is
+                  -- still live, and whether a reservation has lapsed, are
+                  -- questions about this instant — and `snapshot_time` is
+                  -- when the FEED was read, which a cycle running for minutes
+                  -- leaves in the past. Using it here would pick up claims
+                  -- that have since expired or been released.
+                  --
+                  -- `taken_at` below still uses `snapshot_time`, because that
+                  -- one genuinely records when the rental was OBSERVED.
+                  AND expires_at > NOW()
+                  AND (notify_attempt_at IS NULL
+                       OR notify_attempt_at < NOW() - %s::interval)
                 """,
-                (snapshot_time, snapshot_time - DIBS_NOTIFY_LEASE),
+                (DIBS_NOTIFY_LEASE,),
             )
             rows = cur.fetchall()
         conn.commit()
@@ -227,7 +248,7 @@ def _mark_taken(snapshot_time: datetime, claims: list[WatchedClaim]) -> None:
         conn.commit()
 
 
-def _reserve(claim: WatchedClaim, snapshot_time: datetime) -> tuple[bool, str | None, bool]:
+def _reserve(claim: WatchedClaim) -> tuple[bool, str | None, bool]:
     """Transaction 2: claim this send, and re-read the gates while doing it.
 
     Returns `(reserved, phone, verified)`. `reserved` false means somebody got
@@ -247,24 +268,29 @@ def _reserve(claim: WatchedClaim, snapshot_time: datetime) -> tuple[bool, str | 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE dibs AS d SET notify_attempt_at = %s
+                UPDATE dibs AS d SET notify_attempt_at = NOW()
                 WHERE d.id = %s
                   AND d.notified_at IS NULL
                   AND d.notify_skipped IS NULL
                   AND d.mine_at IS NULL
-                  AND d.expires_at > %s
-                  AND (d.notify_attempt_at IS NULL OR d.notify_attempt_at < %s)
+                  -- NOW(), NOT `snapshot_time`. Every other term here is
+                  -- about the claim's own state, but this one asks "may we
+                  -- send, at this instant" — and `snapshot_time` is when the
+                  -- FEED was read, which an ingest cycle running for minutes
+                  -- leaves well in the past (src/ride_watch.py measured
+                  -- exactly that gap on a tracked ride). A rider who released
+                  -- their claim, or whose 25 minutes ran out, during that gap
+                  -- would otherwise still be texted about a scooter they no
+                  -- longer hold.
+                  AND d.expires_at > NOW()
+                  AND (d.notify_attempt_at IS NULL
+                       OR d.notify_attempt_at < NOW() - %s::interval)
                 RETURNING
                   (SELECT a.phone_number FROM accounts a WHERE a.id = d.account_id),
                   (SELECT a.phone_verified_at IS NOT NULL
                      FROM accounts a WHERE a.id = d.account_id)
                 """,
-                (
-                    snapshot_time,
-                    claim.dibs_id,
-                    snapshot_time,
-                    snapshot_time - DIBS_NOTIFY_LEASE,
-                ),
+                (claim.dibs_id, DIBS_NOTIFY_LEASE),
             )
             row = cur.fetchone()
         conn.commit()
@@ -291,6 +317,18 @@ def _record(dibs_id: str, **fields: object) -> None:
         conn.commit()
 
 
+def _mark_notified(dibs_id: str) -> None:
+    """The text landed. `NOW()` rather than the cycle's `snapshot_time`: this
+    column answers "when were they told", and they were told just now, not
+    when the feed happened to be read."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE dibs SET notified_at = NOW() WHERE id = %s", (dibs_id,)
+            )
+        conn.commit()
+
+
 def watch_claims_for_cycle(
     snapshot_time: datetime,
     devices: Iterable[TaggedDevice],
@@ -299,7 +337,7 @@ def watch_claims_for_cycle(
     observed = {d.vehicle_identifier: d for d in devices if d.vehicle_identifier}
     stats = DibsWatchStats()
 
-    claims = _candidates(snapshot_time)
+    claims = _candidates()
     stats.open_claims = len(claims)
     if not claims:
         return stats
@@ -312,7 +350,7 @@ def watch_claims_for_cycle(
     _mark_taken(snapshot_time, taken)
 
     for claim in taken:
-        reserved, phone, verified = _reserve(claim, snapshot_time)
+        reserved, phone, verified = _reserve(claim)
         if not reserved:
             # The rider said "mine" (or another cycle has it). Not a skip: no
             # decision was made about this claim and none should be recorded.
@@ -351,7 +389,7 @@ def watch_claims_for_cycle(
             _record(claim.dibs_id, notify_attempt_at=None)
             stats.deferred += 1
             continue
-        _record(claim.dibs_id, notified_at=snapshot_time)
+        _mark_notified(claim.dibs_id)
         stats.texted += 1
     return stats
 

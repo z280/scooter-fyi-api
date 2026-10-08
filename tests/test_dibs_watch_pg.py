@@ -137,11 +137,20 @@ def _claim(conn, account_id: int | None, *, notify: bool = True,
             INSERT INTO dibs (id, vehicle_identifier, vehicle_name, claimed_by,
                               claimed_at, expires_at, account_id, notify_sms,
                               mine_at)
-            VALUES (%s, %s, 'Perseus 619', 'Zach', %s, %s, %s, %s,
+            VALUES (%s, %s, 'Perseus 619', 'Zach', %s,
+                    -- RELATIVE TO THE DATABASE'S CLOCK, not to the simulated
+                    -- `NOW` these tests use for `snapshot_time`. Whether a
+                    -- claim is still live is decided by NOW() in the watcher's
+                    -- own SQL, so an expiry pinned to a fixed instant would
+                    -- make every claim here dead or alive by accident of what
+                    -- day the suite runs. `claimed_at` stays simulated — it
+                    -- only feeds the message's "7 min ago".
+                    NOW() + make_interval(secs => %s),
+                    %s, %s,
                     CASE WHEN %s THEN NOW() ELSE NULL END)
             """,
             (dibs_id, _VID, NOW - timedelta(minutes=5),
-             NOW + timedelta(minutes=minutes_left), account_id, notify, mine),
+             minutes_left * 60, account_id, notify, mine),
         )
     conn.commit()
     return dibs_id
@@ -507,3 +516,68 @@ def test_an_outcome_recorded_mid_flight_cancels_the_send(pg_pooled, monkeypatch)
 
     assert sent == []
     assert stats.unreserved == 1
+
+
+def test_a_release_during_the_cycle_cancels_the_send(pg_pooled, monkeypatch):
+    """Releasing a claim disarms the watch, even mid-cycle.
+
+    `POST /dibs/{id}/release` sets `expires_at = NOW()`. The reservation tests
+    the expiry against NOW() rather than `snapshot_time` for exactly this case:
+    an ingest cycle runs for minutes, so a claim released after the feed was
+    read but before the watcher reached it would otherwise still be texted —
+    about a scooter the rider had deliberately given up, which is the worst
+    thing this channel can say.
+
+    Mutation-checked: putting `snapshot_time` back in that clause fails here.
+    """
+    dsn = os.environ["VEO_TEST_PG_DSN"]
+    acct = _account(pg_pooled, "released", phone="+17205550204", verified=True)
+    dibs_id = _claim(pg_pooled, acct, dibs_id="released-1")
+
+    sent: list = []
+    real_taken = dibs_watch.taken_claims
+
+    def _taken(claims, observed):
+        out = real_taken(claims, observed)
+        # What `release` does, in the gap between the read and the send.
+        conn = psycopg.connect(dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE dibs SET expires_at = NOW() WHERE id = %s", (dibs_id,)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return out
+
+    monkeypatch.setattr(dibs_watch, "taken_claims", _taken)
+    monkeypatch.setattr(
+        dibs_watch, "send_sms",
+        lambda to, body, **kw: sent.append(to) or {"id": "m"},
+    )
+
+    stats = dibs_watch.watch_claims_for_cycle(NOW, _reserved())
+
+    assert sent == []
+    assert stats.unreserved == 1
+
+
+def test_a_claim_released_before_the_cycle_is_never_a_candidate(pg_pooled, monkeypatch):
+    """The ordinary case: released well before the watcher looks."""
+    acct = _account(pg_pooled, "released2", phone="+17205550205", verified=True)
+    dibs_id = _claim(pg_pooled, acct, dibs_id="released-2")
+    with pg_pooled.cursor() as cur:
+        cur.execute("UPDATE dibs SET expires_at = NOW() WHERE id = %s", (dibs_id,))
+    pg_pooled.commit()
+
+    sent: list = []
+    monkeypatch.setattr(
+        dibs_watch, "send_sms",
+        lambda to, body, **kw: sent.append(to) or {"id": "m"},
+    )
+
+    stats = dibs_watch.watch_claims_for_cycle(NOW, _reserved())
+
+    assert stats.open_claims == 0
+    assert sent == []
