@@ -325,6 +325,29 @@ def _outcome(outcomes: dict[str, tuple[int, int, int]] | None,
     return (outcomes or {}).get(vid or "", (0, 0, 0))
 
 
+def latest_complete_cycle(cur) -> tuple[Any, datetime]:
+    """(cycle_id, snapshot_time) of the newest COMPLETE cycle — the snapshot
+    the devices payload serves. 503 when none has completed yet.
+
+    Shared with src/api_vehicle_plates.py so a plate lookup resolves against
+    exactly the device_ids the map currently has on screen.
+    """
+    cur.execute(
+        """
+        SELECT cycle_id, snapshot_time
+        FROM observation_cycles oc
+        JOIN snapshot_metadata_core USING (cycle_id)
+        WHERE oc.job_status = 'complete'
+        ORDER BY snapshot_time DESC
+        LIMIT 1
+        """
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(503, detail="no completed cycles yet")
+    return row[0], row[1]
+
+
 def _devices_current_impl(
     request: Request,
     response: Response,
@@ -363,20 +386,7 @@ def _devices_current_impl(
     # Resolve which cycle to use
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT cycle_id, snapshot_time
-                FROM observation_cycles oc
-                JOIN snapshot_metadata_core USING (cycle_id)
-                WHERE oc.job_status = 'complete'
-                ORDER BY snapshot_time DESC
-                LIMIT 1
-                """
-            )
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(503, detail="no completed cycles yet")
-            cycle_id, snapshot_time = row[0], row[1]
+            cycle_id, snapshot_time = latest_complete_cycle(cur)
 
             # Validate the bbox up front — before the 304 short-circuit — so
             # a malformed bbox always 400s even when the ETag matches.
