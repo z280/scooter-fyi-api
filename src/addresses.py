@@ -38,6 +38,7 @@ Both structures are built from the database at first use and held in memory:
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -787,3 +788,55 @@ def lookup(q: str, limit: int = 8) -> list[dict[str, Any]]:
         if len(out) >= limit:
             break
     return out
+
+
+# --- reverse -----------------------------------------------------------------
+
+#: How far from a pin the nearest city address point may be and still name it.
+#: Denver's points sit on building footprints, typically 10-25 m behind the
+#: curb a scooter is parked on; 40 m covers a deep setback without reaching
+#: across a street to the house opposite on a typical residential block.
+NEAREST_MAX_METERS = 40.0
+
+
+def nearest(lat: float, lon: float,
+            max_meters: float = NEAREST_MAX_METERS) -> dict[str, Any] | None:
+    """The nearest Denver address point within `max_meters`, or None.
+
+    For GET /api/v1/geocode/reverse: Photon's OSM index lacks most Denver
+    house numbers (see the module docstring), so a pin on a Denver block
+    would otherwise only ever name the street. Bounding-box scan on
+    idx_address_points_latlon, then flat-earth distance — no PostGIS here.
+
+    Never raises and never logs the coordinate: the caller degrades to
+    Photon's answer alone.
+    """
+    from .geo import distance_meters
+
+    dlat = max_meters / 111_320.0
+    dlon = max_meters / (111_320.0 * max(0.2, math.cos(math.radians(lat))))
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT p.number_text, s.display_name, p.lat, p.lon "
+                    "FROM address_points p "
+                    "JOIN address_streets s ON s.id = p.street_id "
+                    "WHERE p.lat BETWEEN %s AND %s AND p.lon BETWEEN %s AND %s "
+                    "ORDER BY (p.lat - %s) ^ 2 + ((p.lon - %s) * %s) ^ 2, "
+                    "         p.unit NULLS FIRST "
+                    "LIMIT 1",
+                    (lat - dlat, lat + dlat, lon - dlon, lon + dlon,
+                     lat, lon, math.cos(math.radians(lat))))
+                row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("address point reverse lookup failed (%s)", type(exc).__name__)
+        return None
+    if not row:
+        return None
+    number_text, display, plat, plon = row
+    dist = distance_meters(lat, lon, plat, plon)
+    if dist > max_meters:
+        return None
+    return {"housenumber": str(number_text), "street": str(display),
+            "distance_m": round(dist, 1)}

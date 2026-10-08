@@ -1,4 +1,6 @@
-"""Address search for Ride Mode: GET /api/v1/geocode/search.
+"""Address search for Ride Mode: GET /api/v1/geocode/search, and reverse
+geocoding for saved places and parking reports: GET /api/v1/geocode/reverse
+(see the "reverse" section at the bottom of this module).
 
 Fronts the self-hosted **Photon** sidecar (`docker/photon/Dockerfile`), which
 serves a Colorado-scoped index seeded from R2 by `src.cli fetch_photon_index`.
@@ -36,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -44,7 +47,7 @@ from functools import lru_cache
 from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from . import config as config_module
 from .client_ip import real_client_ip
@@ -769,3 +772,201 @@ def geocode_search(
     results = query_photon(upstream, q_norm, lat, lon, limit)
     _CACHE.put(key, limit, results)
     return {"results": results[:limit]}
+
+
+# --- reverse -----------------------------------------------------------------
+#
+# GET /api/v1/geocode/reverse?lat=&lng= — "what is at this point?", for the
+# web app's saved places (home / work / favourites) and parking reports. These
+# used to go from the rider's browser straight to nominatim.openstreetmap.org,
+# which handed a third party the rider's home coordinates and IP. They now go
+# to the same Photon sidecar as the search above, plus Denver's address points
+# for the house number OSM does not have.
+#
+# PRIVACY RULES, all load-bearing:
+#   * nothing here logs the coordinate — not the request, not the upstream
+#     URL, not a failure (src/log_redaction.py covers the access log, the
+#     httpx INFO line and Sentry);
+#   * no cache: the search cache above keys on rider TEXT, a reverse cache
+#     would be an in-memory list of where riders live;
+#   * `Cache-Control: no-store` on every response, errors included.
+
+#: Per-IP rate limit (limit, window_seconds). Bucket `geocode_reverse_ip`.
+#: A reverse lookup is one per deliberate action — saving a place, dropping
+#: or nudging a parking-report pin — not one per keystroke like the search,
+#: so a person never gets near one a second. 60/min leaves room for a rider
+#: dragging a pin with a debounced client and for several riders behind one
+#: carrier NAT, while capping a scraper walking a grid at 86k points/day per
+#: IP. It is 3x the search bucket because a reverse request cannot be
+#: answered from cache and costs the sidecar the same either way.
+_LIMIT_REVERSE_PER_IP = (60, 60)
+
+#: How many nearest features to ask Photon for. It returns them nearest
+#: first; asking for a few lets `pick_reverse_feature` skip a bus stop or
+#: bench that happens to be closer than the address or street it stands on.
+REVERSE_FETCH_LIMIT = 5
+
+#: (west, south, east, north) of the Photon index: the Colorado extract
+#: (docs/reference/build_photon_index.md), state lines -109.06/36.99/-102.04/
+#: 41.00 plus a 0.05 deg margin. A point outside it cannot match anything, so
+#: it is refused before it reaches the sidecar.
+COLORADO_BBOX = (-109.11, 36.94, -101.99, 41.05)
+
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+def in_index_area(lat: float, lng: float) -> bool:
+    w, s, e, n = COLORADO_BBOX
+    return s <= lat <= n and w <= lng <= e
+
+
+def pick_reverse_feature(features: list[Any]) -> dict[str, Any] | None:
+    """The feature to describe the point with: the nearest one that is not
+    on-street furniture, else the nearest at all. None when Photon found
+    nothing usable."""
+    usable = []
+    for feat in features:
+        props = feat.get("properties") if isinstance(feat, dict) else None
+        if isinstance(props, dict) and props:
+            usable.append(props)
+    for props in usable:
+        if not is_on_street_furniture(_clean(props.get("osm_key")).lower(),
+                                      _clean(props.get("osm_value")).lower()):
+            return props
+    return usable[0] if usable else None
+
+
+def reverse_fields(props: dict[str, Any],
+                   address_point: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Photon properties (+ an optional Denver address point) -> the
+    response body. Missing fields are null, never "".
+
+    The house number and its street come from Denver's address points when
+    Photon has no house number (most of Denver: OSM never mapped them), so
+    the pair always describes one real door rather than mixing sources."""
+    def opt(key: str) -> str | None:
+        return _clean(props.get(key)) or None
+
+    housenumber, street = opt("housenumber"), opt("street")
+    if not housenumber and address_point:
+        housenumber = address_point.get("housenumber") or None
+        street = address_point.get("street") or street
+    # A street feature names itself: Photon puts "Bannock Street" in `name`
+    # and leaves `street` empty.
+    name = opt("name")
+    if not street and name and kind_for(props) == "street":
+        street = name
+    # Photon 1.x emits the neighbourhood as `district` and sometimes as
+    # `locality`; both mean "the part of town", which is what the label wants.
+    locality = opt("locality") or opt("district")
+    fields = {
+        "name": name,
+        "housenumber": housenumber,
+        "street": street,
+        "locality": locality,
+        "city": opt("city"),
+        "postcode": opt("postcode"),
+    }
+    return {"address": reverse_label(fields), **fields}
+
+
+def reverse_label(f: dict[str, Any]) -> str | None:
+    """One short human line, in the same comma-joined "most specific first"
+    style as `label_for` — but leading with the street address, because a
+    saved place or a parking pin is a place on a street, and stopping at the
+    neighbourhood, because every point the client sends is in the metro:
+
+        "1550 Bannock Street"             a house number and street
+        "Bannock Street, Golden Triangle" a street, qualified by its part of town
+        "Civic Center Park, Denver"       a named place with no street
+        "Golden Triangle, Denver"         nothing finer than a locality
+    """
+    housenumber, street, name = f.get("housenumber"), f.get("street"), f.get("name")
+    area = f.get("locality") or f.get("city")
+    if housenumber and street:
+        return f"{housenumber} {street}"
+    parts: list[str] = []
+    if street:
+        parts.append(street)
+    elif name:
+        parts.append(name)
+    for candidate in (area, f.get("city")):
+        if candidate and candidate not in parts:
+            parts.append(candidate)
+            if len(parts) >= 2:
+                break
+    if not parts and f.get("postcode"):
+        parts.append(f["postcode"])
+    return ", ".join(parts) or None
+
+
+def _fetch_reverse(upstream: str, lat: float, lng: float) -> Any:
+    """One GET against Photon's /reverse, or the 503. Logs NO coordinates:
+    not the URL, not the exception text (httpx can embed the URL in it)."""
+    url = f"{upstream.rstrip('/')}/reverse"
+    params = {"lat": lat, "lon": lng, "limit": REVERSE_FETCH_LIMIT, "lang": "en"}
+    try:
+        resp = httpx.get(url, params=params, timeout=SIDECAR_TIMEOUT_SECONDS)
+    except httpx.HTTPError as exc:
+        log.warning("reverse geocoder unreachable (%s)", type(exc).__name__)
+        raise HTTPException(503, {"error": "geocoder_unavailable"}, headers=_NO_STORE) from exc
+    if resp.status_code >= 400:
+        log.error("reverse geocoder returned HTTP %d", resp.status_code)
+        raise HTTPException(503, {"error": "geocoder_unavailable"}, headers=_NO_STORE)
+    try:
+        return resp.json()
+    except ValueError as exc:
+        log.error("reverse geocoder returned non-JSON")
+        raise HTTPException(503, {"error": "geocoder_unavailable"}, headers=_NO_STORE) from exc
+
+
+@router.get("/api/v1/geocode/reverse")
+def geocode_reverse(
+    request: Request,
+    response: Response,
+    lat: Annotated[float, Query(ge=-90, le=90, description="Latitude (WGS84)")],
+    lng: Annotated[float, Query(ge=-180, le=180, description="Longitude (WGS84)")],
+) -> dict[str, Any]:
+    """Public reverse geocode, Colorado-scoped.
+
+    Public because parking reports work signed out. The per-IP bucket is the
+    whole abuse control, as for the search.
+    """
+    if not (math.isfinite(lat) and math.isfinite(lng)):
+        raise HTTPException(422, {"error": "bad_point",
+                                  "detail": "lat and lng must be finite numbers"},
+                            headers=_NO_STORE)
+    if not in_index_area(lat, lng):
+        raise HTTPException(400, {"error": "outside_coverage",
+                                  "detail": "reverse geocoding covers Colorado only"},
+                            headers=_NO_STORE)
+
+    upstream, enabled = geocode_settings()
+    if not enabled:
+        log.info("geocode reverse refused: geocoding disabled in config")
+        raise HTTPException(503, {"error": "geocoder_unavailable"}, headers=_NO_STORE)
+
+    ip = real_client_ip(request)
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                enforce(cur, bucket="geocode_reverse_ip", key=ip or "?",
+                        limit=_LIMIT_REVERSE_PER_IP[0],
+                        window_seconds=_LIMIT_REVERSE_PER_IP[1])
+            conn.commit()
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **_NO_STORE}
+        raise
+
+    props = pick_reverse_feature(_features(_fetch_reverse(upstream, lat, lng)))
+    address_point = None
+    if not (props and _clean(props.get("housenumber"))):
+        address_point = addresses.nearest(lat, lng)
+    if props is None and address_point is None:
+        raise HTTPException(404, {"error": "not_found"}, headers=_NO_STORE)
+
+    body = reverse_fields(props or {}, address_point)
+    if body["address"] is None:
+        raise HTTPException(404, {"error": "not_found"}, headers=_NO_STORE)
+    response.headers.update(_NO_STORE)
+    return body

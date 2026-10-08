@@ -1777,6 +1777,67 @@ normalized query plus the bias rounded to 2 dp), so a keystroke-debounced
 field costs the sidecar nothing after the first hit. Cached responses still
 count against the rate limit.
 
+### `GET /api/v1/geocode/reverse`
+
+"What is at this point?" — for saved places (home, work, favourites) and
+parking reports. Served by the same Photon sidecar (`/reverse`), plus
+Denver's own address points for the house number OSM lacks; the browser
+never contacts a third-party geocoder.
+
+Public, no auth (parking reports work signed out). Rate limited to **60
+requests/minute per IP** (bucket `geocode_reverse_ip`); a 429 carries
+`Retry-After`. Every response, errors included, carries
+`Cache-Control: no-store`, and nothing is cached server-side.
+
+| Param | Required | Description |
+|---|---|---|
+| `lat` | yes | Latitude, −90…90. Must be inside the Photon index (Colorado). |
+| `lng` | yes | Longitude, −180…180. Note the spelling: `lng`, not `lon`. |
+
+**Response 200**
+
+```json
+{
+  "address": "1550 Bannock Street",
+  "name": null,
+  "housenumber": "1550",
+  "street": "Bannock Street",
+  "locality": "Golden Triangle",
+  "city": "Denver",
+  "postcode": "80202"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `address` | string | One short human line. Render as-is. Most specific first: `"1550 Bannock Street"` (house number + street), `"Bannock Street, Golden Triangle"` (street + part of town), `"Civic Center Park, Denver"` (a named place with no street), `"Golden Triangle, Denver"`. Never null on a 200. |
+| `name` | string \| null | The matched feature's own name (a park, a business, a street). |
+| `housenumber` | string \| null | From Photon when OSM has it, otherwise from the nearest Denver address point within 40 m — in which case `street` is that point's street too (city style, e.g. `"Bannock St"`), so the pair always names one real door. |
+| `street` | string \| null | |
+| `locality` | string \| null | Neighbourhood / part of town (Photon's `locality`, else `district`). |
+| `city` | string \| null | |
+| `postcode` | string \| null | |
+
+The nearest feature wins, except that on-street furniture (bus stops,
+platforms, crossings) is skipped in favour of the next-nearest real address,
+street or place when there is one.
+
+**Errors.** Structured `detail`, like the search:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| 400 | `outside_coverage` | The point is outside Colorado (the index's extent). Do not retry. |
+| 404 | `not_found` | Nothing describable near the point. Let the rider type a label. |
+| 422 | `bad_point` / FastAPI's own | `lat`/`lng` missing, not a number, non-finite, or out of range. |
+| 429 | — | Bucket full; `Retry-After` is seconds. |
+| 503 | `geocoder_unavailable` | The sidecar is down, timed out (3 s), returned an error, **or** geocoding is disabled in config. |
+
+**Privacy.** The coordinate is never logged: the handler logs none, and
+uvicorn's access line for this route, httpx's line for the upstream Photon
+call and Sentry events are all rewritten to `lat=[redacted]&lng=[redacted]`
+(`src/log_redaction.py`). The rate limiter stores the bucket, the IP and a
+timestamp — not the point.
+
 ---
 
 ## Accounts & sessions
@@ -3191,8 +3252,8 @@ waypoints makes it accurate.
 | `POST /api/v1/tracked-rides/{id}/track` | Bulk track donation + verification. See below. |
 | `POST /api/v1/tracked-rides/{id}/waypoints` | **Deprecated** — see below. |
 | `GET /api/v1/tracked-rides/{id}/waypoints?limit=&after=&before=` | → `{ count, waypoints: [ { id, waypoint_at, lat, lon, metadata, created_at } ] }`, oldest first. Page **forward** with `after` (the `waypoint_at` of the last waypoint you received) and backward with `before` (the last `limit` waypoints older than the cursor). Both cursors need an explicit UTC offset. Identical contract to `GET /api/v1/rides/{id}/waypoints`. |
-| `DELETE /api/v1/tracked-rides/{id}` | **Immediate hard delete**, cascades to waypoints, the watch list, and (if not yet de-identified) any track donation. → `{ "deleted": true }` |
-| `DELETE /api/v1/tracked-rides` | **Immediate hard delete of every tracked ride you own.** → `{ "deleted_count": n }` |
+| `DELETE /api/v1/tracked-rides/{id}` | **Immediate hard delete**, cascades to waypoints, the watch list, transaction screenshots, and (if not yet de-identified) any track donation. The screenshots' image files in R2 are deleted right after the commit (best-effort: a storage failure never fails the delete, and anything missed is removed by the weekly `sweep_orphan_images`). → `{ "deleted": true }` |
+| `DELETE /api/v1/tracked-rides` | **Immediate hard delete of every tracked ride you own**, screenshot images included (as above). → `{ "deleted_count": n }` |
 
 Privacy commitment, stated here on purpose: route polylines are the most
 sensitive data this system holds. There is no soft-delete, no tombstone,
