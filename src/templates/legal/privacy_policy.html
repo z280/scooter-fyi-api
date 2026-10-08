@@ -75,7 +75,11 @@ our database, in backups and in any copy of either. We hold the key, so we
 this is encryption at rest, not end-to-end, and we would rather say so than
 imply a protection we do not provide. We never read a saved place into
 analytics, into any aggregate, or into anyone else&rsquo;s view of the
-app.<br><br><strong>Older copies still in plain text.</strong> Before 8
+app. To show a saved place&rsquo;s street address, the app sends its
+coordinates to our own server, which looks the address up in a geocoder we
+run ourselves (see &ldquo;Technical&rdquo; below). They are not sent directly
+to an outside geocoding service; like every request, they pass through our
+host, Cloudflare (see &sect;3).<br><br><strong>Older copies still in plain text.</strong> Before 8
 October 2026 an account could hold a home and a work location, and a list
 of favourites, in ordinary (unencrypted) fields. Those copies are still in
 our database for accounts that had them: when you next open your profile
@@ -155,9 +159,7 @@ the scooter (for scooter-tied awards), and a location for it.
 photographed a scooter; where a ride started or ended; and where a dibs
 referral or stand-down was made. The profile-completion award is the
 exception: it stores only the centre of the map area (about half a square
-kilometre) around your saved Home or Work, not the place itself. Awards
-recorded before 8 October 2026 may still hold the exact location of your
-saved Home or Work; we are removing those</td>
+kilometre) around your saved Home or Work, not the place itself</td>
 <td>Points and the area leaderboards</td></tr>
 <tr><td>Scooter photos (public)</td><td>Photos of a scooter you upload (up
 to three per scooter), with optional coordinates of where you took it.
@@ -201,11 +203,25 @@ whether we read it as an opt-out, an opt-back-in, or something else)</td>
 <td>Sending sign-in codes and service texts; honouring opt-outs</td></tr>
 <tr><td>Technical</td><td>IP address on requests. Our web server&rsquo;s
 access log records each request&rsquo;s address (URL) together with your IP
-address. Route, walking-route and place-search requests put
-<strong>your current location</strong> (and anything you typed into the
-search) in that address, so the log holds your location next to your IP.
-The rate-limit log stores your IP address, email address or phone number
-as the thing being counted</td><td>Rate limiting, abuse prevention,
+address. Route requests (<code>/api/v1/route</code> and
+<code>/api/v1/route/options</code>), walking-route requests
+(<code>/api/v1/route/walk</code>) and place-search requests
+(<code>/api/v1/geocode/search</code>) put <strong>your current
+location</strong> (and anything you typed into the search) in that address,
+and these are <strong>not</strong> redacted, so the log holds your location
+next to your IP. When a place search is passed on to our own geocoder, our
+server&rsquo;s HTTP client log also records what you typed and the search
+location rounded to about 1&nbsp;km (without your IP).<br><br>Two kinds of
+request are redacted. To find the street address of a saved place or a
+parking-report location, the app sends those coordinates to our own server
+(<code>/api/v1/geocode/reverse</code>), which looks them up in a geocoder we
+run ourselves; and a plate lookup (<code>/api/v1/vehicles/resolve</code>)
+sends a scooter&rsquo;s plate. For those two routes the coordinates and the
+plate are replaced with <code>[redacted]</code> in our access log, in our
+HTTP client log (including our server&rsquo;s own call to the geocoder) and
+in error reports sent to Sentry. The rest of the request line, and your IP,
+are still logged.<br><br>The rate-limit log stores your IP address, email
+address or phone number as the thing being counted</td><td>Rate limiting, abuse prevention,
 debugging</td></tr>
 <tr><td>Usage analytics</td><td>First-party, cookieless usage events from
 the web app: which panel or mode was opened, which wizard screen was
@@ -225,17 +241,23 @@ anyone. Neither the IP nor the user-agent is stored with events</td>
 we can improve the app. We run this ourselves — no third-party analytics
 service ever sees it. You can switch it off in the About panel</td></tr>
 </table>
-<p>We do not use tracking cookies or cross-site advertising pixels. Your
+<p>We do not set tracking cookies or use cross-site advertising pixels. Your
 session token is stored in your browser's local storage, not a
 third-party cookie (admin sign-in, which uses GitHub, sets a first-party
 session cookie). Our usage analytics are first-party and cookieless: no
 analytics cookies, no third-party analytics scripts, and no persistent
 device identifier of any kind. The site as a whole is not free of
-third-party scripts: if you are not signed in, it loads Google&rsquo;s
-sign-in script (see &sect;3).</p>
+third-party scripts: our host, Cloudflare, adds its own cookieless Web
+Analytics script to every page, and Google&rsquo;s sign-in script loads
+when you open a sign-in screen that offers Google (see &sect;3). The
+&ldquo;Allow private analytics&rdquo; switch controls only our own
+analytics, not Cloudflare&rsquo;s.</p>
 
 <h3>Google user data</h3>
-<p>When you sign in with Google, Google sends us an ID token containing your
+<p>Google&rsquo;s sign-in script loads only when you open a sign-in screen
+that offers Google (the Account panel&rsquo;s sign-in, or the ride
+wizard&rsquo;s sign-in screen). There is no automatic Google sign-in prompt
+when a page loads. When you sign in with Google, Google sends us an ID token containing your
 email address, whether it is verified, your name, your profile picture and
 a Google account ID. We use only the email address and the verified flag,
 to create or find your account; we do not store your name, picture or
@@ -297,31 +319,38 @@ carrier</td><td>Your phone number and the message text. Our messaging
 service keeps a log of every message it sends (recipient and text)
 indefinitely. Replying STOP opts you out of every site that shares that
 sending number</td></tr>
-<tr><td>Cloudflare</td><td>Hosting, CDN, tunnel, map tiles, and object
+<tr><td>Cloudflare</td><td>Hosting, CDN, tunnel, map tiles, object
 storage (receipt images, model-report photos, ride screenshots, scooter
-photos)</td><td>Network-level request metadata; the stored images</td></tr>
+photos), and Web Analytics (see below)</td><td>Network-level request
+metadata; the stored images; page views and performance reported by its
+Web Analytics script</td></tr>
 <tr><td>OpenRouter (not yet active)</td><td>Reading the figures off an
 uploaded receipt, if we start doing that on our servers (see &sect;2)</td>
 <td>Nothing today. If switched on: the receipt image you uploaded, or the
 text read from it &mdash; not your email, not your account, not your ride
 history</td></tr>
 <tr><td>Sentry</td><td>Error monitoring</td><td>Application error
-reports, which may incidentally include request metadata</td></tr>
+reports, which may incidentally include request metadata (with the
+plate and reverse-geocode coordinates redacted, see &sect;1
+&ldquo;Technical&rdquo;)</td></tr>
 </table>
 <p><strong>Contacted directly by your browser.</strong> Some services are
 reached by your browser rather than by us, so they see your IP address and
 browser details under their own privacy policies:</p>
 <table>
 <tr><th>Service</th><th>When</th><th>What they see</th></tr>
+<tr><td>Cloudflare Web Analytics</td><td>A cookieless script our host
+adds to every page (<code>static.cloudflareinsights.com</code>); it reports
+page views and performance to Cloudflare. Cloudflare&rsquo;s privacy policy
+applies</td><td>Your IP address, browser information, and the pages you
+view</td></tr>
 <tr><td>Google Identity Services</td><td>Google&rsquo;s sign-in script loads
-for every visitor who is not signed in, and Google may show its One Tap
-prompt</td><td>Your IP address and browser information; Google may read or
-set its own cookies, even if you never sign in. Google gives us your email
-only if you choose to sign in with Google</td></tr>
-<tr><td>OpenStreetMap Foundation (Nominatim)</td><td>Turning the
-coordinates of your saved home, work and places, or of a parking-report
-location, into a street address</td><td>Those coordinates and your IP
-address</td></tr>
+only when you open a sign-in screen that offers Google: the Account
+panel&rsquo;s sign-in, or the ride wizard&rsquo;s sign-in screen. There is
+no automatic prompt on page load</td><td>Your IP address and browser
+information; once loaded, Google may read or set its own cookies, even if
+you do not go on to sign in. Google gives us your email only if you choose
+to sign in with Google</td></tr>
 <tr><td>We See You Veo (weseeyouveo.com)</td><td>A separate rider-advocacy
 site run by scooter.fyi&rsquo;s founder. Its logo loads on every page and
 its story options load when you open the story screen. Your story is sent
@@ -362,8 +391,10 @@ next time the same address is rate-checked for the same action. If that
 never happens, the entry is never deleted.</td></tr>
 <tr><td>Server access logs</td><td>No fixed limit</td><td>Request
 addresses with IP addresses &mdash; including the current location in
-route and place-search requests (see &sect;1). Kept until the server
-container is replaced.</td></tr>
+route, walking-route and place-search requests, which are not redacted;
+plate lookups and reverse-geocode coordinates are redacted (see &sect;1
+&ldquo;Technical&rdquo;). Kept until the server container is
+replaced.</td></tr>
 <tr><td>Text messages</td><td>Indefinite</td><td>Our messaging
 service&rsquo;s log of texts sent (number and text) and the replies we
 receive (number, text, and how we read it) are kept with no expiry, so
@@ -371,7 +402,8 @@ that an opt-out keeps being honoured.</td></tr>
 <tr><td>Receipt images</td><td>18 months</td><td>Stored in a private
 bucket, fully re-encoded on upload to strip EXIF/GPS/camera metadata.
 Deleted automatically after 18 months; the report record itself is kept
-(without the image) for the audit history. For one day in October 2026 a
+(without the image) for the audit history. Deleting your account deletes
+them sooner (see &ldquo;Accounts&rdquo;). For one day in October 2026 a
 claim also required a screenshot of your Veo plan; we stopped asking, and
 any plan screenshot already stored is deleted on the same 18-month
 clock as the receipt it came with.</td></tr>
@@ -383,10 +415,14 @@ retention, never reused for analytics. If you donated that ride's track
 donation record, but only until our hourly de-identification sweep runs
 (within about 29 hours of donation) — after that, the donation record has
 already had its account link removed and there is nothing left for a
-ride delete to reach. Ride screenshots are kept for 18 months (below).</td></tr>
-<tr><td>Ride screenshots</td><td>18 months</td><td>Stored in a private
-bucket with camera and location metadata stripped, visible only to you.
-Images are deleted automatically after 18 months.</td></tr>
+ride delete to reach. Deleting a Ride Mode ride also deletes its screenshots
+(below).</td></tr>
+<tr><td>Ride screenshots</td><td>18 months, or until you delete the
+ride</td><td>Stored in a private bucket with camera and location metadata
+stripped, visible only to you. Images are deleted automatically after 18
+months. Deleting the ride (or all your rides) deletes its screenshots from
+storage straight away; if that storage delete fails, the weekly sweep
+described under &ldquo;Orphaned images&rdquo; removes them.</td></tr>
 <tr><td>Donated ride tracks</td><td>Account link removed within about 29
 hours; the track itself kept indefinitely</td><td>If you opt in to "Improve battery modeling" or
 "Navigation Improvement" during a ride and donate your saved track
@@ -428,8 +464,7 @@ in a public street. Every award earned somewhere <em>you</em> were
 &mdash; completing your profile, anything credited at a ride&rsquo;s start
 or end, and referral and stand-down awards &mdash; stores only the centre
 of the map area, so the row records the neighbourhood and never an
-address. Rider-located awards recorded before 2026-10-08 may still hold an
-exact location; we are removing those. These rows are the leaderboard record
+address. These rows are the leaderboard record
 itself: the area leaderboard is computed directly from them, so unlike
 donated tracks above they are never de-identified — only deleting your
 account removes them. Whether they appear on the public leaderboard is
@@ -462,7 +497,9 @@ the vehicle is seen.</td></tr>
 a vehicle-model correction. Same private bucket, same full re-encode that
 strips EXIF/GPS/camera metadata, and the same 18-month deletion job as
 receipt images — a photo of a scooter is a photo of wherever you were
-standing. The correction itself is kept without the image.</td></tr>
+standing. The correction itself is kept without the image. Deleting your
+account deletes the photo too; the correction stays, without the photo and
+without the link to your account.</td></tr>
 <tr><td>Reports and feedback (device / model / feature / route / other)</td><td>Indefinite,
 aggregated</td>
 <td>Kept as the audit evidence base and the vehicle-catalog history. This
@@ -479,9 +516,13 @@ your account</td><td>These require an account, and are deleted with it
 which Equity Area the ride ended in, and the IP address and user-agent the
 report arrived with.</td></tr>
 <tr><td>Scooter photos (public)</td><td>Indefinite</td><td>Kept as
-community reference material until removed. Deleting your account removes
-them from the app; the stored image file itself may not be deleted at the
-same time.</td></tr>
+community reference material until removed. Deleting your account deletes
+them, image files included. If a photo is removed some other way, its
+image file is deleted by the weekly sweep below.</td></tr>
+<tr><td>Orphaned images</td><td>Deleted weekly</td><td>A weekly job deletes
+any stored image (receipt images, model-report photos, ride screenshots,
+scooter photos) that no longer belongs to any record and is more than 7
+days old.</td></tr>
 <tr><td>Dibs</td><td>Indefinite</td><td>There is no deletion job for dibs:
 the claim and its certificate are kept after the dibs expires.</td></tr>
 <tr><td>Referrals and stand-downs</td><td>Indefinite</td><td>The email or
@@ -490,8 +531,13 @@ expiry. Email us to have contact details about you removed.</td></tr>
 <tr><td>Accounts</td><td>Until you ask us to delete it</td><td>Email us
 at the address below to delete your account. Deleting it deletes your
 saved places (including any older plain-text copies), preferences, ride
-history, points, receipt claims and missed-discount reports with
-it.</td></tr>
+history, points, receipt claims and missed-discount reports with it, and
+every image you uploaded: receipt images, model-report photos, ride
+screenshots and scooter photos are deleted from storage at the same time.
+Reports and feedback you filed stay, without the link to your account (see
+above). It does not reach our messaging service&rsquo;s log of texts, or a
+referral someone else made with your contact details; email us to have
+those referral details removed.</td></tr>
 <tr><td>Usage analytics (raw events)</td><td>90 days</td><td>Raw
 first-party usage events (see §1) are pruned by a daily job after 90
 days. The daily-rotating visitor-hash secret is destroyed after 2 days,
@@ -521,7 +567,9 @@ Community has the two visibility switches (both on by default).</li>
 back in). This also stops texts from our other services that share the
 same sending number.</li>
 <li><strong>Delete your account:</strong> email us (below); we don't yet
-have self-serve account deletion.</li>
+have self-serve account deletion. We delete the account and its data,
+including every image you uploaded, as described under
+&ldquo;Accounts&rdquo; in &sect;4.</li>
 <li><strong>Opt out of usage analytics:</strong> the "Allow private
 analytics" switch in the About Scooter.fyi panel turns off all
 usage-event collection for that browser. The choice is stored on your device and works whether or
