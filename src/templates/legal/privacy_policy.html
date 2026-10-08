@@ -44,33 +44,55 @@ disagree, the API reflects what the code actually does.</p>
 <h2>1. Information we collect</h2>
 <p><strong>You don't need an account to use the map.</strong> The public
 map, device data, and compliance metrics are available anonymously. We
-collect personal information only when you choose to create an account,
-submit a report, or subscribe.</p>
+collect personal information when you create an account, use features
+that need one (ride tracking, points, dibs, photos, receipt claims), or
+send us a report. Like any website, our server also sees your IP address
+on every request (see "Technical" below).</p>
 <table>
 <tr><th>Category</th><th>What we collect</th><th>Why</th></tr>
-<tr><td>Account</td><td>Email address (via Google Sign-In or a one-time
-emailed link), rate-plan preference, theme</td>
+<tr><td>Account</td><td>Your email address and/or mobile phone number (at
+least one); how you signed in (Google, an emailed link, an emailed code, or
+a texted code); whether your phone number is verified and whether you have
+opted out of texts; rate-plan preference and theme; your public
+username (an adjective + emoji), display name, and royalty title and colour
+choices; when you last signed in; and two
+visibility switches &mdash; show my public username, and appear on
+leaderboards &mdash; which are <strong>on by default</strong> (you can turn
+them off in Account &rarr; Community)</td>
 <td>Sign-in, personalizing the cost ticker, remembering your
-preferences</td></tr>
-<tr><td>Saved places</td><td>Places you choose to save &mdash; Home, Work,
-and any others you name &mdash; as a label, an emoji and a coordinate.
+preferences, showing your public username and standing</td></tr>
+<tr><td>Sign-in codes and links</td><td>For an emailed link or code: your
+email address, a hashed copy of the link or code, its expiry, and the IP
+address that asked for it. For a texted code: your phone number, a hashed
+copy of the code, its expiry, and the requesting IP address</td>
+<td>Letting you sign in without a password; limiting abuse</td></tr>
+<tr><td>Saved places</td><td>When you are signed in, the places you save
+&mdash; Home, Work, and any others you name &mdash; as a label, an emoji
+and a coordinate, copied from your device so they survive a new phone.
 <strong>Encrypted before we store them</strong>, so they are unreadable in
 our database, in backups and in any copy of either. We hold the key, so we
 <em>can</em> decrypt them to hand them back to your other devices &mdash;
 this is encryption at rest, not end-to-end, and we would rather say so than
 imply a protection we do not provide. We never read a saved place into
 analytics, into any aggregate, or into anyone else&rsquo;s view of the
-app.</td>
+app.<br><br><strong>Older copies still in plain text.</strong> Before 8
+October 2026 an account could hold a home and a work location, and a list
+of favourites, in ordinary (unencrypted) fields. Those copies are still in
+our database for accounts that had them: when you next open your profile
+they are copied into the encrypted list, but the plain-text home or work
+location is cleared only if you remove Home or Work. A later update will
+delete those fields for everyone</td>
 <td>So the places you go most are one tap away, and survive a new
-phone</td></tr>
+phone; Home or Work also counts toward the profile-completion points
+award</td></tr>
 <tr><td>My Scooters (retired)</td><td>Retired on 6 October 2026: nothing new can
 be kept, and kept vehicles are no longer shown or tracked. What was kept before
 then: which vehicle, your nickname for it, when you last scanned it at the kerb,
 and whether you wanted telling when it came free. <strong>Never</strong> where
 you were standing.</td>
-<td>Was: finding a scooter you already knew and liked</td>
-<td>Until you delete it: email us and we will remove it, or delete your
-account. (The API also lists and deletes these for your signed-in session.)</td></tr>
+<td>Was: finding a scooter you already knew and liked. Kept until you
+delete it: email us and we will remove it, or delete your account. (The API
+also lists and deletes these for your signed-in session.)</td></tr>
 <tr><td>Preferences</td><td>Saved map settings,
 ride-mode "Usuals" (saved ride-option presets), and ride specs (your saved
 &ldquo;ideal scooter&rdquo;: which models, features, battery and quality you
@@ -83,15 +105,24 @@ a Usual sets up a ride you start, a ride spec decides which scooters we
 offer you</td></tr>
 <tr><td>Sessions</td><td>A hashed bearer token, issuing IP address, user
 agent</td><td>Keeping you signed in; detecting abuse</td></tr>
-<tr><td>Reports</td><td>Device failure reports, missed-discount reports,
-and vehicle-model corrections. Alongside the report itself: optional
-receipt images, optional model photos, the free-text description you
-write, optional GPS coordinates you provide, and the IP address and
-browser user-agent string the report arrived with</td>
+<tr><td>Reports and feedback</td><td>Device failure reports, vehicle-model
+corrections, device feature and condition reports, route feedback (free
+text up to 2,000 characters), negative reports and quality feedback,
+scooter recommendations, flags on another rider&rsquo;s photo (with any
+comment you add), and QR-code scans (we note the first and the latest
+account to scan each scooter&rsquo;s code). Alongside the report itself:
+optional model photos, the free-text description you write, the scooter&rsquo;s
+plate or QR value, optional GPS coordinates you provide, and the IP address
+and browser user-agent string the report arrived with</td>
 <td>Building the public compliance/reliability dataset; correcting the
-vehicle catalog. IP and user-agent are kept to detect abuse of the report
-forms, which accept anonymous submissions</td></tr>
-<tr><td>Receipt claims</td><td>When you tell us a ride was charged at the
+vehicle catalog; improving routes. IP and user-agent are kept to detect
+abuse of the report forms, several of which accept anonymous
+submissions</td></tr>
+<tr><td>Missed-discount reports</td><td>The ride details you report and
+which Equity Area the ride ended in, plus the IP address and user-agent it
+arrived with. These require an account</td>
+<td>Building the public compliance dataset</td></tr>
+<tr><td>Receipt claims</td><td>Requires an account. When you tell us a ride was charged at the
 wrong rate: the scooter code as printed, the trip minutes, the cost before
 and with tax, the charge date, and <strong>the rate plan you say you were
 on</strong>. Optionally an approximate start time, and pins for where you
@@ -102,25 +133,76 @@ the public vehicle feed instead</td>
 <td>Checking the charge against the rate the city's contract requires in
 an Equity Area. Public surfaces never carry the scooter code itself (only
 a one-way identifier of it) and round any location to about 100&nbsp;m</td></tr>
-<tr><td>Ride history</td><td>Ride start/end time, duration, distance,
-estimated cost, route polyline, any GPS waypoints you upload, the ride-mode
-options you chose for that ride, the ride minutes and rate-plan tier you
-report at the end, and a one-time signing key we issue to your device for
-that ride so your own recording can be verified later</td>
-<td>Your own ride log — opt-in, and deletable by you at any
-time</td></tr>
-<tr><td>Technical</td><td>IP address on requests, standard server
-logs</td><td>Rate limiting, abuse prevention, debugging</td></tr>
+<tr><td>Ride history</td><td>A ride record is created
+<strong>automatically</strong> for any ride you start in Ride Mode while
+signed in (start a ride signed out and none is created). It holds the ride
+start and end location, start/end time, duration, distance, estimated
+cost, battery readings, what the operator&rsquo;s public vehicle feed showed
+for that scooter during the ride, any GPS waypoints you upload, the
+ride-mode options you chose for that ride, the ride minutes and rate-plan
+tier you report at the end, and a one-time signing key we issue to your
+device for that ride so your own recording can be verified later. Rides you
+log on vehicles that are not in the operator&rsquo;s feed (your own scooter,
+another company&rsquo;s) are kept the same way</td>
+<td>Your own ride log, deletable by you at any time</td></tr>
+<tr><td>Ride screenshots</td><td>Up to two screenshots per ride (the
+operator&rsquo;s trip overview and receipt), if you upload them</td>
+<td>Checking what you were charged for that ride. Visible only to
+you</td></tr>
+<tr><td>Points</td><td>Each points award, with the action, the point value,
+the scooter (for scooter-tied awards), and a location for it.
+<strong>Most locations are exact</strong>: where you reported, scanned or
+photographed a scooter; where a ride started or ended; and where a dibs
+referral or stand-down was made. The profile-completion award is the
+exception: it stores only the centre of the map area (about half a square
+kilometre) around your saved Home or Work, not the place itself. Awards
+recorded before 8 October 2026 may still hold the exact location of your
+saved Home or Work; we are removing those</td>
+<td>Points and the area leaderboards</td></tr>
+<tr><td>Scooter photos (public)</td><td>Photos of a scooter you upload (up
+to three per scooter), with optional coordinates of where you took it.
+Camera and location metadata are stripped from the image on upload</td>
+<td>A shared reference of what each scooter looks like. <strong>These are
+public content:</strong> other signed-in riders see them, labelled with
+your public username if you show it, and anyone with a photo&rsquo;s link
+can open it while the link works</td></tr>
+<tr><td>Dibs (public)</td><td>When you call dibs: your display name (or
+public username), the scooter&rsquo;s name, plate and type, where you were,
+and the time</td>
+<td>The dibs certificate. A live dibs is visible to anyone, including people
+without an account, on the map and on its shareable certificate page; the
+certificate page stays reachable after the dibs expires</td></tr>
+<tr><td>Referrals and stand-downs</td><td>Someone at a dibs certificate may
+give us an email address or phone number &mdash; their own, or someone
+else&rsquo;s &mdash; to refer a new rider or to &ldquo;stand down&rdquo;
+from a scooter. We store that contact with the certificate&rsquo;s location
+and time. A stand-down texts that number a sign-in code</td>
+<td>Paying referral points once the new rider actually rides. If someone
+gave us your contact details and you do not want them kept, email us and we
+will remove them</td></tr>
+<tr><td>Text messages</td><td>The texts we send you (your number and the
+message), and any reply you send back (your number, what you wrote, and
+whether we read it as an opt-out, an opt-back-in, or something else)</td>
+<td>Sending sign-in codes and service texts; honouring opt-outs</td></tr>
+<tr><td>Technical</td><td>IP address on requests. Our web server&rsquo;s
+access log records each request&rsquo;s address (URL) together with your IP
+address. Route, walking-route and place-search requests put
+<strong>your current location</strong> (and anything you typed into the
+search) in that address, so the log holds your location next to your IP.
+The rate-limit log stores your IP address, email address or phone number
+as the thing being counted</td><td>Rate limiting, abuse prevention,
+debugging</td></tr>
 <tr><td>Usage analytics</td><td>First-party, cookieless usage events from
 the web app: which panel or mode was opened, which wizard screen was
 reached, coarse device class (mobile/tablet/desktop), operating-system
-family, viewport size bucket, referrer domain, and — if you arrived via a
-link we published with a campaign tag (utm_campaign) — that campaign
-code, matched against our own fixed list of campaigns and never stored as
-free text. Event names come from
-a fixed allowlist — no free text, no search queries, no coordinates, no
-ride content, and no preference values are ever included. No account id
-is attached, only a signed-in yes/no flag. Distinct visitors are counted
+family, viewport size bucket, referrer domain, theme, a millisecond
+timestamp, and a random per-tab session id (kept in that tab only, so one
+tab&rsquo;s events can be linked to each other). Event names and their
+small details come from a fixed allowlist — no free text, no search
+queries, no coordinates, no ride content, and no saved preference contents
+are ever included; some events note which option of a fixed control was
+picked (for example light or dark, or a filter switched on or off). No
+account id is attached, only a signed-in yes/no flag. Distinct visitors are counted
 with a hash of a daily-rotating secret plus IP and user-agent; the secret
 is destroyed after two days, after which the hash cannot be linked to
 anyone. Neither the IP nor the user-agent is stored with events</td>
@@ -130,9 +212,36 @@ service ever sees it. You can switch it off in the About panel</td></tr>
 </table>
 <p>We do not use tracking cookies or cross-site advertising pixels. Your
 session token is stored in your browser's local storage, not a
-third-party cookie. Our usage analytics are first-party and cookieless:
-no analytics cookies, no third-party scripts, and no persistent device
-identifier of any kind.</p>
+third-party cookie (admin sign-in, which uses GitHub, sets a first-party
+session cookie). Our usage analytics are first-party and cookieless: no
+analytics cookies, no third-party analytics scripts, and no persistent
+device identifier of any kind. The site as a whole is not free of
+third-party scripts: if you are not signed in, it loads Google&rsquo;s
+sign-in script (see &sect;3).</p>
+
+<h3>Google user data</h3>
+<p>When you sign in with Google, Google sends us an ID token containing your
+email address, whether it is verified, your name, your profile picture and
+a Google account ID. We use only the email address and the verified flag,
+to create or find your account; we do not store your name, picture or
+Google account ID. We do not request access to any other Google data, we
+do not use Google user data for advertising, and we do not sell or
+transfer it. It is used only to sign you in. Our use of information
+received from Google APIs complies with the
+<a href="https://developers.google.com/terms/api-services-user-data-policy">Google
+API Services User Data Policy</a>, including the Limited Use requirements.
+You can disconnect scooter.fyi from your Google account at
+<a href="https://myaccount.google.com/connections">myaccount.google.com/connections</a>.</p>
+
+<h3>Kept on your device</h3>
+<p>Some things stay in your browser and never reach us unless noted: your
+session token, settings, saved places (copied to your account, encrypted,
+while you are signed in), recent places, dibs, watched scooters,
+the ride in progress, unsent story drafts, and &mdash; if &ldquo;save
+tracks&rdquo; is on, which it is by default &mdash; recorded ride tracks
+with their signing keys. A track leaves your device only if you choose to
+donate it. You can clear all of this from Account &rarr; Local Data, or by
+clearing this site&rsquo;s data in your browser.</p>
 
 <h2>2. How we use information</h2>
 <ul>
@@ -145,15 +254,11 @@ Aggregate publications never include your identity, IP address, or
 email.</li>
 <li>Detect and prevent abuse (rate limiting, fraudulent reports).</li>
 <li>Respond to support requests.</li>
-<li><strong>Read the figures off an image you upload.</strong> When you
-send us a receipt, we may extract the numbers printed on it &mdash; the
-minutes, the costs, the date &mdash; so a claim can be checked. That
-reading may happen on your own device, or on our servers, and where it
-happens can change as the software improves; we prefer your device and
-fall back to our servers when a receipt cannot be read there. Either way
-it applies <strong>only to an image you chose to upload</strong>. We never
-read anything you did not send us, and we never scan images for anything
-other than the receipt fields named above.</li>
+<li><strong>Reading receipt images: not yet.</strong> We do not currently
+read receipt images automatically &mdash; you type in the minutes and the
+costs yourself. If we start, we will update this policy first. That
+reading may happen on your device or on our servers via OpenRouter, and it
+will apply <strong>only to an image you chose to upload</strong>.</li>
 </ul>
 <p>We do not sell your personal information, and we do not share it with
 third parties for their own marketing purposes.</p>
@@ -164,21 +269,62 @@ each processing data only as needed to perform their function:</p>
 <table>
 <tr><th>Provider</th><th>Purpose</th><th>What they see</th></tr>
 <tr><td>Google (Identity Services)</td><td>Sign-in</td><td>Your Google
-account email, only if you use "Sign in with Google"</td></tr>
-<tr><td>Postmark</td><td>Sending magic-link sign-in emails</td>
+account email and verified flag, only if you use "Sign in with Google"
+(see &ldquo;Google user data&rdquo; in &sect;1)</td></tr>
+<tr><td>Postmark</td><td>Sending sign-in emails (links and
+codes)</td>
 <td>Your email address, transactional email content</td></tr>
-<tr><td>Cloudflare</td><td>Hosting, CDN, tunnel, and private object
-storage (receipt images, model-report photos)</td><td>Network-level
-request metadata; receipt images and model-report photos in a private,
-non-public bucket</td></tr>
-<tr><td>OpenRouter</td><td>Reading the figures off an uploaded receipt,
-when that reading happens on our servers rather than on your
-device</td><td>The receipt image you uploaded, or the text read from it.
-Nothing else &mdash; not your email, not your account, not your ride
-history. Used only for receipt claims, and only when server-side reading
-is switched on</td></tr>
+<tr><td>Our messaging service, an SMS gateway, and your mobile
+carrier</td><td>Sending sign-in codes and service texts. Texts go from our
+own messaging service (shared with our other sites) to a self-hosted SMS
+gateway running on an Android phone, and from there through your mobile
+carrier</td><td>Your phone number and the message text. Our messaging
+service keeps a log of every message it sends (recipient and text)
+indefinitely. Replying STOP opts you out of every site that shares that
+sending number</td></tr>
+<tr><td>Cloudflare</td><td>Hosting, CDN, tunnel, map tiles, and object
+storage (receipt images, model-report photos, ride screenshots, scooter
+photos)</td><td>Network-level request metadata; the stored images</td></tr>
+<tr><td>OpenRouter (not yet active)</td><td>Reading the figures off an
+uploaded receipt, if we start doing that on our servers (see &sect;2)</td>
+<td>Nothing today. If switched on: the receipt image you uploaded, or the
+text read from it &mdash; not your email, not your account, not your ride
+history</td></tr>
 <tr><td>Sentry</td><td>Error monitoring</td><td>Application error
 reports, which may incidentally include request metadata</td></tr>
+</table>
+<p><strong>Contacted directly by your browser.</strong> Some services are
+reached by your browser rather than by us, so they see your IP address and
+browser details under their own privacy policies:</p>
+<table>
+<tr><th>Service</th><th>When</th><th>What they see</th></tr>
+<tr><td>Google Identity Services</td><td>Google&rsquo;s sign-in script loads
+for every visitor who is not signed in, and Google may show its One Tap
+prompt</td><td>Your IP address and browser information; Google may read or
+set its own cookies, even if you never sign in. Google gives us your email
+only if you choose to sign in with Google</td></tr>
+<tr><td>Veo (the scooter operator)</td><td>When location is on, your
+browser fetches Veo&rsquo;s public vehicle feed directly to look up
+plates</td><td>Your IP address and that the request came from
+scooter.fyi. No account or location data is sent</td></tr>
+<tr><td>OpenStreetMap Foundation (Nominatim)</td><td>Turning the
+coordinates of your saved home, work and places, or of a parking-report
+location, into a street address</td><td>Those coordinates and your IP
+address</td></tr>
+<tr><td>We See You Veo (weseeyouveo.com)</td><td>A separate rider-advocacy
+site run by scooter.fyi&rsquo;s founder. Its logo loads on every page and
+its story options load when you open the story screen. Your story is sent
+<strong>only if you tick to send it</strong></td><td>Your IP address; and,
+if you send a story: your words, neighbourhood, time, vehicle model, our
+rating of that scooter, where the story came from, and your email only if
+you turn off &ldquo;anonymous&rdquo;. What you send it is governed by its
+own privacy policy</td></tr>
+<tr><td>sunrise-sunset.org</td><td>Only if you use the sun-sync
+theme</td><td>Your IP address (the request uses fixed Denver
+coordinates, not yours)</td></tr>
+<tr><td>Links you choose to follow</td><td>Opening the Veo app (via its
+Adjust link), Google Maps, or Veo support</td><td>Whatever those services
+collect once you are there</td></tr>
 </table>
 <p>We may also disclose information if required by law, or to protect
 the rights, property, or safety of the Service, our users, or the
@@ -190,10 +336,27 @@ public.</p>
 <tr><td>Sessions</td><td>30 days idle (rider) / 24 hours (admin)</td>
 <td>Bearer tokens are stored hashed (SHA-256). Rider sessions slide 30
 days from last refresh; admin sessions are fixed at 24 hours.
-Revoked/expired rows are pruned after 30 days.</td></tr>
-<tr><td>Magic-link tokens</td><td>15 minutes</td><td>Single-use, stored
-hashed, burned on redemption; unused tokens are pruned within a
-day.</td></tr>
+Revoked and expired rows older than 30 days are deleted when someone
+next refreshes a session.</td></tr>
+<tr><td>Sign-in links and codes</td><td>Links 15 minutes; emailed and
+texted codes 10 minutes</td><td>Single-use, stored hashed, burned on
+redemption. Old rows (with the email or phone and the requesting IP) are
+deleted no sooner than a day after they expire, when the next sign-in
+request is made &mdash; so a row can last longer if sign-ins are
+quiet.</td></tr>
+<tr><td>Rate-limit log</td><td>Until the same address is checked again;
+may be indefinite</td><td>Each entry (your IP address, email address or
+phone number, and the time) is deleted, once it is over 2 days old, the
+next time the same address is rate-checked for the same action. If that
+never happens, the entry is never deleted.</td></tr>
+<tr><td>Server access logs</td><td>No fixed limit</td><td>Request
+addresses with IP addresses &mdash; including the current location in
+route and place-search requests (see &sect;1). Kept until the server
+container is replaced.</td></tr>
+<tr><td>Text messages</td><td>Indefinite</td><td>Our messaging
+service&rsquo;s log of texts sent (number and text) and the replies we
+receive (number, text, and how we read it) are kept with no expiry, so
+that an opt-out keeps being honoured.</td></tr>
 <tr><td>Receipt images</td><td>18 months</td><td>Stored in a private
 bucket, fully re-encoded on upload to strip EXIF/GPS/camera metadata.
 Deleted automatically after 18 months; the report record itself is kept
@@ -207,28 +370,34 @@ is an immediate, permanent hard delete — no soft-delete, no backup
 retention, never reused for analytics. If you donated that ride's track
 (see "Donated ride tracks" below), the delete also cascades to that
 donation record, but only until our hourly de-identification sweep runs
-(within 28 hours of donation) — after that, the donation record has
+(within about 29 hours of donation) — after that, the donation record has
 already had its account link removed and there is nothing left for a
-ride delete to reach.</td></tr>
-<tr><td>Donated ride tracks</td><td>Account link removed within 28
-hours</td><td>If you opt in to "Improve battery modeling" or
+ride delete to reach. Ride screenshots are kept for 18 months (below).</td></tr>
+<tr><td>Ride screenshots</td><td>18 months</td><td>Stored in a private
+bucket with camera and location metadata stripped, visible only to you.
+Images are deleted automatically after 18 months.</td></tr>
+<tr><td>Donated ride tracks</td><td>Account link removed within about 29
+hours; the track itself kept indefinitely</td><td>If you opt in to "Improve battery modeling" or
 "Navigation Improvement" during a ride and donate your saved track
 afterward, we verify it once and store a trip record (start/end points,
 distance, timing) linked to your account. An hourly job removes that
 account link 4 hours after your points for the trip settle, with a hard
-floor of 28 hours after donation even if points never settle — so the
-link never survives past 28 hours, and recorded waypoint timestamps are
-coarsened to the minute at the same time. What's left afterward, with no
-account or ride linkage: the trip's derived battery observation (vehicle
-model, start/end battery percentage, distance, duration), which we keep
-indefinitely to improve range predictions for that vehicle model.</td></tr>
-<tr><td>Ride routes</td><td>Account link removed within 28
+floor of 28 hours after donation even if points never settle. The job
+runs once an hour, so the link is gone within about 29 hours, and recorded
+waypoint timestamps are coarsened to the minute at the same time. What's
+left afterward, with no account or ride linkage, and kept indefinitely:
+<strong>the GPS track itself</strong> (each point&rsquo;s position and
+accuracy, timed to the minute) and the trip's derived battery observation
+(vehicle model, start/end battery percentage, distance, duration), which
+we use to improve range predictions and navigation.</td></tr>
+<tr><td>Ride routes</td><td>Account link removed within about 29
 hours</td><td>When you turn on "Navigation Improvement" before a ride, each
 route you pick on Screen 4 (including a mid-ride reselect) is stored --
 profile, origin/destination, the route geometry, and your distance/
 duration/battery estimates -- linked to your account and, once known, the
 ride. The same hourly sweep that de-identifies donated tracks removes this
-link 28 hours after the route was stored, whether or not you ever donated
+link once the route is 28 hours old (within about 29 hours, as it runs
+hourly), whether or not you ever donated
 or surveyed that ride; the route geometry itself is kept afterward with no
 link back to you.</td></tr>
 <tr><td>Ride surveys</td><td>Until you delete the ride, or your
@@ -240,16 +409,16 @@ deleting the ride cascades to its survey, and deleting your account
 removes every survey you wrote.</td></tr>
 <tr><td>Points ledger</td><td>Indefinite; deleted only with your
 account</td><td>Every points award you earn is recorded permanently —
-your account, the coarse map area (H3 resolution-8 cell) it was earned
-in, a point inside that area, the action and point value, and, for
-device-tied awards, the vehicle. For any award earned somewhere
-<em>you</em> were &mdash; completing your profile, anything credited at a
-ride&rsquo;s start or end, and referral awards &mdash; that point is the
-centre of the map area rather than where you actually were, both for new
-awards and for every row already written, so the row records the
-neighbourhood and never an address. Only awards earned at a
-<em>scooter&rsquo;s</em> position, which is a shared vehicle in a public
-street, keep an exact coordinate. These rows are the leaderboard record
+your account, the location it was earned at, the coarse map area (H3
+resolution-8 cell) it falls in, the action and point value, and, for
+device-tied awards, the vehicle. That location is exact only for
+scooter-position awards (report, QR scan, photo) &mdash; a shared vehicle
+in a public street. Every award earned somewhere <em>you</em> were
+&mdash; completing your profile, anything credited at a ride&rsquo;s start
+or end, and referral and stand-down awards &mdash; stores only the centre
+of the map area, so the row records the neighbourhood and never an
+address. Rider-located awards recorded before 2026-10-08 may still hold an
+exact location; we are removing those. These rows are the leaderboard record
 itself: the area leaderboard is computed directly from them, so unlike
 donated tracks above they are never de-identified — only deleting your
 account removes them. Whether they appear on the public leaderboard is
@@ -283,19 +452,35 @@ a vehicle-model correction. Same private bucket, same full re-encode that
 strips EXIF/GPS/camera metadata, and the same 18-month deletion job as
 receipt images — a photo of a scooter is a photo of wherever you were
 standing. The correction itself is kept without the image.</td></tr>
-<tr><td>Reports (device / discount / model)</td><td>Indefinite,
+<tr><td>Reports and feedback (device / model / feature / route / other)</td><td>Indefinite,
 aggregated</td>
 <td>Kept as the audit evidence base and the vehicle-catalog history. This
-includes the description you wrote, any coordinates you sent (for a
-missed-discount report, also which Equity Area the ride ended in), and the IP
+includes the description you wrote, any coordinates you sent, and the IP
 address and user-agent the report arrived with, which are retained for
-abuse detection because these forms accept anonymous submissions. Public
-aggregates and the CSV export never include reporter identity — no IP, no
-email, no user-agent; only an authenticated yes/no signal contributes to
-the aggregate.</td></tr>
+abuse detection because several of these forms accept anonymous
+submissions. If you delete your account, these reports stay, with the
+link to your account removed. Public aggregates and the CSV export never
+include reporter identity — no IP, no email, no user-agent; only an
+authenticated yes/no signal contributes to the aggregate.</td></tr>
+<tr><td>Missed-discount reports and receipt claims</td><td>Until you delete
+your account</td><td>These require an account, and are deleted with it
+(any receipt image is deleted sooner, after 18 months). This includes
+which Equity Area the ride ended in, and the IP address and user-agent the
+report arrived with.</td></tr>
+<tr><td>Scooter photos (public)</td><td>Indefinite</td><td>Kept as
+community reference material until removed. Deleting your account removes
+them from the app; the stored image file itself may not be deleted at the
+same time.</td></tr>
+<tr><td>Dibs</td><td>Indefinite</td><td>There is no deletion job for dibs:
+the claim and its certificate are kept after the dibs expires.</td></tr>
+<tr><td>Referrals and stand-downs</td><td>Indefinite</td><td>The email or
+phone number given, with the certificate&rsquo;s location, is kept with no
+expiry. Email us to have contact details about you removed.</td></tr>
 <tr><td>Accounts</td><td>Until you ask us to delete it</td><td>Email us
-at the address below to delete your account and associated
-preferences.</td></tr>
+at the address below to delete your account. Deleting it deletes your
+saved places (including any older plain-text copies), preferences, ride
+history, points, receipt claims and missed-discount reports with
+it.</td></tr>
 <tr><td>Usage analytics (raw events)</td><td>90 days</td><td>Raw
 first-party usage events (see §1) are pruned by a daily job after 90
 days. The daily-rotating visitor-hash secret is destroyed after 2 days,
@@ -311,18 +496,26 @@ computed before the raw rows are pruned. Contain no identifiers.</td></tr>
 
 <h2>5. Your choices and rights</h2>
 <ul>
-<li><strong>Access/export:</strong> your ride history is available via
-<code>GET /api/v1/rides/export</code> in your account.</li>
-<li><strong>Delete rides:</strong> <code>DELETE /api/v1/rides/:id</code>
-or <code>DELETE /api/v1/rides</code> at any time — immediate and
-irreversible.</li>
+<li><strong>Access/export:</strong> rides you logged on vehicles not in the
+operator&rsquo;s feed can be exported via <code>GET /api/v1/rides/export</code>; Ride
+Mode rides can be listed via <code>GET /api/v1/tracked-rides</code> (there
+is no export for these yet).</li>
+<li><strong>Delete rides:</strong> <code>DELETE /api/v1/tracked-rides/:id</code>
+or <code>DELETE /api/v1/tracked-rides</code> for Ride Mode rides, and
+<code>DELETE /api/v1/rides/:id</code> or <code>DELETE /api/v1/rides</code>
+for those other rides, at any time — immediate and irreversible.</li>
+<li><strong>Hide your username and standing:</strong> Account &rarr;
+Community has the two visibility switches (both on by default).</li>
+<li><strong>Stop texts:</strong> reply STOP to any text (UNSTOP to opt
+back in). This also stops texts from our other services that share the
+same sending number.</li>
 <li><strong>Delete your account:</strong> email us (below); we don't yet
 have self-serve account deletion.</li>
 <li><strong>Opt out of usage analytics:</strong> the "Allow private
 analytics" switch in the About Scooter.fyi panel turns off all
 usage-event collection for that browser. The choice is stored on your device and works whether or
-not you're signed in. Browsers sending Global Privacy Control are opted
-out automatically.</li>
+not you're signed in. Browsers sending Global Privacy Control or Do Not
+Track are opted out automatically.</li>
 <li>We do not sell personal information, so there is nothing to opt out
 of in that sense.</li>
 </ul>
@@ -332,13 +525,15 @@ requests even where not strictly required, given the size of this
 project.</p>
 
 <h2>6. Security</h2>
-<p>Session tokens and magic-link tokens are stored hashed, never in
-plaintext. <strong>Saved places are encrypted</strong> with a key the
-database does not hold, so the row that holds your Home address is
+<p>Session tokens, sign-in links and sign-in codes are stored hashed,
+never in plaintext. <strong>Saved places are encrypted</strong> with a key
+the database does not hold, so the row that holds your Home address is
 ciphertext in our database, in every backup of it, and in any copy either
-one ends up in. All traffic is served over HTTPS. Receipt images and
-model-report photos live in a private storage bucket that is never
-publicly readable. No system is
+one ends up in (apart from the older plain-text copies described in
+&sect;1). All traffic is served over HTTPS. Receipt images,
+model-report photos and ride screenshots live in a private storage bucket
+that is never publicly readable. (Scooter photos are different: they are
+public content, see &sect;1.) No system is
 perfectly secure; if you discover a vulnerability, please report it to
 us directly before disclosing it publicly.</p>
 <p>Two limits worth stating plainly, because the alternative is letting the

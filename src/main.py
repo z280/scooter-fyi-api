@@ -48,6 +48,7 @@ from .api_telemetry import router as telemetry_router
 from .api_tracked_rides import router as tracked_rides_router
 from .api_route import router as route_router
 from .api_user import router as user_router
+from .api_vehicle_plates import RedactPlateQuery, router as vehicle_plates_router
 from . import request_metrics
 from .config import load, session_https_only, session_secret
 from .pg import run_migrations
@@ -58,6 +59,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# uvicorn's access log writes the full request line, query string included;
+# /api/v1/vehicles/resolve?plate=… would put a plate in it. uvicorn configures
+# its loggers before importing this module, so a filter added here sticks.
+logging.getLogger("uvicorn.access").addFilter(RedactPlateQuery())
 
 
 @asynccontextmanager
@@ -121,6 +126,7 @@ app.middleware("http")(request_metrics.middleware)
 app.include_router(public_router)
 app.include_router(h3_router)
 app.include_router(user_router)
+app.include_router(vehicle_plates_router)
 app.include_router(admin_router)
 app.include_router(private_router)
 app.include_router(reports_router)

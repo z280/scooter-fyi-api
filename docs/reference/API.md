@@ -963,6 +963,86 @@ if (geo.metadata.admin) showPlateLayer(geo);   // admins only
 
 ---
 
+### Plate lookups — `GET /api/v1/vehicles/plates` and `GET /api/v1/vehicles/resolve`
+
+The app needs a vehicle's plate (to show it on a device card and in the
+unlock flow) and, from a `?ride=plate:…` deep link or a QR scan, the reverse.
+It used to get both by fetching Veo's public GBFS `free_bike_status` feed
+**from the rider's browser** and reading `&number=<plate>` out of each entry's
+`rental_uris` — which handed Veo every scooter.fyi user's IP. These two
+endpoints answer the same questions from our own ingest, so the browser never
+calls Veo. Both resolve against the **current snapshot** (the newest complete
+cycle — the one `/api/v1/devices/current` serves), because `device_id` is
+Veo's `bike_id` and can rotate per trip. No new data is stored; the plate is
+read from the existing 48-hour raw-telemetry buffer, and plates are never
+logged.
+
+#### `GET /api/v1/vehicles/plates?device_ids=<id>,<id>,…` — device → plate (signed in)
+
+| Param | Required | Notes |
+|---|---|---|
+| `device_ids` | yes | Comma-separated `device_id`s as they appear in the devices payload. Whitespace and duplicates are ignored; **1–50** distinct ids, each ≤ 64 characters. |
+
+**Auth:** a rider session (`Authorization: Bearer <token>`, any account, either
+sign-in door). `401` when missing, invalid or expired.
+
+**Response `200`:**
+
+```json
+{
+  "plates": { "a1b2c3": "1025543", "d4e5f6": "1031187" },
+  "as_of": "2026-10-08T16:40:00+00:00"
+}
+```
+
+`plates` maps each requested id that is in the current snapshot **and** has a
+plate to that plate (raw, as Veo publishes it). Ids not in the current
+snapshot, or with no plate, are **omitted** — not `null`. `as_of` is the
+snapshot's `snapshot_time` (UTC ISO 8601).
+
+**Errors:** `400` (no ids / more than 50 / an id over 64 chars), `422`
+(`device_ids` missing), `401`, `429` (with `Retry-After`), `503` (no complete
+cycle yet).
+
+**Rate limits:** 60 requests/min per account **and** 120 requests/min per IP
+(the per-IP cap is looser because several riders can share one address; it
+stops one client cycling through accounts).
+
+**Caching:** `Cache-Control: private, no-store`, `Vary: Authorization`.
+
+#### `GET /api/v1/vehicles/resolve?plate=<plate>` — plate → vehicle (public)
+
+| Param | Required | Notes |
+|---|---|---|
+| `plate` | yes | As printed or scanned, ≤ 32 characters. Normalised exactly like the frontend's `normalizePlate` (`src/ride-deeplink.ts`): trimmed, uppercased, whitespace and `-` removed — so `10-25 543` matches `1025543`. The stored plate is normalised the same way before comparing. |
+
+**Auth:** none.
+
+**Response `200`:**
+
+```json
+{ "device_id": "a1b2c3", "vehicle_identifier": "8c4a1f0d2e9b7a35" }
+```
+
+Only identifiers already in the public devices payload — **never the plate**.
+
+**Errors:** `404` when no vehicle in the current snapshot carries that plate
+(also when, defensively, more than one does — missing beats wrong); `400`
+(empty after normalisation, or over 32 chars); `422` (`plate` missing); `429`
+(with `Retry-After`); `503` (no complete cycle yet). The `404` body does not
+echo the plate, and the server's access log records the request line with
+`plate=[redacted]`.
+
+**Rate limit:** 30 requests/min per IP. Misses count too — they are exactly
+the traffic an enumeration attempt generates.
+
+**Caching:** `Cache-Control: no-store` on both `200` and `404`. The answer is
+only true for one cycle (a cached `device_id` can point at a re-keyed
+vehicle), and the per-IP limit counts origin hits — an edge cache would serve
+repeat lookups without counting them.
+
+---
+
 ### `GET /api/v1/h3/aggregates?res=8|9|10`
 
 Per-cell aggregates on the [Uber H3](https://h3geo.org/) hex grid, for
