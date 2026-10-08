@@ -178,8 +178,12 @@ def test_the_policy_discloses_reading_an_uploaded_image():
     Phase 8 of the frontend plan once said the image never leaves the device.
     The owner's rule (2026-10-07) is that either is allowed for something a
     rider explicitly uploads, preferring on-device. A policy asserting the
-    stronger promise would be a promise the software does not keep."""
-    assert "read the figures off an image you upload" in _POLICY_PROSE
+    stronger promise would be a promise the software does not keep.
+
+    As of 2026-10-08 no reading runs anywhere (receipt-precheck.ts does no
+    OCR; no server code calls OpenRouter), so the policy says so, and says
+    what will apply if it starts."""
+    assert "do not currently read receipt images automatically" in _POLICY_PROSE
     assert "on our servers" in _POLICY_PROSE
     # The limit that makes it acceptable: only what the rider sent.
     assert "only to an image you chose to upload" in _POLICY_PROSE
