@@ -79,11 +79,24 @@ _PRIVACY = {
             "data": "server_access_logs",
             "retention": "no fixed limit",
             "detail": "Our web server's access log records each request URL "
-                      "with your IP address. Route, walking-route and "
-                      "place-search requests put your current location (and "
-                      "what you typed) in the URL, so the log holds location "
-                      "next to IP. Kept until the server container is "
-                      "replaced.",
+                      "with your IP address. NOT redacted: route "
+                      "(/api/v1/route, /api/v1/route/options), walking-route "
+                      "(/api/v1/route/walk) and place-search "
+                      "(/api/v1/geocode/search) requests put your current "
+                      "location (and what you typed) in the URL, so the log "
+                      "holds location next to IP; when a place search is "
+                      "forwarded to our own geocoder, our HTTP client log "
+                      "also records the text and the search location rounded "
+                      "to about 1 km (no IP). REDACTED: "
+                      "/api/v1/vehicles/resolve (plate) and "
+                      "/api/v1/geocode/reverse (lat, lng; used to turn a "
+                      "saved place or parking-report location into a street "
+                      "address with a geocoder we run ourselves) have those "
+                      "parameters replaced with [redacted] in the access "
+                      "log, in our HTTP client log (including the upstream "
+                      "geocoder call) and in Sentry error reports; the rest "
+                      "of the request line and your IP are still logged. "
+                      "Kept until the server container is replaced.",
         },
         {
             "data": "sms_messages",
@@ -105,7 +118,8 @@ _PRIVACY = {
             "detail": "The receipt screenshot you upload lives in a private "
                       "bucket, EXIF-stripped on upload (full re-encode — GPS and "
                       "camera metadata cannot survive). Deleted by a daily job "
-                      "after 18 months; the report row outlives the image. We no "
+                      "after 18 months, or with your account if that is deleted "
+                      "first; the report row outlives the image. We no "
                       "longer ask for a screenshot of your Veo plan: you tell us "
                       "the plan and we take your word for it. We do not "
                       "currently read receipt images automatically. If we "
@@ -174,7 +188,17 @@ _PRIVACY = {
                       "columns are cleared only when you remove Home or "
                       "Work. A later migration drops them. Email "
                       "mhtc@z280.com to delete an account until self-serve "
-                      "deletion ships.",
+                      "deletion ships. Deletion removes the account and "
+                      "everything that cascades from it (saved places "
+                      "including older plaintext copies, preferences, rides, "
+                      "points, receipt claims, missed-discount reports) and "
+                      "deletes every image you uploaded from storage at the "
+                      "same time: receipt images, model-report photos, ride "
+                      "screenshots and device photos. Reports and feedback "
+                      "you filed stay with the account link removed. It does "
+                      "not reach the messaging service's text log, or "
+                      "referral rows someone else made with your contact "
+                      "details (email us to remove those).",
         },
         {
             "data": "google_user_data",
@@ -187,7 +211,9 @@ _PRIVACY = {
                       "picture and account ID are not stored. We request no "
                       "other Google data, do not use Google user data for "
                       "advertising, and do not sell or transfer it; it is "
-                      "used only to sign you in. Our use complies with the "
+                      "used only to sign you in. Google's script loads only "
+                      "when you open a sign-in screen that offers Google; "
+                      "there is no automatic prompt. Our use complies with the "
                       "Google API Services User Data Policy, including the "
                       "Limited Use requirements. Disconnect at "
                       "myaccount.google.com/connections.",
@@ -312,8 +338,6 @@ _PRIVACY = {
                       "referral and stand-down awards — stores only the "
                       "centre of the H3 resolution-8 cell, so the row "
                       "records the neighbourhood and never an address. "
-                      "Rider-located awards recorded before 2026-10-08 may "
-                      "still hold an exact location; we are removing those. "
                       "These rows are the leaderboard record: the H3 area "
                       "leaderboard is computed directly from them, so "
                       "unlike donated tracks above they are never "
@@ -374,9 +398,11 @@ _PRIVACY = {
                       "link can open it while it works). Optional lat/lng "
                       "of where it was taken is stored. EXIF/GPS is stripped "
                       "from the image on upload. Kept indefinitely as "
-                      "community reference material until removed; deleting "
-                      "the account removes them from the app, but the image "
-                      "file itself may not be deleted at the same time.",
+                      "community reference material until removed. Deleting "
+                      "the account deletes them, image files included; an "
+                      "image file whose photo is removed some other way is "
+                      "deleted by the weekly orphan-image sweep "
+                      "('orphaned_images' below).",
         },
         {
             "data": "dibs",
@@ -414,15 +440,29 @@ _PRIVACY = {
                       "EXIF-stripped on upload (full re-encode — GPS and "
                       "camera metadata cannot survive), and is deleted by a "
                       "daily job after 18 months, matching the receipts "
-                      "window; the report row outlives the image.",
+                      "window; the report row outlives the image. Deleting "
+                      "your account deletes the photo too; the report stays, "
+                      "without the photo or the account link.",
         },
         {
             "data": "ride_transaction_screenshots",
-            "retention": "18 months",
+            "retention": "18 months, or until you delete the ride",
             "detail": "Two screenshots per ride (overview, receipt) in a "
                       "private bucket, EXIF-stripped on upload, visible only "
                       "to the uploader. Images are deleted automatically "
-                      "after 18 months.",
+                      "after 18 months. DELETE /api/v1/tracked-rides[/:id] "
+                      "deletes the ride's screenshot images from storage "
+                      "immediately after the ride is deleted; an image that "
+                      "storage delete misses is removed by the weekly "
+                      "orphan-image sweep.",
+        },
+        {
+            "data": "orphaned_images",
+            "retention": "deleted weekly",
+            "detail": "A weekly job deletes any stored image (receipt "
+                      "images, model-report photos, ride screenshots, "
+                      "device photos) that no table row references any "
+                      "more and that is more than 7 days old.",
         },
         {
             "data": "telemetry_events",
@@ -481,25 +521,32 @@ _PRIVACY = {
          "purpose": "sign-in codes and service texts",
          "sees": "your phone number and the message text"},
         {"name": "Cloudflare", "purpose": "hosting, CDN, tunnel, map tiles, "
-                                          "object storage",
-         "sees": "network request metadata; stored images"},
+                                          "object storage, Web Analytics",
+         "sees": "network request metadata; stored images; page views and "
+                 "performance reported by its Web Analytics script"},
         {"name": "OpenRouter", "purpose": "receipt reading — not yet active",
          "sees": "nothing today; if switched on, only an uploaded receipt "
                  "image or the text read from it"},
         {"name": "Sentry", "purpose": "error monitoring",
          "sees": "error reports, which may incidentally include request "
-                 "metadata"},
+                 "metadata; plate and reverse-geocode coordinates in query "
+                 "strings are redacted"},
     ],
     "contacted_by_your_browser": [
+        {"name": "Cloudflare Web Analytics",
+         "when": "a cookieless script our host adds to every page "
+                 "(static.cloudflareinsights.com); it reports page views and "
+                 "performance to Cloudflare. Cloudflare's privacy policy "
+                 "applies. Not controlled by the private-analytics switch",
+         "sees": "IP, browser information and the pages you view"},
         {"name": "Google Identity Services",
-         "when": "the sign-in script loads for every visitor who is not "
-                 "signed in; Google may show One Tap",
-         "sees": "IP and browser information; Google may read or set its "
-                 "own cookies even if you never sign in"},
-        {"name": "OpenStreetMap Foundation (Nominatim)",
-         "when": "turning saved home/work/places or a parking-report "
-                 "location into a street address",
-         "sees": "those coordinates and your IP"},
+         "when": "the sign-in script loads only when you open a sign-in "
+                 "screen that offers Google (the Account drawer's sign-in, "
+                 "or the ride wizard's sign-in screen); there is no "
+                 "automatic prompt on page load",
+         "sees": "IP and browser information; once loaded, Google may read "
+                 "or set its own cookies even if you do not go on to sign "
+                 "in"},
         {"name": "We See You Veo (weseeyouveo.com)",
          "when": "a separate rider-advocacy site run by scooter.fyi's "
                  "founder; its logo loads on every page, story options load "
