@@ -37,3 +37,5 @@ Living documents that describe the system as it is now.
 - [API.md](reference/API.md): the public API reference, and the contract for frontend consumers.
 - [MIGRATION.md](reference/MIGRATION.md): the VPS migration runbook, plus the post-rename checklist and the names that deliberately stay `veo-audit`.
 - [build_photon_index.md](reference/build_photon_index.md): runbook for building the Photon geocoder index (seed once, then refresh quarterly).
+
+- [`unmerged.md`](unmerged.md): remote branches holding work not on `main` (snapshot, 2026-10-08).
