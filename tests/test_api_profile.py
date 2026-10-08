@@ -281,8 +281,11 @@ def test_put_newly_completing_the_profile_awards_points(monkeypatch):
     credit_points INSERT — distinct from _put_client's shortcut fetch
     queue, which always stubs 'already awarded' to keep the other tests
     focused on their own behavior."""
+    # (email, rate_plan, phone, saved_places_encrypted, home/work lat/lng).
+    # No blob here, so the legacy columns are the location — the fallback path
+    # for a row the lazy migration has not reached yet.
     complete_accounts_row = ("rider@example.com", "resident", "+13035551234",
-                              39.74, -104.98, None, None)
+                              None, 39.74, -104.98, None, None)
     fetches = [
         # (email, phone_number, phone_verified_at) — the FOR UPDATE read.
         ("rider@example.com", None, None),

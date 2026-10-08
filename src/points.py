@@ -28,6 +28,7 @@ from typing import Any
 
 import h3
 
+from . import place_crypto, saved_places
 from .geo import distance_meters
 from .device_photos import MAX_PHOTOS_PER_DEVICE
 from .ride_limits import MAX_POINTS_PER_RIDE
@@ -668,6 +669,20 @@ def maybe_credit_profile_completion(cur, account_id: int) -> dict[str, Any] | No
     changed rate_plan away from the default. Flagging in case "pricing
     plan" was meant as "explicitly changed away from the default," which
     would need a behavior this module doesn't currently implement.
+
+    WHERE THE LOCATION COMES FROM, and why it moved. Home and Work used to
+    be two plaintext column pairs on `accounts`; they are two of the
+    rider's saved places now, in the encrypted `saved_places_encrypted`
+    blob (sql/096, src/place_crypto.py), and the client no longer writes
+    the columns at all. So the criterion reads the blob, falling back to
+    the columns for a rider whose row has not been migrated yet — the same
+    lazy drain src/saved_places.py describes, and it disappears with them.
+
+    An unreadable blob (no key configured, or a key we no longer hold)
+    counts as NO location rather than raising. This is a speculative call
+    on every profile save; taking a rider's whole profile write down over
+    a bonus they may already have is the wrong trade, and the award is
+    re-checked on their next save anyway.
     """
     cur.execute(
         "SELECT 1 FROM user_points WHERE account_id = %s AND action = 'profile_completion'",
@@ -678,7 +693,8 @@ def maybe_credit_profile_completion(cur, account_id: int) -> dict[str, Any] | No
 
     cur.execute(
         """
-        SELECT email, rate_plan, phone_number, home_lat, home_lng, work_lat, work_lng
+        SELECT email, rate_plan, phone_number, saved_places_encrypted,
+               home_lat, home_lng, work_lat, work_lng
         FROM accounts WHERE id = %s
         """,
         (account_id,),
@@ -686,17 +702,65 @@ def maybe_credit_profile_completion(cur, account_id: int) -> dict[str, Any] | No
     row = cur.fetchone()
     if row is None:
         return None
-    email, rate_plan, phone_number, home_lat, home_lng, work_lat, work_lng = row
-    has_location = (home_lat is not None and home_lng is not None) or \
-                   (work_lat is not None and work_lng is not None)
-    if not (email and rate_plan and phone_number and has_location):
+    (email, rate_plan, phone_number, blob,
+     home_lat, home_lng, work_lat, work_lng) = row
+    if not (email and rate_plan and phone_number):
         return None
 
-    lat, lng = (home_lat, home_lng) if home_lat is not None else (work_lat, work_lng)
+    where = _completion_location(blob, home_lat, home_lng, work_lat, work_lng)
+    if where is None:
+        return None
+
     return credit_points(
         cur, account_id=account_id, action="profile_completion",
-        points=POINTS_PROFILE_COMPLETION, lat=lat, lng=lng,
+        points=POINTS_PROFILE_COMPLETION, lat=where[0], lng=where[1],
     )
+
+
+def _completion_location(
+    blob: str | None,
+    home_lat: Any, home_lng: Any, work_lat: Any, work_lng: Any,
+) -> tuple[float, float] | None:
+    """A point for the ledger row, or None when the rider has saved nowhere.
+
+    THE RETURNED POINT IS THE H3 CELL CENTRE, NOT THE RIDER'S DOORSTEP, and
+    that is the whole reason this is a function rather than two lines inline.
+
+    `user_points.lat`/`lng` are written by every award and read by nothing:
+    grep the tree — the only column anything selects off this table is
+    `h3_8_index` (src/area_leaders.py, src/api_leaderboard.py,
+    src/api_private.py). For every other award the stored point is a vehicle
+    or a ride start, so storing it exactly costs nothing. For this one it is
+    where the rider LIVES, and `user_points` is an ordinary plaintext table —
+    which would put an exact home address one join away from an account id,
+    in the same dump the `saved_places` encryption exists to keep it out of.
+
+    Snapping to the cell centre keeps `h3_8_index` bit-for-bit identical, so
+    territory, leaderboards and every reader behave exactly as before, and
+    the ledger stops carrying a coordinate nobody reads and nobody should.
+
+    Resolution 8 is roughly 0.46 km² — the hex says which part of town, which
+    is all the leaderboard ever asked of it.
+    """
+    places = saved_places.clean_places(place_crypto.unseal(blob))
+    by_id = {p["id"]: p for p in places}
+    for slot in (saved_places.SLOT_HOME_ID, saved_places.SLOT_WORK_ID):
+        hit = by_id.get(slot)
+        if hit is not None:
+            return _cell_centre(hit["lat"], hit["lon"])
+
+    # The legacy columns, for a row the lazy migration has not reached. Goes
+    # when they do.
+    for lat, lng in ((home_lat, home_lng), (work_lat, work_lng)):
+        if lat is not None and lng is not None:
+            return _cell_centre(float(lat), float(lng))
+    return None
+
+
+def _cell_centre(lat: float, lng: float) -> tuple[float, float]:
+    """The centre of the resolution-8 hex containing this point."""
+    centre = h3.cell_to_latlng(h3.latlng_to_cell(lat, lng, 8))
+    return (float(centre[0]), float(centre[1]))
 
 
 # --- Ride Mode survey awards (docs/implemented/PLAN_RIDE_MODE_API.md phase A3; src/api_ride_surveys.py) -----

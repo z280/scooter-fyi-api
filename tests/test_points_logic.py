@@ -6,7 +6,9 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 
 import pytest
+from cryptography.fernet import Fernet
 
+from src import place_crypto
 from src.points import (
     settle_referrals_for_account,
     REPORT_TYPE_POINTS,
@@ -176,12 +178,38 @@ def test_credit_gbfs_validation_points_no_reappearance_is_a_noop():
 
 # ---------- maybe_credit_profile_completion ---------------------------------------
 
-_COMPLETE_ROW = ("rider@example.com", "resident", "+13035551234", 39.74, -104.99, None, None)
-_INCOMPLETE_ROW = ("rider@example.com", "visitor", None, None, None, None, None)
+# The row is (email, rate_plan, phone, saved_places_encrypted,
+#             home_lat, home_lng, work_lat, work_lng). The blob is the
+# location source now; the four columns are the legacy fallback that goes
+# when they do.
+_LEGACY_ROW = ("rider@example.com", "resident", "+13035551234", None,
+               39.74, -104.99, None, None)
+_INCOMPLETE_ROW = ("rider@example.com", "visitor", None, None,
+                   None, None, None, None)
+
+
+@pytest.fixture()
+def places_key(monkeypatch):
+    monkeypatch.setenv("VEO_PLACES_KEY", Fernet.generate_key().decode())
+    monkeypatch.delenv("VEO_PLACES_KEY_OLD", raising=False)
+
+
+def _blob(*places):
+    return place_crypto.seal(list(places))
+
+
+def _slot(place_id, lat, lon):
+    return {"id": place_id, "label": "X", "emoji": "", "lat": lat, "lon": lon}
+
+
+def _credited_point(cur):
+    """The (lat, lng) the ledger row was written with."""
+    _, params = cur.executed[-1]
+    return (params[3], params[4])
 
 
 def test_profile_completion_awards_once():
-    cur = _FakeCursor([None, _COMPLETE_ROW, (1, _NOW)])
+    cur = _FakeCursor([None, _LEGACY_ROW, (1, _NOW)])
     result = maybe_credit_profile_completion(cur, account_id=1)
     assert result["action"] == "profile_completion"
 
@@ -199,11 +227,79 @@ def test_profile_completion_incomplete_profile_is_a_noop():
 
 
 def test_profile_completion_uses_work_location_when_home_absent():
-    row = ("rider@example.com", "resident", "+13035551234", None, None, 39.75, -105.0)
+    row = ("rider@example.com", "resident", "+13035551234", None,
+           None, None, 39.75, -105.0)
     cur = _FakeCursor([None, row, (1, _NOW)])
     maybe_credit_profile_completion(cur, account_id=1)
-    _, params = cur.executed[-1]
-    assert params[3] == 39.75 and params[4] == -105.0
+    # Same hex as the work address, which is what every reader of this table
+    # actually looks at.
+    assert h3_8_index_for(*_credited_point(cur)) == h3_8_index_for(39.75, -105.0)
+
+
+def test_profile_completion_reads_the_saved_place(places_key):
+    # Home and Work live in the encrypted blob now. The columns are empty for
+    # any rider whose client is current.
+    row = ("rider@example.com", "resident", "+13035551234",
+           _blob(_slot("slot:home", 39.74, -104.99)), None, None, None, None)
+    cur = _FakeCursor([None, row, (1, _NOW)])
+    assert maybe_credit_profile_completion(cur, account_id=1) is not None
+    assert h3_8_index_for(*_credited_point(cur)) == h3_8_index_for(39.74, -104.99)
+
+
+def test_profile_completion_accepts_the_work_slot_alone(places_key):
+    row = ("rider@example.com", "resident", "+13035551234",
+           _blob(_slot("slot:work", 39.75, -105.0)), None, None, None, None)
+    cur = _FakeCursor([None, row, (1, _NOW)])
+    assert maybe_credit_profile_completion(cur, account_id=1) is not None
+
+
+def test_a_custom_slot_is_not_a_home_or_a_work(places_key):
+    # "Somewhere I go often" is not the criterion. Only the two reserved
+    # slots count, which is what the columns they replaced meant.
+    row = ("rider@example.com", "resident", "+13035551234",
+           _blob(_slot("slot:custom1", 39.74, -104.99)), None, None, None, None)
+    cur = _FakeCursor([None, row, (1, _NOW)])
+    assert maybe_credit_profile_completion(cur, account_id=1) is None
+
+
+def test_the_blob_wins_over_a_stale_column(places_key):
+    # A rider who moved house: the app wrote the new address into the blob and
+    # the old one is still sitting in `home_lat`. Crediting the old hex would
+    # put their territory on a doorstep they left.
+    row = ("rider@example.com", "resident", "+13035551234",
+           _blob(_slot("slot:home", 40.0, -106.0)), 39.74, -104.99, None, None)
+    cur = _FakeCursor([None, row, (1, _NOW)])
+    maybe_credit_profile_completion(cur, account_id=1)
+    assert h3_8_index_for(*_credited_point(cur)) == h3_8_index_for(40.0, -106.0)
+
+
+def test_an_unreadable_blob_is_no_location_rather_than_an_exception(monkeypatch):
+    # This runs speculatively on EVERY profile save. Taking a rider's whole
+    # profile write down over a bonus they may already have is the wrong trade.
+    monkeypatch.delenv("VEO_PLACES_KEY", raising=False)
+    row = ("rider@example.com", "resident", "+13035551234",
+           "gAAAAA-not-decryptable", None, None, None, None)
+    cur = _FakeCursor([None, row])
+    assert maybe_credit_profile_completion(cur, account_id=1) is None
+
+
+def test_the_ledger_never_stores_the_exact_doorstep(places_key):
+    """The point of `_completion_location`, asserted rather than assumed.
+
+    `user_points` is a plaintext table and `lat`/`lng` on it are read by
+    NOTHING — only `h3_8_index` is. An exact home address there would sit one
+    join from an account id, in the same dump the `saved_places` encryption
+    exists to keep it out of.
+    """
+    home = (39.7285, -105.0345)
+    row = ("rider@example.com", "resident", "+13035551234",
+           _blob(_slot("slot:home", *home)), None, None, None, None)
+    cur = _FakeCursor([None, row, (1, _NOW)])
+    maybe_credit_profile_completion(cur, account_id=1)
+    lat, lng = _credited_point(cur)
+    assert (lat, lng) != home
+    # Still the right hex, so territory and the leaderboard are unchanged.
+    assert h3_8_index_for(lat, lng) == h3_8_index_for(*home)
 
 
 # ---------- referrals & stand-downs (sql/076-078) -----------------------------
