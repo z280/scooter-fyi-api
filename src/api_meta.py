@@ -496,10 +496,6 @@ _PRIVACY = {
                  "signed in; Google may show One Tap",
          "sees": "IP and browser information; Google may read or set its "
                  "own cookies even if you never sign in"},
-        {"name": "Veo", "when": "with location on, your browser fetches "
-                                "Veo's public vehicle feed to look up plates",
-         "sees": "IP and that the request came from scooter.fyi; no account "
-                 "or location data"},
         {"name": "OpenStreetMap Foundation (Nominatim)",
          "when": "turning saved home/work/places or a parking-report "
                  "location into a street address",

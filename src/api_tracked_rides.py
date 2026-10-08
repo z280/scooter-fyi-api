@@ -76,6 +76,7 @@ from .points import (
 from .polyline import PolylineError, decode as decode_polyline, encode as encode_polyline
 from .quality import compute_battery_percent
 from .ratelimit import enforce
+from .ride_screenshots import delete_screenshots_best_effort
 from .ride_limits import (
     MAX_LEG_METERS,
     MAX_RIDE_DISTANCE_METERS,
@@ -1512,12 +1513,20 @@ def delete_tracked_ride(
     ride_id: str,
     user: SessionUser = Depends(require_session),
 ) -> dict[str, Any]:
-    """Hard delete, cascades to user_device_watch_list + ride_waypoints.
-    404 for both 'not yours' and 'doesn't exist' — no existence oracle
-    across accounts."""
+    """Hard delete, cascades to user_device_watch_list + ride_waypoints +
+    ride_transaction_screenshots — and then deletes those screenshots' R2
+    objects, which no cascade reaches. 404 for both 'not yours' and 'doesn't
+    exist' — no existence oracle across accounts."""
     rid = _parse_ride_id(ride_id)
     with connection() as conn:
         with conn.cursor() as cur:
+            # Keys first: the cascade removes the only record of them.
+            cur.execute(
+                "SELECT r2_key FROM ride_transaction_screenshots "
+                "WHERE ride_id = %s AND account_id = %s",
+                (str(rid), user.account_id),
+            )
+            keys = [r[0] for r in cur.fetchall() if r[0]]
             cur.execute(
                 "DELETE FROM tracked_rides WHERE id = %s AND account_id = %s",
                 (str(rid), user.account_id),
@@ -1526,15 +1535,26 @@ def delete_tracked_ride(
         conn.commit()
     if not deleted:
         raise HTTPException(404, "no such ride")
+    # After the commit, so a storage failure can never undo the delete.
+    delete_screenshots_best_effort(keys)
     return {"deleted": True}
 
 
 @router.delete("/api/v1/tracked-rides")
 def delete_all_tracked_rides(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
-    """Hard delete every tracked ride the account owns. Immediate and final."""
+    """Hard delete every tracked ride the account owns, screenshot images
+    included (see delete_tracked_ride). Immediate and final."""
     with connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT s.r2_key FROM ride_transaction_screenshots s "
+                "JOIN tracked_rides r ON r.id = s.ride_id "
+                "WHERE r.account_id = %s",
+                (user.account_id,),
+            )
+            keys = [r[0] for r in cur.fetchall() if r[0]]
             cur.execute("DELETE FROM tracked_rides WHERE account_id = %s", (user.account_id,))
             deleted = cur.rowcount
         conn.commit()
+    delete_screenshots_best_effort(keys)
     return {"deleted_count": int(deleted)}
