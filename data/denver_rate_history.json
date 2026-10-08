@@ -1,5 +1,5 @@
 {
-  "_note": "Denver shared-micromobility rate history. Feeds pricing comparisons; the eventual GET /api/v1/meta/pricing (see MULTI_TENANCY_PLAN.md 7e) should serve this rather than the frontend hardcoding it. Amounts in CENTS.",
+  "_note": "Denver shared-micromobility rate history. Feeds pricing comparisons; the eventual GET /api/v1/meta/pricing (see docs/MULTI_TENANCY_PLAN.md 7e) should serve this rather than the frontend hardcoding it. Amounts in CENTS.",
   "_provenance_warning": "The rates that matter for a rider-facing comparison are the LEAST citable ones. Lime -- whose 30/60-minute passes are what Denver riders actually bought -- publishes NO pricing feed at all: system_pricing_plans 404s and is absent from their GBFS discovery document. Lyft publishes rack rates only (data/lyft_den_pricing_2024-12-16.json), and no bundle. So a price comparison assembled from open data can only ever show walk-up rates, which is not what anyone paid. Plans below carry a per-plan `cited` flag; do not publish a derived multiple that depends on an uncited plan. Note also that Lyft's feed is abandoned rather than merely stale: its freeze stamp post-dates its own operating period by an unknown margin, so nothing in it can be dated. Lime is the meaningful comparator for Denver -- and the one that publishes no pricing at all.",
   "currency": "USD",
   "operators": [

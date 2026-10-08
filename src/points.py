@@ -66,8 +66,8 @@ POINTS_QR_SCAN = 100
 # Confirmed by the owner 2026-10-06 (the points rationalisation): 10.
 POINTS_PROFILE_COMPLETION = 10
 
-# --- Ride Mode awards (PLAN_RIDE_MODE_API.md phase A2; values locked by
-# RIDE_MODE_OVERHAUL_PLAN.md Decision 6) ------------------------------------
+# --- Ride Mode awards (docs/implemented/PLAN_RIDE_MODE_API.md phase A2; values locked by
+# docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6) ------------------------------------
 #
 # The VALUES land in A1, ahead of the award machinery, on purpose: the whole
 # published schedule (GET /api/v1/points/schedule, src/api_points.py) is
@@ -306,7 +306,7 @@ def credit_points(
     if points is None:
         return None
 
-    # EVEN-POINTS INVARIANT (RIDE_MODE_OVERHAUL_PLAN.md Decision 6, sql/053).
+    # EVEN-POINTS INVARIANT (docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6, sql/053).
     # Safe against cap trimming: MAX_POINTS_PER_RIDE (100) and every
     # POINTS_* constant this module defines are even, and even minus even is
     # even, so a trimmed remainder from _apply_ride_cap is always even too.
@@ -590,7 +590,7 @@ def credit_battery_contribution(
     cur, *, account_id: int, vehicle_identifier: str | None,
     distance_m: float, start_lat: float, start_lng: float, ride_id: str,
 ) -> dict[str, Any] | None:
-    """PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md Decision 6:
+    """docs/implemented/PLAN_RIDE_MODE_API.md phase A2 / docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6:
     `POINTS_BATTERY_CONTRIBUTION_BASE` plus
     `POINTS_BATTERY_CONTRIBUTION_PER_STEP` for every started
     `BATTERY_CONTRIBUTION_STEP_METERS` of verified track distance, rounded
@@ -605,7 +605,7 @@ def credit_battery_contribution(
     credit_gbfs_validation_points above.
 
     lat/lng = the ride's START point (start_lat/start_lng), NOT its end —
-    RIDE_MODE_OVERHAUL_PLAN.md's Risk 3 rule for the reshaped awards,
+    docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md's Risk 3 rule for the reshaped awards,
     deliberately unlike the two superseded ride awards above, which file at
     the ride's end.
 
@@ -628,7 +628,7 @@ def credit_nav_distance_bonus(
     cur, *, account_id: int, vehicle_identifier: str | None,
     distance_m: float, start_lat: float, start_lng: float, ride_id: str,
 ) -> dict[str, Any] | None:
-    """PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md Decision 6:
+    """docs/implemented/PLAN_RIDE_MODE_API.md phase A2 / docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6:
     `POINTS_NAV_DISTANCE_PER_STEP` for every started `NAV_DISTANCE_STEP_METERS`
     of verified track distance, rounded UP — `2 * ceil(distance_m / 3000)`.
     `distance_m` is the same verified `track_donations` distance
@@ -637,7 +637,7 @@ def credit_nav_distance_bonus(
 
     Same division of labor as credit_battery_contribution:
     `ride_options.nav_improvement` on and a `ride_routes` row existing are
-    the CALLER's preconditions (PLAN_RIDE_MODE_API.md phase A3), not
+    the CALLER's preconditions (docs/implemented/PLAN_RIDE_MODE_API.md phase A3), not
     checked here.
 
     lat/lng = the ride's START point, same Risk 3 rule as above.
@@ -699,7 +699,7 @@ def maybe_credit_profile_completion(cur, account_id: int) -> dict[str, Any] | No
     )
 
 
-# --- Ride Mode survey awards (PLAN_RIDE_MODE_API.md phase A3; src/api_ride_surveys.py) -----
+# --- Ride Mode survey awards (docs/implemented/PLAN_RIDE_MODE_API.md phase A3; src/api_ride_surveys.py) -----
 #
 # All three are flat awards (no distance formula) credited from
 # POST /api/v1/tracked-rides/{ride_id}/survey. Same division of labor as
@@ -723,7 +723,7 @@ def credit_ride_survey(
     cur, *, account_id: int, vehicle_identifier: str | None,
     lat: float, lng: float, ride_id: str,
 ) -> dict[str, Any] | None:
-    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_RIDE_SURVEY` (4) for
+    """docs/implemented/PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_RIDE_SURVEY` (4) for
     Screen 9's scooter-feedback pane. The CALLER checks (any scooter-
     feedback field present) AND `ride_options.end_survey` AND not an
     own-device ride before calling — own-device is defensive, not a
@@ -740,7 +740,7 @@ def credit_nav_route_feedback(
     cur, *, account_id: int, vehicle_identifier: str | None,
     lat: float, lng: float, ride_id: str,
 ) -> dict[str, Any] | None:
-    """PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_NAV_ROUTE_FEEDBACK` (4)
+    """docs/implemented/PLAN_RIDE_MODE_API.md phase A3: flat `POINTS_NAV_ROUTE_FEEDBACK` (4)
     for rating the selected route. The CALLER checks `nav_route_rating` is
     present AND `ride_route_id` resolves to a `ride_routes` row owned by
     the caller (unlinked, or already linked to this ride — see
@@ -748,7 +748,7 @@ def credit_nav_route_feedback(
 
     Not `credit_nav_distance_bonus`'s twin in every respect: unlike that
     A2 award, this one is not gated here on `ride_options.nav_improvement`
-    — PLAN_RIDE_MODE_API.md's A3 endpoint spec states only the rating +
+    — docs/implemented/PLAN_RIDE_MODE_API.md's A3 endpoint spec states only the rating +
     resolved-route precondition for this action, so that is what the
     caller checks."""
     return credit_points(
@@ -763,7 +763,7 @@ def credit_nav_qualitative_feedback(
     cur, *, account_id: int, vehicle_identifier: str | None,
     lat: float, lng: float, ride_id: str, text_length: int = 0,
 ) -> dict[str, Any] | None:
-    """PLAN_RIDE_MODE_API.md phase A3, tiered 2026-10-06: free-text
+    """docs/implemented/PLAN_RIDE_MODE_API.md phase A3, tiered 2026-10-06: free-text
     navigation feedback earns `POINTS_NAV_QUALITATIVE` (6), or
     `POINTS_NAV_QUALITATIVE_DETAILED` (12) when `text_length` (stripped) is
     at least NAV_QUALITATIVE_DETAILED_MIN_CHARS. The CALLER still checks

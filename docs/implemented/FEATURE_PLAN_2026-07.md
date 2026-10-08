@@ -2,7 +2,7 @@
 
 Planned 2026-07-28 against `feat/operator-hard-invariants` (5c59ba7).
 Four independent features, rush delivery. Written to be folded into
-`API_REQUIREMENTS.md` as §8–§11 once agreed.
+`docs/API_REQUIREMENTS.md` as §8–§11 once agreed.
 
 **`sql/042_auth_session_methods.sql` is already written and verified** —
 the §9.1 fix below, shipped ahead of the rest because it is a live 500.
@@ -358,7 +358,7 @@ this is the regression test for §9.1), `test_phone_verification_pg.py`
 
 > **SHIPPED AS `sql/047_tracked_rides_reported_fields.sql`, AND NOT WITH THE DDL
 > BELOW.** Two corrections, both made when the Ride Mode program picked this
-> section up (`PLAN_RIDE_MODE_API.md` Phase A1):
+> section up (`docs/implemented/PLAN_RIDE_MODE_API.md` Phase A1):
 >
 > 1. **Number.** `046` was taken by `sql/046_comms_replies.sql` before this
 >    section shipped. `047` is the file that exists; do not create a second one.
@@ -444,7 +444,7 @@ points there in the last four weeks, recalculated."
 > **NUMBER CORRECTION: this migration is `sql/048_h3_r8_area_leaders.sql`.**
 > `046` and `047` were both taken before §11 shipped (`046_comms_replies.sql`,
 > then `047_tracked_rides_reported_fields.sql` for §10 above), and §11 itself is
-> now delivered by `PLAN_RIDE_MODE_API.md` **Phase A4**, which owns `sql/048`.
+> now delivered by `docs/implemented/PLAN_RIDE_MODE_API.md` **Phase A4**, which owns `sql/048`.
 > Creating `sql/047_h3_r8_area_leaders.sql` would collide with a file that
 > already exists and holds something else.
 
@@ -496,7 +496,7 @@ or backfill always reflects current data.
 
 ### 11.3 Job
 
-> **Superseded (sql/061).** The nightly `recompute` described below was split: `src/area_leaders.py:refresh_universe` now runs WEEKLY and refreshes only the all-time cell universe, and the leaderboard itself is computed per request in `src/api_leaderboard.py`. The stored `h3_r8_area_leaders`/`regional_leaders` tables are gone. The window, the confirmed-only rule and the tie-break are unchanged — only where and when they are applied. See API.md's `/api/v1/leaderboard/map` section.
+> **Superseded (sql/061).** The nightly `recompute` described below was split: `src/area_leaders.py:refresh_universe` now runs WEEKLY and refreshes only the all-time cell universe, and the leaderboard itself is computed per request in `src/api_leaderboard.py`. The stored `h3_r8_area_leaders`/`regional_leaders` tables are gone. The window, the confirmed-only rule and the tie-break are unchanged — only where and when they are applied. See docs/reference/API.md's `/api/v1/leaderboard/map` section.
 
 `src/area_leaders.py:recompute(window_days=28)`, exposed as
 `python -m src.cli recompute_area_leaders`, crontab:
@@ -557,9 +557,9 @@ are independent of PR 2; only its read endpoint needs the color columns,
 so it can start immediately and merge after.
 
 Per-PR doc duties, matching existing convention: endpoint tables in
-`README.md`, full request/response shapes and error codes in `API.md`,
+`README.md`, full request/response shapes and error codes in `docs/reference/API.md`,
 new env in `.env.example` **and** `docker-compose.yml`, a row in the
-`API_REQUIREMENTS.md` status table, and the crontab comment block for
+`docs/API_REQUIREMENTS.md` status table, and the crontab comment block for
 PR 5.
 
 ## Open items

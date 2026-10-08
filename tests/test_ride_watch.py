@@ -311,10 +311,10 @@ def test_unresolved_watches_get_last_checked_cycle_bumped(monkeypatch):
 
 
 # ---------- the ride_watch advisory-lock fix + validation-finisher wiring --
-# (PLAN_RIDE_MODE_API.md phase A2, "Validation finisher")
+# (docs/implemented/PLAN_RIDE_MODE_API.md phase A2, "Validation finisher")
 
 def test_advisory_lock_is_taken_before_the_gbfs_reappeared_update(monkeypatch):
-    """THE LOAD-BEARING ORDERING. PLAN_RIDE_MODE_API.md's A2 spec: a resolve
+    """THE LOAD-BEARING ORDERING. docs/implemented/PLAN_RIDE_MODE_API.md's A2 spec: a resolve
     path that ran its gbfs_* row UPDATE first and locked second would
     deadlock against a donation mid-flight on the same ride. This fails if
     that inversion is ever reintroduced — the lock must appear in call_log

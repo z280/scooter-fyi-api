@@ -337,7 +337,7 @@ def test_temperature_lookup_is_bounded():
     """Unbounded, a hole in the cache hands a trip a reading from days away and
     beta_3 absorbs the error as if it were signal.
 
-    The bounded query itself lives in _temperature_at_cur — PLAN_RIDE_MODE_API.md
+    The bounded query itself lives in _temperature_at_cur — docs/implemented/PLAN_RIDE_MODE_API.md
     phase A2's donated-ride ingestion needed the same lookup over an
     already-open cursor (it has no `conn` of its own to hand
     _temperature_at), so the query was split out and _temperature_at

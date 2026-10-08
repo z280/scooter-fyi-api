@@ -1,6 +1,6 @@
 -- My Scooters: the specific vehicles a rider has kept.
 --
--- ALONG_THE_WAY_PLAN.md §8. A rider who has physically stood at a scooter and
+-- docs/ALONG_THE_WAY_PLAN.md §8. A rider who has physically stood at a scooter and
 -- scanned the QR sticker under its handlebar can keep it — name it, find it
 -- again next week, be told when it comes free. Ten per account.
 --

@@ -15,7 +15,7 @@
 #                               seeds a fresh volume, so any /admin edits (e.g.
 #                               a hand-tuned cadence) are ONLY here.
 #
-# ORDER OF OPERATIONS (see MIGRATION.md for the full runbook):
+# ORDER OF OPERATIONS (see docs/reference/MIGRATION.md for the full runbook):
 #   1. Bring the new stack UP first (deploy.yml against the new box) so its
 #      empty Postgres + volumes exist.
 #   2. Freeze writes on the OLD box  (stop scheduler + worker; Postgres stays up
@@ -105,7 +105,7 @@ run "ssh '$NEW' 'docker exec $DB_CONTAINER psql -U $PGUSER -d $PGDB -tAc \
 say "State migration complete."
 cat <<EOF
 
-Next (see MIGRATION.md):
+Next (see docs/reference/MIGRATION.md):
   * Restart the NEW scheduler so supercronic reloads the copied crontab:
         ssh $NEW 'cd $NEW_DIR && docker compose restart scheduler'
   * Verify the API on the new box (before cutover):

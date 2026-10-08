@@ -1,4 +1,4 @@
-"""Tests for src/api_ride_surveys.py (PLAN_RIDE_MODE_API.md phase A3,
+"""Tests for src/api_ride_surveys.py (docs/implemented/PLAN_RIDE_MODE_API.md phase A3,
 sql/052) and the survey-award functions it drives in src/points.py.
 
 Fake-cursor idiom, following tests/test_ride_usuals.py's small in-memory
@@ -554,7 +554,7 @@ def test_nav_route_feedback_not_awarded_without_a_rating(client, db):
 
 
 # ---------------------------------------------------------------------------
-# Review-fix regression: PLAN_RIDE_MODE_API.md's own precondition —
+# Review-fix regression: docs/implemented/PLAN_RIDE_MODE_API.md's own precondition —
 # "nav_* require ride_options.nav_improvement + a ride_routes row" — was
 # never actually checked. A rider with a rating, a resolved route, and
 # qualitative text all present must still earn NOTHING when nav_improvement
@@ -659,7 +659,7 @@ def test_a_nonexistent_route_id_is_422(client, db):
 
 
 def test_a_deidentified_route_id_is_422_the_same_way_as_a_nonexistent_one(client, db):
-    """de-id nulls ride_routes.account_id (PLAN_RIDE_MODE_API.md's A2/A3
+    """de-id nulls ride_routes.account_id (docs/implemented/PLAN_RIDE_MODE_API.md's A2/A3
     28h sweep) — the ownership predicate alone excludes it, same 422 as a
     made-up id. A >28h-late survey retries without ride_route_id and still
     earns the scooter-feedback award (tested separately)."""

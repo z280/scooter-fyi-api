@@ -87,7 +87,7 @@ def test_expire_stale_watches_registered_in_cli_commands():
     assert "expire_stale_watches" in cli.COMMANDS
 
 
-# ---------- validation-finisher wiring (PLAN_RIDE_MODE_API.md phase A2) ----
+# ---------- validation-finisher wiring (docs/implemented/PLAN_RIDE_MODE_API.md phase A2) ----
 
 def test_finisher_select_keys_on_watch_window_not_ride_status(monkeypatch):
     """A donated ride already has user_reported_ended_at set and isn't

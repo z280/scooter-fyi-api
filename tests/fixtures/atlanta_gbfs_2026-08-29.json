@@ -1,7 +1,7 @@
 {
  "_source": {
   "retrieved_at": "2026-08-29T11:48:26Z",
-  "purpose": "Golden fixture for the GbfsAdapter (MULTI_TENANCY_PLAN.md \u00a77). Two live GBFS feeds at real coordinate distribution, carrying the divergences a spec-compliant baseline has to absorb: Bird's 0-1 float current_fuel_percent, Bird's float current_range_meters vs Lime's int, Lime's redundant vehicle_type string beside vehicle_type_id, and a vehicle_types registry that declares types with no vehicles in them. Vehicle arrays are a seeded random sample, NOT the full fleet -- see fleet_size for the real counts. Positions/batteries are one instant; nothing here is a time series.",
+  "purpose": "Golden fixture for the GbfsAdapter (docs/MULTI_TENANCY_PLAN.md \u00a77). Two live GBFS feeds at real coordinate distribution, carrying the divergences a spec-compliant baseline has to absorb: Bird's 0-1 float current_fuel_percent, Bird's float current_range_meters vs Lime's int, Lime's redundant vehicle_type string beside vehicle_type_id, and a vehicle_types registry that declares types with no vehicles in them. Vehicle arrays are a seeded random sample, NOT the full fleet -- see fleet_size for the real counts. Positions/batteries are one instant; nothing here is a time series.",
   "identity_probe": {
    "method": "free_bike_status polled 7 times over a 15-minute window (~150s apart), bike_id sets compared between consecutive snapshots, plus a control pair inside one Bird ttl=60 generation.",
    "bird": {

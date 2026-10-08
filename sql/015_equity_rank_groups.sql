@@ -1,5 +1,5 @@
 -- Per-equity-rank-group metric tracking: er1..er6 (see src/equity_groups.py
--- for the group registry, and API_REQUIREMENTS.md §1.1a for why these exist
+-- for the group registry, and docs/API_REQUIREMENTS.md §1.1a for why these exist
 -- alongside v1/v2). Each of Denver DOTI's six EquityGroupRank tiers
 -- (1 = highest need) gets the same total/percent fields as v1/v2 in BOTH
 -- the per-cycle 22-metric snapshot and the 6am-9am daily SLA average, so

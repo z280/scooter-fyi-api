@@ -224,7 +224,7 @@ def test_one_early_waypoint_then_an_implausible_final_leg(pg_conn):
     # in neither.
     assert len(done["path_geojson"]["coordinates"]) == 2
 
-    # SUPERSEDED as of PLAN_RIDE_MODE_API.md phase A2 (Decision 6 / Risk 5):
+    # SUPERSEDED as of docs/implemented/PLAN_RIDE_MODE_API.md phase A2 (Decision 6 / Risk 5):
     # PATCH .../end no longer credits `waypoint` points at all (nor any
     # other action) — see src/api_tracked_rides.py:end_tracked_ride and
     # tests/test_api_tracked_rides_validation.py's own coverage of the

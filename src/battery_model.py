@@ -32,7 +32,7 @@ observations 10-30 minutes apart with a position jump between them."
 Veo does not drop rented vehicles. It keeps them listed for the whole rental,
 sampled every 2 minutes, broadcasting their live moving position, with
 ``is_reserved`` true (see src/ride_watch.py's own measurement, and the
-correction note in API_REQUIREMENTS.md). A real rental therefore produces NO
+correction note in docs/API_REQUIREMENTS.md). A real rental therefore produces NO
 observation gap at all, and the old anchor was mining feed outages that
 happened to coincide with movement.
 
@@ -455,7 +455,7 @@ WHERE pre.current_range_meters IS NOT NULL
       WHERE b.vehicle_identifier = pre.vehicle_identifier
         AND b.departed_at = pre.snapshot_time
   )
-  -- Double-count guard (sql/051 / PLAN_RIDE_MODE_API.md phase A2 "Battery
+  -- Double-count guard (sql/051 / docs/implemented/PLAN_RIDE_MODE_API.md phase A2 "Battery
   -- ingestion"): a donated ride's window can straddle this episode without
   -- sharing its exact departed_at, so the exact-match NOT EXISTS above would
   -- miss it. ingest_donated_observation() handles the inverse direction.
@@ -1507,8 +1507,8 @@ def route_adherence(gps_points: list[tuple[float, float]],
     }
 
 
-# --- Donated-ride ingestion (PLAN_RIDE_MODE_API.md phase A2, "Battery
-# ingestion"; RIDE_MODE_OVERHAUL_PLAN.md Part 1.4) --------------------------
+# --- Donated-ride ingestion (docs/implemented/PLAN_RIDE_MODE_API.md phase A2, "Battery
+# ingestion"; docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Part 1.4) --------------------------
 #
 # A verified track donation is a SECOND source for this table, alongside the
 # nightly observation-gap mining above — and a better one: a donated trip's
@@ -1521,7 +1521,7 @@ def route_adherence(gps_points: list[tuple[float, float]],
 
 # Cap on the number of via-points handed to a single Valhalla /route
 # request for the elevation re-derivation below. A donated track can carry
-# up to ~10,800 points (600 batches x 25 pts, per PLAN_RIDE_MODE_API.md's
+# up to ~10,800 points (600 batches x 25 pts, per docs/implemented/PLAN_RIDE_MODE_API.md's
 # donation cap sanity math) — routing THROUGH that many locations is not
 # what /route is for (trace_attributes, called first, is) and risks a
 # request Valhalla simply refuses. Downsampling to a still-generous handful
@@ -1546,7 +1546,7 @@ def _downsample_for_routing(
 def _donated_elevation_gain_meters(points: list[tuple[float, float]]) -> float | None:
     """Elevation gain for a donated ride's verified waypoint track.
 
-    PLAN_RIDE_MODE_API.md's A2 "Battery ingestion" section calls for this to
+    docs/implemented/PLAN_RIDE_MODE_API.md's A2 "Battery ingestion" section calls for this to
     be "re-derived by map-matching via Valhalla trace_attributes (reuse the
     shade-scoring trace path)". ``valhalla.trace_attributes()``
     (src/valhalla.py — the exact call ``route_adherence()`` above and
@@ -1600,7 +1600,7 @@ def _resolve_soc(ride_row: dict[str, Any]) -> tuple[float, float, str] | None:
     feed-derived reading the rider cannot influence) and falls back to
     reported_start_battery_percent (what the rider read off the vehicle's
     own display) only when the feed had no fresh observation at ride start
-    — the same preference order PLAN_RIDE_MODE_API.md's A2 spec states.
+    — the same preference order docs/implemented/PLAN_RIDE_MODE_API.md's A2 spec states.
 
     soc_end NOW FALLS BACK TO gbfs_end_battery_percent, and until it did,
     THIS FUNCTION WAS THE REASON RIDE MODE HAD NEVER PRODUCED A SINGLE
@@ -1647,7 +1647,7 @@ def ingest_donated_observation(
 ) -> dict[str, Any] | None:
     """Insert one ``battery_trip_observations`` row, ``source='donated_ride'``,
     for a verified track donation whose start AND end battery percentages
-    are both resolvable — PLAN_RIDE_MODE_API.md phase A2's "Battery
+    are both resolvable — docs/implemented/PLAN_RIDE_MODE_API.md phase A2's "Battery
     ingestion". The SOLE way a donated ride's battery signal enters this
     table. Two callers, per the A2 spec:
 

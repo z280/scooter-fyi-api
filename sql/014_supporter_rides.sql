@@ -1,4 +1,4 @@
--- Supporter payments + ride history (API_REQUIREMENTS.md §4).
+-- Supporter payments + ride history (docs/API_REQUIREMENTS.md §4).
 --
 -- supporter_payments: one row per completed Stripe Checkout (Payment Link,
 -- pay-what-you-want). accounts.supporter is derived: TRUE iff the account

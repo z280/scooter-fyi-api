@@ -9,7 +9,7 @@
 -- It isn't. Veo keeps a rented vehicle in free_bike_status for the whole
 -- rental, sampled every 2 minutes, broadcasting its live moving position,
 -- with is_reserved true (see sql/../src/ride_watch.py and the correction
--- note in API_REQUIREMENTS.md). So every 2-minute sample of a moving
+-- note in docs/API_REQUIREMENTS.md). So every 2-minute sample of a moving
 -- rental cleared the threshold and appended its own trip_events row: one
 -- rental became ~10 "trips", and one stop in device_history fragmented
 -- into ~10 two-minute stops, which is what dwell_stats reads.

@@ -1,4 +1,4 @@
-"""Fleet analytics rollups (sql/094, docs/PLAN_FLEET_ANALYTICS.md).
+"""Fleet analytics rollups (sql/094, docs/implemented/PLAN_FLEET_ANALYTICS.md).
 
 Rides, failed starts and dwell, summed by hour (or day) x region x model, so
 the dashboard can slice months of history by neighbourhood without a

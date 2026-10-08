@@ -1,4 +1,4 @@
--- Fleet analytics rollups (docs/PLAN_FLEET_ANALYTICS.md).
+-- Fleet analytics rollups (docs/implemented/PLAN_FLEET_ANALYTICS.md).
 --
 -- The owner's fleet dashboard (2026-10-07) needs rides, failed starts and
 -- dwell by model AND by region over months. Placing an event in a region is a

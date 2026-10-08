@@ -12,14 +12,14 @@ every 48 hours.
 > identify live resources deliberately did *not*: the Compose project
 > (`veo-audit`, the prefix on every volume), the `/opt/veo-audit` deploy
 > dir, the `veo-audit` Cloudflare tunnel, and the `veo_audit` database.
-> See [MIGRATION.md](MIGRATION.md#post-rename-operator-checklist).
+> See [docs/reference/MIGRATION.md](docs/reference/MIGRATION.md#post-rename-operator-checklist).
 
 The original purpose was tracking compliance with Denver RFP §3.0 (30%
-of fleet in Equity Areas) — see `VEO_AUDIT.md` for that history. The
+of fleet in Equity Areas) — see `docs/deferred/VEO_AUDIT.md` for that history. The
 v3.3 architecture (this README) generalizes the pipeline so any future
 frontend (scooter.fyi, weseeyouveo.com, keepdenverfair.com, …) can XHR-poll the public REST
 API for live state. For full request/response shapes, error codes, and
-auth details behind the endpoint tables below, see [API.md](API.md).
+auth details behind the endpoint tables below, see [docs/reference/API.md](docs/reference/API.md).
 
 ## Architecture
 
@@ -96,7 +96,7 @@ agent process).
 │                              60 migrations, applied idempotently at boot
 ├── docker/photon/Dockerfile    the Photon geocoding sidecar (pinned + sha256-verified
 │                               official jar; the index itself ships from R2)
-├── scripts/build_photon_index.md  manual runbook for building/refreshing that index
+├── docs/reference/build_photon_index.md  manual runbook for building/refreshing that index
 ├── src/
 │   ├── main.py                 FastAPI app, lifespan, migrations, router mounts
 │   ├── cli.py                  subcommands run by the scheduler container
@@ -218,7 +218,7 @@ agent process).
 
 Core tables in Postgres, all narrow (no 270-column wide schemas). (This
 list predates the accounts/reports tables from
-API_REQUIREMENTS.md §2-§4 — see those migrations for the full current
+docs/API_REQUIREMENTS.md §2-§4 — see those migrations for the full current
 set; kept here is the original ingest-pipeline core plus trip tracking.)
 
 | Table | Purpose |
@@ -238,9 +238,9 @@ set; kept here is the original ingest-pipeline core plus trip tracking.)
 
 | `region_category` | `region_type` | rows |
 |---|---|---|
-| `disadvantaged_areas` | `v1` | 34 polygons (legacy hand-drawn boundary; RFP compliance metric today, being retired — see API_REQUIREMENTS.md §1.1a) |
+| `disadvantaged_areas` | `v1` | 34 polygons (legacy hand-drawn boundary; RFP compliance metric today, being retired — see docs/API_REQUIREMENTS.md §1.1a) |
 | `disadvantaged_areas` | `v2` | 65 census block groups |
-| `disadvantaged_areas` | `er1`..`er6` | 34 / 58 / 157 / 93 / 114 / 116 census block groups — DOTI Equity Index, one layer per exact rank tier (er1 = highest need). Partition the scored area; tracked individually (not pre-combined) so a future compliance cutoff can be reconstructed from history. Full metric parity with v1/v2 in both `snapshot_metadata_core` and `daily_sla_compliance` — see `src/equity_groups.py` and API_REQUIREMENTS.md §1.1a. |
+| `disadvantaged_areas` | `er1`..`er6` | 34 / 58 / 157 / 93 / 114 / 116 census block groups — DOTI Equity Index, one layer per exact rank tier (er1 = highest need). Partition the scored area; tracked individually (not pre-combined) so a future compliance cutoff can be reconstructed from history. Full metric parity with v1/v2 in both `snapshot_metadata_core` and `daily_sla_compliance` — see `src/equity_groups.py` and docs/API_REQUIREMENTS.md §1.1a. |
 | `council_districts` | `council_district` | 11 (CD_1…CD_11; At-Large overlays filtered) |
 | `community_networks` | `community_network` | 13 (CN_Central, CN_Southwest, …) |
 | `neighborhoods` | `neighborhood` | 78 (NB_AthmarPark, …) |
@@ -308,7 +308,7 @@ else (curl, server-to-server) is unaffected by CORS.
 Both upstreams are self-hosted sidecars in this repo's compose file — a
 Denver-clipped Valhalla graph (`valhalla`) and a Colorado-scoped Photon
 index (`photon`, built from `docker/photon/`, seeded from R2; see
-`scripts/build_photon_index.md`). No third-party routing or geocoding API,
+`docs/reference/build_photon_index.md`). No third-party routing or geocoding API,
 no API key, and no rider query leaves the box. Both are rate limited per IP
 because a sidecar round trip is expensive.
 
@@ -665,7 +665,7 @@ Push to `main`. `.github/workflows/deploy.yml`:
 4. `curl /health` — fails the workflow if not green
 
 Renaming the repo? See the
-[post-rename operator checklist](MIGRATION.md#post-rename-operator-checklist).
+[post-rename operator checklist](docs/reference/MIGRATION.md#post-rename-operator-checklist).
 
 Required GitHub Secrets:
 

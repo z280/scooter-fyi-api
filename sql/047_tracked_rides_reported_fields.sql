@@ -1,4 +1,4 @@
--- Rider-reported ride facts (FEATURE_PLAN_2026-07.md §10): how many
+-- Rider-reported ride facts (docs/implemented/FEATURE_PLAN_2026-07.md §10): how many
 -- minutes the operator's app said the ride was, and which rate-plan tier
 -- the rider says they rode under.
 --

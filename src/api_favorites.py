@@ -1,5 +1,5 @@
 """My Scooters — the specific vehicles a rider has kept
-(sql/081_favorite_devices.sql, ALONG_THE_WAY_PLAN.md §8).
+(sql/081_favorite_devices.sql, docs/ALONG_THE_WAY_PLAN.md §8).
 
     GET    /api/v1/profile/favorite-devices          the list, with live state
     POST   /api/v1/profile/favorite-devices          keep one — needs a fresh scan

@@ -48,7 +48,7 @@ that: it keeps the vehicle in free_bike_status for the whole rental,
 sampled every 2 minutes, broadcasting its live moving position, with
 is_reserved true (measured — see src/ride_watch.py's own
 "WHAT CHECKED OUT ACTUALLY LOOKS LIKE", and the correction note in
-API_REQUIREMENTS.md).
+docs/API_REQUIREMENTS.md).
 
 So every 2-minute sample of a moving rental cleared the threshold and
 appended its own trip_events row. One rental became ~10 "trips", and one

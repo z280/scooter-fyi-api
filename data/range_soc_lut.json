@@ -1,6 +1,6 @@
 {
  "_comment": [
-  "Fleet-wide current_range_meters -> SoC lookup table (API_REQUIREMENTS.md \u00a77.1).",
+  "Fleet-wide current_range_meters -> SoC lookup table (docs/API_REQUIREMENTS.md \u00a77.1).",
   "Veo's feed emits exactly these 100 values for EVERY vehicle type: an integer",
   "state-of-charge percent mapped through one vendor-side table. Captured from a",
   "live GBFS snapshot 2026-07-06 and verified against the 37-day R2 archive",

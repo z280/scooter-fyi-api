@@ -1,6 +1,6 @@
 """Tests for src/track_verify.py -- the server-side track chain verifier
-(PLAN_RIDE_MODE_API.md phase A2, "Verification"; format spec
-RIDE_MODE_OVERHAUL_PLAN.md Part 2).
+(docs/implemented/PLAN_RIDE_MODE_API.md phase A2, "Verification"; format spec
+docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Part 2).
 
 Two families of tests:
 
@@ -890,7 +890,7 @@ def test_per_check_keys_are_stable_across_every_outcome():
 
 
 def test_distance_meters_is_computed_over_raw_unadjusted_points():
-    """PLAN_RIDE_MODE_API.md check 4: the accuracy adjustment is only for
+    """docs/implemented/PLAN_RIDE_MODE_API.md check 4: the accuracy adjustment is only for
     the speed GATE, never for the reported distance -- a ride with large
     (but individually plausible) accuracy values must still report the
     RAW measured distance, not one shrunk by the accuracy subtraction."""

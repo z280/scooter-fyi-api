@@ -1,4 +1,4 @@
-"""POST /api/v1/ride-routes (PLAN_RIDE_MODE_API.md phase A3, sql/052).
+"""POST /api/v1/ride-routes (docs/implemented/PLAN_RIDE_MODE_API.md phase A3, sql/052).
 
 Same fake-cursor idiom as tests/test_ride_session_fields.py: a monkeypatched
 connection/cursor, assertions on the SQL that gets built, and a bare

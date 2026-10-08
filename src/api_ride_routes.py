@@ -1,4 +1,4 @@
-"""Ride route persistence: POST /api/v1/ride-routes (PLAN_RIDE_MODE_API.md
+"""Ride route persistence: POST /api/v1/ride-routes (docs/implemented/PLAN_RIDE_MODE_API.md
 phase A3, sql/052_ride_surveys_routes.sql).
 
 Screen 4 of the ride wizard picks a route (one of the four

@@ -1,6 +1,6 @@
 """Pure-logic + fake-cursor coverage for src/area_leaders.py
-(sql/048_h3_r8_area_leaders.sql; FEATURE_PLAN_2026-07.md §11.3;
-PLAN_RIDE_MODE_API.md Phase A4).
+(sql/048_h3_r8_area_leaders.sql; docs/implemented/FEATURE_PLAN_2026-07.md §11.3;
+docs/implemented/PLAN_RIDE_MODE_API.md Phase A4).
 
 Three properties are asserted directly against the pure helper functions
 (_build_universe / _aggregate_window_points / _rank_cell — no cursor, no

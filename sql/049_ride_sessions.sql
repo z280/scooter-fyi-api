@@ -3,7 +3,7 @@
 -- drives the post-ride contribution screen.
 --
 -- WHAT A RIDE SESSION IS. Ride mode records its GPS track LOCALLY, in the
--- browser, and transmits nothing mid-ride (RIDE_MODE_OVERHAUL_PLAN.md
+-- browser, and transmits nothing mid-ride (docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md
 -- Part 2). For that local record to be worth anything later, the batches
 -- have to be signed with something the server issued and can re-derive at
 -- donation time. That is track_key + track_nonce: minted once, at ride
@@ -48,7 +48,7 @@
 -- feed_start_lon are the vehicle's last position AS THE FEED SAW IT,
 -- which the rider cannot supply or influence — that is what makes them the
 -- anti-fabrication anchor for the donation-time start correlation
--- (PLAN_RIDE_MODE_API.md §A2 check 5, which prefers them and falls back to
+-- (docs/implemented/PLAN_RIDE_MODE_API.md §A2 check 5, which prefers them and falls back to
 -- start_lat/lon only when the feed had no fresh observation, so rides that
 -- predate this migration stay verifiable). Read from the same newest
 -- telemetry row as feed_start_battery_percent, in the same query.

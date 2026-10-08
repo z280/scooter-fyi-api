@@ -4,7 +4,7 @@
 -- premise that "a rented vehicle drops out of GBFS free_bike_status". Veo does
 -- not: it keeps the vehicle listed for the whole rental, sampled every 2
 -- minutes, moving, with is_reserved true (see sql/069 and the correction note
--- in API_REQUIREMENTS.md). A real rental produces no gap at all, so the old
+-- in docs/API_REQUIREMENTS.md). A real rental produces no gap at all, so the old
 -- anchor was mining feed outages that happened to coincide with movement.
 --
 -- The window compounded it. MIN_DURATION_S=10min / MAX_DURATION_S=30min were

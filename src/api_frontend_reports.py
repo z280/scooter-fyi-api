@@ -1,4 +1,4 @@
-"""Frontend report ingestion + aggregates (API_REQUIREMENTS.md §3).
+"""Frontend report ingestion + aggregates (docs/API_REQUIREMENTS.md §3).
 
     POST /api/v1/reports/device               rider failure report
     POST /api/v1/reports/discount             missed-discount evidence
@@ -143,7 +143,7 @@ _VEHICLE_IDENTIFIER_RE = re.compile(r"^[0-9a-f]{16}$")
 
 # §3.3 est_overcharge_cents: without Veo's rate card we can't compute the
 # exact delta, so the estimate assumes the missed equity discount is half
-# of what was charged. Documented in API.md; tune here when DOTI confirms
+# of what was charged. Documented in docs/reference/API.md; tune here when DOTI confirms
 # the actual discount schedule.
 OVERCHARGE_FRACTION = 0.5
 

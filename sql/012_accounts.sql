@@ -1,5 +1,5 @@
 -- Accounts + bearer sessions + magic-link tokens + rate-limit event log.
--- API_REQUIREMENTS.md §2 (accounts & sessions) and §5 (rate limiting).
+-- docs/API_REQUIREMENTS.md §2 (accounts & sessions) and §5 (rate limiting).
 --
 -- Two sign-in doors (Google ID token, Postmark magic link), one session
 -- model. Sessions are opaque bearer tokens stored ONLY as sha256 hashes —

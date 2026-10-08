@@ -1,4 +1,4 @@
--- Recurring supporter subscriptions (API_REQUIREMENTS.md §4.1 update:
+-- Recurring supporter subscriptions (docs/API_REQUIREMENTS.md §4.1 update:
 -- single fixed-price monthly plan with a 30-day free trial, replacing the
 -- one-time pay-what-you-want Payment Link as the primary supporter path).
 --

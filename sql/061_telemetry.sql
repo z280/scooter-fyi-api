@@ -27,7 +27,7 @@
 -- ("/api/v1/devices/{device_id}"), never the raw path, so the column's
 -- distinct values are bounded by the number of routes in the app.
 --
--- city_id is carried per MULTI_TENANCY_PLAN.md §9: nullable, NULL = Denver
+-- city_id is carried per docs/MULTI_TENANCY_PLAN.md §9: nullable, NULL = Denver
 -- today, populated when multi-city lands — a tenant DIMENSION for
 -- analytics, not a scoping key.
 --

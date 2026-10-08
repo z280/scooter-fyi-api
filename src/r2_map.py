@@ -165,7 +165,7 @@ def sync_map_assets() -> dict:
 # fetch sidecar and the photon container mount `photon_files`.
 PHOTON_INDEX_DIR = "/photon"
 # Photon serves whatever it finds in <data-dir>/photon_data; that is also the
-# top-level directory inside the tarball (see scripts/build_photon_index.md).
+# top-level directory inside the tarball (see docs/reference/build_photon_index.md).
 PHOTON_DATA_DIRNAME = "photon_data"
 PHOTON_INDEX_PREFIX = "photon/"
 # The object name carries its build date, so the newest key is picked by name
@@ -278,7 +278,7 @@ def _stage_photon_index(archive: Path, dest_dir: Path) -> None:
         raise RuntimeError(
             f"photon index archive has no top-level {PHOTON_DATA_DIRNAME}/ "
             f"directory — build it with `tar -c {PHOTON_DATA_DIRNAME}/` "
-            f"(scripts/build_photon_index.md)")
+            f"(docs/reference/build_photon_index.md)")
 
     # Swap within the STAGING namespace only — `live`/`PHOTON_DATA_DIRNAME`
     # is never touched here.
@@ -351,7 +351,7 @@ def sync_photon_index() -> dict:
 
     if key is None:
         log.warning("photon index sync: no %s* object in r2://%s — seed one with "
-                    "scripts/build_photon_index.md; /api/v1/geocode/search will "
+                    "docs/reference/build_photon_index.md; /api/v1/geocode/search will "
                     "503 until then", PHOTON_INDEX_PREFIX, bucket)
         return result
     result["key"] = key

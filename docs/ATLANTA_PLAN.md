@@ -4,10 +4,10 @@ Status: **assessment**, nothing here is built. Feeds probed live
 2026-08-29; rebased and re-verified against `main` at `sql/081` on
 2026-09-29.
 
-Parent doc: [`MULTI_TENANCY_PLAN.md`](MULTI_TENANCY_PLAN.md), whose
+Parent doc: [`docs/MULTI_TENANCY_PLAN.md`](MULTI_TENANCY_PLAN.md), whose
 three-axis framing (city / provider / deployment) this doc assumes.
 Frontend lane: `denver-scooter-fyi/docs/ATLANTA_PLAN.md`.
-Sibling program: [`ALONG_THE_WAY_PLAN.md`](ALONG_THE_WAY_PLAN.md) — see §2e,
+Sibling program: [`docs/ALONG_THE_WAY_PLAN.md`](ALONG_THE_WAY_PLAN.md) — see §2e,
 which is the part of this doc most likely to matter to roadmap decisions.
 
 Atlanta was proposed with two operator feeds — Bird and Lime. Both were
@@ -21,7 +21,7 @@ Where a number is *not* measured it says so.
 Atlanta is a **better** city #2 than the multi-tenancy plan assumed, and a
 **worse** one than the feeds make it look.
 
-Better, because Denver's Lime/Bird/Lyft probe (`MULTI_TENANCY_PLAN.md` §7b)
+Better, because Denver's Lime/Bird/Lyft probe (`docs/MULTI_TENANCY_PLAN.md` §7b)
 found 3 vehicles, 0 vehicles and an abandoned feed. Atlanta has **5,822 live
 vehicles across two live operators** — 72% of Denver Veo's 8,084 — with
 working `vehicle_types`, live `last_reported`, and in Bird's case a real
@@ -41,7 +41,7 @@ more dangerous of the two, because an adapter that trusts it produces
 thousands of phantom vehicles and phantom trips at each rotation instead of
 an obviously empty feature.
 
-That is the same wall `MULTI_TENANCY_PLAN.md` §7c drew, and it lands in
+That is the same wall `docs/MULTI_TENANCY_PLAN.md` §7c drew, and it lands in
 mostly the same place: Atlanta gets the fleet-analytics half and almost
 none of the per-vehicle half.
 
@@ -121,7 +121,7 @@ against the City of Atlanta's own limits layer (136.27 sq mi, retrieved
 | Lime | 2,876 / 2,926 — **98.3%** | 50 |
 
 So both fleets are effectively municipal, not metro-wide. Lime's wide bbox
-is 50 stragglers, not a distribution. `MULTI_TENANCY_PLAN.md` §7d warned to
+is 50 stragglers, not a distribution. `docs/MULTI_TENANCY_PLAN.md` §7d warned to
 "expect a much higher `other_outlier` share for metro-wide operators" based
 on Denver-Lime, where 2 of 3 vehicles were outside the city — that
 generalised from a 3-vehicle sample and does not hold here. Atlanta's
@@ -155,7 +155,7 @@ All observed, none hypothetical:
 - **Bird's `max_range_meters` is plausible** (24 km scooter, 60 km e-bike)
   but unverified in the field. `_KNOWN_VEHICLE_TYPES` is a
   corrections layer built by standing next to a scooter
-  (`MULTI_TENANCY_PLAN.md` §11.5); Atlanta starts with an empty one for
+  (`docs/MULTI_TENANCY_PLAN.md` §11.5); Atlanta starts with an empty one for
   both operators and no way to fill it remotely.
 - **Bird's geofencing zones carry no `name` and no `maximum_speed_kph`** —
   only `ride_allowed` / `ride_through_allowed`. 21 zones are hard no-go,
@@ -256,7 +256,7 @@ and §2d's warning about position-matching applies to any answer it produces.
 
 ### 2a. What this costs, concretely
 
-`MULTI_TENANCY_PLAN.md` §7c already drew this line and it holds exactly:
+`docs/MULTI_TENANCY_PLAN.md` §7c already drew this line and it holds exactly:
 
 **Works in Atlanta, both operators, today** — `compute.py`'s DuckDB spatial
 join, the `snapshot_metadata_core` metrics, `regional_metrics_narrow`,
@@ -281,7 +281,7 @@ Two entries that look like they belong on that list do not:
   matching does not share.
 
 That second list is not a footnote. It is most of what shipped in the last
-year — dibs (`sql/076`), ride mode (`PLAN_RIDE_MODE_API.md`), device
+year — dibs (`sql/076`), ride mode (`docs/implemented/PLAN_RIDE_MODE_API.md`), device
 features (`sql/055`), battery (`sql/070`–`071`).
 
 The parent plan's `stable_vehicle_id` capability flag (§7a) is what makes
@@ -422,13 +422,13 @@ nearest-neighbour matching between cycles is superficially tempting. Don't:
 it is inference presented as identity, it fails precisely when a vehicle
 moves (the only case that matters), and a wrong match silently merges two
 vehicles' history, reports and photos — the same corruption
-`MULTI_TENANCY_PLAN.md` §5 warns about from hash collisions, arrived at
+`docs/MULTI_TENANCY_PLAN.md` §5 warns about from hash collisions, arrived at
 deliberately instead of by accident. If per-vehicle intelligence in Atlanta
 ever matters, the route is an MDS agreement with ATLDOT, not GBFS scraping.
 
 ### 2e. Atlanta diverges from the roadmap, not just from today's product
 
-`ALONG_THE_WAY_PLAN.md` landed on `main` after this assessment was first
+`docs/ALONG_THE_WAY_PLAN.md` landed on `main` after this assessment was first
 written, and it changes the strategic reading enough to be worth its own
 section.
 
@@ -452,7 +452,7 @@ Atlanta has no plates, so there is nothing to hash and nothing to stand at.
 **The implication is about sequencing, not feasibility.** Every phase of
 Along the Way that Atlanta cannot run is a phase whose Denver implementation
 will accumulate `vehicle_identifier` assumptions for as long as it is built
-without a second city in view. Phase 1 of `MULTI_TENANCY_PLAN.md` exists to
+without a second city in view. Phase 1 of `docs/MULTI_TENANCY_PLAN.md` exists to
 stop exactly that, and it is still unbuilt. The cost of deferring it is not
 constant — it grows with every identity-gated feature that ships first.
 
@@ -524,7 +524,7 @@ it needs the permit document read by a person.
 Until then Atlanta can compute and publish *distribution* but **must not**
 render a pass/fail, a gauge against a threshold, or the word "compliance".
 Inventing a threshold would be the exact failure mode
-`MULTI_TENANCY_PLAN.md` §8b calls the rack-rate trap: a number that is
+`docs/MULTI_TENANCY_PLAN.md` §8b calls the rack-rate trap: a number that is
 citable because it is convenient, not because it binds anyone.
 `COMPLIANCE_GROUPS` for Atlanta is the empty tuple, and that has to be
 expressible.
@@ -582,7 +582,7 @@ prices for Atlanta scooters.
 
 ## 4. Infrastructure: the actual wall
 
-Same wall as `MULTI_TENANCY_PLAN.md` §8, now with Atlanta's numbers.
+Same wall as `docs/MULTI_TENANCY_PLAN.md` §8, now with Atlanta's numbers.
 
 **Routing and geocoding.** Valhalla (3.0 GiB cap, Denver-clipped graph) and
 Photon (2.0 GiB, Colorado-scoped index) are ~5 GiB of a 12 GiB box whose
@@ -621,7 +621,7 @@ hours apart.
 
 ## 5. What Phase 4 actually costs, in order
 
-Phases 1–3 of `MULTI_TENANCY_PLAN.md` are prerequisites and unchanged. What
+Phases 1–3 of `docs/MULTI_TENANCY_PLAN.md` are prerequisites and unchanged. What
 Atlanta adds on top:
 
 | # | Work | Size |

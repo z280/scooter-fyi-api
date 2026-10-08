@@ -118,7 +118,7 @@
 30 4 * * * cd /app && python -m src.cli refresh_routing_graph
 
 # Photon geocoding index refresh. The index itself is rebuilt BY HAND, roughly
-# quarterly (scripts/build_photon_index.md), so this is only an R2 ETag check
+# quarterly (docs/reference/build_photon_index.md), so this is only an R2 ETag check
 # and a no-op on all but ~4 days a year. 05:00 keeps it clear of the 04:30
 # routing-graph refresh: both unpack multi-GB artifacts into volumes on the
 # same disk. A changed index is logged loudly, because the photon container has
@@ -162,8 +162,8 @@
 */5 * * * * cd /app && python -m src.cli poll_comms_replies
 
 # De-id sweep: severs account linkage on donated ride tracks
-# (track_donations/donated_track_points -- RIDE_MODE_OVERHAUL_PLAN.md's
-# "De-id" glossary entry / PLAN_RIDE_MODE_API.md phase A2) 4h after a
+# (track_donations/donated_track_points -- docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md's
+# "De-id" glossary entry / docs/implemented/PLAN_RIDE_MODE_API.md phase A2) 4h after a
 # ride's points settle, with a hard floor of 28h after donation even if
 # points never settle -- so a donated track is never account-linked past
 # 28h. Also carries a to_regclass('ride_routes')-guarded arm for phase
@@ -173,7 +173,7 @@
 # safe to run every hour forever.
 15 * * * * cd /app && python -m src.cli deidentify_donations
 
-# H3 r8 cell universe (FEATURE_PLAN_2026-07.md §11 / PLAN_RIDE_MODE_API.md
+# H3 r8 cell universe (docs/implemented/FEATURE_PLAN_2026-07.md §11 / docs/implemented/PLAN_RIDE_MODE_API.md
 # phase A4): full-replaces the list of cells that have EVER had an observed
 # device or a point — all-time, not windowed (src/area_leaders.py:
 # refresh_universe).

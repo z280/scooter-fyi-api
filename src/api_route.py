@@ -98,7 +98,7 @@ def city_coverage(origin: tuple[float, float], dest: tuple[float, float]) -> dic
     }
 
 
-# Per-IP rate limits (API_REQUIREMENTS.md §5), as (limit, window_seconds).
+# Per-IP rate limits (docs/API_REQUIREMENTS.md §5), as (limit, window_seconds).
 # 30/min on /route accommodates Screen 4's four parallel profile fetches plus
 # the <=1/min off-route re-route; /route/profiles is a config-only response and
 # gets the looser cap.

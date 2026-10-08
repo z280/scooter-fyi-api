@@ -1,4 +1,4 @@
-"""Profile endpoints (API_REQUIREMENTS.md §2.4, extended for public
+"""Profile endpoints (docs/API_REQUIREMENTS.md §2.4, extended for public
 usernames / phone numbers / home-work locations).
 
     GET  /api/v1/profile                      full profile incl. server-computed fields

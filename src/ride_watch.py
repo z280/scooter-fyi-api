@@ -52,7 +52,7 @@ system, not this detection layer.
 A watch that expires without ever resolving is left alone here —
 src/cli.py:expire_stale_watches() closes those out on its own cadence.
 
-VALIDATION FINISHER (PLAN_RIDE_MODE_API.md phase A2, "Validation finisher"):
+VALIDATION FINISHER (docs/implemented/PLAN_RIDE_MODE_API.md phase A2, "Validation finisher"):
 finalize_validation() below settles a ride's contribution eligibility once
 the thing a `pending_feed` ride was waiting on resolves — either GBFS
 reappearing (this module's own resolve path, right below) or the watch
@@ -215,7 +215,7 @@ def update_watches_for_cycle(
                     (str(cycle_id), watch_ids),
                 )
                 # ADVISORY-LOCK ORDERING (the "ride_watch advisory-lock fix",
-                # PLAN_RIDE_MODE_API.md phase A2 "Validation finisher"): take
+                # docs/implemented/PLAN_RIDE_MODE_API.md phase A2 "Validation finisher"): take
                 # every reappearing ride's ride_validation:<ride_id> lock
                 # BEFORE the tracked_rides UPDATE just below touches its row
                 # — not after, and not only inside finalize_validation
@@ -268,7 +268,7 @@ def update_watches_for_cycle(
                 )
         conn.commit()
 
-        # Validation finisher (PLAN_RIDE_MODE_API.md phase A2). Deliberately
+        # Validation finisher (docs/implemented/PLAN_RIDE_MODE_API.md phase A2). Deliberately
         # a SEPARATE transaction per ride, run only after the block above
         # has committed and thereby released the advisory locks it took: by
         # the time finalize_validation re-takes `ride_validation:<ride_id>`
@@ -306,7 +306,7 @@ def update_watches_for_cycle(
 
 
 # ---------------------------------------------------------------------------
-# Validation finisher (PLAN_RIDE_MODE_API.md phase A2, "Validation
+# Validation finisher (docs/implemented/PLAN_RIDE_MODE_API.md phase A2, "Validation
 # finisher")
 # ---------------------------------------------------------------------------
 #
@@ -314,7 +314,7 @@ def update_watches_for_cycle(
 # imported: that module's checks need the RAW batch strings to recompute
 # from scratch (signature, chain integrity, monotonicity, speed), and those
 # strings are discarded right after verification
-# (RIDE_MODE_OVERHAUL_PLAN.md Part 2: "Raw JWS strings are discarded after
+# (docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Part 2: "Raw JWS strings are discarded after
 # verification"), so by the time a pending_feed donation reaches this
 # finisher there is nothing left to feed verify_track_chain(). Per that
 # module's own pipeline, a donation only ever settles at 'pending_feed'
@@ -405,7 +405,7 @@ def finalize_validation(cur, ride_id: str) -> dict[str, Any] | None:
        for a donation that arrived before GBFS resolved (the donation
        transaction itself ingests only when GBFS had already resolved at
        donation time) — same "recompute validation_status -> award points
-       -> ingest battery observation" order PLAN_RIDE_MODE_API.md states
+       -> ingest battery observation" order docs/implemented/PLAN_RIDE_MODE_API.md states
        for the donation transaction.
 
     Returns None when there was nothing to do: no such ride; validation_status
@@ -566,7 +566,7 @@ def finalize_validation(cur, ride_id: str) -> dict[str, Any] | None:
                 points_awarded.append({"action": award["action"], "points": award["points"]})
 
         if may_award and nav_improvement_on:
-            # ride_routes doesn't exist until PLAN_RIDE_MODE_API.md phase
+            # ride_routes doesn't exist until docs/implemented/PLAN_RIDE_MODE_API.md phase
             # A3 (sql/052) -- same to_regclass guard as
             # src/api_tracked_rides.py:donate_track and
             # src/cli.py:deidentify_donations.

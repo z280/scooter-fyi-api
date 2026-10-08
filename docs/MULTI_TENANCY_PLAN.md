@@ -73,7 +73,7 @@ Everything else is already a `config.json` key. These are not:
    which city they're standing in. `/denver/profile` and `/boulder/profile`
    returning the same row is a design smell that will leak into the client.
 3. It is a hard break for every existing consumer on day one, including the
-   live frontend and API.md's 3,194 lines of documented shapes.
+   live frontend and docs/reference/API.md's 3,194 lines of documented shapes.
 
 **Instead:** scope only the resources that are actually city-scoped, and do
 it in two compatible steps.
@@ -617,8 +617,8 @@ lost is with a source outside the open-data ecosystem entirely.
 - **Admin panel.** `/admin/cycles`, `/admin/failures`, `/admin/regions` need
   a feed selector, and the cycle list needs the feed name in the table or it
   becomes unreadable at 15 feeds × 720 cycles/day.
-- **`GET /` banner and API.md.** Both enumerate every endpoint by hand.
-  Budget the doc update — API.md is 3,194 lines and its accuracy is
+- **`GET /` banner and docs/reference/API.md.** Both enumerate every endpoint by hand.
+  Budget the doc update — docs/reference/API.md is 3,194 lines and its accuracy is
   load-bearing for the frontend.
 - **Rate limits.** Per-IP, no change needed.
 - **Privacy policy.** One document today. Per-city data law divergence is a
@@ -640,7 +640,7 @@ Denver's boundaries, graph and geocoder stay exactly as they are.
 | **2** | `ProviderAdapter` protocol; `VeoAdapter` extracted verbatim; `GbfsAdapter` (built against Lyft's frozen 2,730-vehicle payload as a fixture, proven live against `lime_denver`); capabilities endpoint; pricing moves server-side | capability flags | **L** |
 | **3** | Frontend de-Denverization (companion doc) — Denver build should be byte-comparable | — | **L** |
 | **4** | City #2: boundaries, combined routing graph, widened Photon index, per-city weather, retention/partitioning | new Pages project | **XL**, infra-bound |
-| **5** | Per-city leaderboards, admin feed filters, per-city compliance config, API.md rewrite | — | **M** |
+| **5** | Per-city leaderboards, admin feed filters, per-city compliance config, docs/reference/API.md rewrite | — | **M** |
 
 Phase 1 is the one to be disciplined about: it must ship with **zero
 user-visible change**. If it does, everything after it is additive.

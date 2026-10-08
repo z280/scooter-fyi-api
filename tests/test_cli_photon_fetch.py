@@ -20,7 +20,7 @@ comment). These tests were rewritten from asserting a live swap to
 asserting the staged directory instead; `index_present` now tracks the
 LIVE directory's presence, which none of these tests create unless they
 say so explicitly (a real deployment's `photon_data` is populated once,
-by hand, before `photon` first starts — see build_photon_index.md).
+by hand, before `photon` first starts — see docs/reference/build_photon_index.md).
 """
 
 from __future__ import annotations

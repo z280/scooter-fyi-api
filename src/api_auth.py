@@ -1,4 +1,4 @@
-"""Account auth routes (API_REQUIREMENTS.md §2.1–§2.3).
+"""Account auth routes (docs/API_REQUIREMENTS.md §2.1–§2.3).
 
     POST /api/v1/auth/google       Google ID token → session
     POST /api/v1/auth/magic-link   email → Postmark magic link (always 202)

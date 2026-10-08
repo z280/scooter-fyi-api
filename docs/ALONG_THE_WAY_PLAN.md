@@ -1236,7 +1236,7 @@ Session-authed throughout. Rate-limited per account on the existing
 `enforce()` bucket pattern — the QR endpoint's 20/hour is the right
 neighbourhood.
 
-Errors worth naming explicitly in `API.md`: `qr_mismatch` (400),
+Errors worth naming explicitly in `docs/reference/API.md`: `qr_mismatch` (400),
 `too_far_from_device` (403, with the metres), `unknown_device` (400),
 `favorite_limit_reached` (409, naming the cap), `already_favorited` (200,
 idempotent — re-scanning an existing favourite refreshes `verified_at` rather
@@ -2461,10 +2461,10 @@ interruption in a way almost nothing else in this program is.
 
 ## 15. House duties this program owes
 
-Per `FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
+Per `docs/implemented/FEATURE_PLAN_2026-07.md` "Sequencing" and the module headers:
 
 - **Every PR:** endpoint-table row in `README.md`, full request/response shapes
-  and error codes in `API.md`, a status row in `API_REQUIREMENTS.md`, new env
+  and error codes in `docs/reference/API.md`, a status row in `docs/API_REQUIREMENTS.md`, new env
   vars in **both** `.env.example` and `docker-compose.yml`, a comment block in
   `crontab` for any new job.
 - **Migrations:** idempotent, applied in sorted order at boot, recorded in

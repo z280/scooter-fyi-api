@@ -1,4 +1,4 @@
-"""Fleet analytics endpoints (docs/PLAN_FLEET_ANALYTICS.md).
+"""Fleet analytics endpoints (docs/implemented/PLAN_FLEET_ANALYTICS.md).
 
 Public, read-only, cached. Every response states its window, its time zone,
 its granularity, its region, its sample and what its numbers mean; a chart

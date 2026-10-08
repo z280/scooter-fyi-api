@@ -146,7 +146,7 @@ def _aggregate_window_points(
     full set both to rank (`_rank_cell`) and to compute a cell's
     `total_points` / `distinct_earners`, which cover every earner, not only
     the stored top 3 (see the response-shape example in
-    PLAN_RIDE_MODE_API.md Phase A4: `distinct_earners: 4` alongside a
+    docs/implemented/PLAN_RIDE_MODE_API.md Phase A4: `distinct_earners: 4` alongside a
     3-entry leader+runners_up list).
     """
     totals: dict[tuple[int, int], list[Any]] = {}

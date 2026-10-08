@@ -116,7 +116,7 @@ def points_schedule() -> dict[str, dict[str, int]]:
     for action, value in p.REPORT_TYPE_POINTS.values():
         schedule[action] = {"points": value}
 
-    # Ride Mode (PLAN_RIDE_MODE_API.md A1 ships the complete schedule; A2/A3
+    # Ride Mode (docs/implemented/PLAN_RIDE_MODE_API.md A1 ships the complete schedule; A2/A3
     # wire the awards). Published BEFORE anything awards them on purpose —
     # Screen 2's ℹ copy and Screen 9's header interpolate these values, and
     # the frontend needs them the day F2 deploys.

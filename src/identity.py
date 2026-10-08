@@ -15,7 +15,7 @@ The raw plate is NEVER exposed over an unauthenticated wire. Only the
 HMAC `vehicle_identifier` appears on the public /api/v1/devices/current
 endpoint; the plate is served exclusively by the bearer-gated
 /api/v1/private/* endpoints. (A §1.1 promotion of the plate to the
-public endpoint was later reverted — see API_REQUIREMENTS.md §1.1.)
+public endpoint was later reverted — see docs/API_REQUIREMENTS.md §1.1.)
 With the salt set:
   * Casual scrapers see opaque 16-char identifiers, not plates.
   * Anyone with our public API alone cannot reverse identifier → plate.

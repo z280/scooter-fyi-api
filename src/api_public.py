@@ -981,7 +981,7 @@ def _empty_daily_payload() -> dict[str, Any]:
     Mirrors the persisted row's keys with null values (snapshot_count 0) so
     the front-end compliance gauge can render a 'pending' state. The
     documented gauge does `v1Pct === null ? "pending" : v1Pct.toFixed(1)`
-    (API.md → Common patterns), which only works if the field is present
+    (docs/reference/API.md → Common patterns), which only works if the field is present
     and null — a 503 / `{detail}` body leaves it `undefined` and the gauge
     crashes on `.toFixed()`.
     """

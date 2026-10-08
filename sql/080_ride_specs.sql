@@ -1,6 +1,6 @@
 -- Ride specs: a rider's saved "ideal scooter".
 --
--- ALONG_THE_WAY_PLAN.md §5. A spec is what a rider will ride — kind of
+-- docs/ALONG_THE_WAY_PLAN.md §5. A spec is what a rider will ride — kind of
 -- device, required features, minimum quality, minimum battery — with each
 -- requirement marked MUST or PREFER. It is read by the trip search
 -- (POST /api/v1/trip/candidates), which ranks against it and relaxes the

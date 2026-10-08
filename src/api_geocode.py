@@ -57,7 +57,7 @@ log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Query parameter bounds (PLAN_RIDE_MODE_API.md, Phase A1).
+# Query parameter bounds (docs/implemented/PLAN_RIDE_MODE_API.md, Phase A1).
 Q_MIN_LEN = 2
 Q_MAX_LEN = 100
 MAX_LIMIT = 8

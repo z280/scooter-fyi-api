@@ -1,4 +1,4 @@
--- Retire the GitHub map-auth flow (API_REQUIREMENTS.md §2.5).
+-- Retire the GitHub map-auth flow (docs/API_REQUIREMENTS.md §2.5).
 --
 -- api_tokens held the bearer tokens minted by the GitHub OAuth "elevated
 -- map" flow (src/map_auth.py) and verified by require_map_user
