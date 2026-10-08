@@ -30,6 +30,20 @@
 - **Off-map** is vehicles seen in the last 7 days but not in the current feed: rented out past the feed, in the shop, or gone. It is recorded per cycle from this deploy on; earlier hours are null, not zero.
 - **Time buckets** are Denver local time (`America/Denver`) for day, week (Monday start) and month. Hours are stored in UTC and shown local.
 
+## Counting eras: the series are not comparable across two dates
+
+`trip_events`, `device_history` stops and failed starts were counted three different ways (found once the backfill drew them):
+
+| Period | Counting | Effect |
+|---|---|---|
+| until 2026-08-10 04:15 UTC | every 2-minute sample of a moving rented vehicle was a trip (`8a51d4d` fixed it) | rides about 6× over-counted; stops split into 2-minute pieces |
+| 2026-08-10 → 2026-10-06 01:36 UTC | one trip per rental, but GPS drift over 16 m was still a trip (`dc292b6` fixed it) | about 2 of 3 trips were drift; drift restarted dwell; failed starts under-counted |
+| since 2026-10-06 01:36 UTC | current method | comparable |
+
+Measured on production: before Oct 6 the median trip was 28–49 m at about 4,000 an hour; after it, about 800 m at about 1,000 an hour.
+
+The history cannot be corrected after the fact (the pre-Aug-10 samples cannot be de-duplicated into rentals), so it is **labelled**: rides, failed-starts and dwell responses carry `counting_changes` (dated, with the commit and a summary), `comparable_since` and a caveat, and the page marks the dates and sets the older eras apart.
+
 ## Rollups (sql/094)
 
 These are incremental and idempotent, refreshed at the end of every ingest cycle. A refresh failure is logged and never fails the cycle. A one-time `analytics_backfill` CLI fills the history.

@@ -1049,7 +1049,7 @@ The owner's fleet dashboard (docs/PLAN_FLEET_ANALYTICS.md). All endpoints are pu
 | `GET /analytics/fleet-status` | `days` (≤30: the source keeps 30 days), `granularity`, optional `model` | `series[{bucket, available, in_use, out_of_service, off_map, cycles}]`; `off_map` is null before 2026-10-07 and not split by model |
 | `GET /analytics/fleet-counts` | — | `visible_now`, `visible_now_by_model`, `ever_seen_total`, `ever_seen_by_model`, `ever_seen_since` |
 
-A `400` means a bad parameter; a `404` means an unknown region. Failed starts and dwell end at `data_through`, because closes settle for 6 h before they are counted.
+A `400` means a bad parameter; a `404` means an unknown region. Rides, failed starts and dwell also return `counting_changes` (dated changes in how they were counted: 2026-08-10 and 2026-10-06) and `comparable_since`; figures before that date measure something different and must not be compared with later ones. Failed starts and dwell end at `data_through`, because closes settle for 6 h before they are counted.
 
 **Definitions** (also returned inline):
 - A ride is a `trip_events` move, placed by its start and timed at detection.
