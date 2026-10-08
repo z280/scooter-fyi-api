@@ -43,6 +43,27 @@ ALTER TABLE dibs ADD COLUMN IF NOT EXISTS taken_at TIMESTAMPTZ;
 -- it a single rental would text the rider twenty times.
 ALTER TABLE dibs ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
 
+-- When a cycle RESERVED this claim's send, which is a different moment from
+-- when the send landed and needs its own column.
+--
+-- The watcher cannot hold a row lock across the SMS gateway. If it did, a
+-- `/mine` arriving mid-send would block on the locked row until the watcher
+-- committed — so the alert would go out and the rider's "I've got it" would
+-- land immediately after it, which is precisely the own-rental false alert
+-- this feature exists to prevent. A slow gateway would also hold locks on
+-- every live claim at once.
+--
+-- So the reservation is one short transaction (claim it), the send happens
+-- with nothing locked, and the outcome is another short transaction. This
+-- column is what makes that safe: it is set by the reservation, so a second
+-- overlapping cycle finds the claim already taken.
+--
+-- It is a TIMESTAMP rather than a flag so a reservation whose process died
+-- between claiming and recording can be retried after DIBS_NOTIFY_LEASE.
+-- That retry cannot double-text: `send_sms` is called with an idempotency
+-- key naming the claim, so comms collapses the second attempt.
+ALTER TABLE dibs ADD COLUMN IF NOT EXISTS notify_attempt_at TIMESTAMPTZ;
+
 -- Why we did not text, when we did not. One of a small set of reasons
 -- (no_phone, unverified, opted_out, unusable, quota, error) — kept because
 -- "the switch is on and no text arrived" is otherwise unanswerable, and the
@@ -77,3 +98,9 @@ COMMENT ON COLUMN dibs.mine_at IS
 COMMENT ON COLUMN dibs.notified_at IS
     'Set when the alert went out. The once-only guard: the ingest cycle runs '
     'every couple of minutes and a rental spans many of them.';
+COMMENT ON COLUMN dibs.notify_attempt_at IS
+    'Set when a cycle reserved this claim''s send, so the gateway is never '
+    'called with a row lock held — a lock across the send would make a '
+    'concurrent /mine wait for the alert it was meant to prevent. Expires '
+    'after a lease so a died-mid-send claim retries; comms'' idempotency key '
+    'is what stops that retry texting twice.';

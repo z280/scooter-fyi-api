@@ -324,3 +324,186 @@ def test_the_observation_survives_a_send_that_never_lands(pg, sent):
     dibs_watch.watch_claims_for_cycle(NOW, _reserved())
 
     assert _row(pg, dibs_id)[0] is not None
+
+
+# ---------------------------------------------------------------------------
+# The lock window: a concurrent /mine must not wait for the SMS gateway.
+#
+# The first version of this module selected every candidate FOR UPDATE and
+# sent before committing. A `/mine` arriving mid-send blocked on the locked
+# row until the watcher committed — so the alert went out and the rider's
+# "I've got it" landed just after it, which is the own-rental false alert the
+# feature exists to prevent.
+#
+# These two tests need REAL independent connections, so they do not use the
+# `pg` fixture above (which hands every caller one shared connection, and
+# would make a lock-window bug invisible by construction).
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def pg_pooled(monkeypatch):
+    """Like `pg`, but `dibs_watch.connection` opens a FRESH connection each
+    time — one per short transaction, as it is in production."""
+    dsn = os.environ.get("VEO_TEST_PG_DSN")
+    if not dsn:
+        pytest.skip("VEO_TEST_PG_DSN not set — dibs_watch race test skipped")
+    if not _reachable(dsn):
+        pytest.skip(f"VEO_TEST_PG_DSN unreachable ({dsn})")
+
+    setup = psycopg.connect(dsn)
+    with setup.cursor() as cur:
+        for path in sorted(SQL_DIR.glob("*.sql")):
+            cur.execute(path.read_text())
+    setup.commit()
+
+    def _clean() -> None:
+        with setup.cursor() as cur:
+            cur.execute("DELETE FROM dibs WHERE vehicle_identifier = %s", (_VID,))
+            cur.execute("DELETE FROM accounts WHERE email LIKE %s", (_TEST_EMAIL_LIKE,))
+        setup.commit()
+
+    _clean()
+
+    opened: list = []
+
+    @contextmanager
+    def _conn():
+        conn = psycopg.connect(dsn)
+        opened.append(conn)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(dibs_watch, "connection", _conn)
+    yield setup
+    _clean()
+    setup.close()
+
+
+def _post_mine(dsn: str, dibs_id: str, *, timeout_ms: int = 3000) -> bool:
+    """What `POST /api/v1/dibs/{id}/mine` does, on its own connection, with a
+    statement timeout so a blocked UPDATE FAILS rather than hanging the suite.
+
+    Returns whether it landed. A False here is the bug: it means the rider's
+    "I've got it" was made to wait for an SMS gateway.
+    """
+    conn = psycopg.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SET statement_timeout = {timeout_ms}")
+            try:
+                cur.execute(
+                    "UPDATE dibs SET mine_at = COALESCE(mine_at, NOW()) WHERE id = %s",
+                    (dibs_id,),
+                )
+            except psycopg.errors.QueryCanceled:
+                conn.rollback()
+                return False
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def test_mine_does_not_block_behind_the_sms_gateway(pg_pooled, monkeypatch):
+    """THE REGRESSION. `/mine` arrives while the watcher is inside the send."""
+    dsn = os.environ["VEO_TEST_PG_DSN"]
+    acct = _account(pg_pooled, "race", phone="+17205550201", verified=True)
+    dibs_id = _claim(pg_pooled, acct, dibs_id="race-1")
+
+    landed: dict[str, bool] = {}
+
+    def _send(to, body, *, idempotency_key, **kw):
+        # Mid-send, with whatever the watcher is holding still held.
+        landed["mine"] = _post_mine(dsn, dibs_id)
+        return {"id": "msg-1"}
+
+    monkeypatch.setattr(dibs_watch, "send_sms", _send)
+    dibs_watch.watch_claims_for_cycle(NOW, _reserved())
+
+    assert landed["mine"] is True, (
+        "POST /dibs/{id}/mine blocked on a row the watcher held while calling "
+        "the SMS gateway — the own-rental false alert this feature prevents"
+    )
+
+
+def test_a_mine_that_lands_first_cancels_the_send(pg_pooled, monkeypatch):
+    """The other side of the same race, and the reason the reservation re-tests
+    `mine_at` instead of trusting the candidate read: between selecting the
+    claim and sending, the rider can say it is theirs."""
+    dsn = os.environ["VEO_TEST_PG_DSN"]
+    acct = _account(pg_pooled, "race2", phone="+17205550202", verified=True)
+    dibs_id = _claim(pg_pooled, acct, dibs_id="race-2")
+
+    sent: list = []
+    real_taken = dibs_watch.taken_claims
+
+    def _taken(claims, observed):
+        out = real_taken(claims, observed)
+        # Exactly the gap the old code left open: after the read, before the
+        # send. The reservation is what has to notice.
+        _post_mine(dsn, dibs_id)
+        return out
+
+    monkeypatch.setattr(dibs_watch, "taken_claims", _taken)
+    monkeypatch.setattr(
+        dibs_watch, "send_sms",
+        lambda to, body, **kw: sent.append(to) or {"id": "m"},
+    )
+
+    stats = dibs_watch.watch_claims_for_cycle(NOW, _reserved())
+
+    assert sent == []
+    assert stats.unreserved == 1
+    with pg_pooled.cursor() as cur:
+        cur.execute("SELECT notified_at, notify_skipped FROM dibs WHERE id = %s", (dibs_id,))
+        notified_at, skipped = cur.fetchone()
+    # Nothing was decided about this claim, so nothing is recorded: not a skip.
+    assert notified_at is None
+    assert skipped is None
+
+
+def test_an_outcome_recorded_mid_flight_cancels_the_send(pg_pooled, monkeypatch):
+    """Two overlapping cycles must not both text.
+
+    Without `FOR UPDATE` on the candidate read, two cycles can both select the
+    same claim before either sends — so the reservation re-tests `notified_at`
+    as well as `mine_at`, and the loser sends nothing. Simulated here by
+    another cycle finishing in the gap between this one's read and its
+    reservation, which is exactly the window that exists.
+
+    Found by mutation: dropping `notified_at IS NULL` from the reservation left
+    every other test in this file passing, because the candidate SELECT filters
+    it too and no test put a claim in this state.
+    """
+    dsn = os.environ["VEO_TEST_PG_DSN"]
+    acct = _account(pg_pooled, "overlap", phone="+17205550203", verified=True)
+    dibs_id = _claim(pg_pooled, acct, dibs_id="overlap-1")
+
+    sent: list = []
+    real_taken = dibs_watch.taken_claims
+
+    def _taken(claims, observed):
+        out = real_taken(claims, observed)
+        other = psycopg.connect(dsn)
+        try:
+            with other.cursor() as cur:
+                cur.execute(
+                    "UPDATE dibs SET notified_at = NOW() WHERE id = %s", (dibs_id,)
+                )
+            other.commit()
+        finally:
+            other.close()
+        return out
+
+    monkeypatch.setattr(dibs_watch, "taken_claims", _taken)
+    monkeypatch.setattr(
+        dibs_watch, "send_sms",
+        lambda to, body, **kw: sent.append(to) or {"id": "m"},
+    )
+
+    stats = dibs_watch.watch_claims_for_cycle(NOW, _reserved())
+
+    assert sent == []
+    assert stats.unreserved == 1
