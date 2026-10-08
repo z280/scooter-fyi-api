@@ -10,6 +10,8 @@ from cryptography.fernet import Fernet
 
 from src import place_crypto
 from src.points import (
+    RIDER_LOCATED_ACTIONS,
+    cell_centre,
     settle_referrals_for_account,
     REPORT_TYPE_POINTS,
     credit_gbfs_validation_points,
@@ -174,6 +176,72 @@ def test_credit_gbfs_validation_points_no_reappearance_is_a_noop():
         ride_id="uuid-1",
     )
     assert result is None
+
+
+# ---------- credit_points: where the coordinate is blunted --------------------
+#
+# The review that produced these: the privacy policy claimed every
+# rider-located award was stored at the cell centre, while only
+# `profile_completion` actually was — because that fix lived in the CALLER.
+# Every ride-located award was still writing an exact start or end point, so
+# the one-time scrub would have been refilled by the next ride.
+
+
+def _stored_point(cur):
+    """The (lat, lng) a credit_points call actually inserted."""
+    insert = [p for sql, p in cur.executed if "INSERT INTO user_points" in sql][0]
+    return (insert[3], insert[4])
+
+
+def _stored_index(cur):
+    insert = [p for sql, p in cur.executed if "INSERT INTO user_points" in sql][0]
+    return insert[5]
+
+
+HOME = (39.72851, -105.03452)
+
+
+@pytest.mark.parametrize("action", sorted(RIDER_LOCATED_ACTIONS))
+def test_every_rider_located_award_is_stored_at_the_cell_centre(action):
+    # Parametrised over the SET rather than a hand-written list, so an award
+    # added to it later cannot quietly skip this.
+    cur = _FakeCursor([(1, _NOW)])
+    credit_points(cur, account_id=1, action=action, points=10,
+                  lat=HOME[0], lng=HOME[1])
+    assert _stored_point(cur) != HOME
+    assert _stored_point(cur) == cell_centre(*HOME)
+
+
+@pytest.mark.parametrize("action", ["qr_scan", "device_photo"])
+def test_a_vehicle_position_is_stored_exactly(action):
+    # A shared scooter in a public street is not a private place, and the exact
+    # point is the only record of where a reported vehicle actually was.
+    cur = _FakeCursor([(1, _NOW)])
+    credit_points(cur, account_id=1, action=action, points=10,
+                  lat=HOME[0], lng=HOME[1])
+    assert _stored_point(cur) == HOME
+
+
+def test_blunting_never_moves_the_h3_index():
+    """The invariant the whole approach rests on.
+
+    `h3_8_index` is the only column anything selects off this table, so if
+    blunting could change it, territory and the leaderboard would move with it.
+    """
+    for action in ("nav_distance_bonus", "qr_scan"):
+        cur = _FakeCursor([(1, _NOW)])
+        credit_points(cur, account_id=1, action=action, points=10,
+                      lat=HOME[0], lng=HOME[1])
+        assert _stored_index(cur) == h3_8_index_for(*HOME)
+        # And the stored point really lies in the cell the row claims.
+        assert h3_8_index_for(*_stored_point(cur)) == _stored_index(cur)
+
+
+def test_the_centre_is_stable_under_a_second_pass():
+    # What lets the scrub recognise an already-blunted row without a marker
+    # column — and what makes it idempotent against rows this writer produced.
+    once = cell_centre(*HOME)
+    assert cell_centre(*once) == once
 
 
 # ---------- maybe_credit_profile_completion ---------------------------------------
@@ -422,7 +490,14 @@ def test_points_land_where_the_referral_was_MADE():
     ])
     settle_referrals_for_account(cur, account_id=9, lat=39.9, lng=-104.9)
     insert = [p for s, p in cur.executed if "INSERT INTO user_points" in s][0]
-    assert insert[3] == 39.111 and insert[4] == -104.222
+    # Compared as a CELL, not as a coordinate: `referral` is rider-located, so
+    # `credit_points` blunts the stored point to the hex centre. The claim this
+    # test makes is about WHICH PLACE the points land in, and the hex is what
+    # carries that — it is also the only column anything reads.
+    assert h3_8_index_for(insert[3], insert[4]) == h3_8_index_for(39.111, -104.222)
+    assert h3_8_index_for(insert[3], insert[4]) != h3_8_index_for(39.9, -104.9)
+    # And the exact doorstep is NOT what was written.
+    assert (insert[3], insert[4]) != (39.111, -104.222)
 
 
 def _seq(cur, values):

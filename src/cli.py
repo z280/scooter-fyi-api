@@ -139,6 +139,7 @@ from .battery_model import (
 )
 from .comms_replies import poll_once as poll_comms_replies
 from .config import load
+from .points import RIDER_LOCATED_ACTIONS
 from .cycle import run_once
 from .r2_map import sync_map_assets, sync_photon_index
 from .daily_sla import run_daily
@@ -938,33 +939,6 @@ def backfill_ride_distances_from_donations() -> dict[str, int]:
     return {"fixed": fixed, "skipped": skipped}
 
 
-#: The awards whose ledger point is somewhere the RIDER was, rather than
-#: somewhere a VEHICLE was.
-#:
-#: `profile_completion` is the direct one: until this branch it was credited at
-#: the rider's own `home_lat`/`work_lat`, so its row IS a home address. The rest
-#: are credited at a tracked ride's start or end, and a ride that starts at
-#: 07:40 on a Tuesday starts on somebody's doorstep — across a few rows that is
-#: a home address too, inferred rather than stored, which is no better.
-#:
-#: Deliberately NOT included: `qr_scan`, `device_photo` and the device-report
-#: awards. Those are credited at the SCOOTER's position, which is a shared
-#: vehicle in a public street — not a private place, and the exact point is the
-#: only record of where a reported vehicle actually was.
-_RIDER_LOCATED_ACTIONS = (
-    "profile_completion",
-    "battery_contribution",
-    "nav_distance_bonus",
-    "waypoint",
-    "gbfs_trip_validated",
-    "ride_survey",
-    "nav_route_feedback",
-    "nav_qualitative_feedback",
-    "referral",
-    "stand_down",
-)
-
-
 def scrub_award_locations(dry_run: bool = False) -> dict:
     """Snap rider-located `user_points` rows to their own H3 cell centre, so
     the ledger stops holding coordinates precise enough to be an address.
@@ -998,6 +972,14 @@ def scrub_award_locations(dry_run: bool = False) -> dict:
     run it twice, run it hourly forever, run it against a table the fixed code
     has been writing to for a year, and the second run updates nothing.
 
+    THE ACTION LIST IS `points.RIDER_LOCATED_ACTIONS`, shared with
+    `credit_points` and not a second copy. That is what stops the two drifting:
+    the writer blunts exactly the actions this sweeps, so a new award added to
+    that set is coarsened going forward AND picked up here for whatever it
+    wrote before the change. A private list here would have let them disagree
+    silently, which is how the ride-located awards kept writing exact points
+    after this command was first written to clean them.
+
     `dry_run=True` counts what WOULD move without writing, for a look before
     committing to it.
     """
@@ -1014,7 +996,7 @@ def scrub_award_locations(dry_run: bool = False) -> dict:
                 WHERE action = ANY(%s)
                 ORDER BY id
                 """,
-                (list(_RIDER_LOCATED_ACTIONS),),
+                (sorted(RIDER_LOCATED_ACTIONS),),
             )
             rows = cur.fetchall()
 
