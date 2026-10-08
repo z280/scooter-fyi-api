@@ -11,7 +11,15 @@ from datetime import datetime, timezone
 
 import psycopg
 
-from . import analytics_rollups, compute, device_state, ingest, ride_watch, transmit
+from . import (
+    analytics_rollups,
+    compute,
+    device_state,
+    dibs_watch,
+    ingest,
+    ride_watch,
+    transmit,
+)
 from .pg import connection
 from .sentry import capture_exception, set_cycle_tag
 
@@ -161,6 +169,18 @@ def run_once() -> str | None:
             ride_watch.update_watches_for_cycle(cycle_id, snapshot_time, corrected_devices)
         except Exception as e:  # noqa: BLE001
             log.exception("ride_watch update failed for cycle %s", cycle_id)
+            capture_exception(e)
+
+        # Dibs alerts: a claimed scooter that just went out on rental, and a
+        # claimant who asked to hear about it. Same contract again — and it
+        # SENDS, which is the reason the isolation matters more here than
+        # anywhere else in this chain: comms being down, over quota or slow
+        # must cost the cycle nothing. src/dibs_watch.py defers those cases
+        # internally too, so a failure that reaches here is already unusual.
+        try:
+            dibs_watch.watch_claims_for_cycle(snapshot_time, corrected_devices)
+        except Exception as e:  # noqa: BLE001
+            log.exception("dibs_watch update failed for cycle %s", cycle_id)
             capture_exception(e)
 
         _set_status(

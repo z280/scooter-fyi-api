@@ -52,7 +52,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
-from .accounts import normalize_us_phone
+from .accounts import SessionUser, normalize_us_phone, optional_session
 from .api_auth import send_sign_in_code
 from .client_ip import real_client_ip
 from .pg import connection
@@ -119,6 +119,18 @@ class DibsIn(BaseModel):
     #: from one won in a suburb.
     lat: float | None = Field(default=None, ge=-90, le=90)
     lon: float | None = Field(default=None, ge=-180, le=180)
+    #: "Text me if this one goes out while my claim is live."
+    #:
+    #: Carried on the CLAIM rather than looked up from a stored account
+    #: preference, and sql/097 says why: a claim made while the switch was on
+    #: should be honoured even if the rider turns it off an hour later, and
+    #: one made while it was off should not start texting because they turned
+    #: it on. Same rule as `expires_at`.
+    #:
+    #: Honoured only for a signed-in claim with a verified phone — there is
+    #: nobody to text otherwise. src/dibs_watch.py records which of those it
+    #: was rather than failing silently.
+    notify_sms: bool = False
 
 
 def _limit(request: Request) -> None:
@@ -130,25 +142,43 @@ def _limit(request: Request) -> None:
 
 
 @router.post("/api/v1/dibs", dependencies=[Depends(_limit)])
-def create_dibs(body: DibsIn) -> dict[str, Any]:
+def create_dibs(
+    body: DibsIn,
+    user: SessionUser | None = Depends(optional_session),
+) -> dict[str, Any]:
     """Register a claim and hand back its certificate links.
 
     THE TIMESTAMP IS OURS. `claimed_at` is the database's NOW(), never
     anything the client sent — that is the entire reason this endpoint exists.
     A rider with a wrong clock, or one who set theirs back deliberately,
     cannot win an argument they should lose.
+
+    OPTIONALLY SIGNED IN. The app has always sent a bearer here (`registerDibs`
+    is `authedFetchJSON`), but this endpoint never required one and still does
+    not: the certificate is the point, and a claim that reached us is a claim
+    worth timestamping. The session is read for one reason — somebody has to
+    be on the other end of `notify_sms`, and `claimed_by` is a display name,
+    not an address. No session means no watch, which `watching` reports back
+    so the app can say so instead of promising a text nobody will send.
     """
     dibs_id = _new_id()
+    account_id = user.account_id if user is not None else None
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO dibs (id, vehicle_identifier, vehicle_name, "
-                "plate, claimed_by, device_type, lat, lon, expires_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW() + %s) "
+                "plate, claimed_by, device_type, lat, lon, "
+                "account_id, notify_sms, expires_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW() + %s) "
                 "RETURNING claimed_at, expires_at",
                 (dibs_id, body.vehicle_identifier, body.vehicle_name,
                  body.plate, body.claimed_by, body.device_type,
                  body.lat, body.lon,
+                 account_id,
+                 # An unsigned-in claim cannot be watched, so the column says
+                 # so rather than carrying an aspiration the watcher's own
+                 # query then has to filter out.
+                 bool(body.notify_sms) and account_id is not None,
                  timedelta(minutes=DIBS_MAX_TOTAL_MINUTES)),
             )
             claimed_at, expires_at = cur.fetchone()
@@ -163,6 +193,11 @@ def create_dibs(body: DibsIn) -> dict[str, Any]:
         # against the app's origin and 404'd — the certificate rendered with a
         # broken image where its QR should be.
         "qr_url": f"{API_BASE}/api/v1/dibs/{dibs_id}/qr.svg",
+        # Whether this claim is actually being watched, which is NOT simply
+        # whatever the client asked for: a signed-out claim has nobody to
+        # text. Reported so the app can tell the rider the truth rather than
+        # leave the switch looking honoured.
+        "watching": bool(body.notify_sms) and account_id is not None,
     }
 
 
@@ -202,6 +237,46 @@ def dibs_release(dibs_id: str) -> dict[str, Any]:
     # 200 either way: a claim that was already gone is the state the caller
     # wanted, and a retry after a dropped connection must not read as failure.
     return {"released": row is not None}
+
+
+@router.post("/api/v1/dibs/{dibs_id}/mine")
+def dibs_mine(dibs_id: str) -> dict[str, Any]:
+    """"I've got it" — the claimant is riding the scooter they claimed.
+
+    THIS EXISTS TO PREVENT ONE WRONG TEXT. The alert in src/dibs_watch.py
+    fires on "a rental started on this vehicle", because that is the whole of
+    what the feed tells us; it cannot see who started it. The commonest
+    rental on a claimed scooter is the claimant's own, so without this the
+    most ordinary happy path in the app would text the rider to say somebody
+    had taken their scooter.
+
+    It does not close the claim. The claim is still the thing the certificate
+    rests on, it still dims the scooter for everybody else until it expires,
+    and `release` is still how a rider gives one back. All this says is "the
+    rental you are about to observe is mine", which is why it stamps its own
+    column rather than reusing either of those.
+
+    Idempotent, and unauthenticated like `release`, for the same reason:
+    possession of the unguessable claim id is the credential, exactly as it
+    is for the certificate URL. The worst a guessed id can do is stop a text
+    nobody wanted — which is strictly less damage than the guess buys on
+    `release`, already accepted.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE dibs SET mine_at = COALESCE(mine_at, NOW()) "
+                "WHERE id = %s RETURNING mine_at, notified_at IS NOT NULL",
+                (dibs_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    if row is None:
+        # 200 and `claimed: false`, not a 404: this is a fire-and-forget call
+        # on a path the rider is already walking away from, and an id we have
+        # never seen is indistinguishable from one that aged out of the table.
+        return {"claimed": False, "already_notified": False}
+    return {"claimed": True, "already_notified": bool(row[1])}
 
 
 @router.get("/api/v1/dibs/live")

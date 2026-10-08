@@ -159,27 +159,27 @@ def test_absence_still_counts_as_checked_out():
     """Operators that DO drop rented vehicles (and genuine feed dropouts)
     must keep working — this is the pre-existing contract, asserted here
     against the helper directly so it can't be lost in a later refactor."""
-    assert ride_watch._is_checked_out(None) is True
+    assert ride_watch.is_checked_out(None) is True
 
 
 def test_missing_reservation_flag_reads_as_available():
     """src/ingest.py normalises a non-bool is_reserved to None. None must
     NOT mean checked out, or a feed that stops publishing the flag would
     pin every watch open forever."""
-    assert ride_watch._is_checked_out(_device("aaaa000000000000", is_reserved=None)) is False
+    assert ride_watch.is_checked_out(_device("aaaa000000000000", is_reserved=None)) is False
 
 
 def test_disabled_but_unreserved_is_not_checked_out():
-    """is_disabled is out-of-service, not in-use — see _is_checked_out's
+    """is_disabled is out-of-service, not in-use — see is_checked_out's
     docstring. Reading it as checked out would flip every maintenance-
     flagged vehicle mid-watch."""
     dev = _device("aaaa000000000000", is_reserved=False, is_disabled=True)
-    assert ride_watch._is_checked_out(dev) is False
+    assert ride_watch.is_checked_out(dev) is False
 
 
-def test_disabled_and_reserved_is_checked_out():
+def test_disabled_and_reservedis_checked_out():
     dev = _device("aaaa000000000000", is_reserved=True, is_disabled=True)
-    assert ride_watch._is_checked_out(dev) is True
+    assert ride_watch.is_checked_out(dev) is True
 
 
 # ---------- update_watches_for_cycle (DB orchestration, fake cursor) ---------

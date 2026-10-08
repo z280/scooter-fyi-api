@@ -36,6 +36,10 @@ class _Cur:
 
     def execute(self, sql, params=()):
         self._sql, self._params = sql, params
+        if "UPDATE dibs SET mine_at" in sql:
+            rec = self.store.get(params[0])
+            if rec is not None and rec.get("mine_at") is None:
+                rec["mine_at"] = self.store["__now__"]
         if "UPDATE dibs SET expires_at" in sql:
             self.store["__last_release_sql__"] = sql
             rec = self.store.get(params[0])
@@ -65,6 +69,11 @@ class _Cur:
         return out
 
     def fetchone(self):
+        if "UPDATE dibs SET mine_at" in self._sql:
+            rec = self.store.get(self._params[0])
+            if rec is None:
+                return None
+            return (rec["mine_at"], False)
         if "UPDATE dibs SET expires_at" in self._sql:
             return ("x",) if self.store.get("__released__") else None
         if "FROM accounts" in self._sql:
@@ -81,6 +90,13 @@ class _Cur:
                 "vehicle_name": self._params[2], "plate": self._params[3],
                 "claimed_by": self._params[4], "device_type": self._params[5],
                 "lat": self._params[6], "lon": self._params[7],
+                # sql/097: who to text, and whether they asked. Positional,
+                # like everything above it, and the reason these are captured
+                # at all is that "the switch was on" and "the claim is being
+                # watched" are different facts whenever there is no session.
+                "account_id": self._params[8],
+                "notify_sms": self._params[9],
+                "mine_at": None,
                 "claimed_at": claimed,
                 "expires_at": expires,
             }
@@ -673,3 +689,111 @@ def test_a_referral_pays_the_published_value(client):
     client.post(f"/dibs/{dibs_id}/refer", data={"email": "new@example.com"})
     params = client.store["__referrals__"][-1]
     assert params[6] == points.POINTS_REFERRAL
+
+
+# ---------------------------------------------------------------------------
+# sql/097 — the claim as something that can be WATCHED.
+#
+# src/dibs_watch.py does the watching; these tests are about the two facts it
+# reads off the row, both of which are decided here and nowhere else: who to
+# text, and whether the rider asked to be texted for THIS claim.
+# ---------------------------------------------------------------------------
+
+def _signed_in(client, account_id: int = 77):
+    """Override the optional session rather than forging a bearer token: what
+    is under test is what `create_dibs` does with an account, not how
+    `accounts._load_session` finds one."""
+    from src.accounts import SessionUser, optional_session
+
+    user = SessionUser(
+        account_id=account_id,
+        email="rider@example.com",
+        scopes=("rider",),
+        expires_at=NOW + timedelta(days=30),
+        sliding=True,
+        method="magic_link",
+        token_sha256="x" * 64,
+    )
+    client.app.dependency_overrides[optional_session] = lambda: user
+    return user
+
+
+def test_a_signed_in_claim_records_who_to_text(client):
+    _signed_in(client)
+    r = client.post("/api/v1/dibs", json={**BODY, "notify_sms": True})
+    row = client.store[r.json()["id"]]
+    assert row["account_id"] == 77
+    assert row["notify_sms"] is True
+    assert r.json()["watching"] is True
+
+
+def test_the_switch_off_means_the_claim_is_not_watched(client):
+    _signed_in(client)
+    r = client.post("/api/v1/dibs", json={**BODY, "notify_sms": False})
+    assert client.store[r.json()["id"]]["notify_sms"] is False
+    assert r.json()["watching"] is False
+
+
+def test_asking_for_a_text_without_an_account_is_not_recorded_as_watched(client):
+    """There is nobody to text. The column says so rather than carrying an
+    aspiration the watcher's query then has to filter out — and `watching`
+    tells the app, so it can say so instead of leaving the switch looking
+    honoured."""
+    r = client.post("/api/v1/dibs", json={**BODY, "notify_sms": True})
+    assert r.status_code == 200
+    row = client.store[r.json()["id"]]
+    assert row["account_id"] is None
+    assert row["notify_sms"] is False
+    assert r.json()["watching"] is False
+
+
+def test_a_claim_still_works_with_no_session_at_all(client):
+    """The certificate is the point, and this endpoint never required a
+    session. Adding the watch must not have quietly made one mandatory."""
+    r = client.post("/api/v1/dibs", json=BODY)
+    assert r.status_code == 200
+    assert r.json()["verify_url"].endswith(r.json()["id"])
+
+
+def test_default_is_no_watch_when_the_client_says_nothing(client):
+    """An older app build sends no `notify_sms`. Pydantic's default decides
+    what that means, and the safe reading of silence is "do not text me"."""
+    _signed_in(client)
+    r = client.post("/api/v1/dibs", json=BODY)
+    assert client.store[r.json()["id"]]["notify_sms"] is False
+
+
+def test_saying_it_is_mine_suppresses_the_alert(client):
+    """The commonest rental on a claimed scooter is the claimant's own, and
+    the feed cannot tell us whose it is — so the app says."""
+    dibs_id = client.post("/api/v1/dibs", json={**BODY, "notify_sms": True}).json()["id"]
+    r = client.post(f"/api/v1/dibs/{dibs_id}/mine")
+    assert r.status_code == 200
+    assert r.json() == {"claimed": True, "already_notified": False}
+    assert client.store[dibs_id]["mine_at"] is not None
+
+
+def test_saying_it_is_mine_twice_is_the_same_as_once(client):
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.post(f"/api/v1/dibs/{dibs_id}/mine")
+    first = client.store[dibs_id]["mine_at"]
+    assert client.post(f"/api/v1/dibs/{dibs_id}/mine").json()["claimed"] is True
+    assert client.store[dibs_id]["mine_at"] == first
+
+
+def test_saying_it_is_mine_does_not_release_the_claim(client):
+    """It is still the thing the certificate rests on, and it still dims the
+    scooter for everybody else until it expires. `release` is how a rider
+    gives one back; this only says whose rental is about to appear."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.post(f"/api/v1/dibs/{dibs_id}/mine")
+    assert client.store[dibs_id]["expires_at"] > NOW
+    assert client.get(f"/api/v1/dibs/{dibs_id}").status_code == 200
+
+
+def test_an_unknown_claim_is_a_quiet_no_rather_than_a_404(client):
+    """Fire-and-forget, on a path the rider is already walking away from. An
+    id we never saw is indistinguishable from one that aged out."""
+    r = client.post("/api/v1/dibs/not-a-real-id/mine")
+    assert r.status_code == 200
+    assert r.json()["claimed"] is False
