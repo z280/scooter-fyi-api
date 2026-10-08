@@ -104,6 +104,8 @@ def test_rides_stops_and_region_devices_flow_into_the_endpoints(db):
     fs = c.get("/api/v1/analytics/failed-starts?days=2").json()
     assert fs["failed_starts"] == 2 and fs["stops_with_failures"] == 1
     assert "under-reported" in fs["caveat"]
+    assert fs["comparable_since"] == "2026-10-06T01:36:00+00:00"
+    assert rides["counting_changes"][0]["commit"] == "8a51d4d"
 
     dwell = c.get("/api/v1/analytics/dwell?region_type=city&days=2").json()
     cosmo = dwell["regions"][0]["by_model"]["Cosmo"]

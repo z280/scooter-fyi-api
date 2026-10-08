@@ -151,3 +151,14 @@ def test_fleet_status_is_capped_at_its_30_days_of_history():
     from src import api_analytics as aa
     with pytest.raises(HTTPException):
         aa._window(60, "day", cap=aa.FLEET_STATUS_RETENTION_DAYS)
+
+
+
+def test_counting_changes_are_dated_and_ordered():
+    from src import api_analytics as aa
+    ats = [c["at"] for c in aa.COUNTING_CHANGES]
+    assert ats == sorted(ats)
+    assert aa.COMPARABLE_SINCE == "2026-10-06T01:36:00+00:00"
+    assert aa._eras("rides")["comparable_since"] == aa.COMPARABLE_SINCE
+    assert [c["commit"] for c in aa._eras("rides")["counting_changes"]] == ["8a51d4d", "dc292b6"]
+    assert [c["commit"] for c in aa._eras("failed_starts")["counting_changes"]] == ["dc292b6"]

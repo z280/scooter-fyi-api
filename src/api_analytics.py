@@ -39,9 +39,42 @@ MAX_DAYS = {"hour": 31, "day": 366, "week": 366, "month": 366}
 EQUITY_THRESHOLD_PCT = 30.0
 #: An average dwell over fewer stops than this is shown as counts only.
 MIN_DWELLS_FOR_AVERAGE = 30
-#: The failed-start counter's known under-reporting begins here
-#: (in-place releases + GPS jitter; fix in progress).
+#: The failed-start counter was under-reported from here until the counting
+#: fix of COMPARABLE_SINCE (dc292b6, deployed 2026-10-06 01:36 UTC).
 FAILED_STARTS_UNDERCOUNT_SINCE = "2026-08-10"
+
+#: How trip_events, device_history stops and failed starts were COUNTED changed
+#: twice. Figures from different eras measure different things, so every series
+#: built on them carries these dates and the API says where the current method
+#: begins; a chart must not present a counting change as a change in Denver.
+#: (Measured on production: before Oct 6 the median trip was 28-49 m of GPS
+#: drift at ~4,000 an hour; after it, ~800 m at ~1,000 an hour.)
+COUNTING_CHANGES = (
+    {
+        "at": "2026-08-10T04:15:00+00:00",
+        "commit": "8a51d4d",
+        "affects": ["rides", "dwell"],
+        "summary": "One rental, one trip. Before this, a rented scooter moving in the feed "
+                   "logged a trip at every 2-minute sample (about a 6x over-count), and its "
+                   "stops were split into 2-minute pieces.",
+    },
+    {
+        "at": "2026-10-06T01:36:00+00:00",
+        "commit": "dc292b6",
+        "affects": ["rides", "dwell", "failed_starts"],
+        "summary": "GPS drift is no longer a trip, and a rental released where it started "
+                   "counts as a failed start. Before this, about 2 of every 3 trips were "
+                   "drift, drift restarted dwell, and failed starts were under-counted "
+                   "(from 2026-08-10).",
+    },
+)
+#: Where the current counting method begins: compare figures only after this.
+COMPARABLE_SINCE = COUNTING_CHANGES[-1]["at"]
+
+
+def _eras(kind: str) -> dict[str, Any]:
+    changes = [c for c in COUNTING_CHANGES if kind in c["affects"]]
+    return {"counting_changes": changes, "comparable_since": changes[-1]["at"] if changes else None}
 CACHE_SECONDS = 300
 #: device_status_snapshots keeps 30 days (compute.py prunes it).
 FLEET_STATUS_RETENTION_DAYS = 30
@@ -237,6 +270,10 @@ def analytics_rides(
             "data_through": through.isoformat(),
             "definition": "A ride is a vehicle that moved from one stop to another (trip_events), "
                           "placed by where it started and counted when the move was detected.",
+            "caveat": "How rides are counted changed on 2026-08-10 and 2026-10-06; earlier "
+                      "figures are inflated (see counting_changes) and are not comparable with "
+                      "figures after comparable_since.",
+            **_eras("rides"),
         }
 
     response.headers["Cache-Control"] = f"public, max-age={CACHE_SECONDS}"
@@ -267,9 +304,12 @@ def analytics_failed_starts(
             "definition": "A failed start is a rental that ended where it began, counted when the "
                           "vehicle's stop closes, at that stop. Closes are folded in after a 6-hour "
                           "settle, so the series ends at data_through.",
-            "caveat": f"Failed starts have been under-reported since {FAILED_STARTS_UNDERCOUNT_SINCE} "
-                      "(a counting fix is in progress); a drop after that date is not an improvement.",
+            "caveat": f"Failed starts were under-reported from {FAILED_STARTS_UNDERCOUNT_SINCE} until "
+                      "the counting fix of 2026-10-06; the drop in August and the rise in October "
+                      "are counting changes, not changes in Denver.",
             "undercount_since": FAILED_STARTS_UNDERCOUNT_SINCE,
+            "undercount_until": COMPARABLE_SINCE,
+            **_eras("failed_starts"),
         }
 
     response.headers["Cache-Control"] = f"public, max-age={CACHE_SECONDS}"
@@ -441,6 +481,10 @@ def analytics_dwell(
             "regions": [{"region": r, "by_model": dict(sorted(v.items()))} for r, v in sorted(by_region.items())],
             "min_dwells_for_average": MIN_DWELLS_FOR_AVERAGE,
             "data_through": through.isoformat() if through else None,
+            **_eras("dwell"),
+            "caveat": "How stops are counted changed on 2026-08-10 (stops were split into "
+                      "2-minute pieces before) and 2026-10-06 (GPS drift restarted dwell before); "
+                      "a window spanning those dates averages different methods.",
             "definition": "Dwell is how long a vehicle stayed at a stop, from arrival to departure, "
                           "for stops that closed in the window (Denver days); open stops and stops "
                           "over 30 days are not counted. Placed at the stop.",
