@@ -7,7 +7,7 @@ Cache-Control header (fallback 1 hour); an unknown `kid` forces one
 immediate refetch to handle Google's key rotation without waiting out
 the cache.
 
-Checks enforced (all required, per API_REQUIREMENTS.md §2.2):
+Checks enforced (all required, per docs/API_REQUIREMENTS.md §2.2):
     * signature against Google's JWKS (RS256 only)
     * iss ∈ {https://accounts.google.com, accounts.google.com}
     * aud == our OAuth client id (GOOGLE_OAUTH_CLIENT_ID)

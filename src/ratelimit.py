@@ -1,4 +1,4 @@
-"""Postgres-backed fixed-window rate limiting (API_REQUIREMENTS.md §5).
+"""Postgres-backed fixed-window rate limiting (docs/API_REQUIREMENTS.md §5).
 
 One row per counted event in rate_limit_events; a request is allowed when
 COUNT(bucket, key, window) < limit. Deliberately simple — at this system's

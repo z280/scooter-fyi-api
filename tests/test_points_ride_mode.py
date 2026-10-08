@@ -1,5 +1,5 @@
 """Ride-mode points reshape: the two distance-formula award functions
-(PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md Decision 6),
+(docs/implemented/PLAN_RIDE_MODE_API.md phase A2 / docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6),
 `credit_points`'s even-points assert, and sql/053's widened action
 vocabulary + `user_points_points_even` CHECK.
 
@@ -73,10 +73,10 @@ _BATTERY_TABLE = [
     (3999, 12),
     (4000, 12),
     (4001, 14),
-    (10_000, 18),      # RIDE_MODE_OVERHAUL_PLAN.md's 10 km worked example
+    (10_000, 18),      # docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md's 10 km worked example
     (20_000, 28),
     (79_999, 88),
-    (80_000, 88),      # PLAN_RIDE_MODE_API.md's 80 km worked example
+    (80_000, 88),      # docs/implemented/PLAN_RIDE_MODE_API.md's 80 km worked example
     (80_001, 90),
 ]
 
@@ -116,7 +116,7 @@ def test_nav_distance_bonus_ceil_math(distance_m, expected):
 
 
 def test_the_10km_worked_example_totals_40():
-    """RIDE_MODE_OVERHAUL_PLAN.md's own worked case: a 10 km ride with
+    """docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md's own worked case: a 10 km ride with
     everything on is 18 (battery) + 18 (nav: 4 + 6 + 8) + 4 (survey) = 40.
     nav_route_feedback/nav_qualitative/ride_survey's credit_* functions are
     A3's to add; the constants they will use already exist (A1), so the
@@ -153,7 +153,7 @@ def test_80km_battery_is_credited_in_full_when_nothing_else_has_landed_yet():
 
 
 def test_80km_nav_distance_bonus_is_trimmed_by_the_ride_cap():
-    """PLAN_RIDE_MODE_API.md's worked example: an 80 km ride requests
+    """docs/implemented/PLAN_RIDE_MODE_API.md's worked example: an 80 km ride requests
     88 (battery) + 64 (nav: 4 + 6 + 54) + 4 (survey) = 156, trimmed to the
     unchanged MAX_POINTS_PER_RIDE = 100. Simulated here as 88 already
     landed on this ride (the battery award above) and 12 headroom left:
@@ -208,7 +208,7 @@ def test_nav_distance_bonus_dedupes_via_the_source_conflict():
 
 # ---------------------------------------------------------------------------
 # source_table / source_id / action / lat-lng wiring — getting this wrong is
-# the real bug PLAN_RIDE_MODE_API.md calls out explicitly: any source_table
+# the real bug docs/implemented/PLAN_RIDE_MODE_API.md calls out explicitly: any source_table
 # other than 'tracked_rides' silently bypasses the per-ride cap entirely.
 # ---------------------------------------------------------------------------
 
@@ -327,7 +327,7 @@ def test_credit_points_accepts_a_normal_even_award():
 
 # ---------------------------------------------------------------------------
 # Even-points sweep — every POINTS_* constant, and both new formulas across
-# a range of distances. Owner's rule (RIDE_MODE_OVERHAUL_PLAN.md Decision
+# a range of distances. Owner's rule (docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision
 # 6): "Intentionally points should always be even."
 # ---------------------------------------------------------------------------
 

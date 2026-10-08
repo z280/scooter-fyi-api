@@ -40,11 +40,11 @@ ALTER TABLE device_reports
 -- REPLAY SAFETY (fixed in place, same bug class and same repair shape as
 -- sql/029's fix for device_reports_report_type_allowed above -- see that
 -- file's header, and the sql/040/041 guarded-rewrite shape
--- PLAN_RIDE_MODE_API.md's house rules point to). This block used to DROP
+-- docs/implemented/PLAN_RIDE_MODE_API.md's house rules point to). This block used to DROP
 -- the constraint unconditionally and re-ADD it with only the 8 action
 -- values known when this file was written.
 --
--- RIDE_MODE_OVERHAUL_PLAN.md's phases A2/A3 (sql/053, sql/052) later widen
+-- docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md's phases A2/A3 (sql/053, sql/052) later widen
 -- this SAME constraint to admit five more actions ('battery_contribution',
 -- 'nav_route_feedback', 'nav_qualitative_feedback', 'nav_distance_bonus',
 -- 'ride_survey') -- see those files' own guarded DO blocks.

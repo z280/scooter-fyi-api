@@ -1,5 +1,5 @@
--- Ride Mode points reshape (PLAN_RIDE_MODE_API.md phase A2 / master
--- RIDE_MODE_OVERHAUL_PLAN.md Decision 6): widen user_points.action for the
+-- Ride Mode points reshape (docs/implemented/PLAN_RIDE_MODE_API.md phase A2 / master
+-- docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6): widen user_points.action for the
 -- five new ride-mode awards, and make the owner's even-points rule a
 -- database fact, not just a Python convention.
 --
@@ -21,7 +21,7 @@
 -- it.
 --
 -- THE GUARD IS KEYED ON 'battery_contribution' ALONE, deliberately not on
--- all five new values: PLAN_RIDE_MODE_API.md phase A3 ships sql/052, which
+-- all five new values: docs/implemented/PLAN_RIDE_MODE_API.md phase A3 ships sql/052, which
 -- widens this SAME constraint for THREE of these five actions
 -- ('ride_survey', 'nav_route_feedback', 'nav_qualitative_feedback') using
 -- its own guard keyed on 'ride_survey', because A2 and A3 are independently
@@ -60,7 +60,7 @@ BEGIN
                 'report_not_rideable', 'report_not_found',
                 'report_vehicle_issue', 'report_improper_parking',
                 'qr_scan',
-                -- New in this phase (RIDE_MODE_OVERHAUL_PLAN.md Decision 6 /
+                -- New in this phase (docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6 /
                 -- Part 1.1 goal 4). Formulas and gating live in
                 -- src/points.py and src/api_tracked_rides.py /
                 -- src/api_ride_surveys.py; this CHECK only says the value is
@@ -74,7 +74,7 @@ END $$;
 -- ---------------------------------------------------------------------------
 -- 2. The even-points invariant, as a database fact.
 -- ---------------------------------------------------------------------------
--- RIDE_MODE_OVERHAUL_PLAN.md Decision 6 (owner's rule): "anywhere I offered
+-- docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6 (owner's rule): "anywhere I offered
 -- 5 make it 6. Intentionally points should always be even." Enforced THREE
 -- ways in this program — this CHECK, an `assert points % 2 == 0` in
 -- src/points.py:credit_points (right before the INSERT, after cap

@@ -1,4 +1,4 @@
-"""Donated-ride battery ingestion (PLAN_RIDE_MODE_API.md phase A2, "Battery
+"""Donated-ride battery ingestion (docs/implemented/PLAN_RIDE_MODE_API.md phase A2, "Battery
 ingestion"; src/battery_model.py:ingest_donated_observation).
 
 Fake-cursor tests, following the idiom already established in this file

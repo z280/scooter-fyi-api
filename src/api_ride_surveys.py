@@ -1,4 +1,4 @@
-"""Screen 9 end-ride survey (PLAN_RIDE_MODE_API.md phase A3, sql/052).
+"""Screen 9 end-ride survey (docs/implemented/PLAN_RIDE_MODE_API.md phase A3, sql/052).
 
     POST /api/v1/tracked-rides/{ride_id}/survey   submit the ride's survey (single-shot)
 
@@ -66,7 +66,7 @@ from .points import (
 
 router = APIRouter()
 
-# The exact 16-item vocabulary (PLAN_RIDE_MODE_API.md phase A3 / Screen 9's
+# The exact 16-item vocabulary (docs/implemented/PLAN_RIDE_MODE_API.md phase A3 / Screen 9's
 # "IF no — what wasn't?" checklist). Anything outside this set is 422.
 ISSUE_VOCABULARY = (
     "app_veo", "acceleration", "basket", "battery", "bell", "brakes",
@@ -406,7 +406,7 @@ def submit_ride_survey(
                 if award is not None:
                     points_awarded.append({"action": award["action"], "points": award["points"]})
 
-            # PLAN_RIDE_MODE_API.md §A3, verbatim: "nav_* require
+            # docs/implemented/PLAN_RIDE_MODE_API.md §A3, verbatim: "nav_* require
             # ride_options.nav_improvement + a ride_routes row." One shared
             # gate for every nav_* award — previously only the route-row
             # half of this precondition was checked, so a rider who

@@ -76,7 +76,7 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
       AUTH_ALLOWED_GITHUB_ORGS: ${AUTH_ALLOWED_GITHUB_ORGS}
       SESSION_SECRET: ${SESSION_SECRET}
-      # Accounts & sessions (API_REQUIREMENTS.md §2) — without these,
+      # Accounts & sessions (docs/API_REQUIREMENTS.md §2) — without these,
       # api_auth.py/api_profile.py 503 even with a correct .env, because
       # they never reached the container.
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
@@ -344,7 +344,7 @@ services:
     environment:
       # Photon embeds OpenSearch in THIS JVM, so the heap is the index budget.
       # 1536m under a 2048m limit leaves room for the JVM's non-heap footprint;
-      # the Colorado-scoped index (scripts/build_photon_index.md) is what makes
+      # the Colorado-scoped index (docs/reference/build_photon_index.md) is what makes
       # that fit at all — a US-wide index does not.
       JAVA_OPTS: "-Xmx1536m"
       PHOTON_DATA_DIR: /photon

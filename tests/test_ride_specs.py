@@ -44,7 +44,7 @@ _USER = SessionUser(
 )
 _OTHER_ACCOUNT = 2
 
-# What the frontend actually stores (ALONG_THE_WAY_PLAN.md §5.1): the
+# What the frontend actually stores (docs/ALONG_THE_WAY_PLAN.md §5.1): the
 # requirements, plus `must` — the list that says which of them are HARD. That
 # field is the whole difference between a spec and a map filter, and it is
 # also the field this module must never look at.

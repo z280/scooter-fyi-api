@@ -13,7 +13,7 @@ requires a bearer token and accepts writes. See
 [Accounts & sessions](#accounts--sessions) onward.
 
 This document is the contract for frontend consumers. Backend internals
-are in [README.md](./README.md).
+are in [README.md](../../README.md).
 
 ---
 
@@ -251,7 +251,7 @@ to keep answerable was settled in August 2026 when the city named the
 official Equity Area map: the `equity` group, and
 `percent_all_devices_equity`, are now **the** RFP §3.0 metric.
 `percent_all_devices_v1` and the `erN` families remain computed and
-returned as history; see API_REQUIREMENTS.md §1.1a.
+returned as history; see docs/API_REQUIREMENTS.md §1.1a.
 
 **Every tracked group also gets the same breakdown along a second,
 independent axis: `vehicle_use_type` (sitting vs standing), not just
@@ -793,7 +793,7 @@ between polls of the same cycle.
 | `is_disabled` | bool \| null | `true` when the scooter is out of service (low battery, mechanical fault, impound). Disabled devices still count toward fleet totals because they occupy space. |
 | `is_reserved` | bool \| null | `true` when a rider has the scooter on hold (typically a 5–10 min reservation window before unlock). |
 | `current_range_meters` | int \| null | Estimated remaining range from upstream, in meters. |
-| `battery_percent` | int \| null | Server-computed 0–100 state of charge. Exact SoC recovery: upstream `current_range_meters` is an integer percent mapped through one fleet-wide 100-value lookup table (same table for every vehicle type — verified stable across a 37-day archive; see `data/range_soc_lut.json` and API_REQUIREMENTS.md §7.1), so percent = the value's rank in that table. Values outside the table (vendor drift) fall back to linear scaling against the observed 45,293 m full-charge cap, clamped to [0, 100]. `null` when range is missing (e.g. pedal-only `"human"` bikes). NOT scaled by the rated per-type max, which the archive disproved (a full bicycle would read 68%). |
+| `battery_percent` | int \| null | Server-computed 0–100 state of charge. Exact SoC recovery: upstream `current_range_meters` is an integer percent mapped through one fleet-wide 100-value lookup table (same table for every vehicle type — verified stable across a 37-day archive; see `data/range_soc_lut.json` and docs/API_REQUIREMENTS.md §7.1), so percent = the value's rank in that table. Values outside the table (vendor drift) fall back to linear scaling against the observed 45,293 m full-charge cap, clamped to [0, 100]. `null` when range is missing (e.g. pedal-only `"human"` bikes). NOT scaled by the rated per-type max, which the archive disproved (a full bicycle would read 68%). |
 | `estimated_range_meters` | int \| null | Roughly how far this charge goes, in meters: `battery_percent × 364`, truncated to an int. The 364 m per SoC point is **measured from the fleet running itself flat** (220 vehicles followed from ≥95% to ≤5%; median 32.7 km over 10 rides and 85 h), deliberately not the upstream `current_range_meters` or an inversion of the battery-burn regression. Conservative for a single ride — that median includes ~84 h of standby drain a rider taking the vehicle now won't pay — because under-promising is the right failure mode for "will I make it". `null` exactly when `battery_percent` is. Pair it with `battery_reading`. Source: `usable_range_meters` in `src/battery_model.py`. |
 | `battery_reading` | string | How far to trust the reported charge: `"fresh"` (parked < 1 h as of `metadata.snapshot_time`), `"stale"` (parked ≥ 1 h), or `"unknown"` (not state-tracked, so no `first_observed_at_location`). Upstream range is frozen while a vehicle sits (99.4% of parked 2-minute steps show no change) and vehicles parked > 1 h burn measurably more per km once rented, so a stale reading tends to be optimistic. Independent of `battery_percent` being null — a pedal bike can be `"fresh"`. Source: `reading_confidence` in `src/battery_model.py`. |
 | `parked_hours` | float \| null | Dwell at the current location in hours, 1 decimal: `metadata.snapshot_time − first_observed_at_location`. Measured from the cycle's snapshot time (the same clock `quality_designation`, `reliability_tier` and the `dwell_*` fields use), **not** the time you fetched it, so it does not tick between polls of one cycle. `null` when the device isn't state-tracked. |
@@ -1037,7 +1037,7 @@ GET /api/v1/h3/aggregates?res=9
 
 ### Fleet analytics (`/api/v1/analytics/*`)
 
-The owner's fleet dashboard (docs/PLAN_FLEET_ANALYTICS.md). All endpoints are public and cached for 5 minutes. Every response carries `window_start`/`window_end` (UTC), `timezone` (`America/Denver`; day, week and month buckets are Denver-local and start on a whole local boundary; hour buckets are true hours, so Nov 1's repeated 01:00 is two buckets; each `bucket` is ISO 8601 with its offset, and an incomplete one has `partial: true`), a `definition`, and its sample sizes.
+The owner's fleet dashboard (docs/implemented/PLAN_FLEET_ANALYTICS.md). All endpoints are public and cached for 5 minutes. Every response carries `window_start`/`window_end` (UTC), `timezone` (`America/Denver`; day, week and month buckets are Denver-local and start on a whole local boundary; hour buckets are true hours, so Nov 1's repeated 01:00 is two buckets; each `bucket` is ISO 8601 with its offset, and an incomplete one has `partial: true`), a `definition`, and its sample sizes.
 
 | Endpoint | Parameters | Returns |
 |---|---|---|
@@ -1276,7 +1276,7 @@ GET /api/v1/equity-estimate?ranks=1,2
   was built to preview candidate cutoffs while the city had not yet said
   which map binds; it has, so `percent_all_devices_equity` is the metric
   and this is now a historical comparison tool (see
-  API_REQUIREMENTS.md §1.1a).
+  docs/API_REQUIREMENTS.md §1.1a).
 
 ---
 
@@ -3167,7 +3167,7 @@ most **600 batches** per request.
 
 Each string is one HS256-signed batch, sealed client-side at ≤25 waypoints
 or ≤60 s. Signing key/nonce come from `track_signing` (above); see
-`RIDE_MODE_OVERHAUL_PLAN.md` Part 2 for the exact wire shape and hash
+`docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md` Part 2 for the exact wire shape and hash
 chain. Raw batches are verified once and then **discarded** — only the
 verification summary and the decoded waypoints persist.
 
@@ -3810,7 +3810,7 @@ trend endpoint and as the keys of `regions` in spatial-snapshot).
 
 - **`equity` is the official map.** In August 2026 the city clarified which polygon the Veo license agreement's Equity Area Deployment target (Exhibit B: 30% of the active fleet, averaged over the 6–9 AM window) is actually measured against. That map is this layer: 30 polygons, `EQ_001`–`EQ_030`. `percent_all_devices_equity` on `/api/v1/snapshots/latest` and `avg_percent_all_devices_equity` / `compliance_equity_pass` on the daily-SLA endpoints are the **contractually binding** figures. Everything below is retained history — still computed, still returned, no longer the answer.
 - **v1 vs v2** are two distinct versions of the city's original Equity / Opportunity Areas polygon. Both exist because Denver's contract negotiations referenced both; `percent_all_devices_v1` was the canonical compliance metric until the `equity` layer above superseded it, with `v2` tracked in parallel throughout. They are not nested or disjoint — a device can be in both, neither, or one or the other.
-- **`er1`–`er6`** are Denver DOTI's newer, authoritative census-block-group Equity Index, split into one layer per exact `EquityGroupRank` tier (`er1` = highest need, `er6` = lowest). Unlike v1/v2 they **partition** the scored area — every scored block group falls in exactly one `erN` layer, never two. They're tracked individually (not pre-combined into a cutoff) in both `/api/v1/snapshots/latest` and `/api/v1/compliance/daily/latest` so that whatever cutoff DOTI confirms as contractually authoritative can be reconstructed from history later (e.g. a "rank ≤ 2" metric = `er1 + er2`). **No individual `erN` layer is a compliance boundary** — and the question they were tracked to answer is now settled by the `equity` layer above, so they are historical. See API_REQUIREMENTS.md §1.1a.
+- **`er1`–`er6`** are Denver DOTI's newer, authoritative census-block-group Equity Index, split into one layer per exact `EquityGroupRank` tier (`er1` = highest need, `er6` = lowest). Unlike v1/v2 they **partition** the scored area — every scored block group falls in exactly one `erN` layer, never two. They're tracked individually (not pre-combined into a cutoff) in both `/api/v1/snapshots/latest` and `/api/v1/compliance/daily/latest` so that whatever cutoff DOTI confirms as contractually authoritative can be reconstructed from history later (e.g. a "rank ≤ 2" metric = `er1 + er2`). **No individual `erN` layer is a compliance boundary** — and the question they were tracked to answer is now settled by the `equity` layer above, so they are historical. See docs/API_REQUIREMENTS.md §1.1a.
 - **At-Large council districts** (Gonzales-Gutierrez and Parady, which cover the entire city) are **excluded** from `council_district` rows to avoid double-counting. Only the 11 numbered districts appear.
 - **Neighborhoods** uses Denver's Statistical Neighborhood Boundaries (DOTI). Spaces and punctuation are stripped from names: `Athmar Park` → `NB_AthmarPark`, `Park Hill` → `NB_ParkHill` (note: there are also separate `NB_NortheastParkHill`, `NB_NorthParkHill`, `NB_SouthParkHill` neighborhoods).
 - **Community Networks** are Denver's 13 official planning regions, broader than neighborhoods.

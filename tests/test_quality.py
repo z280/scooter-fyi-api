@@ -173,7 +173,7 @@ def test_failed_start_and_long_dwell_stack():
     assert out == "poor"
 
 
-# ---------- Reliability tier (API_REQUIREMENTS.md §1.2) ---------------------
+# ---------- Reliability tier (docs/API_REQUIREMENTS.md §1.2) ---------------------
 # Defaults: a healthy, state-tracked scooter that arrived an hour ago.
 _REL_BASE = dict(
     number_failed_starts=0,

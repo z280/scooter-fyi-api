@@ -9,14 +9,14 @@
 #
 # The index is NOT baked in: it lives on the `photon_files` volume, seeded from
 # R2 by `python -m src.cli fetch_photon_index` (src/r2_map.py) and rebuilt
-# quarterly per scripts/build_photon_index.md. Photon opens the index at JVM
+# quarterly per docs/reference/build_photon_index.md. Photon opens the index at JVM
 # startup and never re-reads it, so a new index needs a container restart.
 FROM eclipse-temurin:21-jre
 
 # Photon 1.x requires Java 21+ (hence the temurin 21 base) and embeds
 # OpenSearch in-process, so the index format is VERSION-LOCKED: an index built
 # by a different photon version may not open. Bump this only together with a
-# rebuilt index (scripts/build_photon_index.md), and never in isolation.
+# rebuilt index (docs/reference/build_photon_index.md), and never in isolation.
 #
 # Checksum source (do not take it on faith when bumping — re-read it):
 #   curl -s https://api.github.com/repos/komoot/photon/releases \
@@ -31,7 +31,7 @@ FROM eclipse-temurin:21-jre
 #     single jar under the plain name. If you bump into a 0.7.x pin for any
 #     reason, the filename changes back — check before assuming.
 #   * The `serve` / `import` subcommands and every flag used here and in
-#     scripts/build_photon_index.md were read out of this jar's own `-h`
+#     docs/reference/build_photon_index.md were read out of this jar's own `-h`
 #     output, including `-listen-ip` defaulting to 127.0.0.1.
 ARG PHOTON_VERSION=1.2.1
 ARG PHOTON_SHA256=6ea66d598a3f6fc1b59b0f81ad4f8abee72ccdb9d3db03bc12008974cdebd58d

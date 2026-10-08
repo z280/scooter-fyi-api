@@ -245,7 +245,7 @@ def _patch_end(client, **body):
 
 def _end_fetches(*, row=None, **select_kw):
     """PATCH .../end's fetchone sequence: the FOR UPDATE read, then the
-    final response read. PLAN_RIDE_MODE_API.md phase A2 superseded the
+    final response read. docs/implemented/PLAN_RIDE_MODE_API.md phase A2 superseded the
     waypoint-count/points-crediting queries that used to sit between them
     (see src/api_tracked_rides.py:end_tracked_ride) — /end no longer reads
     ride_waypoints or writes user_points at all."""
@@ -473,7 +473,7 @@ def test_the_key_is_issued_server_side_at_start(monkeypatch):
 def test_active_response_carries_the_signing_block(monkeypatch):
     """A client that reloaded mid-ride resumes signing from this."""
     # The extra (None,) is _survey_submitted_ids' `SELECT
-    # to_regclass('ride_surveys')` existence probe (PLAN_RIDE_MODE_API.md
+    # to_regclass('ride_surveys')` existence probe (docs/implemented/PLAN_RIDE_MODE_API.md
     # phase A3, sql/052) — None short-circuits it to "table does not exist
     # yet", matching this test's pre-A3 world.
     c, _ = _client(monkeypatch, [_owner_row(), (None,), None])
@@ -653,7 +653,7 @@ def test_end_writes_the_provisional_status_and_settles_only_when_terminal(monkey
     # making this ride ineligible is that the rider never opted into saving
     # tracks — the check that has to win over 'pending'. A1's version of
     # this test also expected the GBFS-corroboration award's fetches here
-    # (cap-headroom probe, ledger INSERT) — PLAN_RIDE_MODE_API.md phase A2
+    # (cap-headroom probe, ledger INSERT) — docs/implemented/PLAN_RIDE_MODE_API.md phase A2
     # superseded that award at /end (see
     # test_end_no_longer_credits_waypoint_points above), so only the FOR
     # UPDATE read and the final response read remain.
@@ -696,7 +696,7 @@ def test_end_reads_ride_options_off_the_locked_row(monkeypatch):
 
 def test_end_no_longer_credits_waypoint_points(monkeypatch):
     """A1's namesake test documented that award supersession was A2's to
-    make ("provisional validation notwithstanding"). PLAN_RIDE_MODE_API.md
+    make ("provisional validation notwithstanding"). docs/implemented/PLAN_RIDE_MODE_API.md
     phase A2 has landed: PATCH .../end no longer reads ride_waypoints or
     writes user_points at all — see src/api_tracked_rides.py:end_tracked_ride
     and tests/test_api_tracked_rides_validation.py's own coverage of this

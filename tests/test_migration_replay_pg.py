@@ -97,7 +97,7 @@ def test_replaying_every_migration_is_safe_with_a_ride_mode_points_row(pg_conn):
     """Same failure class as the not_rideable case above, recurring for a
     different constraint: sql/037 ALSO rewrites user_points_action_allowed
     unconditionally (a plain DROP/re-ADD, no guard — see that file's
-    'user_points.action' block before its fix). RIDE_MODE_OVERHAUL_PLAN.md
+    'user_points.action' block before its fix). docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md
     phases A2/A3 (sql/053, sql/052) later widen that SAME constraint to
     admit five new ride-mode actions. Once a single production row carries
     one of those (e.g. a rider submits one end-of-ride survey), sql/037

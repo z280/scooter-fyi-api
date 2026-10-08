@@ -3,7 +3,7 @@
 Before the first daily SLA row exists, the endpoint must return a 200 with a
 null-filled body — NOT a 503 — so the front-end gauge (which does
 `v1Pct === null ? "pending" : v1Pct.toFixed(1)`) renders a pending state
-instead of crashing on an undefined field. See API.md → Common patterns.
+instead of crashing on an undefined field. See docs/reference/API.md → Common patterns.
 
 We drive the public handler with an empty result set (monkeypatched
 `connection`) rather than poking at internal helpers, so the test is coupled to

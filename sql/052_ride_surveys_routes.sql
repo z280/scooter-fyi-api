@@ -1,5 +1,5 @@
--- Ride Mode routes + end-of-ride surveys (PLAN_RIDE_MODE_API.md phase A3 /
--- master RIDE_MODE_OVERHAUL_PLAN.md Part 2, contract table §1.5).
+-- Ride Mode routes + end-of-ride surveys (docs/implemented/PLAN_RIDE_MODE_API.md phase A3 /
+-- master docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Part 2, contract table §1.5).
 --
 -- TWO NEW TABLES:
 --
@@ -144,7 +144,7 @@ BEGIN
                 'report_not_rideable', 'report_not_found',
                 'report_vehicle_issue', 'report_improper_parking',
                 'qr_scan',
-                -- Ride Mode (RIDE_MODE_OVERHAUL_PLAN.md Decision 6 / Part
+                -- Ride Mode (docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6 / Part
                 -- 1.1 goal 4) — the full five-action union both sql/052 and
                 -- sql/053 install, so either landing order converges here.
                 'battery_contribution', 'nav_route_feedback',

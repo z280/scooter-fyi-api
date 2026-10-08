@@ -381,7 +381,7 @@ def delete_ride_usual(
 # A spec is a rider's "ideal scooter": kind of device, required features,
 # minimum quality, minimum battery, and — the field that makes it a spec
 # rather than a filter — which of those are MUST rather than PREFER
-# (ALONG_THE_WAY_PLAN.md §5.1). The trip search reads it; this module stores
+# (docs/ALONG_THE_WAY_PLAN.md §5.1). The trip search reads it; this module stores
 # it.
 #
 # THIS IS THE THIRD COPY of the same four handlers, and that is worth saying

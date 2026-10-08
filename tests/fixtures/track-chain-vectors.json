@@ -7,7 +7,7 @@
       "scooter-fyi-api"
     ],
     "generator": "denver-scooter-fyi scripts/gen-track-vectors.mjs",
-    "spec": "RIDE_MODE_OVERHAUL_PLAN.md Part 2 (committed byte-identically to both repos)",
+    "spec": "docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Part 2 (committed byte-identically to both repos)",
     "consumers": [
       "denver-scooter-fyi src/track-store.test.ts",
       "scooter-fyi-api tests/test_track_verify.py"

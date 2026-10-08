@@ -1,5 +1,5 @@
 """De-id sweep — `python -m src.cli deidentify_donations`
-(PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md's "De-id"
+(docs/implemented/PLAN_RIDE_MODE_API.md phase A2 / docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md's "De-id"
 glossary entry, `src/cli.py:deidentify_donations`).
 
 Fake-cursor unit tests, same idiom as tests/test_ride_usuals.py: a small

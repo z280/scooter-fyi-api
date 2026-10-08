@@ -1,6 +1,6 @@
 # Ride Mode Overhaul — API Plan (scooter-fyi-api)
 
-Companion to `RIDE_MODE_OVERHAUL_PLAN.md` (the master program plan — read it first; the vision,
+Companion to `docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md` (the master program plan — read it first; the vision,
 glossary, chain-format spec, sequencing graph, and risks live there). This document is the
 actionable API-side plan: **four big phases (A1–A4)**, each independently mergeable and deployable,
 each divisible into parallel lanes for multiple implementing agents.
@@ -16,8 +16,8 @@ House rules that bind every phase:
   `VEO_TEST_PG_DSN`. One test file per module. `tests/test_migration_replay_pg.py` must keep
   passing (replay idempotence).
 - Per-PR doc duties (FEATURE_PLAN "Sequencing"): endpoint table row in `README.md`, full shapes +
-  error codes in `API.md`, new env vars in both `.env.example` and `docker-compose.yml`, an
-  `API_REQUIREMENTS.md` status-table row, and a comment block in `crontab` for any new job.
+  error codes in `docs/reference/API.md`, new env vars in both `.env.example` and `docker-compose.yml`, an
+  `docs/API_REQUIREMENTS.md` status-table row, and a comment block in `crontab` for any new job.
 - **Three-address rule** (`src/api_meta.py` header): any new stored field is a retention rule —
   update `src/cli.py` (cleanup/de-id jobs), `src/api_meta.py:_PRIVACY`, and
   `src/templates/legal/privacy_policy.html` together.
@@ -195,7 +195,7 @@ geocoding, pricing/points metadata, and Usuals.
   be restarted to load a new index. Unpacking `.zst` requires adding `zstandard` to
   `requirements.txt` — stdlib `tarfile` reads only gz/bz2/xz and the worker image ships no `zstd`
   binary.
-- Seeding runbook `scripts/build_photon_index.md` (manual, one-time + quarterly): Geofabrik
+- Seeding runbook `docs/reference/build_photon_index.md` (manual, one-time + quarterly): Geofabrik
   `colorado-latest.osm.pbf` (~250 MB) → throwaway Nominatim import container →
   `photon -nominatim-import` → tar `photon_data/` → upload to R2. Colorado-scoped keeps the index
   low-GB and the JVM under 2 GiB; a full-US extract is explicitly rejected.
@@ -208,8 +208,8 @@ geocoding, pricing/points metadata, and Usuals.
 (the index fetch lives beside `sync_map_assets`), `requirements.txt` (`zstandard`), `config.json`,
 `src/config.py`, `docker-compose.yml`,
 `docker-compose.override.yml.example`, new `docker/photon/Dockerfile`, new
-`scripts/build_photon_index.md`, `crontab`, `API.md`, `README.md`, `.env.example`,
-`API_REQUIREMENTS.md`.
+`docs/reference/build_photon_index.md`, `crontab`, `docs/reference/API.md`, `README.md`, `.env.example`,
+`docs/API_REQUIREMENTS.md`.
 
 **Tests:** extend `tests/test_api_tracked_rides_validation.py` (options blob shape + 4 KB cap,
 start-battery bounds, §10 round-trip); new `tests/test_route_maneuvers.py` (**multi-leg index
@@ -329,11 +329,11 @@ de-identification sweep.
   `validation.status = "pending_feed"` — finished later by `finalize_validation` (below). This is
   Screen 10's "waiting on validation from the live feed" branch.
 - `PATCH .../end`: stops calling `credit_waypoint_points` / `credit_gbfs_validation_points`
-  (functions retained for history/tests; `API.md` documents the supersession).
+  (functions retained for history/tests; `docs/reference/API.md` documents the supersession).
 - Deprecation: `POST .../waypoints` (600/h single-waypoint) has **no known client callers** —
   the denver-scooter-fyi frontend never wired it (verified: zero references in its `src/`), so
   there is no "legacy HUD" dependency and its schedule is decoupled from frontend F3. It is
-  retained one release purely as caution for unknown external callers, with an `API.md`
+  retained one release purely as caution for unknown external callers, with an `docs/reference/API.md`
   deprecation note landing in A2. Waypoints it records stop earning points as of A2 — precisely:
   this endpoint never wrote ledger rows itself; the per-waypoint award was always granted at
   `/end` via `credit_waypoint_points`, so the supersession lands in `/end` (above), not here. It
@@ -473,8 +473,8 @@ leaderboard record" and the privacy page must actually say so).
 **Files:** `sql/051`, `sql/053`, new `src/track_verify.py`, `src/api_tracked_rides.py`,
 `src/points.py` (award functions — the constants and `/points/schedule` entries landed in A1),
 `src/ride_watch.py`, `src/battery_model.py`, `src/cli.py`,
-`crontab`, `src/api_meta.py`, `src/templates/legal/privacy_policy.html`, `API.md`, `README.md`,
-`API_REQUIREMENTS.md`.
+`crontab`, `src/api_meta.py`, `src/templates/legal/privacy_policy.html`, `docs/reference/API.md`, `README.md`,
+`docs/API_REQUIREMENTS.md`.
 
 **Tests:** `tests/test_track_verify.py` (golden chains from the shared fixture — the byte-shared
 copy is the single file `tests/fixtures/track-chain-vectors.json`, the **program-wide canonical
@@ -644,8 +644,8 @@ program must not touch), `src/api_tracked_rides.py` (`survey_submitted`), `src/p
 (constants + survey award functions), `src/api_points.py` (the three actions enter
 `/points/schedule`, above), `src/cli.py` + `crontab` (the 28 h `ride_routes` de-id
 arm, above), `src/api_meta.py` + `src/templates/legal/privacy_policy.html` (three-address
-entries for both new tables), `src/main.py` (mount both routers), `API.md`, `README.md`,
-`API_REQUIREMENTS.md`.
+entries for both new tables), `src/main.py` (mount both routers), `docs/reference/API.md`, `README.md`,
+`docs/API_REQUIREMENTS.md`.
 
 **Tests:** `tests/test_ride_routes.py` (validation incl. the metric bounds, profile-vs-config,
 bbox, non-owned `tracked_ride_id` 404, consent-only call
@@ -667,7 +667,7 @@ awards (incl. the `/points/schedule` entries).
 
 ## Phase A4 — §11 H3 r8 Leaderboard
 
-**Goal:** implement FEATURE_PLAN_2026-07.md §11 as specified — with one response-shape extension
+**Goal:** implement docs/implemented/FEATURE_PLAN_2026-07.md §11 as specified — with one response-shape extension
 for the frontend Leaderboard view, plus two narrow §11 deviations argued where they occur (an
 index reconciliation §11 omits; a content-keyed ETag where §11.4's run-keyed one would break its
 own read-time-privacy rule). Independent of A2/A3 mechanics (reads the ledger only); can land
@@ -681,7 +681,7 @@ ships a plain `idx_user_points_h3_8 ON user_points (h3_8_index)`, which the new 
 `DROP INDEX IF EXISTS idx_user_points_h3_8` (idempotent, replay-safe) instead of leaving every
 `user_points` insert maintaining two indexes over the same leading column.
 
-> **Superseded (sql/061).** The nightly `recompute` described below was split: `src/area_leaders.py:refresh_universe` now runs WEEKLY and refreshes only the all-time cell universe, and the leaderboard itself is computed per request in `src/api_leaderboard.py`. The stored `h3_r8_area_leaders`/`regional_leaders` tables are gone. The window, the confirmed-only rule and the tie-break are unchanged — only where and when they are applied. See API.md's `/api/v1/leaderboard/map` section.
+> **Superseded (sql/061).** The nightly `recompute` described below was split: `src/area_leaders.py:refresh_universe` now runs WEEKLY and refreshes only the all-time cell universe, and the leaderboard itself is computed per request in `src/api_leaderboard.py`. The stored `h3_r8_area_leaders`/`regional_leaders` tables are gone. The window, the confirmed-only rule and the tie-break are unchanged — only where and when they are applied. See docs/reference/API.md's `/api/v1/leaderboard/map` section.
 
 **Recompute:** `src/area_leaders.py:recompute(window_days=28)` per §11.3 — universe =
 `DISTINCT h3_8_index FROM device_history` ∪ `device_state.current_h3_8_index` ∪
@@ -753,8 +753,8 @@ filters above). A1–A3 each carry their entries; "it's just a daily report" is 
 
 **Files:** `sql/048`, new `src/area_leaders.py`, new `src/api_leaderboard.py`, `src/api_private.py`
 (admin sibling), `src/cli.py`, `crontab`, `src/main.py` (mount), `src/api_meta.py`,
-`src/templates/legal/privacy_policy.html`, `API.md`, `README.md`,
-`API_REQUIREMENTS.md`.
+`src/templates/legal/privacy_policy.html`, `docs/reference/API.md`, `README.md`,
+`docs/API_REQUIREMENTS.md`.
 
 **Tests:** `tests/test_area_leaders_logic.py` (tie-break, window, confirmed-only),
 `tests/test_area_leaders_pg.py` (universe union, full-replace idempotence, account-delete cascade),
@@ -778,6 +778,6 @@ the 600 s `max-age`; that bound is inherited from §11.4's chosen header).
 
 ## Cross-cutting: what the frontend is promised
 
-The complete frontend-facing contract table lives in `RIDE_MODE_OVERHAUL_PLAN.md` §1.5. Any change
+The complete frontend-facing contract table lives in `docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md` §1.5. Any change
 to a request/response shape in this plan must be reflected there (both repo copies) and in
-`API.md` in the same PR.
+`docs/reference/API.md` in the same PR.

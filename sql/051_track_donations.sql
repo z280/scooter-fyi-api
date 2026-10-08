@@ -1,5 +1,5 @@
--- Track donations (PLAN_RIDE_MODE_API.md phase A2 / master
--- RIDE_MODE_OVERHAUL_PLAN.md Part 2): the bulk-upload target for a ride's
+-- Track donations (docs/implemented/PLAN_RIDE_MODE_API.md phase A2 / master
+-- docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Part 2): the bulk-upload target for a ride's
 -- locally-recorded, hash-chained, HMAC-signed waypoint chain, verified once
 -- server-side at donation (src/track_verify.py) and never transmitted
 -- mid-ride.

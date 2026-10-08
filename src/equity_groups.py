@@ -13,7 +13,7 @@ window (`daily_sla_compliance`).
                map) and its parallel-tracked companion. Still computed and
                still carrying a pass/fail flag so the historical series
                stays continuous and comparable — the frontend no longer
-               shows either. See API_REQUIREMENTS.md §1.1a.
+               shows either. See docs/API_REQUIREMENTS.md §1.1a.
     er1..er6 — one group per exact `EquityGroupRank` tier (1 = highest
                need) from Denver DOTI's authoritative census-block-group
                Equity Index. Tracked individually and atomically — not
@@ -44,7 +44,7 @@ over these same snapshot columns.
 `OFFICIAL_GROUP` — and v1/v2 keep theirs so the pre-clarification series
 stays readable beside it. er1..er6 are tracked as raw averages only: no
 individual rank tier was ever itself a compliance boundary, so no
-pass/fail flag is computed for one. See API_REQUIREMENTS.md §1.1a.
+pass/fail flag is computed for one. See docs/API_REQUIREMENTS.md §1.1a.
 
 SPLIT DIMENSIONS -------------------------------------------------------
 Every tracked group also gets a binary breakdown along each dimension in

@@ -19,7 +19,7 @@
 -- tables, so per-campaign history survives the 90-day raw-event pruning
 -- and is kept indefinitely. Rows exist only for campaign <> 'none'.
 --
--- city_id carried per MULTI_TENANCY_PLAN.md §9, same as 061: a tenant
+-- city_id carried per docs/MULTI_TENANCY_PLAN.md §9, same as 061: a tenant
 -- dimension, NULL = Denver today.
 
 CREATE TABLE IF NOT EXISTS campaigns (

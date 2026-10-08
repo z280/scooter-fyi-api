@@ -330,7 +330,7 @@ def test_live_recorded_maps_can_never_be_unmeasurable(monkeypatch):
 
 
 def test_status_precedence_covers_every_documented_value():
-    """The five values API.md documents, and the order they are decided in."""
+    """The five values docs/reference/API.md documents, and the order they are decided in."""
     status = api_public._calendar_status
     assert status(None) == "no_data"
     assert status({"pass": True, "unmeasurable_reason": None}) == "pass"

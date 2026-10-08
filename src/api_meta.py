@@ -1,4 +1,4 @@
-"""Meta endpoints (API_REQUIREMENTS.md §5).
+"""Meta endpoints (docs/API_REQUIREMENTS.md §5).
 
 GET /api/v1/meta/pricing — the sales-tax rate Ride Mode's cost breakdown
 applies, config-driven (see the "Pricing" section below). Rate PLANS stay

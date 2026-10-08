@@ -1,5 +1,5 @@
-"""Server-side track chain verifier (PLAN_RIDE_MODE_API.md phase A2,
-"Verification"; format spec RIDE_MODE_OVERHAUL_PLAN.md Part 2).
+"""Server-side track chain verifier (docs/implemented/PLAN_RIDE_MODE_API.md phase A2,
+"Verification"; format spec docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Part 2).
 
     verify_track_chain(cur, ride_row, batches) -> VerificationResult
 
@@ -10,7 +10,7 @@ codebase and to leave room for a future check that legitimately needs a
 read — nothing in checks 1-6 as specified needs the database, because
 every fact they need already lives on `ride_row`.
 
-Runs the six checks IN ORDER, exactly as PLAN_RIDE_MODE_API.md's A2
+Runs the six checks IN ORDER, exactly as docs/implemented/PLAN_RIDE_MODE_API.md's A2
 "Verification" section numbers them:
 
     1. signature   -- HMAC-SHA256 per batch + the triple ride binding
@@ -26,7 +26,7 @@ separate "signature" key in the per-check dict returned to callers —
 see the golden vectors' own note on this: "The response's `verification`
 dict has no separate signature key, so the observable field is
 `chain`."). A failure in either is unrecoverable for everything after it
-("don't run later checks against garbage" -- PLAN_RIDE_MODE_API.md): the
+("don't run later checks against garbage" -- docs/implemented/PLAN_RIDE_MODE_API.md): the
 function stops immediately, per_check keys from "monotonic" onward stay
 "skipped", chain_root_hash is None (never computed over an unverified/
 misordered chain), and distance_meters/waypoint_count are 0.
@@ -76,7 +76,7 @@ from .ride_limits import clamp_distance, measure_path
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Chain format constants (RIDE_MODE_OVERHAUL_PLAN.md Part 2 / the golden
+# Chain format constants (docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Part 2 / the golden
 # vectors' "contract" block). Kept local to this module rather than
 # imported from src/api_tracked_rides.py (which owns TRACK_SIGNING_ALG for
 # the *issuing* side) so this verifier has zero import-time coupling to the
@@ -231,7 +231,7 @@ class VerificationResult:
     check-1 signature failure it is simply the batch's index in the
     submitted list). None once past check 2, or when `batches` was empty.
     Exists so a 422 response can name "the failing check + batch seq" per
-    PLAN_RIDE_MODE_API.md's donation-endpoint error shape.
+    docs/implemented/PLAN_RIDE_MODE_API.md's donation-endpoint error shape.
 
     `per_check` always has all six CHECK_KEYS present; a key that never
     ran reads "skipped" (see SKIPPED).
@@ -241,7 +241,7 @@ class VerificationResult:
     the same order `distance_meters`/`waypoint_count` were computed over.
     INTEGRATOR ADDITION, not in the original lane brief: the donation
     endpoint has to persist `donated_track_points` (sql/051) -- raw JWS
-    strings are discarded after verification (RIDE_MODE_OVERHAUL_PLAN.md
+    strings are discarded after verification (docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md
     Part 2), so this is the only place those decoded points are ever
     available, and re-deriving them a second time by re-parsing the batches
     would duplicate checks 1/2's own parsing logic outside this module.
@@ -326,7 +326,7 @@ def _signature_binds_this_ride(
     header_b64: str, payload_b64: str, header: dict, payload: dict, sig: bytes,
     *, ride_row: RideRow, hmac_key: bytes,
 ) -> bool:
-    """The triple binding PLAN_RIDE_MODE_API.md's check 1 requires: header
+    """The triple binding docs/implemented/PLAN_RIDE_MODE_API.md's check 1 requires: header
     `kid`, payload `rid`, and payload `non` must all match THIS ride, on
     top of the HMAC itself verifying under THIS ride's key -- so a chain
     built for any other ride or account fails here, not a later
@@ -459,7 +459,7 @@ def _verify_monotonic(
     points: list[_Point], batch_bounds: list[tuple[float, float]], ride_row: RideRow,
 ) -> str:
     """"ok" or a failure code. No dedicated reason token exists for this
-    check in the A2 vocabulary (see PLAN_RIDE_MODE_API.md's golden-vector
+    check in the A2 vocabulary (see docs/implemented/PLAN_RIDE_MODE_API.md's golden-vector
     note on the out-of-bounds-timestamps scenario), so a failure here never
     adds anything to `reasons` -- only to `per_check["monotonic"]`."""
     for t0, t1 in batch_bounds:
@@ -653,7 +653,7 @@ def _verify_track_chain(ride_row: RideRow, batches: Sequence[str]) -> Verificati
     # Metrics over trusted points -- see module docstring for why these
     # are computed unconditionally here rather than gated behind checks
     # 3-6. RAW, un-adjusted points: the accuracy adjustment belongs to
-    # check 4's speed math only (PLAN_RIDE_MODE_API.md is explicit that
+    # check 4's speed math only (docs/implemented/PLAN_RIDE_MODE_API.md is explicit that
     # the distance this function reports must not carry it).
     path = [(lat, lon) for (_, lat, lon, _) in chain.points]
     measured, _excluded_legs = measure_path(path, cap_legs=True)

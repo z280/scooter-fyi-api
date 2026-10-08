@@ -1,4 +1,4 @@
-"""Server-computed profile badges (API_REQUIREMENTS.md §4.3).
+"""Server-computed profile badges (docs/API_REQUIREMENTS.md §4.3).
 
 Recomputed on every profile read — no stored badge state, so thresholds
 can be tuned without migrations and retroactively apply. Earned badges

@@ -1,5 +1,5 @@
 """Full lifecycle of POST /api/v1/tracked-rides/{ride_id}/track against a
-real Postgres — the donation endpoint (PLAN_RIDE_MODE_API.md phase A2)
+real Postgres — the donation endpoint (docs/implemented/PLAN_RIDE_MODE_API.md phase A2)
 that composes all four A2 lanes' work in one transaction:
 
     src.track_verify.verify_track_chain   (verification)

@@ -220,7 +220,7 @@ def test_flat_values_match_the_constants(schedule):
 
 def test_ride_mode_values_are_the_locked_decision_6_numbers(schedule):
     """Belt and braces on the drift test above: the constants themselves are
-    locked by RIDE_MODE_OVERHAUL_PLAN.md Decision 6, so a "harmless" retune
+    locked by docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6, so a "harmless" retune
     of one of them has to break a test somewhere. 6, not 5, for the
     qualitative award — that is the even-points correction, not a typo."""
     assert schedule["battery_contribution"] == {
@@ -342,7 +342,7 @@ def test_the_ride_mode_step_constants_agree_in_both_units():
 
 
 def test_the_documented_ten_km_worked_example(schedule):
-    """RIDE_MODE_OVERHAUL_PLAN.md's own worked case: a 10 km ride with
+    """docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md's own worked case: a 10 km ride with
     everything on is 18 + 18 + 4 = 40 points, under the unchanged
     MAX_POINTS_PER_RIDE of 100. If this drifts, the plan's headline number
     and the shipped schedule disagree."""

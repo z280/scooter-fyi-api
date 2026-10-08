@@ -37,7 +37,7 @@ what make it safe to ship — a system that hides things owes an explanation to
 the person it hid them from, and a lever to the people maintaining it.
 
 **This is NOT part of the Along the Way program.** It shares no phase, no
-migration and no module with `ALONG_THE_WAY_PLAN.md`. It is here because it
+migration and no module with `docs/ALONG_THE_WAY_PLAN.md`. It is here because it
 touches the same tables and deserves the same kind of document.
 
 ---
@@ -339,7 +339,7 @@ contradiction.
 | Points awarded per report type | `src/points.py:195` |
 | Admin pages, OAuth-gated | `src/api_admin.py` — `cycles`, `failures`, `scheduler`, `regions`, `admins`, `analytics`, `campaigns` |
 | Admin page pattern | `_render("name.html", ...)` + Jinja templates in `src/templates/` |
-| SMS with consent, quota, STOP | `src/comms.py` — **already built**, see `ALONG_THE_WAY_PLAN.md` §13 |
+| SMS with consent, quota, STOP | `src/comms.py` — **already built**, see `docs/ALONG_THE_WAY_PLAN.md` §13 |
 | QR scan endpoint — authed, 20/hr, and **nothing calls it** | `src/api_qr.py:30` |
 | Plate extraction and the match check | `src/qr.py:32` `extract_plate`, `:40` `validate_scan` |
 | Why the client cannot resolve a hidden device | `src/identity.py:59-69` — salted HMAC, "anyone without it cannot" |

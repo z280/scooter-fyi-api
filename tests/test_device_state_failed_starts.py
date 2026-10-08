@@ -218,7 +218,7 @@ def test_short_ride_carries_the_count_to_the_new_stop(cycle):
 @pytest.mark.parametrize("offset_m, clears", [(0.0, True), (-0.01, False)])
 def test_a_ride_of_exactly_the_decay_distance_clears_the_count(cycle, monkeypatch,
                                                                offset_m, clears):
-    """'Cleared by a relocation of AT LEAST FAILED_START_DECAY_M' (API.md,
+    """'Cleared by a relocation of AT LEAST FAILED_START_DECAY_M' (docs/reference/API.md,
     quality.py): the boundary itself clears. The threshold is pinned to the
     exact distance _distance_meters reports so float rounding in the
     degrees->meters conversion cannot decide the test."""

@@ -17,7 +17,7 @@ Available commands:
                       is still missing; `equity_backfill <start> [end]`
                       does an explicit range by hand.
     cleanup_receipts  Delete receipt images past the 18-month retention
-                      (API_REQUIREMENTS.md §3.2 / privacy policy).
+                      (docs/API_REQUIREMENTS.md §3.2 / privacy policy).
     cleanup_ride_screenshots
                       Delete ride transaction screenshots (+ their row)
                       past the 18-month retention (/api/v1/meta/privacy).
@@ -480,7 +480,7 @@ def expire_stale_watches() -> dict:
     that can never match a live query again.
 
     ALSO the finalize_validation hook for a `pending_feed` ride whose watch
-    window elapsed without GBFS ever resolving (PLAN_RIDE_MODE_API.md phase
+    window elapsed without GBFS ever resolving (docs/implemented/PLAN_RIDE_MODE_API.md phase
     A2, "Validation finisher" — src/ride_watch.py:finalize_validation). The
     ride-side UPDATE just above SKIPS a donated ride: it already has
     `user_reported_ended_at` set (PATCH .../end ran) and its `status` is
@@ -660,7 +660,7 @@ def _cli_refresh_photon_index() -> dict:
     """Re-check R2 for a newer geocoding index on a schedule (cron, 05:00).
 
     ETag-gated, so this is a no-op on all but the handful of days a year the
-    index is rebuilt by hand (scripts/build_photon_index.md). REVIEW FIX:
+    index is rebuilt by hand (docs/reference/build_photon_index.md). REVIEW FIX:
     sync_photon_index only STAGES a changed index now — it never swaps it
     into the live, served directory itself (see that function's own doc
     comment for why and for the exact operator promotion sequence: stop
@@ -698,7 +698,7 @@ def _cli_backfill_battery_trips() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# H3 r8 cell universe (FEATURE_PLAN_2026-07.md §11 / PLAN_RIDE_MODE_API.md
+# H3 r8 cell universe (docs/implemented/FEATURE_PLAN_2026-07.md §11 / docs/implemented/PLAN_RIDE_MODE_API.md
 # phase A4). Cron: `15 9 * * 1 python -m src.cli refresh_area_universe`.
 # ---------------------------------------------------------------------------
 def _cli_refresh_area_universe() -> dict:
@@ -714,7 +714,7 @@ def _cli_cleanup_job_runs() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# De-id sweep (PLAN_RIDE_MODE_API.md phase A2 / RIDE_MODE_OVERHAUL_PLAN.md
+# De-id sweep (docs/implemented/PLAN_RIDE_MODE_API.md phase A2 / docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md
 # glossary "De-id"). Cron: `15 * * * * python -m src.cli deidentify_donations`.
 # ---------------------------------------------------------------------------
 
@@ -729,8 +729,8 @@ _MS_PER_MINUTE = 60_000
 
 def deidentify_donations(dry_run: bool = False) -> dict:
     """De-identify donated ride tracks once points have settled — the sweep
-    named in PLAN_RIDE_MODE_API.md phase A2 and
-    RIDE_MODE_OVERHAUL_PLAN.md's "De-id" glossary entry.
+    named in docs/implemented/PLAN_RIDE_MODE_API.md phase A2 and
+    docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md's "De-id" glossary entry.
     `python -m src.cli deidentify_donations`, hourly at :15.
 
     A `track_donations` row is swept the moment EITHER is true:
@@ -764,7 +764,7 @@ def deidentify_donations(dry_run: bool = False) -> dict:
     command is safe to run every hour forever (or twice in the same
     minute) with no double effect.
 
-    `ride_routes` (PLAN_RIDE_MODE_API.md phase A3, sql/052) sweeps on its
+    `ride_routes` (docs/implemented/PLAN_RIDE_MODE_API.md phase A3, sql/052) sweeps on its
     OWN 28h clock, independent of any donation — a nav-improvement ride
     whose track is never donated still stored route geometry, and hanging
     its de-id off a donation that may not exist would keep it
@@ -965,7 +965,7 @@ COMMANDS = {
     "rollup_analytics":      rollup_analytics,
     "cleanup_telemetry":     cleanup_telemetry,
     "migrate":               lambda: run_migrations(),
-    # docs/PLAN_FLEET_ANALYTICS.md: fill the fleet-analytics rollups once.
+    # docs/implemented/PLAN_FLEET_ANALYTICS.md: fill the fleet-analytics rollups once.
     # Resumable (each pass commits its watermark); the ingest keeps them
     # current afterwards.
     "analytics_backfill":    analytics_backfill,

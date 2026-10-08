@@ -1,4 +1,4 @@
-"""The validation finisher (PLAN_RIDE_MODE_API.md phase A2, "Validation
+"""The validation finisher (docs/implemented/PLAN_RIDE_MODE_API.md phase A2, "Validation
 finisher"; src/ride_watch.py:finalize_validation).
 
 Fake-cursor tests exercising finalize_validation directly (as opposed to
@@ -118,7 +118,7 @@ def test_the_advisory_lock_is_the_very_first_statement():
     """THE load-bearing assertion: if a future edit moved the lock after
     the ride SELECT (or dropped it), this fails immediately -- a resolve
     path or the donation transaction that ran a row read/write before
-    locking is exactly the inversion PLAN_RIDE_MODE_API.md's A2 spec warns
+    locking is exactly the inversion docs/implemented/PLAN_RIDE_MODE_API.md's A2 spec warns
     deadlocks against a concurrent participant on the same ride."""
     cur = _FakeCursor(ride_row=None)
     ride_watch.finalize_validation(cur, _RIDE_ID)

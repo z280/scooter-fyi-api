@@ -27,7 +27,7 @@ returned by the start call and by the two owner-only single-ride reads, and
 never by the list endpoint — see _RIDE_COLS vs _RIDE_COLS_OWNER, where that
 is structural rather than a redaction anyone has to remember.
 
-TRACK DONATION (PLAN_RIDE_MODE_API.md phase A2, RIDE_MODE_OVERHAUL_PLAN.md
+TRACK DONATION (docs/implemented/PLAN_RIDE_MODE_API.md phase A2, docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md
 Part 2): ride mode records its GPS track LOCALLY (IndexedDB, hash-chained,
 HMAC-signed batches) and sends nothing mid-ride — the chain is verified
 server-side only at donation, POST .../track (sql/051). This SUPERSEDES the
@@ -66,7 +66,7 @@ from .pg import connection
 # credit_waypoint_points / credit_gbfs_validation_points are RETAINED for
 # history and their existing tests (tests/test_points_logic.py,
 # tests/test_ride_hard_caps.py) but are no longer called from this module —
-# PLAN_RIDE_MODE_API.md phase A2 supersedes both awards; see end_tracked_ride
+# docs/implemented/PLAN_RIDE_MODE_API.md phase A2 supersedes both awards; see end_tracked_ride
 # below and the module docstring's "TRACK DONATION" note.
 from .points import (
     credit_battery_contribution,
@@ -94,7 +94,7 @@ _LIMIT_START_RIDE_PER_ACCOUNT = (20, 3600)
 _LIMIT_WAYPOINT_PER_ACCOUNT = (600, 3600)
 _VEHICLE_IDENTIFIER_RE = r"^[0-9a-f]{16}$"
 
-# Track donation (PLAN_RIDE_MODE_API.md phase A2). Body cap and batch-count
+# Track donation (docs/implemented/PLAN_RIDE_MODE_API.md phase A2). Body cap and batch-count
 # cap sized against the longest honest ride, per the spec's own sanity
 # check: the 3h watch window at 1Hz seals at most ~432 25-point batches
 # (~650 KB of compact JWS), so 600 batches / 2 MB clears that with headroom
@@ -338,7 +338,7 @@ def _track_signing(r: tuple, *, ride_id: str) -> dict[str, Any] | None:
 
 def _survey_submitted_ids(cur, ride_ids: list) -> set[str]:
     """Which of `ride_ids` (raw tracked_rides.id values, straight off a
-    fetched row) already have a ride_surveys row (PLAN_RIDE_MODE_API.md
+    fetched row) already have a ride_surveys row (docs/implemented/PLAN_RIDE_MODE_API.md
     phase A3, sql/052) — one batched query per response rather than one
     per ride, so a list response of N rides costs one extra round trip,
     not N.
@@ -434,7 +434,7 @@ def _row_to_ride(
             "status": validation_status,
             "reasons": validation_reasons if isinstance(validation_reasons, list) else [],
         },
-        # PLAN_RIDE_MODE_API.md phase A3 (sql/052, src/api_ride_surveys.py):
+        # docs/implemented/PLAN_RIDE_MODE_API.md phase A3 (sql/052, src/api_ride_surveys.py):
         # an EXISTS against ride_surveys, computed by the caller and passed
         # in — NOT redacted like track_signing, since whether a survey was
         # submitted reveals nothing the rider didn't do themselves. Included
@@ -882,8 +882,8 @@ def end_tracked_ride(
                  str(rid)),
             )
 
-            # Points (requirement #10) — SUPERSEDED as of PLAN_RIDE_MODE_API.md
-            # phase A2 (RIDE_MODE_OVERHAUL_PLAN.md Decision 6 / Risk 5): PATCH
+            # Points (requirement #10) — SUPERSEDED as of docs/implemented/PLAN_RIDE_MODE_API.md
+            # phase A2 (docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Decision 6 / Risk 5): PATCH
             # .../end no longer awards `waypoint` or `gbfs_trip_validated`.
             # GBFS alignment is now an ELIGIBILITY GATE (_provisional_validation
             # above / src/track_verify.py), not an award; the reshaped
@@ -922,8 +922,8 @@ async def donate_track(
     request: Request,
     user: SessionUser = Depends(require_session),
 ) -> dict[str, Any]:
-    """Bulk track donation + server-side verification (PLAN_RIDE_MODE_API.md
-    phase A2, RIDE_MODE_OVERHAUL_PLAN.md Part 2) — the sole track upload
+    """Bulk track donation + server-side verification (docs/implemented/PLAN_RIDE_MODE_API.md
+    phase A2, docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md Part 2) — the sole track upload
     path; ride mode never transmits mid-ride. Composes four independently
     built pieces in one transaction:
 
@@ -989,7 +989,7 @@ async def donate_track(
 
     with connection() as conn:
         with conn.cursor() as cur:
-            # The transaction OPENS with this lock — PLAN_RIDE_MODE_API.md is
+            # The transaction OPENS with this lock — docs/implemented/PLAN_RIDE_MODE_API.md is
             # explicit: finalize_validation (src/ride_watch.py) takes the
             # SAME `ride_validation:<ride_id>` lock before touching the ride
             # row, so a ride_watch resolve landing mid-donation serializes
@@ -1276,7 +1276,7 @@ async def donate_track(
                     points_awarded.append({"action": award["action"], "points": award["points"]})
 
             if may_award and nav_improvement_on:
-                # ride_routes doesn't exist until PLAN_RIDE_MODE_API.md phase
+                # ride_routes doesn't exist until docs/implemented/PLAN_RIDE_MODE_API.md phase
                 # A3 (sql/052) — A2 may deploy first. Guard on a safe
                 # existence probe (to_regclass returns NULL rather than
                 # raising against a database that hasn't applied sql/052 yet,

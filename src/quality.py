@@ -25,7 +25,7 @@ BASELINE (from battery percent — recovered SoC, see BATTERY PERCENT)
     poor        : battery <  28%
 
 Thresholds were re-expressed from meters to percent when battery percent
-switched to exact SoC recovery (API_REQUIREMENTS.md §7.1): the old
+switched to exact SoC recovery (docs/API_REQUIREMENTS.md §7.1): the old
 "great" rule (≥ 75% of the rated per-type max) was unreachable for
 bicycles, whose rated max (67,000 m) exceeds the highest value the feed
 ever emits (45,293 m).
@@ -52,7 +52,7 @@ N/A OVERRIDES (any of these forces N/A and skips all other rules):
     is_reserved is True
     current_range_meters is None
 
-RELIABILITY TIER (API_REQUIREMENTS.md §1.2, recalibrated 2026-07)
+RELIABILITY TIER (docs/API_REQUIREMENTS.md §1.2, recalibrated 2026-07)
 -----------------------------------------------------------------
 `compute_reliability_tier` collapses the failure signals into a single
 public field answering "will this scooter actually unlock?" — distinct
@@ -141,7 +141,7 @@ the 2026-07-06 production snapshot (8,449 devices): citywide dwell
 percentiles were p50=7.2h / p90=48h / p95=76h, so 96h (~p97) was leaving
 hundreds of top-decile idlers marked "ok".
 
-DWELL OUTLIERS (peer-relative, API_REQUIREMENTS.md workstream 2026-07)
+DWELL OUTLIERS (peer-relative, docs/API_REQUIREMENTS.md workstream 2026-07)
 ----------------------------------------------------------------------
 Absolute dwell thresholds can't tell "31h idle on a block that turns
 over every 6h" (damning) from "31h idle where everything sits a day"
@@ -206,7 +206,7 @@ _TIERS = ("poor", "acceptable", "good", "great")
 # Baseline thresholds (battery percent — true SoC via the lookup table).
 # Percent equivalents of the previous meter cutoffs against the observed
 # 45,293 m full-charge cap (the rated per-type max they used to be scaled
-# by is fiction — see API_REQUIREMENTS.md §7.1).
+# by is fiction — see docs/API_REQUIREMENTS.md §7.1).
 _GREAT_MIN_PCT = 75
 _GOOD_MIN_PCT = 53        # ≈ old 24,140 m (≈ 15 mi nominal)
 _ACCEPTABLE_MIN_PCT = 28  # ≈ old 12,875 m (≈ 8 mi nominal)

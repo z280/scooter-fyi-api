@@ -229,7 +229,7 @@ def test_end_ride_409_when_already_reported(monkeypatch):
 
 
 def test_end_ride_no_longer_credits_waypoint_points(monkeypatch):
-    """SUPERSEDED as of PLAN_RIDE_MODE_API.md phase A2 (Decision 6 / Risk 5):
+    """SUPERSEDED as of docs/implemented/PLAN_RIDE_MODE_API.md phase A2 (Decision 6 / Risk 5):
     PATCH .../end used to award `waypoint` points (2 * waypoint_count) here.
     It no longer queries ride_waypoints or writes to user_points at all —
     the reshaped ride-mode awards are credited from POST .../track and
@@ -305,7 +305,7 @@ def test_end_ride_drops_an_implausible_final_leg_and_says_so(monkeypatch):
     c, conn = _client(
         monkeypatch,
         # end SELECT, final SELECT — no waypoint-count/points crediting
-        # since PLAN_RIDE_MODE_API.md phase A2 superseded that at /end.
+        # since docs/implemented/PLAN_RIDE_MODE_API.md phase A2 superseded that at /end.
         [_end_select(), _row()],
         waypoints=[(39.74 + 20 * step, -104.98)],
     )

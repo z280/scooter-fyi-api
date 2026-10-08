@@ -1,4 +1,4 @@
-"""Account + session core (API_REQUIREMENTS.md §2.1).
+"""Account + session core (docs/API_REQUIREMENTS.md §2.1).
 
 Session model
 -------------
@@ -24,7 +24,7 @@ Expiry policy:
 The FastAPI dependencies live here too: require_session (any valid
 session), require_admin (session whose email is on ADMIN_EMAILS — either
 door; this gates the /api/v1/private/* endpoints that the retired GitHub
-map-auth bearer flow used to gate, per API_REQUIREMENTS.md §2.5).
+map-auth bearer flow used to gate, per docs/API_REQUIREMENTS.md §2.5).
 
 Signed-in or admin are the ONLY gates in this system. There is no paid
 tier — see sql/036_decommercialize.sql.

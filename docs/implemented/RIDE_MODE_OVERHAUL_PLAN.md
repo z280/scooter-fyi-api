@@ -4,12 +4,12 @@ Status: **planning approved 2026-07-29**. This master document is committed **by
 repositories:
 
 - `denver-scooter-fyi` → `docs/RIDE_MODE_OVERHAUL_PLAN.md`
-- `scooter-fyi-api` → `RIDE_MODE_OVERHAUL_PLAN.md`
+- `scooter-fyi-api` → `docs/implemented/RIDE_MODE_OVERHAUL_PLAN.md`
 
 Each repository additionally carries its own detailed, actionable plan, structured as a few **big**
 phases ready for division across multiple implementing agents:
 
-- API: `PLAN_RIDE_MODE_API.md` (phases **A1–A4**)
+- API: `docs/implemented/PLAN_RIDE_MODE_API.md` (phases **A1–A4**)
 - Frontend: `docs/PLAN_RIDE_MODE_FRONTEND.md` (phases **F1–F4**)
 
 Where this master narrative and a per-repo plan disagree on a detail, the per-repo plan wins for its
@@ -257,7 +257,7 @@ ruling colors); the detail shows **rankings per zone under a generous-size secti
 5. Honor privacy: the server keeps only trip **metadata** under the account; donated geometry is
    **de-identified 4–28 h after points settle**; the points ledger keeps only the coarse h3 r8 cell —
    exactly what the leaderboard consumes.
-6. Ship `FEATURE_PLAN_2026-07.md` **§10** (reported ride fields) and **§11** (H3 r8 area
+6. Ship `docs/implemented/FEATURE_PLAN_2026-07.md` **§10** (reported ride fields) and **§11** (H3 r8 area
    leaderboard) in this program — plus the rider-facing **🏆 Leaderboard view**.
 7. Self-host geocoding: a **Photon sidecar** in the compose stack, fronted by
    `GET /api/v1/geocode/search`, following the Valhalla sidecar pattern exactly.
@@ -404,7 +404,7 @@ before hashing; `sha256(jws_n)` is over the ASCII bytes of the compact JWS strin
   `fin:true` field on the final batch is a backward-compatible addition (same argument as the
   checkpoint note).
 
-Server verification (`src/track_verify.py`, detailed in `PLAN_RIDE_MODE_API.md` §A2): signature →
+Server verification (`src/track_verify.py`, detailed in `docs/implemented/PLAN_RIDE_MODE_API.md` §A2): signature →
 chain integrity → time monotonicity within the server-stamped ride window → speed plausibility →
 GBFS start/end correlation → volume minimums. Reason vocabulary (drives Screen 10's generated
 copy): `start_mismatch`, `end_mismatch`, `tracking_not_opted`, `too_few_waypoints`,

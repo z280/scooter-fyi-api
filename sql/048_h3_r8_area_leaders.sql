@@ -1,5 +1,5 @@
--- H3 r8 area leader report (FEATURE_PLAN_2026-07.md §11 /
--- PLAN_RIDE_MODE_API.md Phase A4): "all r8 hexagons in the local network,
+-- H3 r8 area leader report (docs/implemented/FEATURE_PLAN_2026-07.md §11 /
+-- docs/implemented/PLAN_RIDE_MODE_API.md Phase A4): "all r8 hexagons in the local network,
 -- with the user who earned the most points there in the last four weeks,
 -- recalculated."
 --
@@ -84,7 +84,7 @@ CREATE INDEX IF NOT EXISTS idx_user_points_h3_8_created
     ON user_points (h3_8_index, created_at DESC);
 
 -- ---------------------------------------------------------------------------
--- Reconciliation beyond §11.2 (PLAN_RIDE_MODE_API.md Phase A4 calls this out
+-- Reconciliation beyond §11.2 (docs/implemented/PLAN_RIDE_MODE_API.md Phase A4 calls this out
 -- explicitly as one of two narrow deviations from the FEATURE_PLAN text):
 -- sql/028 already ships a plain `idx_user_points_h3_8 ON user_points
 -- (h3_8_index)`. The composite index just above leads on the exact same

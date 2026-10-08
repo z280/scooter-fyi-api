@@ -1,4 +1,4 @@
--- Frontend report ingestion (API_REQUIREMENTS.md §3).
+-- Frontend report ingestion (docs/API_REQUIREMENTS.md §3).
 --
 -- device_reports:   rider-facing failure reports (failed_unlock /
 --                    dead_battery / damaged). Anonymous allowed; when a
