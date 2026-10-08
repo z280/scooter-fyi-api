@@ -48,7 +48,21 @@ echo "session-start: installing Python dependencies"
 python -m pip install --upgrade pip >/dev/null 2>&1 || true
 # `install`, not a locked sync: the container caches its state after this hook,
 # so the next session starts from the already-installed tree.
-pip install -r "$CLAUDE_PROJECT_DIR/requirements.txt" pytest >/dev/null
+# A SECOND ATTEMPT, and only for one failure mode worth naming. Some base
+# images ship a python3-cryptography (and friends) installed by the system
+# package manager, with no RECORD file — pip can see it, refuses to uninstall
+# it, and the whole install fails with "Cannot uninstall X, RECORD file not
+# found". CI does not hit this (actions/setup-python gives a clean
+# interpreter), so a pinned upgrade that is correct in CI and in the Dockerfile
+# can still take a web session's hook down on the first run after it is added.
+#
+# `--ignore-installed` leaves the distro copy on disk and installs ours over it
+# in pip's own site-packages, which is what we want: the pins in
+# requirements.txt are what this repo tests against.
+if ! pip install -r "$CLAUDE_PROJECT_DIR/requirements.txt" pytest >/dev/null 2>&1; then
+  echo "session-start: retrying dependency install past a distro-managed package" >&2
+  pip install --ignore-installed -r "$CLAUDE_PROJECT_DIR/requirements.txt" pytest >/dev/null
+fi
 
 start_postgres() {
   if [ -z "$PGBIN" ]; then

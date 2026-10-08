@@ -30,7 +30,8 @@ _USER = SessionUser(
 #  show_in_leaderboards, rate_plan, theme, favorites,
 #  home_lat, home_lng, work_lat, work_lng,
 #  royalty_title, ruling_color, ruling_border_color,
-#  display_name, phone_verified_at, sms_opted_out_at)
+#  display_name, phone_verified_at, sms_opted_out_at,
+#  saved_places_encrypted)
 _PROFILE_ROW = (
     "rider@example.com", None, "brave🦉", True, True,
     "visitor", None, [], None, None, None, None,
@@ -39,6 +40,12 @@ _PROFILE_ROW = (
     # record. The payload reports these as the booleans phone_verified /
     # sms_opted_out.
     None, None,
+    # No saved places, and no legacy ones either (`favorites` is [] and the
+    # four lat/lng columns above are NULL) — so the lazy migration in
+    # `_read_and_migrate_places` finds nothing to fold and issues no UPDATE,
+    # which is what every one of these fixed-queue fixtures depends on: an
+    # extra query here would shift every later fetch in the file.
+    None,
 )
 
 

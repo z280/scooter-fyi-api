@@ -74,7 +74,15 @@ from .ride_totals import compute_ride_totals
 from .comms import comms_credentials
 from .pg import connection
 from .points import maybe_credit_profile_completion
+from .place_crypto import configured as places_key_configured, seal, unseal
 from .ratelimit import enforce
+from .saved_places import (
+    SLOT_HOME_ID,
+    SLOT_WORK_ID,
+    clean_places,
+    fold_legacy,
+    legacy_present,
+)
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +90,11 @@ router = APIRouter()
 
 _RATE_PLANS = ("resident", "visitor", "equity")
 _MAX_FAVORITES = 100
+# Deliberately looser than `saved_places.MAX_SAVED_PLACES`: this bounds what
+# the parser will even look at, and the cleaner below is what decides the real
+# cap. One number refusing the request and another silently truncating would
+# be two caps that disagree.
+_MAX_SAVED_PLACES_IN = 200
 _MAX_THEME_LEN = 64
 _MAX_TITLE_LEN = 64
 # Shared by both username-mutating endpoints below — they change the same
@@ -97,6 +110,13 @@ class ProfileUpdate(BaseModel):
     rate_plan: str | None = Field(default=None)
     theme: str | None = Field(default=None, max_length=_MAX_THEME_LEN)
     favorites: list[Any] | None = Field(default=None, max_length=_MAX_FAVORITES)
+    # The rider's saved places, encrypted at rest (sql/096, src/place_crypto).
+    # Supersedes `favorites` and the home_/work_ pairs above; those stay
+    # writable until lazy migration has drained them and a later migration
+    # drops the columns.
+    saved_places: list[Any] | None = Field(
+        default=None, max_length=_MAX_SAVED_PLACES_IN
+    )
     email: str | None = Field(default=None, max_length=320)
     phone_number: str | None = Field(default=None, max_length=32)
     show_public_username: bool | None = Field(default=None)
@@ -119,6 +139,73 @@ class UsernameChoice(BaseModel):
     emoji: str | None = Field(default=None, max_length=16)
 
 
+
+def _read_and_migrate_places(
+    cur,
+    account_id: int,
+    *,
+    encrypted: str | None,
+    legacy_favorites: Any,
+    home_lat: Any,
+    home_lng: Any,
+    work_lat: Any,
+    work_lng: Any,
+) -> list[dict[str, Any]]:
+    """Decrypt a rider's saved places, folding in anything still in plaintext.
+
+    THE MIGRATION RUNS HERE, on a read, and sql/096's header says why: the
+    replacement column is encrypted, so Postgres cannot migrate it and a
+    backfill script would have to hold the key against production with no way
+    to verify its own work. Each rider's row is migrated the next time they
+    look at their profile; one who never returns is never touched, which is
+    the correct amount of work to do on their behalf.
+
+    IT WRITES ONLY WHEN THERE IS SOMETHING TO WRITE. Every read after the first
+    — and every read for the great majority of riders, who never had a legacy
+    row — finds nothing to fold and does no UPDATE. Without that check a
+    profile GET would become a GET plus an UPDATE, forever.
+
+    IT NEVER FAILS THE READ. A profile GET that 500s over one unreadable field
+    takes the rider's email, phone and rate plan down with it, and those are
+    the fields they need in order to fix whatever is wrong.
+    """
+    current = clean_places(unseal(encrypted))
+    if not legacy_present(
+        legacy_favorites=legacy_favorites,
+        home_lat=home_lat,
+        home_lng=home_lng,
+        work_lat=work_lat,
+        work_lng=work_lng,
+    ):
+        return current
+    merged = fold_legacy(
+        current,
+        legacy_favorites=legacy_favorites,
+        home_lat=home_lat,
+        home_lng=home_lng,
+        work_lat=work_lat,
+        work_lng=work_lng,
+    )
+    if merged == current:
+        return current
+    if not places_key_configured():
+        # Nothing to do but serve what we folded. Writing plaintext would be
+        # the silent degradation `place_crypto` exists to prevent, and failing
+        # the read would punish the rider for an operator's missing env var.
+        log.error("VEO_PLACES_KEY unset — serving saved places without migrating")
+        return merged
+    try:
+        cur.execute(
+            "UPDATE accounts SET saved_places_encrypted = %s WHERE id = %s",
+            (seal(merged), account_id),
+        )
+    except Exception:
+        # Logged, not raised. The fold is already correct in memory, so the
+        # rider sees the right list; the next read tries the write again.
+        log.exception("could not migrate saved places for account %s", account_id)
+    return merged
+
+
 def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
     cur.execute(
         """
@@ -126,7 +213,8 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
                show_in_leaderboards, rate_plan, theme, favorites,
                home_lat, home_lng, work_lat, work_lng,
                royalty_title, ruling_color, ruling_border_color,
-               display_name, phone_verified_at, sms_opted_out_at
+               display_name, phone_verified_at, sms_opted_out_at,
+               saved_places_encrypted
         FROM accounts WHERE id = %s
         """,
         (user.account_id,),
@@ -138,7 +226,18 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
      show_in_leaderboards, rate_plan, theme, favorites,
      home_lat, home_lng, work_lat, work_lng,
      royalty_title, ruling_color, ruling_border_color,
-     display_name, phone_verified_at, sms_opted_out_at) = row
+     display_name, phone_verified_at, sms_opted_out_at,
+     saved_places_encrypted) = row
+    saved_places = _read_and_migrate_places(
+        cur,
+        user.account_id,
+        encrypted=saved_places_encrypted,
+        legacy_favorites=favorites,
+        home_lat=home_lat,
+        home_lng=home_lng,
+        work_lat=work_lat,
+        work_lng=work_lng,
+    )
     return {
         "email": email,
         "phone_number": phone_number,
@@ -166,7 +265,17 @@ def _profile_payload(cur, user: SessionUser) -> dict[str, Any]:
         "show_in_leaderboards": bool(show_in_leaderboards),
         "rate_plan": rate_plan,
         "theme": theme,
+        # LEGACY, and kept on the wire only until the plaintext columns are
+        # dropped. `saved_places` below is the field clients read now; this one
+        # is what an older build wrote and what `_read_and_migrate_places` has
+        # already folded in.
         "favorites": favorites if isinstance(favorites, list) else [],
+        # The rider's saved places, decrypted. ALWAYS A LIST: a rider with
+        # nothing saved and a rider whose blob could not be decrypted both get
+        # `[]`, because a client that has to tell those apart would be a client
+        # making a decision it cannot make correctly — and the server logs the
+        # second case loudly for somebody who can.
+        "saved_places": saved_places,
         "home_lat": home_lat,
         "home_lng": home_lng,
         "work_lat": work_lat,
@@ -261,6 +370,40 @@ def put_profile(
                     raise HTTPException(400, "favorites must be an array (use [] to clear)")
                 sets.append("favorites = %s::jsonb")
                 params.append(json.dumps(payload.favorites))
+            if "saved_places" in provided:
+                if payload.saved_places is None:
+                    raise HTTPException(
+                        400, "saved_places must be an array (use [] to clear)"
+                    )
+                # A WRITE THAT CANNOT ENCRYPT MUST FAIL, loudly, rather than
+                # fall back to plaintext — a silent fallback is the exact
+                # failure src/place_crypto.py exists to prevent, and it would
+                # look like success to everyone.
+                if not places_key_configured():
+                    raise HTTPException(
+                        503,
+                        "saved places are temporarily unavailable — "
+                        "server encryption key not configured",
+                    )
+                cleaned = clean_places(payload.saved_places)
+                sets.append("saved_places_encrypted = %s")
+                params.append(seal(cleaned))
+                # THE LEGACY COLUMNS GO WITH IT, and this is not tidying.
+                # A rider who deletes Home in the app, while `home_lat` still
+                # holds the old coordinates, would have it folded straight back
+                # in on their very next read: the migration helper adds what is
+                # missing, and it cannot tell "deleted" from "not drained yet".
+                # Clearing the column here is what makes the deletion stick —
+                # and it is also the only thing that ever removes a plaintext
+                # home address from the database before the columns are
+                # dropped.
+                kept_ids = {p["id"] for p in cleaned}
+                if SLOT_HOME_ID not in kept_ids:
+                    sets.append("home_lat = NULL")
+                    sets.append("home_lng = NULL")
+                if SLOT_WORK_ID not in kept_ids:
+                    sets.append("work_lat = NULL")
+                    sets.append("work_lng = NULL")
 
             new_email = current_email
             if "email" in provided:
