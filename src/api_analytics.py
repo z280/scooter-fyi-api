@@ -270,9 +270,10 @@ def analytics_rides(
             "data_through": through.isoformat(),
             "definition": "A ride is a vehicle that moved from one stop to another (trip_events), "
                           "placed by where it started and counted when the move was detected.",
-            "caveat": "How rides are counted changed on 2026-08-10 and 2026-10-06; earlier "
-                      "figures are inflated (see counting_changes) and are not comparable with "
-                      "figures after comparable_since.",
+            # Shown to readers as is: plain words, no field names.
+            "caveat": "How rides are counted changed on Aug 10 and Oct 6, 2026. Earlier "
+                      "figures are inflated (GPS drift and repeated samples were counted as "
+                      "rides) and cannot be compared with later ones.",
             **_eras("rides"),
         }
 
