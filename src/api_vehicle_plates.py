@@ -36,12 +36,12 @@ NEVER LOG PLATES. Nothing in this module logs request parameters or results;
 the rate limiter logs only the bucket and the account id / IP. The one place a
 plate WOULD otherwise be written down is uvicorn's access log, which records
 the full request line — `GET /api/v1/vehicles/resolve?plate=1025543` — so
-src/main.py attaches RedactPlateQuery to the `uvicorn.access` logger.
+src/main.py attaches src/log_redaction.py's filter to the `uvicorn.access`
+logger (RedactPlateQuery below is that filter's historical name).
 """
 
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 
@@ -51,6 +51,7 @@ from .accounts import SessionUser, require_session
 from .api_public import latest_complete_cycle
 from .client_ip import real_client_ip
 from .pg import connection
+from .log_redaction import RedactSensitiveQuery
 from .ratelimit import enforce
 
 router = APIRouter()
@@ -102,19 +103,10 @@ def redact_plate_query(path: str) -> str:
     return _PLATE_QUERY.sub(r"\1[redacted]", path)
 
 
-class RedactPlateQuery(logging.Filter):
-    """Scrubs `plate=` from uvicorn access-log lines for the resolve route.
-
-    uvicorn.access logs with args (client, method, full_path, http_version,
-    status); only full_path is rewritten, and only for this route, so every
-    other access line is untouched."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        args = record.args
-        if (isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str)
-                and args[2].startswith("/api/v1/vehicles/resolve")):
-            record.args = (*args[:2], redact_plate_query(args[2]), *args[3:])
-        return True
+#: The access-log filter src/main.py installs. Generalised into
+#: src/log_redaction.py (it now also covers /api/v1/geocode/reverse's
+#: coordinates and the httpx logger); the name is kept for existing callers.
+RedactPlateQuery = RedactSensitiveQuery
 
 
 def normalize_plate(raw: str | None) -> str:

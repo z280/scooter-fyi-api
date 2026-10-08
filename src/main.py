@@ -48,7 +48,8 @@ from .api_telemetry import router as telemetry_router
 from .api_tracked_rides import router as tracked_rides_router
 from .api_route import router as route_router
 from .api_user import router as user_router
-from .api_vehicle_plates import RedactPlateQuery, router as vehicle_plates_router
+from .api_vehicle_plates import router as vehicle_plates_router
+from . import log_redaction
 from . import request_metrics
 from .config import load, session_https_only, session_secret
 from .pg import run_migrations
@@ -60,9 +61,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 # uvicorn's access log writes the full request line, query string included;
-# /api/v1/vehicles/resolve?plate=… would put a plate in it. uvicorn configures
-# its loggers before importing this module, so a filter added here sticks.
-logging.getLogger("uvicorn.access").addFilter(RedactPlateQuery())
+# /api/v1/vehicles/resolve?plate=… would put a plate in it, and
+# /api/v1/geocode/reverse?lat=…&lng=… a rider's home. httpx logs the upstream
+# Photon URL at INFO the same way. uvicorn configures its loggers before
+# importing this module, so filters added here stick. See src/log_redaction.py.
+log_redaction.install()
 
 
 @asynccontextmanager

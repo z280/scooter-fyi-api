@@ -15,6 +15,7 @@ import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 
 from .config import sentry_dsn
+from .log_redaction import scrub_sentry_breadcrumb, scrub_sentry_event
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,10 @@ def init() -> bool:
         traces_sample_rate=0.0,
         send_default_pii=False,
         integrations=[FastApiIntegration()],
+        # Query strings are sent regardless of send_default_pii; strip the
+        # plate / coordinate ones (src/log_redaction.py).
+        before_send=scrub_sentry_event,
+        before_breadcrumb=scrub_sentry_breadcrumb,
     )
     _INITIALIZED = True
     return True

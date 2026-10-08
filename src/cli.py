@@ -26,6 +26,17 @@ Available commands:
                       retention as receipts, stamping photo_deleted_at.
                       The report row (the catalog correction itself)
                       outlives the image.
+    sweep_orphan_images [--apply] [--force]
+                      Delete user images in R2 (receipts/, model-reports/,
+                      ride-screenshots/, device-photos/) that no table row
+                      references and that are older than 7 days
+                      (src/image_sweep.py). Dry-run unless --apply; logs
+                      counts and sizes only. Weekly in the crontab.
+    delete_account --account-id N [--apply]
+                      Delete an account row (everything cascades), then
+                      every image under its prefixes in both buckets.
+                      Dry-run unless --apply. Runbook:
+                      docs/reference/account_deletion.md.
     backfill_public_usernames
                       One-time: assign a public_username to every account
                       created before sql/025 (idempotent — already-
@@ -1215,8 +1226,63 @@ def close_ghost_stops_cli(sub_args: list[str]) -> int:
     return 0
 
 
+def sweep_orphan_images_cli(sub_args: list[str]) -> int:
+    """`python -m src.cli sweep_orphan_images [--apply] [--force]`.
+
+    Scheduled weekly with --apply, so unlike the other sub-argument commands
+    it writes the job_runs ledger itself (main() only records zero-arg
+    COMMANDS). Prints the count-only JSON summary; never a key.
+    """
+    from . import image_sweep
+
+    usage = "usage: python -m src.cli sweep_orphan_images [--apply] [--force]"
+    flags = set(sub_args)
+    if flags - {"--apply", "--force"} or len(flags) != len(sub_args):
+        print(usage, file=sys.stderr)
+        return 2
+    run_id = job_runs.start("sweep_orphan_images")
+    try:
+        result = image_sweep.sweep(apply="--apply" in flags, force="--force" in flags)
+    except Exception as e:  # noqa: BLE001
+        job_runs.finish(run_id, status="error", error=f"{type(e).__name__}: {e}")
+        raise
+    job_runs.finish(run_id, status="ok", summary=result)
+    print(json.dumps(result, default=str))
+    return 0
+
+
+def delete_account_cli(sub_args: list[str]) -> int:
+    """`python -m src.cli delete_account --account-id N [--apply]`.
+
+    By hand only (docs/reference/account_deletion.md). Dry-run by default:
+    reports what would go, changes nothing.
+    """
+    from . import image_sweep
+
+    usage = "usage: python -m src.cli delete_account --account-id N [--apply]"
+    args = list(sub_args)
+    apply = "--apply" in args
+    args = [a for a in args if a != "--apply"]
+    if len(args) != 2 or args[0] != "--account-id":
+        print(usage, file=sys.stderr)
+        return 2
+    try:
+        account_id = int(args[1])
+    except ValueError:
+        print(usage, file=sys.stderr)
+        return 2
+    if account_id <= 0:
+        print("error: account id must be positive", file=sys.stderr)
+        return 2
+    result = image_sweep.delete_account(account_id, apply=apply)
+    print(json.dumps(result, default=str))
+    return 0 if not result["images_failed"] else 1
+
+
 _SUBARG_COMMANDS.update({
     "admin": admin_cli,
+    "delete_account": delete_account_cli,
+    "sweep_orphan_images": sweep_orphan_images_cli,
     "close_ghost_stops": close_ghost_stops_cli,
     "equity_backfill": equity_backfill_cli,
 })

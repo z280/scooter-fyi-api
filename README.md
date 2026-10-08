@@ -478,6 +478,7 @@ because a sidecar round trip is expensive.
 | `GET /api/v1/route/walk` | Walking route from the rider to the vehicle they picked. Same per-IP limit as `/route` |
 | `GET /api/v1/route/profiles` | The selectable routing profiles + `graph_bbox` (config-driven; treat as the live list). 60/min per IP |
 | `GET /api/v1/geocode/search?q=…&lat=…&lon=…&limit=…` | Up to 8 Denver-scoped hits as `{label, lat, lon, kind, in_coverage}`; `in_coverage` is routing-graph membership so clients can grey out un-routable picks. 20/min per IP; 503 `geocoder_unavailable` when the sidecar is down or disabled |
+| `GET /api/v1/geocode/reverse?lat=…&lng=…` | What is at a point (saved places, parking reports): `{address, name, housenumber, street, locality, city, postcode}`, nulls for missing fields. Photon `/reverse` plus Denver's address points for the house number. Colorado only (400 `outside_coverage`), 404 `not_found`, 503 `geocoder_unavailable`. 60/min per IP, `Cache-Control: no-store`, coordinates never logged |
 
 Route responses also carry `outside_city: {from, to}` and an
 `outside_city_warning` string (null when both ends are inside Denver).
@@ -742,7 +743,7 @@ track donation, verification and validation-finishing live in
 | `POST /api/v1/tracked-rides/{ride_id}/track` | Bulk track donation: verifies the signed waypoint chain (`src/track_verify.py`), stores it, awards `battery_contribution`/`nav_distance_bonus`, and feeds the battery model. Owner-only, 6/hour, ≤2 MB / 600 batches. 404 not yours, 409 not ended / already donated, 422 not opted in / chain invalid |
 | `POST /api/v1/tracked-rides/{ride_id}/waypoints` | **Deprecated** — append a GPS waypoint while the ride is active. Superseded by `POST .../track`; earns no points |
 | `GET /api/v1/tracked-rides/{ride_id}/waypoints?limit=&before=` | Paginated waypoint list |
-| `DELETE /api/v1/tracked-rides/{ride_id}` / (bare) | Hard-delete one ride / every ride you own |
+| `DELETE /api/v1/tracked-rides/{ride_id}` / (bare) | Hard-delete one ride / every ride you own, including its screenshot images in R2 |
 | `POST /api/v1/tracked-rides/{ride_id}/screenshots?screenshot_type=overview\|receipt` | Upload a transaction screenshot (overwrites the same slot) |
 | `GET /api/v1/tracked-rides/{ride_id}/screenshots` | List your screenshots for a ride |
 | `POST /api/v1/tracked-rides/{ride_id}/survey` | Screen 9's end-of-ride survey — scooter-feedback + navigation-feedback panes, single-shot. Awards `ride_survey`/`nav_route_feedback`/`nav_qualitative_feedback`. 404 not yours, 409 not ended / already submitted, 422 bad issue / bad model_bonus / bad ride_route_id. See `src/api_ride_surveys.py` |
@@ -995,6 +996,7 @@ America/Denver. Summary (read `crontab` for each job's reasoning):
 | 09:00 / 09:02 | `daily_trips` / `daily_sla` |
 | 09:20 | `rollup_analytics` |
 | 09:40 | `reprocess_equity_compliance` |
+| Sun 03:50 | `sweep_orphan_images --apply` |
 | Sun 04:15 | `refresh_address_points` |
 | Mon 05:45 | `train_battery_model` |
 | Mon 09:15 | `refresh_area_universe` |
@@ -1014,9 +1016,9 @@ schedule; the rest are by hand. Defined in `src/cli.py`.
 | Rides + points | `expire_stale_watches`, `expire_stale_off_feed_rides`, `deidentify_donations`, `refresh_area_universe`, `process_device_feature_reports`, `backfill_ride_distances_from_donations` |
 | Battery model | `extract_battery_trips`, `train_battery_model`, `backfill_battery_trips` (manual; needs a raised memory limit) |
 | Routing + geocoding assets | `fetch_map_pbf`, `refresh_routing_graph`, `fetch_photon_index`, `refresh_photon_index`, `refresh_address_points` |
-| Retention | `cleanup_receipts`, `cleanup_ride_screenshots`, `cleanup_model_report_photos`, `cleanup_job_runs`, `cleanup_telemetry` |
+| Retention | `cleanup_receipts`, `cleanup_ride_screenshots`, `cleanup_model_report_photos`, `cleanup_job_runs`, `cleanup_telemetry`, `sweep_orphan_images [--apply] [--force]` (unreferenced user images, 7-day grace; weekly) |
 | Messaging | `poll_comms_replies` |
-| Accounts + admin | `admin list` / `admin add <email>` / `admin remove <email>`, `backfill_public_usernames` |
+| Accounts + admin | `admin list` / `admin add <email>` / `admin remove <email>`, `backfill_public_usernames`, `delete_account --account-id N [--apply]` ([runbook](docs/reference/account_deletion.md)) |
 | Schema + repair | `migrate`, `close_ghost_stops [--dry-run] [YYYY-MM-DD ...]` (one-off) |
 
 ## Operating tips

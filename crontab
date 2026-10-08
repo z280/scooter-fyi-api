@@ -220,3 +220,16 @@
 # destroying the salt is what makes visitor_hash irreversible. Joins the
 # 3:30 retention family at its own :45 slot.
 45 3 * * * cd /app && python -m src.cli cleanup_telemetry
+
+# Orphan image sweep (src/image_sweep.py): deletes user images in R2 --
+# receipts/, model-reports/, ride-screenshots/, device-photos/ -- that no table
+# row references and that are more than 7 days old. The retention jobs above
+# find images only THROUGH rows, so an object whose row went first (a ride or
+# account cascade, an upload whose INSERT never committed) was invisible to
+# them and lived forever. WEEKLY: orphans are rare once the delete paths clean
+# up after themselves; this is the backstop. Sunday 03:50, after the 3:30/3:45
+# retention family has run, and clear of the 04:15 Sunday address refresh.
+# Logs counts and byte totals only; a per-prefix circuit breaker skips any
+# prefix where more than half the objects look orphaned (run by hand with
+# --force after reading a dry-run). Recorded in job_runs like every other job.
+50 3 * * 0 cd /app && python -m src.cli sweep_orphan_images --apply
