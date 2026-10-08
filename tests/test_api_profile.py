@@ -30,7 +30,8 @@ _USER = SessionUser(
 #  show_in_leaderboards, rate_plan, theme, favorites,
 #  home_lat, home_lng, work_lat, work_lng,
 #  royalty_title, ruling_color, ruling_border_color,
-#  display_name, phone_verified_at, sms_opted_out_at)
+#  display_name, phone_verified_at, sms_opted_out_at,
+#  saved_places_encrypted)
 _PROFILE_ROW = (
     "rider@example.com", None, "brave🦉", True, True,
     "visitor", None, [], None, None, None, None,
@@ -39,6 +40,12 @@ _PROFILE_ROW = (
     # record. The payload reports these as the booleans phone_verified /
     # sms_opted_out.
     None, None,
+    # No saved places, and no legacy ones either (`favorites` is [] and the
+    # four lat/lng columns above are NULL) — so the lazy migration in
+    # `_read_and_migrate_places` finds nothing to fold and issues no UPDATE,
+    # which is what every one of these fixed-queue fixtures depends on: an
+    # extra query here would shift every later fetch in the file.
+    None,
 )
 
 
@@ -274,8 +281,11 @@ def test_put_newly_completing_the_profile_awards_points(monkeypatch):
     credit_points INSERT — distinct from _put_client's shortcut fetch
     queue, which always stubs 'already awarded' to keep the other tests
     focused on their own behavior."""
+    # (email, rate_plan, phone, saved_places_encrypted, home/work lat/lng).
+    # No blob here, so the legacy columns are the location — the fallback path
+    # for a row the lazy migration has not reached yet.
     complete_accounts_row = ("rider@example.com", "resident", "+13035551234",
-                              39.74, -104.98, None, None)
+                              None, 39.74, -104.98, None, None)
     fetches = [
         # (email, phone_number, phone_verified_at) — the FOR UPDATE read.
         ("rider@example.com", None, None),

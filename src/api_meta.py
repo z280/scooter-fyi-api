@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 _PRIVACY = {
-    "updated": "2026-10-07",
+    "updated": "2026-10-08",
     "contact": "zneill@gmail.com",
     "retention": [
         {
@@ -98,11 +98,18 @@ _PRIVACY = {
             "retention": "until deletion is requested",
             "detail": "An account stores your email and/or phone number (at "
                       "least one is required), rate-plan choice, theme, "
-                      "favorites, a public username (an adjective + emoji you "
-                      "can choose or re-roll), optional home/work coordinates, "
-                      "and two visibility toggles (public username, "
-                      "leaderboards). Email zneill@gmail.com to delete an "
-                      "account until self-serve deletion ships.",
+                      "a public username (an adjective + emoji you "
+                      "can choose or re-roll), and two visibility toggles "
+                      "(public username, leaderboards). Saved places — Home, "
+                      "Work and any others you name — are ENCRYPTED before "
+                      "storage with a key the database does not hold, so they "
+                      "are unreadable in the database and in backups of it. We "
+                      "hold the key and can decrypt them to serve them back to "
+                      "your devices: encryption at rest, not end-to-end. The "
+                      "plaintext home/work coordinate columns this replaced are "
+                      "cleared as each account is migrated. Email "
+                      "zneill@gmail.com to delete an account until self-serve "
+                      "deletion ships.",
         },
         {
             "data": "favorite_devices",

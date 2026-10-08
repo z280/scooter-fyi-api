@@ -28,7 +28,7 @@
 </header>
 <main>
 <h1>Privacy Policy</h1>
-<p class="updated">Last updated: October 7, 2026</p>
+<p class="updated">Last updated: October 8, 2026</p>
 
 <p>This Privacy Policy explains how <strong>Mile High Technology
 Consulting, LLC</strong>, doing business as <strong>"scooter.fyi"</strong>
@@ -49,9 +49,20 @@ submit a report, or subscribe.</p>
 <table>
 <tr><th>Category</th><th>What we collect</th><th>Why</th></tr>
 <tr><td>Account</td><td>Email address (via Google Sign-In or a one-time
-emailed link), rate-plan preference, theme, favorites</td>
+emailed link), rate-plan preference, theme</td>
 <td>Sign-in, personalizing the cost ticker, remembering your
 preferences</td></tr>
+<tr><td>Saved places</td><td>Places you choose to save &mdash; Home, Work,
+and any others you name &mdash; as a label, an emoji and a coordinate.
+<strong>Encrypted before we store them</strong>, so they are unreadable in
+our database, in backups and in any copy of either. We hold the key, so we
+<em>can</em> decrypt them to hand them back to your other devices &mdash;
+this is encryption at rest, not end-to-end, and we would rather say so than
+imply a protection we do not provide. We never read a saved place into
+analytics, into any aggregate, or into anyone else&rsquo;s view of the
+app.</td>
+<td>So the places you go most are one tap away, and survive a new
+phone</td></tr>
 <tr><td>My Scooters (retired)</td><td>Retired on 6 October 2026: nothing new can
 be kept, and kept vehicles are no longer shown or tracked. What was kept before
 then: which vehicle, your nickname for it, when you last scanned it at the kerb,
@@ -315,11 +326,20 @@ project.</p>
 
 <h2>6. Security</h2>
 <p>Session tokens and magic-link tokens are stored hashed, never in
-plaintext. All traffic is served over HTTPS. Receipt images and
+plaintext. <strong>Saved places are encrypted</strong> with a key the
+database does not hold, so the row that holds your Home address is
+ciphertext in our database, in every backup of it, and in any copy either
+one ends up in. All traffic is served over HTTPS. Receipt images and
 model-report photos live in a private storage bucket that is never
 publicly readable. No system is
 perfectly secure; if you discover a vulnerability, please report it to
 us directly before disclosing it publicly.</p>
+<p>Two limits worth stating plainly, because the alternative is letting the
+word &ldquo;encrypted&rdquo; do more work than it should. We hold the
+decryption key, so a compromise of our running service could read your
+saved places, and so could we &mdash; encryption at rest protects the data
+where it sits, not from us. And it covers saved places only: your email
+address, phone number and ride history are stored as ordinary columns.</p>
 
 <h2>7. Children's privacy</h2>
 <p>The Service is not directed at children under 13, and we do not

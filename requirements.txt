@@ -17,6 +17,11 @@ pyarrow==18.1.0
 # train_battery_model raised ModuleNotFoundError on every weekly run.
 numpy==2.2.6
 h3==4.1.2
+# Fernet, for encrypting riders' saved places at rest (src/place_crypto.py).
+# A saved place is where somebody lives, and the rows it sits in end up in
+# dumps, backups and read replicas — volume encryption protects a stolen disk
+# and none of those. Hand-rolling AES-GCM instead is how nonce reuse happens.
+cryptography==44.0.0
 pillow==11.0.0
 # QR codes for campaign links (/admin/campaigns/<code>/qr.png|svg in
 # src/api_admin.py). Pure Python, no deps; writes PNG and SVG itself, so
