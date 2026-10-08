@@ -280,7 +280,14 @@ A works from day one and survives layout changes. B keeps a second opinion that 
 
 - 20 submissions per account per day (the existing limit).
 - One award per matched ride.
-- 10-point awards capped at 3 per day.
+- **6-point** (`submitted_unmatched`) awards capped at 3 per account per day —
+  the same rule stated with the tiers above, repeated here because this is
+  where someone looks for the limits. It is that tier and not the 10-point one
+  because `submitted_unmatched` is the only award needing no feed
+  corroboration, so it is the only one a fabricated receipt can reach — the
+  same reasoning the 50-point bullet below makes for itself. (This bullet said
+  "10-point" until 2026-10-07, contradicting both the rule and its own
+  neighbour.)
 - The 50-point tier needs a ride we independently observed, so a doctored image cannot earn it.
 
 ## Phase 3b: human portal (fallback + labels)

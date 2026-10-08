@@ -317,7 +317,14 @@ class DiscountReportIn(BaseModel):
     # 'equity' = the city's official Equity Area map (sql/091); v1/v2 are the
     # retired estimate layers, still accepted from old clients.
     zone_version: str = Field(..., pattern="^(v1|v2|equity)$")
-    region_name: str | None = Field(default=None, pattern=r"^EQ_\d{3}$")
+    # `[0-9]`, NOT `\d`. Both Python's `re` and the Rust engine Pydantic uses
+    # read `\d` as any Unicode decimal digit, so `EQ_\u0660\u0661\u0664`
+    # (Arabic-Indic) passed this field — and sql/091's CHECK is
+    # `~ '^EQ_[0-9]{3}$'`, which does not. The insert then raised a
+    # CheckViolation that the handler below re-raises, so a malformed field
+    # came back as a 500 instead of a 422. #117 made the receipt-claim path
+    # ASCII-only for exactly this reason and this legacy field was missed.
+    region_name: str | None = Field(default=None, pattern=r"^EQ_[0-9]{3}$")
     end_lat: float | None = Field(default=None, ge=-90, le=90)
     end_lng: float | None = Field(default=None, ge=-180, le=180)
     amount_charged_cents: int | None = Field(default=None, ge=0, le=100_000)
