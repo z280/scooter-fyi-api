@@ -232,3 +232,12 @@ def test_out_of_coverage_is_refused(client):
                    params={"from": "0,0", "to": "39.7319,-104.9721"})
     assert r.status_code == 400
     assert r.json()["detail"]["error"] == "out_of_coverage"
+
+
+def test_options_say_whether_the_trip_leaves_the_city(client, monkeypatch):
+    import src.geo as geo
+    monkeypatch.setattr(geo, "region_for_point",
+                        lambda layer, lon, lat: None if layer == "council_district" else None)
+    body = client.get("/api/v1/route/options", params=QS).json()
+    assert body["outside_city"] == {"from": True, "to": True}
+    assert body["outside_city_warning"].startswith("Scooter.fyi uses City of Denver data")
