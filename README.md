@@ -413,6 +413,7 @@ else (curl, server-to-server) is unaffected by CORS.
 | `GET /api/v1/devices/current` | GeoJSON FeatureCollection of every device's current position/quality (no plate) |
 | `GET /api/v1/devices/history/hourly?days=1..14` | Fleet size per hour (last cycle in each hour), with per-model status counts where recorded |
 | `GET /api/v1/devices/{vehicle_identifier}/features` | Crowdsourced feature consensus for one vehicle |
+| `GET /api/v1/vehicles/resolve?plate=…` | Plate → `{device_id, vehicle_identifier}` in the current snapshot (never the plate); 404 if none; 30/min per IP |
 | `GET /api/v1/equity-estimate` | Device share inside selected equity-rank tiers from the latest snapshot |
 | `GET /api/v1/h3/aggregates` | Per-H3-cell aggregates (device_count, trips_started_24h, battery, risk_share, dwell) at res 8/9/10 |
 
@@ -659,6 +660,7 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `GET /api/v1/royalty-titles/search?q=…` | Partial match on the title list |
 | `GET /api/v1/ruling-colors` | The 128-colour leaderboard palette + already-claimed (fill, border) pairs |
 | `GET /api/v1/user/devices/current` | Signed-in device map feed; adds plate/admin fields for admin-allowlisted sessions |
+| `GET /api/v1/vehicles/plates?device_ids=…` | `{plates: {device_id: plate}, as_of}` for ≤50 ids in the current snapshot (replaces the browser's direct Veo GBFS fetch) |
 | `POST /api/v1/reports/discount` | Missed-discount evidence, optional receipt upload. Multipart carrying any receipt-claim field is an **equity receipt claim** (below) |
 
 ### Equity receipt claims (Phase 1: capture)
