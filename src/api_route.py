@@ -59,6 +59,45 @@ NAV_BETA_WARNING = (
     "and traffic laws."
 )
 
+# Owner's wording (2026-10-08), shown when a trip starts or ends outside the
+# City and County of Denver. The graph covers the basemap's extent, but the
+# overlays that shape the route styles (High Injury Network, tree canopy, the
+# bike network) are City of Denver data and stop at the city line.
+OUTSIDE_CITY_WARNING = (
+    "Scooter.fyi uses City of Denver data to optimize routing. Your routing "
+    "starts or ends outside of the city and thus may not be as optimized as "
+    "in-city routes would be."
+)
+
+
+def _in_city(lat: float, lon: float) -> bool | None:
+    """Is the point inside the City and County of Denver (its council
+    districts)? None if the boundary layer cannot be read: then no warning is
+    shown rather than a wrong one."""
+    try:
+        from .geo import region_for_point
+        return region_for_point("council_district", lon, lat) is not None
+    except Exception:  # noqa: BLE001
+        log.warning("city boundary lookup failed", exc_info=True)
+        return None
+
+
+def city_coverage(origin: tuple[float, float], dest: tuple[float, float]) -> dict:
+    """{"outside_city": {"from": bool|None, "to": bool|None},
+        "outside_city_warning": str|None} for a route response.
+
+    All or nothing: if EITHER lookup fails, both ends are null and there is
+    no warning. A half-known answer is not one (zneill-agent, #126)."""
+    f, t = _in_city(*origin), _in_city(*dest)
+    if f is None or t is None:
+        return {"outside_city": {"from": None, "to": None}, "outside_city_warning": None}
+    outside = {"from": not f, "to": not t}
+    return {
+        "outside_city": outside,
+        "outside_city_warning": OUTSIDE_CITY_WARNING if (outside["from"] or outside["to"]) else None,
+    }
+
+
 # Per-IP rate limits (API_REQUIREMENTS.md §5), as (limit, window_seconds).
 # 30/min on /route accommodates Screen 4's four parallel profile fetches plus
 # the <=1/min off-route re-route; /route/profiles is a config-only response and
@@ -1108,6 +1147,7 @@ def route_options(
     return {
         "graph_bbox": cfg.bbox,
         "beta_warning": NAV_BETA_WARNING,
+        **city_coverage(origin, dest),
         "profiles_unavailable": failures,
         "options": options,
     }
