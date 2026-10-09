@@ -46,6 +46,9 @@ class _Cur:
             live = rec is not None and rec["expires_at"] > self.store["__now__"]
             if live:
                 rec["expires_at"] = self.store["__now__"]
+                # sql/098: the same statement stamps WHY it ended, and
+                # only for the call that actually released a live claim.
+                rec["released_at"] = self.store["__now__"]
             self.store["__released__"] = live
         if "INSERT INTO referrals" in sql:
             self.store.setdefault("__referrals__", []).append(params)
@@ -97,6 +100,7 @@ class _Cur:
                 "account_id": self._params[8],
                 "notify_sms": self._params[9],
                 "mine_at": None,
+                "released_at": None,
                 "claimed_at": claimed,
                 "expires_at": expires,
             }
@@ -122,7 +126,8 @@ class _Cur:
             return (row["id"], row["vehicle_identifier"], row["vehicle_name"],
                     row["plate"], row["claimed_by"], row["claimed_at"],
                     row["expires_at"], self.store["__now__"],
-                    row["device_type"], row["lat"], row["lon"])
+                    row["device_type"], row["lat"], row["lon"],
+                    row.get("released_at"))
         return None
 
 
@@ -797,3 +802,103 @@ def test_an_unknown_claim_is_a_quiet_no_rather_than_a_404(client):
     r = client.post("/api/v1/dibs/not-a-real-id/mine")
     assert r.status_code == 200
     assert r.json()["claimed"] is False
+
+
+# ---------------------------------------------------------------------------
+# sql/098 — giving a claim back is not the same as running out of time.
+#
+# `release` expires a claim by setting `expires_at = NOW()`, which is exactly
+# the shape a natural expiry has. Until `released_at` the certificate told
+# every rider who handed a scooter back early that their dibs "expired" —
+# which understates them, and in the argument the certificate exists to settle
+# invites "my dibs were still fresh and you took it" about a claim they had
+# given up.
+# ---------------------------------------------------------------------------
+
+def test_releasing_records_that_it_was_given_back(client):
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.post(f"/api/v1/dibs/{dibs_id}/release")
+    assert client.store[dibs_id]["released_at"] == NOW
+    # One statement, so a release can never land without its reason.
+    assert "released_at = NOW()" in client.store["__last_release_sql__"]
+
+
+def test_a_claim_that_ran_out_was_not_given_back(client):
+    """NULL is the honest answer for an expiry, and for every claim released
+    before this column existed."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.store["__now__"] = NOW + timedelta(
+        minutes=api_dibs.DIBS_MAX_TOTAL_MINUTES + 1
+    )
+    assert client.store[dibs_id]["released_at"] is None
+    assert client.get(f"/api/v1/dibs/{dibs_id}").json()["released_at"] is None
+
+
+def test_the_page_says_gave_them_up_rather_than_expired(client):
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.post(f"/api/v1/dibs/{dibs_id}/release")
+    html = client.get(f"/dibs/{dibs_id}").text
+
+    assert "gave them up at" in html
+    assert "free for anyone." in html
+    # The word that was wrong about this claim.
+    assert "expired at" not in html
+    assert "null and void" not in html
+
+
+def test_the_page_still_says_expired_when_it_expired(client):
+    """The other branch has to keep working — a rider who ran out of time did
+    not give anything back, and saying they did would be the same error
+    pointed the other way."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.store["__now__"] = NOW + timedelta(
+        minutes=api_dibs.DIBS_MAX_TOTAL_MINUTES + 1
+    )
+    html = client.get(f"/dibs/{dibs_id}").text
+
+    assert "expired at" in html
+    assert "null and void" in html
+    assert "gave them up" not in html
+
+
+def test_a_live_claim_is_unaffected(client):
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    html = client.get(f"/dibs/{dibs_id}").text
+    assert "has dibs on" in html
+    assert "Still good." in html
+    assert "gave them up" not in html
+
+
+def test_the_released_page_still_names_the_claimant_and_the_time(client):
+    """It is still a certificate. Giving the scooter back does not make the
+    claim less true, and the page is the evidence that it happened."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.post(f"/api/v1/dibs/{dibs_id}/release")
+    html = client.get(f"/dibs/{dibs_id}").text
+
+    assert "Resourceful 🌈" in html
+    assert "Lunar 🐸 928" in html
+    assert api_dibs._denver(NOW) in html
+
+
+def test_the_json_reports_why_it_ended(client):
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.post(f"/api/v1/dibs/{dibs_id}/release")
+    body = client.get(f"/api/v1/dibs/{dibs_id}").json()
+
+    assert body["active"] is False
+    assert body["released_at"] == NOW.isoformat()
+
+
+def test_a_second_release_cannot_relabel_an_expired_claim(client):
+    """`release` only stamps the row it actually releases. Without that, a
+    call made after the clock ran out would record a give-back that never
+    happened — and the certificate would credit the rider for it."""
+    dibs_id = client.post("/api/v1/dibs", json=BODY).json()["id"]
+    client.store["__now__"] = NOW + timedelta(
+        minutes=api_dibs.DIBS_MAX_TOTAL_MINUTES + 1
+    )
+
+    assert client.post(f"/api/v1/dibs/{dibs_id}/release").json() == {"released": False}
+    assert client.store[dibs_id]["released_at"] is None
+    assert "expired at" in client.get(f"/dibs/{dibs_id}").text
