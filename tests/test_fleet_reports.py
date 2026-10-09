@@ -135,10 +135,21 @@ def test_inaccessible_is_accepted_and_stored(monkeypatch):
     assert "inaccessible" in _insert(sink)
 
 
-def test_every_report_type_has_a_suppression_priority():
-    # A type missing from the priority tuple would never suppress, silently.
-    assert sorted(fleet_reports.SUPPRESSION_REASON_PRIORITY) == sorted(_REPORT_TYPES)
-    assert fleet_reports.SUPPRESSION_REASON_PRIORITY[0] == "inaccessible"
+def test_every_report_type_is_classified_for_suppression():
+    # A new type must be put in exactly one of the two tuples on purpose: a
+    # type missing from both would never suppress, silently.
+    sup = set(fleet_reports.SUPPRESSION_REASON_PRIORITY)
+    non = set(fleet_reports.NON_SUPPRESSING_REPORT_TYPES)
+    assert not sup & non
+    assert sup | non == set(_REPORT_TYPES)
+    assert fleet_reports.SUPPRESSION_REASON_PRIORITY[:2] == ("inaccessible", "not_found")
+
+
+def test_improperly_parked_does_not_suppress():
+    # Owner, 2026-10-09: "the improperly parked is a report to veo" — not a
+    # reason to steer riders away from a reachable, rideable scooter.
+    assert "improperly_parked" not in fleet_reports.SUPPRESSION_REASON_PRIORITY
+    assert "improperly_parked" in fleet_reports.NON_SUPPRESSING_REPORT_TYPES
 
 
 def test_the_insert_records_the_charge_at_report_time(monkeypatch):
@@ -189,7 +200,9 @@ def test_a_decoy_reason_refiles_the_report(monkeypatch, decoy, stored):
 
 
 def test_the_decoys_map_as_the_owner_said():
-    assert NOT_RIDEABLE_DECOYS == {"cannot_find": "inaccessible",
+    # "cannot find" is not_found (owner, 2026-10-09); inaccessible is for a
+    # scooter you can see but cannot reach.
+    assert NOT_RIDEABLE_DECOYS == {"cannot_find": "not_found",
                                    "dead_battery": "dead_battery"}
 
 
@@ -198,7 +211,7 @@ def test_a_decoy_dedupes_against_the_type_it_becomes(monkeypatch):
     r = client.post("/api/v1/reports/device",
                     json={**_BODY, "report_type": "not_rideable", "reason": "cannot_find"})
     assert r.json()["deduped"] is True
-    assert "inaccessible" in sink[0][1]
+    assert "not_found" in sink[0][1]
 
 
 def test_a_decoy_works_through_the_deprecated_alias(monkeypatch):
@@ -314,7 +327,9 @@ class _CsvCursor:
         if self.n == 1:
             return [
                 (_TS, _VID, "inaccessible", 39.73921, -104.98761, True),
+                (_TS, _VID, "not_found", 39.73921, -104.98761, True),
                 (_TS, _VID, "not_rideable", 39.73921, -104.98761, True),
+                (_TS, _VID, "improperly_parked", 39.73921, -104.98761, True),
             ]
         return []
 
@@ -346,10 +361,12 @@ def test_the_public_csv_drops_an_inaccessible_reports_coordinates(monkeypatch):
     r = TestClient(app).get("/api/v1/reports/export/monthly.csv", params={"month": "2026-10"})
     assert r.status_code == 200
     lines = r.text.strip().splitlines()
-    inacc = next(line for line in lines if ",inaccessible," in line)
-    other = next(line for line in lines if ",not_rideable," in line)
-    assert "39.739" not in inacc and "-104.988" not in inacc
-    assert "39.739" in other  # every other type keeps its ~100 m point
+    for hidden in (",inaccessible,", ",not_found,"):
+        line = next(x for x in lines if hidden in x)
+        assert "39.739" not in line and "-104.988" not in line, hidden
+    for kept in (",not_rideable,", ",improperly_parked,"):
+        # every other type keeps its ~100 m point
+        assert "39.739" in next(x for x in lines if kept in x), kept
 
 
 # ---------------------------------------------------------------------------

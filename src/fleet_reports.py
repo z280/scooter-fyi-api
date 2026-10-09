@@ -9,8 +9,8 @@ it would re-merge exactly the two questions the plan exists to separate. So
 suppression is its own flag with its own reason, computed here, and nothing in
 src/quality.py reads it. DO NOT "simplify" the two together.
 
-WHAT SUPPRESSES. A SIGNED-IN, UNRESOLVED device report of any type in
-SUPPRESSION_REASON_PRIORITY, on a vehicle that has not moved since the report
+WHAT SUPPRESSES. A SIGNED-IN, UNRESOLVED device report of a type in
+SUPPRESSION_REASON_PRIORITY (every type except improperly_parked), on a vehicle that has not moved since the report
 and whose charge has not RISEN since it (`report holds`, below). Anonymous
 reports never suppress: they still feed has_negative_report for 24 hours in
 their cell, as they always have, but hiding a vehicle from every rider is the
@@ -54,24 +54,30 @@ from typing import Any
 from .device_features import FEATURE_PRESENCE_COLUMNS, STATUS_NEEDS_REVIEW
 from .quality import full_charge_range_meters
 
-#: Every device report type suppresses, and when several hold at once this is
-#: the order `suppressed_reason` reports them in: the reason that most changes
+#: The report types that suppress, and — when several hold at once — the
+#: order `suppressed_reason` reports them in: the reason that most changes
 #: what a rider should do comes first. `inaccessible` heads it because it is
-#: the one whose copy has to stop somebody climbing a fence (§2.1).
+#: the one whose copy has to stop somebody climbing a fence (§2.1); `not_found`
+#: next, because the rider would walk to a spot with nothing there.
 #:
-#: `improperly_parked` is here because the plan says so (§2.2(2), §5: "an
-#: improperly_parked report likewise suppresses without touching the tier").
-#: It is the one entry with a live counter-argument — a sidewalk-blocker is
-#: reachable and riding it away fixes the complaint — so it is last, and
-#: taking it out is a one-line change to this tuple.
+#: `improperly_parked` is deliberately ABSENT (owner, 2026-10-09, overriding
+#: the plan's §2.2(2)/§5): "Improperly Parked is not the same as
+#: Inaccessible/Can't Find it. The latter should avoid especially if on
+#: private property, the improperly parked is a report to veo." A badly
+#: parked scooter is reachable and rideable — riding it away even fixes the
+#: complaint — so it stays on the map. It is still stored, counted in the
+#: admin export and the dossier, and is Veo's to act on.
 SUPPRESSION_REASON_PRIORITY: tuple[str, ...] = (
     "inaccessible",
     "not_found",
     "not_rideable",
     "damaged",
     "dead_battery",
-    "improperly_parked",
 )
+
+#: Report types that never suppress. Every type is in exactly one of these
+#: two tuples; tests/test_fleet_reports.py holds that.
+NON_SUPPRESSING_REPORT_TYPES: tuple[str, ...] = ("improperly_parked",)
 
 #: How much the charge must RISE over the reading at report time before the
 #: rise counts as somebody servicing the vehicle. A battery swap or a charge
@@ -111,8 +117,8 @@ def _open_reports_sql(*, single_vehicle: bool) -> str:
     """Signed-in, unresolved reports that still HOLD, with the telemetry row
     of the given cycle supplying the current range.
 
-    The hold clauses are the accountable has_negative_report branch's, minus
-    the reliability-type filter (every type suppresses), and they are
+    The hold clauses are the accountable has_negative_report branch's, with
+    the suppressing types in place of the reliability-type filter, and they are
     mirrored in api_public.py and api_h3.py —
     tests/test_reliability_sql_mirrored.py keeps the copies honest.
 
@@ -340,7 +346,7 @@ REASONS_DEFINITION = (
     "or not. not_rideable.reasons counts not_rideable reports by the reason "
     "the rider gave; 'unspecified' is a report with none (older clients, or "
     "a skipped question). remapped counts picks of the not_rideable picker's "
-    "decoys, which the server re-files: 'cannot_find' as inaccessible, "
+    "decoys, which the server re-files: 'cannot_find' as not_found, "
     "'dead_battery' as dead_battery — those reports are counted under their "
     "stored type, not under not_rideable. observed_at is when the rider says "
     "they saw the problem (defaults to the submission time); "

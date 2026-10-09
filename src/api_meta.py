@@ -166,8 +166,9 @@ _PRIVACY = {
                       "Public aggregates and the CSV export never include reporter "
                       "identity (no IP, no email — only an authenticated yes/no "
                       "flag), never the scooter code itself (only its one-way "
-                      "identifier), and round any point to about 100 m; an "
-                      "'inaccessible' report's point is never published at all.",
+                      "identifier), and round any point to about 100 m; the point "
+                      "of an 'inaccessible' or 'not found' report is never "
+                      "published at all.",
         },
         {
             "data": "accounts",
