@@ -33,6 +33,7 @@ Per-cell attributes:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -49,6 +50,8 @@ from .quality import (
     compute_reliability_tier,
     recent_rentals_no_go,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -68,6 +71,22 @@ class _CellAccum:
         self.dwell_n = 0
         self.trips = 0
         self.hourly: dict[datetime, int] = {}
+
+
+def _negative_states_at(cycle_id, snapshot_time):
+    """The single report-state pass for /h3, on its OWN connection (a failure
+    must not abort the main read's transaction) and guarded: None on failure,
+    which the caller turns into "unknown" for every vehicle rather than a 500,
+    the same posture as /devices/current's _negative_states."""
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                return fleet_reports.negative_states(
+                    cur, cycle_id, snapshot_time=snapshot_time,
+                    where="AND r.spatial_status = 'denver_core'")
+    except Exception:  # noqa: BLE001
+        log.warning("h3: negative-report states unavailable — every vehicle reads unknown this request")
+        return None
 
 
 @router.get("/api/v1/h3/aggregates")
@@ -128,9 +147,6 @@ def h3_aggregates(
                 },
             )
             device_rows = cur.fetchall()
-            negative_by = fleet_reports.negative_states(
-                cur, cycle_id, snapshot_time=snapshot_time,
-                where="AND r.spatial_status = 'denver_core'")
 
             # Trailing-24h trip starts, anchored at snapshot_time so the
             # payload is fully determined by the cycle (ETag-safe).
@@ -152,6 +168,7 @@ def h3_aggregates(
     # which is what the cycle-keyed ETag promises. Nothing here reads the
     # wall clock.
     dwell_stats = stats_for_cycle(cycle_id, snapshot_time)
+    negative_by = _negative_states_at(cycle_id, snapshot_time)
 
     cells: dict[str, _CellAccum] = {}
 
@@ -165,9 +182,14 @@ def h3_aggregates(
          failed_starts, first_obs, recent_mask, _placeholder) in device_rows:
         if h3_idx is None:
             continue
-        entry = negative_by.get(vid)
-        has_neg = (None if not entry else
-                   "high" if entry.get("risk") == fleet_reports.RISK_HIGH else "unknown")
+        if negative_by is None:
+            # The pass failed: we cannot say any vehicle is unreported, and a
+            # reported scooter must never read likely-rideable (owner rule).
+            has_neg = "unknown"
+        else:
+            entry = negative_by.get(vid)
+            has_neg = (None if not entry else
+                       "high" if entry.get("risk") == fleet_reports.RISK_HIGH else "unknown")
         acc = _cell(h3.int_to_str(int(h3_idx)))
         acc.devices += 1
 

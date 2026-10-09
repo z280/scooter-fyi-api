@@ -238,3 +238,28 @@ def test_dwell_outlier_feeds_risk_share(_fake_db, monkeypatch):
     )
     flagged = _call()["cells"][_CELL_A]
     assert flagged["risk_share"] == 0.5
+
+
+def test_a_failed_report_state_pass_reads_unknown_not_500(_fake_db, monkeypatch):
+    """zneill-agent (#148): if the single report-state pass fails, /h3 must
+    degrade every vehicle to "unknown" (never ok, never a 500), the same
+    posture as /devices/current."""
+    from src import fleet_reports
+
+    def _boom(*a, **k):
+        raise RuntimeError("negative_states down")
+
+    monkeypatch.setattr(fleet_reports, "negative_states", _boom)
+    seen = []
+    real = api_h3.compute_reliability_tier
+
+    def _spy(**kw):
+        seen.append(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(api_h3, "compute_reliability_tier", _spy)
+    out = _call()                                  # no exception, no 500
+    assert set(out["cells"]) == {_CELL_A, _CELL_B}
+    assert seen, "reliability was computed"
+    assert all(kw["has_faded_negative_report"] is True for kw in seen)
+    assert not any(kw["has_negative_report"] for kw in seen)
