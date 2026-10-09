@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from . import accounts, auth, campaigns, job_runs, parking_response
+from . import accounts, auth, campaigns, job_runs, parking_response, vehicle_identity
 from .cli import COMMANDS
 from .pg import connection
 
@@ -69,13 +69,6 @@ async def auth_callback(request: Request):
 @router.get("/logout")
 def logout(request: Request):
     return auth.logout(request)
-
-
-@router.get("", include_in_schema=False)
-def index(request: Request):
-    if "admin_user" not in request.session:
-        return RedirectResponse("/admin/login")
-    return RedirectResponse("/admin/cycles")
 
 
 @router.get("/cycles", response_class=HTMLResponse)
@@ -947,3 +940,747 @@ def campaigns_archive(
         f"/admin/campaigns?saved={verb if changed else 'no+change'}",
         status_code=303,
     )
+
+
+# ===========================================================================
+# Fleet reports admin centre (docs/FLEET_REPORTS_PLAN.md Phase 2, §4.1(5))
+# ===========================================================================
+# Server-rendered pages over Phase 1's data. Wherever Phase 1 has an
+# endpoint, the page CALLS ITS FUNCTION (src/api_fleet_reports.py) rather
+# than re-querying, so the page and the JSON cannot disagree.
+#
+# AUTH. Every page and form is `auth.require_admin` — the GitHub-OAuth
+# session the rest of /admin uses (org membership checked at sign-in). That
+# session carries a GitHub login and no rider account, so writes from these
+# pages are attributed to the LOGIN (device_reports.resolved_by_login,
+# device_census_ack.*_by_login, sql/102); the /api/v1/private routes keep
+# attributing to the admin's account. Every POST also passes _csrf_ok.
+#
+# NO RIDER EMAILS on these pages: reporters are shown as account id plus
+# public username. (Admins' own emails appear where an admin acted through
+# the account-session API, as on /admin/admins.)
+
+_FLEET_PAGE_SIZE = 50
+_REGION_LAYER = "neighborhood"
+#: The region filter is applied in Python (a report's region is a
+#: point-in-polygon on its own coordinates), over at most this many of the
+#: newest matching rows.
+_REGION_SCAN_LIMIT = 5000
+
+
+def _fleet_redirect(path: str, **params: Any) -> RedirectResponse:
+    from urllib.parse import urlencode
+
+    q = urlencode({k: v for k, v in params.items() if v not in (None, "")})
+    return RedirectResponse(f"{path}?{q}" if q else path, status_code=303)
+
+
+def _safe_next(next_url: str | None, default: str) -> str:
+    """Only ever redirect back inside /admin/fleet."""
+    if next_url and next_url.startswith("/admin/fleet") and "//" not in next_url:
+        return next_url
+    return default
+
+
+def _region_of(lat: float | None, lon: float | None) -> str | None:
+    from . import geo
+
+    if lat is None or lon is None:
+        return None
+    try:
+        return geo.region_for_point(_REGION_LAYER, float(lon), float(lat))
+    except Exception:  # noqa: BLE001 — a missing layer must not break the page
+        return None
+
+
+def _region_names() -> list[str]:
+    from . import geo
+
+    try:
+        return sorted(geo.region_names(_REGION_LAYER))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _report_point(lat, lng, h3_10, ds_lat, ds_lon) -> tuple[float | None, float | None]:
+    if lat is not None and lng is not None:
+        return float(lat), float(lng)
+    if h3_10 is not None:
+        import h3
+
+        try:
+            c = h3.cell_to_latlng(h3.int_to_str(int(h3_10)))
+            return float(c[0]), float(c[1])
+        except Exception:  # noqa: BLE001 — a bad stored cell is just "no point"
+            pass
+    if ds_lat is not None and ds_lon is not None:
+        return float(ds_lat), float(ds_lon)
+    return None, None
+
+
+def _pct(range_m) -> int | None:
+    from .quality import full_charge_range_meters
+
+    if range_m is None:
+        return None
+    return int(round(100 * float(range_m) / full_charge_range_meters()))
+
+
+@router.get("", include_in_schema=False)
+def admin_home(request: Request):
+    """/admin — an index of every admin page. Superseded the old redirect
+    to /admin/cycles; signed-out visitors still go to the login."""
+    user = request.session.get("admin_user")
+    if not user:
+        return RedirectResponse("/admin/login")
+    return _render("admin_index.html", user=user)
+
+
+@router.get("/fleet", response_class=HTMLResponse)
+def fleet_index(request: Request, user: dict = Depends(auth.require_admin)):
+    return _render("admin_index.html", user=user)
+
+
+# --- 1. Reports queue -------------------------------------------------------
+
+@router.get("/fleet/reports", response_class=HTMLResponse)
+def fleet_reports_queue(
+    request: Request,
+    user: dict = Depends(auth.require_admin),
+    report_type: str | None = Query(None),
+    reason: str | None = Query(None),
+    region: str | None = Query(None),
+    standing: str | None = Query(None, pattern="^(yes|no)?$"),
+    status: str | None = Query(None, pattern="^(open|resolved)?$"),
+    page: int = Query(0, ge=0),
+):
+    from . import fleet_reports
+    from .api_frontend_reports import NOT_RIDEABLE_REASONS, _REPORT_TYPES
+    from .api_public import latest_complete_cycle
+
+    where = ["TRUE"]
+    params: list[Any] = []
+    if report_type:
+        where.append("dr.report_type = %s")
+        params.append(report_type)
+    if reason:
+        if reason == "unspecified":
+            where.append("dr.report_type = 'not_rideable' AND dr.reason IS NULL")
+        else:
+            where.append("dr.reason = %s")
+            params.append(reason)
+    if status == "open":
+        where.append("dr.resolved_at IS NULL")
+    elif status == "resolved":
+        where.append("dr.resolved_at IS NOT NULL")
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cycle_id, snap = latest_complete_cycle(cur)
+            standing_ids = fleet_reports.standing_report_ids_all(cur, cycle_id)
+            if standing == "yes":
+                where.append("dr.id = ANY(%s)")
+                params.append(list(standing_ids))
+            elif standing == "no":
+                where.append("NOT (dr.id = ANY(%s))")
+                params.append(list(standing_ids))
+            limit = _REGION_SCAN_LIMIT if region else _FLEET_PAGE_SIZE + 1
+            offset = 0 if region else page * _FLEET_PAGE_SIZE
+            cur.execute(
+                f"""
+                SELECT dr.id, dr.vehicle_identifier, ds.vehicle_plate, dr.report_type,
+                       dr.reason, dr.submitted_reason, dr.observed_at, dr.reported_at,
+                       dr.account_id, acc.public_username, dr.range_at_report_meters,
+                       dr.lat, dr.lng, dr.h3_10_index, ds.current_lat, ds.current_lon,
+                       ds.first_observed_at_location, dr.resolved_at,
+                       COALESCE(dr.resolution_source,
+                                CASE WHEN dr.resolved_at IS NOT NULL THEN 'admin' END),
+                       dr.resolution, dr.reconfirm_count,
+                       (SELECT COUNT(*) FROM device_reports d2
+                         WHERE d2.vehicle_identifier = dr.vehicle_identifier
+                           AND d2.report_type = dr.report_type AND d2.id <> dr.id
+                           AND d2.reported_at BETWEEN dr.reported_at - INTERVAL '30 minutes'
+                                                  AND dr.reported_at + INTERVAL '30 minutes'),
+                       (SELECT COUNT(DISTINCT d3.account_id) FROM device_reports d3
+                         WHERE d3.vehicle_identifier = dr.vehicle_identifier
+                           AND d3.id = ANY(%s))
+                  FROM device_reports dr
+                  LEFT JOIN device_state ds ON ds.vehicle_identifier = dr.vehicle_identifier
+                  LEFT JOIN accounts acc ON acc.id = dr.account_id
+                 WHERE {" AND ".join(where)}
+                 ORDER BY dr.reported_at DESC, dr.id DESC
+                 LIMIT %s OFFSET %s
+                """,
+                [list(standing_ids), *params, limit, offset],
+            )
+            raw = cur.fetchall()
+    rows = []
+    for r in raw:
+        lat, lon = _report_point(r[11], r[12], r[13], r[14], r[15])
+        reg = _region_of(lat, lon)
+        if region and reg != region:
+            continue
+        parked_since = r[16]
+        rows.append({
+            "id": r[0], "vehicle_identifier": r[1],
+            "display_name": vehicle_identity.display_name(r[1], r[2]),
+            "report_type": r[3], "reason": r[4], "submitted_reason": r[5],
+            "observed_at": r[6], "reported_at": r[7],
+            "account_id": r[8], "public_username": r[9],
+            "charge_pct_at_report": _pct(r[10]),
+            "region": reg,
+            "moved_since": bool(parked_since and parked_since > r[7]),
+            "resolved_at": r[17], "resolution_source": r[18], "resolution": r[19],
+            "reconfirm_count": r[20],
+            "near_duplicates": int(r[21] or 0),
+            "standing_accounts": int(r[22] or 0),
+            "standing": r[0] in standing_ids,
+            "suppressing_type": r[3] in fleet_reports.SUPPRESSION_REASON_PRIORITY,
+            "signed_in": r[8] is not None,
+        })
+    if region:
+        start = page * _FLEET_PAGE_SIZE
+        has_next = len(rows) > start + _FLEET_PAGE_SIZE
+        rows = rows[start:start + _FLEET_PAGE_SIZE]
+    else:
+        has_next = len(rows) > _FLEET_PAGE_SIZE
+        rows = rows[:_FLEET_PAGE_SIZE]
+    return _render(
+        "fleet_reports.html", user=user, rows=rows, as_of=snap, page=page,
+        has_next=has_next, report_types=_REPORT_TYPES,
+        reasons=tuple(NOT_RIDEABLE_REASONS) + ("unspecified",),
+        regions=_region_names(),
+        f={"report_type": report_type or "", "reason": reason or "",
+           "region": region or "", "standing": standing or "", "status": status or ""},
+        region_scan_limit=_REGION_SCAN_LIMIT,
+    )
+
+
+# --- 3. Resolve / void / reinstate -----------------------------------------
+
+@router.post("/fleet/reports/{report_id}/resolve")
+def fleet_resolve_report(
+    request: Request,
+    report_id: int,
+    resolution: str = Form(...),
+    next: str | None = Form(None),
+    user: dict = Depends(auth.require_admin),
+):
+    """Void or resolve a report from the queue or the dossier. Audited:
+    resolution_source 'admin', resolved_by_login = the GitHub login, and
+    the reason — the same write path (fleet_reports.resolve_report) as the
+    Phase 1 JSON endpoint."""
+    from . import fleet_reports
+
+    back = _safe_next(next, "/admin/fleet/reports")
+    if not _csrf_ok(request):
+        return _fleet_redirect(back, error="cross-site request blocked")
+    why = (resolution or "").strip()
+    if not why or len(why) > 500:
+        return _fleet_redirect(back, error="a reason (1-500 characters) is required")
+    with connection() as conn:
+        with conn.cursor() as cur:
+            try:
+                fleet_reports.resolve_report(
+                    cur, report_id, source=fleet_reports.RESOLUTION_SOURCE_ADMIN,
+                    resolution=why, login=user.get("login") or "unknown")
+            except fleet_reports.ReportNotFound:
+                return _fleet_redirect(back, error=f"no report {report_id}")
+            except fleet_reports.ReportAlreadyResolved:
+                return _fleet_redirect(back, error=f"report {report_id} is already resolved")
+        conn.commit()
+    return _fleet_redirect(back, saved=f"report {report_id} resolved")
+
+
+@router.post("/fleet/reports/{report_id}/reinstate")
+def fleet_reinstate_report(
+    request: Request,
+    report_id: int,
+    reason: str = Form(...),
+    next: str | None = Form(None),
+    user: dict = Depends(auth.require_admin),
+):
+    """Put back a report a RIDER's condition check resolved (plan §4.4). An
+    admin's resolution is final and is refused."""
+    from . import fleet_reports
+
+    back = _safe_next(next, "/admin/fleet/reports")
+    if not _csrf_ok(request):
+        return _fleet_redirect(back, error="cross-site request blocked")
+    why = (reason or "").strip()
+    if not why or len(why) > 500:
+        return _fleet_redirect(back, error="a reason (1-500 characters) is required")
+    with connection() as conn:
+        with conn.cursor() as cur:
+            try:
+                fleet_reports.reinstate_report(cur, report_id,
+                                               login=user.get("login") or "unknown",
+                                               reason=why)
+            except fleet_reports.ReportNotFound:
+                return _fleet_redirect(back, error=f"no report {report_id}")
+            except fleet_reports.NotRiderResolved:
+                return _fleet_redirect(
+                    back, error=f"report {report_id} was not resolved by a rider check")
+        conn.commit()
+    return _fleet_redirect(back, saved=f"report {report_id} reinstated")
+
+
+# --- 2. Per-scooter dossier -------------------------------------------------
+
+def _same_spot_clusters(stops: list[dict], reports: list[dict]) -> list[dict]:
+    """Group the vehicle's stops that sit within 50 m of each other, and
+    count the stops at each spot that drew a suppressing report. A spot with
+    reports at two or more SEPARATE stops is "repeatedly hidden at the same
+    spot" — the vehicle was moved away and came back to the same yard."""
+    from . import fleet_reports
+    from .geo import distance_meters
+
+    for st in stops:
+        st["reports"] = [
+            r for r in reports
+            if r["report_type"] in fleet_reports.SUPPRESSION_REASON_PRIORITY
+            and r["_reported_at"] >= st["arrived_at"]
+            and (st["departed_at"] is None or r["_reported_at"] < st["departed_at"])
+        ]
+    clusters: list[dict] = []
+    for st in stops:
+        for c in clusters:
+            if distance_meters(c["lat"], c["lon"], st["lat"], st["lon"]) <= 50.0:
+                c["stops"].append(st)
+                break
+        else:
+            clusters.append({"lat": st["lat"], "lon": st["lon"], "stops": [st]})
+    out = []
+    for c in clusters:
+        reported = [s for s in c["stops"] if s["reports"]]
+        if not reported:
+            continue
+        out.append({
+            # ~100 m rounding, as everywhere a report's spot is shown.
+            "lat": round(c["lat"], 3), "lon": round(c["lon"], 3),
+            "stops": len(c["stops"]),
+            "stops_with_reports": len(reported),
+            "reports": sum(len(s["reports"]) for s in reported),
+            "accounts": len({r["reporter_account_id"] for s in reported
+                             for r in s["reports"] if r["reporter_account_id"]}),
+            "first": min(s["arrived_at"] for s in reported),
+            "last": max(s["arrived_at"] for s in reported),
+            "repeated": len(reported) >= 2,
+        })
+    out.sort(key=lambda c: (-c["stops_with_reports"], -c["reports"]))
+    return out
+
+
+@router.get("/fleet/devices/{vehicle_identifier}", response_class=HTMLResponse)
+def fleet_dossier(
+    request: Request,
+    vehicle_identifier: str,
+    user: dict = Depends(auth.require_admin),
+    days: int = Query(14, ge=1, le=90),
+    error: str | None = Query(None),
+    saved: str | None = Query(None),
+):
+    from fastapi import HTTPException
+
+    from . import admin_watch, api_fleet_reports
+
+    if not re.fullmatch(r"[0-9a-f]{16}", vehicle_identifier):
+        return _render("not_found.html", user=user, what=f"vehicle {vehicle_identifier}")
+    try:
+        d = api_fleet_reports.device_dossier(vehicle_identifier, user=None, limit=500)
+    except HTTPException:
+        return _render("not_found.html", user=user, what=f"vehicle {vehicle_identifier}")
+    from datetime import timedelta, timezone
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT snapshot_time, departed_at, lat, lon, departure_reason,
+                       dwell_failed_starts
+                  FROM device_history
+                 WHERE vehicle_identifier = %s
+                   AND (departed_at IS NULL OR departed_at >= %s)
+                 ORDER BY snapshot_time DESC
+                 LIMIT 500
+                """,
+                (vehicle_identifier, since),
+            )
+            stops = [
+                {"arrived_at": r[0], "departed_at": r[1], "lat": float(r[2]),
+                 "lon": float(r[3]), "departure_reason": r[4],
+                 "failed_starts": int(r[5] or 0),
+                 "idle_hours": round(((r[1] or datetime.now(timezone.utc)) - r[0])
+                                     .total_seconds() / 3600.0, 1)}
+                for r in cur.fetchall()
+            ]
+            # Every stop the vehicle has ever had, for the same-spot view —
+            # that question spans longer than the history window.
+            cur.execute(
+                """
+                SELECT snapshot_time, departed_at, lat, lon
+                  FROM device_history WHERE vehicle_identifier = %s
+                 ORDER BY snapshot_time LIMIT 5000
+                """,
+                (vehicle_identifier,),
+            )
+            all_stops = [{"arrived_at": r[0], "departed_at": r[1], "lat": float(r[2]),
+                          "lon": float(r[3])} for r in cur.fetchall()]
+            cur.execute(
+                """
+                SELECT date_trunc('hour', snapshot_time) AS h,
+                       MIN(current_range_meters), MAX(current_range_meters),
+                       COUNT(*) FILTER (WHERE is_reserved), COUNT(*)
+                  FROM raw_telemetry_points
+                 WHERE vehicle_identifier = %s AND snapshot_time >= %s
+                 GROUP BY 1 ORDER BY 1 DESC LIMIT 2200
+                """,
+                (vehicle_identifier, since),
+            )
+            battery = [{"hour": r[0], "min_pct": _pct(r[1]), "max_pct": _pct(r[2]),
+                        "reserved_samples": int(r[3] or 0), "samples": int(r[4] or 0)}
+                       for r in cur.fetchall()]
+            watches = admin_watch.list_watches(cur, vehicle_identifier)
+    for r in d["reports"]:
+        r["_reported_at"] = datetime.fromisoformat(r["reported_at"])
+    spots = _same_spot_clusters(all_stops, d["reports"])
+    return _render(
+        "fleet_dossier.html", user=user, d=d, stops=stops, battery=battery,
+        spots=spots, watches=watches, days=days, error=error, saved=saved,
+        charge_pct=_pct((d.get("state") or {}).get("current_range_meters")),
+        pct=_pct,
+    )
+
+
+# --- 4. Reporter view -------------------------------------------------------
+
+@router.get("/fleet/reporters", response_class=HTMLResponse)
+def fleet_reporters(
+    request: Request,
+    user: dict = Depends(auth.require_admin),
+    days: int = Query(30, ge=1, le=365),
+    account_id: int | None = Query(None, ge=1),
+):
+    """Per-account report volume and spread — §2.6(2), spotting griefing —
+    with rider condition-check resolutions alongside (plan §4.4: an account
+    resolving reports nobody else's rides corroborate is the same signal as
+    one filing them). Account id + public username only."""
+    from datetime import timedelta, timezone
+
+    from .api_frontend_reports import _REPORT_TYPES
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    type_cols = ", ".join(
+        f"COUNT(*) FILTER (WHERE dr.report_type = '{t}')" for t in _REPORT_TYPES)
+    detail = None
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH rep AS (
+                    SELECT dr.account_id,
+                           COUNT(*) AS reports,
+                           COUNT(DISTINCT dr.vehicle_identifier) AS vehicles,
+                           COUNT(DISTINCT dr.h3_10_index) AS cells,
+                           COUNT(DISTINCT (dr.reported_at AT TIME ZONE 'America/Denver')::date) AS days_active,
+                           COUNT(DISTINCT EXTRACT(HOUR FROM dr.reported_at AT TIME ZONE 'America/Denver')) AS hours_of_day,
+                           MIN(dr.reported_at) AS first_at, MAX(dr.reported_at) AS last_at,
+                           COUNT(*) FILTER (WHERE dr.resolution_source = 'admin'
+                                              OR (dr.resolved_at IS NOT NULL
+                                                  AND dr.resolution_source IS NULL)) AS voided,
+                           COUNT(*) FILTER (WHERE dr.resolution_source = 'rider_check') AS rider_resolved,
+                           {type_cols}
+                      FROM device_reports dr
+                     WHERE dr.account_id IS NOT NULL AND dr.reported_at >= %(since)s
+                     GROUP BY dr.account_id
+                ), chk AS (
+                    SELECT c.account_id,
+                           COUNT(*) AS checks,
+                           COUNT(*) FILTER (WHERE NOT c.test_ride) AS no_ride_checks,
+                           SUM(c.reports_resolved) AS resolutions,
+                           SUM(c.reports_reconfirmed) AS reconfirmations,
+                           COUNT(*) FILTER (WHERE c.feed_status = 'confirmed') AS feed_confirmed,
+                           COUNT(*) FILTER (WHERE c.feed_status = 'unconfirmed') AS feed_unconfirmed
+                      FROM device_condition_checks c
+                     WHERE c.account_id IS NOT NULL AND c.submitted_at >= %(since)s
+                     GROUP BY c.account_id
+                )
+                SELECT COALESCE(rep.account_id, chk.account_id) AS aid,
+                       a.public_username, rep.*, chk.*
+                  FROM rep FULL OUTER JOIN chk ON chk.account_id = rep.account_id
+                  LEFT JOIN accounts a ON a.id = COALESCE(rep.account_id, chk.account_id)
+                 ORDER BY COALESCE(rep.reports, 0) + COALESCE(chk.resolutions, 0) DESC
+                 LIMIT 500
+                """,
+                {"since": since},
+            )
+            cols = [c.name for c in cur.description]
+            rows = []
+            n_types = len(_REPORT_TYPES)
+            for r in cur.fetchall():
+                rec = dict(zip(cols, r))
+                # rep.* puts the type counts right after `rider_resolved`.
+                idx = cols.index("rider_resolved") + 1
+                rec["by_type"] = dict(zip(_REPORT_TYPES, r[idx:idx + n_types]))
+                rows.append(rec)
+            if account_id is not None:
+                cur.execute(
+                    """
+                    SELECT dr.id, dr.vehicle_identifier, dr.report_type, dr.reason,
+                           dr.reported_at, dr.resolved_at,
+                           COALESCE(dr.resolution_source,
+                                    CASE WHEN dr.resolved_at IS NOT NULL THEN 'admin' END),
+                           dr.h3_10_index
+                      FROM device_reports dr
+                     WHERE dr.account_id = %s AND dr.reported_at >= %s
+                     ORDER BY dr.reported_at DESC LIMIT 300
+                    """,
+                    (account_id, since),
+                )
+                reps = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT EXTRACT(HOUR FROM reported_at AT TIME ZONE 'America/Denver')::int,
+                           COUNT(*)
+                      FROM device_reports
+                     WHERE account_id = %s AND reported_at >= %s
+                     GROUP BY 1 ORDER BY 1
+                    """,
+                    (account_id, since),
+                )
+                by_hour = dict(cur.fetchall())
+                cur.execute(
+                    """
+                    SELECT c.id, c.vehicle_identifier, c.submitted_at, c.test_ride,
+                           c.reports_resolved, c.reports_reconfirmed, c.feed_status,
+                           c.points_base + c.points_confirmed, c.points_withheld
+                      FROM device_condition_checks c
+                     WHERE c.account_id = %s AND c.submitted_at >= %s
+                     ORDER BY c.submitted_at DESC LIMIT 300
+                    """,
+                    (account_id, since),
+                )
+                checks = cur.fetchall()
+                cur.execute("SELECT public_username FROM accounts WHERE id = %s",
+                            (account_id,))
+                urow = cur.fetchone()
+                import h3
+
+                cells: dict[str, int] = {}
+                for rr in reps:
+                    if rr[7] is not None:
+                        # Spread at resolution 8 (~0.7 km²): enough to see a
+                        # cluster, too coarse to name an address.
+                        try:
+                            c8 = h3.cell_to_parent(h3.int_to_str(int(rr[7])), 8)
+                        except Exception:  # noqa: BLE001
+                            c8 = "invalid-cell"
+                        cells[c8] = cells.get(c8, 0) + 1
+                detail = {
+                    "account_id": account_id,
+                    "public_username": urow[0] if urow else None,
+                    "reports": [
+                        {"id": x[0], "vehicle_identifier": x[1],
+                         "display_name": vehicle_identity.public_name(x[1]),
+                         "report_type": x[2], "reason": x[3], "reported_at": x[4],
+                         "resolved_at": x[5], "resolution_source": x[6]}
+                        for x in reps],
+                    "by_hour": [(h, by_hour.get(h, 0)) for h in range(24)],
+                    "cells": sorted(cells.items(), key=lambda kv: -kv[1]),
+                    "checks": [
+                        {"id": x[0], "vehicle_identifier": x[1],
+                         "display_name": vehicle_identity.public_name(x[1]),
+                         "submitted_at": x[2], "test_ride": x[3], "resolved": x[4],
+                         "reconfirmed": x[5], "feed_status": x[6], "points": x[7],
+                         "withheld": x[8]}
+                        for x in checks],
+                }
+    return _render("fleet_reporters.html", user=user, rows=rows, days=days,
+                   report_types=_REPORT_TYPES, detail=detail)
+
+
+# --- 5. SMS watch -----------------------------------------------------------
+
+@router.get("/fleet/watches", response_class=HTMLResponse)
+def fleet_watches(
+    request: Request,
+    user: dict = Depends(auth.require_admin),
+    vehicle_identifier: str | None = Query(None, pattern="^[0-9a-f]{16}$"),
+    error: str | None = Query(None),
+    saved: str | None = Query(None),
+):
+    from . import admin_watch
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            watches = admin_watch.list_watches(cur)
+    for w in watches:
+        w["display_name"] = vehicle_identity.public_name(w["vehicle_identifier"])
+    return _render("fleet_watches.html", user=user, watches=watches,
+                   vehicle_identifier=vehicle_identifier or "", error=error,
+                   saved=saved, max_hours=admin_watch.MAX_WATCH_HOURS,
+                   default_hours=admin_watch.DEFAULT_WATCH_HOURS,
+                   max_texts=admin_watch.MAX_TEXTS_PER_WATCH)
+
+
+@router.post("/fleet/watches")
+def fleet_watch_subscribe(
+    request: Request,
+    vehicle_identifier: str = Form(...),
+    account_email: str = Form(...),
+    hours: int = Form(24),
+    consent: str | None = Form(None),
+    user: dict = Depends(auth.require_admin),
+):
+    from . import admin_watch
+
+    if not _csrf_ok(request):
+        return _fleet_redirect("/admin/fleet/watches", error="cross-site request blocked")
+    if not re.fullmatch(r"[0-9a-f]{16}", vehicle_identifier or ""):
+        return _fleet_redirect("/admin/fleet/watches", error="vehicle_identifier must be 16 hex")
+    try:
+        w = admin_watch.subscribe(
+            vehicle_identifier=vehicle_identifier, account_email=account_email,
+            login=user.get("login") or "unknown", hours=hours,
+            consent=consent in ("1", "on", "yes", "true"))
+    except admin_watch.WatchError as e:
+        return _fleet_redirect("/admin/fleet/watches", error=str(e),
+                               vehicle_identifier=vehicle_identifier)
+    return _fleet_redirect("/admin/fleet/watches", saved=f"watch #{w['id']} started")
+
+
+@router.post("/fleet/watches/{watch_id}/unsubscribe")
+def fleet_watch_unsubscribe(
+    request: Request,
+    watch_id: int,
+    user: dict = Depends(auth.require_admin),
+):
+    from . import admin_watch
+
+    if not _csrf_ok(request):
+        return _fleet_redirect("/admin/fleet/watches", error="cross-site request blocked")
+    ok = admin_watch.unsubscribe(watch_id, login=user.get("login") or "unknown")
+    return _fleet_redirect("/admin/fleet/watches",
+                           **({"saved": f"watch #{watch_id} stopped"} if ok
+                              else {"error": f"watch #{watch_id} is not live"}))
+
+
+# --- 6. Census --------------------------------------------------------------
+
+@router.get("/fleet/census", response_class=HTMLResponse)
+def fleet_census(
+    request: Request,
+    user: dict = Depends(auth.require_admin),
+    which: str = Query("missing", alias="list", pattern="^(arrivals|missing|gone)$"),
+    hours: float = Query(72, gt=0, le=24 * 3650),
+    page: int = Query(0, ge=0),
+    error: str | None = Query(None),
+    saved: str | None = Query(None),
+):
+    from . import api_fleet_reports
+
+    limit, offset = 100, page * 100
+    if which == "arrivals":
+        data = api_fleet_reports.census_arrivals(user=None, limit=limit, offset=offset)
+    elif which == "missing":
+        data = api_fleet_reports.census_missing(user=None, hours=hours, order="asc",
+                                                limit=limit, offset=offset)
+    else:
+        data = api_fleet_reports.census_gone(user=None, limit=limit, offset=offset)
+    return _render("fleet_census.html", user=user, data=data, which=which,
+                   hours=hours, page=page, error=error, saved=saved,
+                   has_next=len(data["devices"]) == limit)
+
+
+def _census_write(request: Request, vid: str, next_url: str | None, user: dict, action):
+    back = _safe_next(next_url, "/admin/fleet/census")
+    if not _csrf_ok(request):
+        return _fleet_redirect(back, error="cross-site request blocked")
+    if not re.fullmatch(r"[0-9a-f]{16}", vid):
+        return _fleet_redirect(back, error="bad vehicle identifier")
+    from fastapi import HTTPException
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            try:
+                msg = action(cur, user.get("login") or "unknown")
+            except HTTPException as e:
+                return _fleet_redirect(back, error=str(e.detail))
+        conn.commit()
+    return _fleet_redirect(back, saved=msg)
+
+
+@router.post("/fleet/census/{vehicle_identifier}/ack")
+def fleet_census_ack(request: Request, vehicle_identifier: str,
+                     note: str = Form(""), next: str | None = Form(None),
+                     user: dict = Depends(auth.require_admin)):
+    from . import api_fleet_reports
+
+    def act(cur, login):
+        api_fleet_reports.acknowledge_gone(cur, vehicle_identifier, account_id=None,
+                                           login=login,
+                                           note=(note or "").strip()[:2000] or None)
+        return "acknowledged gone"
+    return _census_write(request, vehicle_identifier, next, user, act)
+
+
+@router.post("/fleet/census/{vehicle_identifier}/unack")
+def fleet_census_unack(request: Request, vehicle_identifier: str,
+                       next: str | None = Form(None),
+                       user: dict = Depends(auth.require_admin)):
+    from fastapi import HTTPException
+
+    from . import api_fleet_reports
+
+    def act(cur, login):
+        if api_fleet_reports.withdraw_gone(cur, vehicle_identifier, account_id=None,
+                                           login=login) is None:
+            raise HTTPException(404, "that vehicle is not acknowledged gone")
+        return "acknowledgement withdrawn"
+    return _census_write(request, vehicle_identifier, next, user, act)
+
+
+@router.post("/fleet/census/{vehicle_identifier}/note")
+def fleet_census_note(request: Request, vehicle_identifier: str,
+                      note: str = Form(""), next: str | None = Form(None),
+                      user: dict = Depends(auth.require_admin)):
+    from . import api_fleet_reports
+
+    def act(cur, login):
+        api_fleet_reports.set_note(cur, vehicle_identifier, account_id=None, login=login,
+                                   note=(note or "").strip()[:2000] or None)
+        return "note saved"
+    return _census_write(request, vehicle_identifier, next, user, act)
+
+
+# --- 7. Export for advocacy -------------------------------------------------
+
+@router.get("/fleet/export", response_class=HTMLResponse)
+def fleet_export(
+    request: Request,
+    user: dict = Depends(auth.require_admin),
+    window_days: int = Query(30, ge=1, le=3650),
+    unmoved_days: int = Query(7, ge=0, le=3650),
+):
+    from . import api_fleet_reports
+
+    data = api_fleet_reports.reports_export(user=None, window_days=window_days,
+                                            unmoved_days=unmoved_days, format="json",
+                                            table="summary")
+    return _render("fleet_export.html", user=user, data=data,
+                   window_days=window_days, unmoved_days=unmoved_days)
+
+
+@router.get("/fleet/export.csv")
+def fleet_export_csv(
+    request: Request,
+    user: dict = Depends(auth.require_admin),
+    window_days: int = Query(30, ge=1, le=3650),
+    unmoved_days: int = Query(7, ge=0, le=3650),
+    table: str = Query("summary", pattern="^(summary|inaccessible)$"),
+):
+    from . import api_fleet_reports
+
+    return api_fleet_reports.reports_export(user=None, window_days=window_days,
+                                            unmoved_days=unmoved_days, format="csv",
+                                            table=table)

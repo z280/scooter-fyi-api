@@ -201,3 +201,19 @@ def test_the_payload_agrees_with_the_policy_about_plan_screenshots():
     # And the payload carries the same reading disclosure, so a reader of
     # either document learns the same thing.
     assert "on your device or on our servers" in detail
+
+
+def test_condition_checks_and_admin_watches_are_documented():
+    """sql/102 stores condition checks tied to accounts and admin SMS watches
+    tied to a verified phone; both the payload and the published policy say
+    what is kept, and the two agree on the 20-minute window and the caps."""
+    checks = _ENTRIES["condition_checks"]
+    for fact in ("test ride", "discarded", "20 minutes", "account link"):
+        assert fact in checks["detail"], fact
+    watches = _ENTRIES["admin_device_watches"]
+    assert "7 days" in watches["retention"]
+    for fact in ("verified phone", "consented", "STOP", "at most 20"):
+        assert fact in watches["detail"], fact
+    assert "<td>Condition checks</td>" in _POLICY_HTML
+    assert "<td>Admin SMS watches</td>" in _POLICY_HTML
+    assert "20 minutes" in _POLICY_HTML and "at most 7 days" in _POLICY_HTML

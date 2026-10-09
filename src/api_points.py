@@ -164,6 +164,12 @@ def points_schedule() -> dict[str, dict[str, int]]:
     # (found 2026-10-06). Stand-down is tiered by who stands down: an
     # existing rider (`points`) or a new one the dibs page brought in
     # (`new_rider_points`).
+    # Condition checks (docs/FLEET_REPORTS_PLAN.md §4.4, sql/102): 10 for a
+    # test-ridden check, +40 when the feed confirms the test ride.
+    schedule["condition_check"] = {"points": p.POINTS_CONDITION_CHECK}
+    schedule["condition_check_confirmed"] = {
+        "points": p.POINTS_CONDITION_CHECK_FEED_CONFIRMED}
+
     schedule["referral"] = {"points": p.POINTS_REFERRAL}
     schedule["stand_down"] = {
         "points": p.STAND_DOWN_POINTS_EXISTING,

@@ -12,8 +12,10 @@ from datetime import datetime, timezone
 import psycopg
 
 from . import (
+    admin_watch,
     analytics_rollups,
     compute,
+    condition_checks,
     device_state,
     dibs_watch,
     ingest,
@@ -181,6 +183,24 @@ def run_once() -> str | None:
             dibs_watch.watch_claims_for_cycle(snapshot_time, corrected_devices)
         except Exception as e:  # noqa: BLE001
             log.exception("dibs_watch update failed for cycle %s", cycle_id)
+            capture_exception(e)
+
+        # Fleet reports Phase 1b: settle rider condition checks against the
+        # device_state this cycle just wrote (the +40 for a feed-confirmed
+        # test ride). Derived, so isolated like the layers above.
+        try:
+            condition_checks.confirm_pending_checks(snapshot_time)
+        except Exception as e:  # noqa: BLE001
+            log.exception("condition_checks update failed for cycle %s", cycle_id)
+            capture_exception(e)
+
+        # Fleet reports Phase 2: admin SMS watches on single vehicles. It
+        # SENDS, so — like dibs_watch — comms trouble must cost the cycle
+        # nothing.
+        try:
+            admin_watch.watch_for_cycle(snapshot_time, corrected_devices)
+        except Exception as e:  # noqa: BLE001
+            log.exception("admin_watch update failed for cycle %s", cycle_id)
             capture_exception(e)
 
         _set_status(

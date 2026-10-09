@@ -162,7 +162,10 @@ _PRIVACY = {
                       "the scooter's charge when the report arrived; when an "
                       "admin voids a report, or marks a vanished vehicle as "
                       "permanently gone, the record keeps which admin account "
-                      "did it and why (removed if that account is deleted). "
+                      "(or admin GitHub login) did it and why (the account "
+                      "link is removed if that account is deleted); when a "
+                      "rider's condition check resolves or reconfirms a "
+                      "report, the record keeps which check did. "
                       "Public aggregates and the CSV export never include reporter "
                       "identity (no IP, no email — only an authenticated yes/no "
                       "flag), never the scooter code itself (only its one-way "
@@ -339,7 +342,8 @@ _PRIVACY = {
                       "resolution-8 area cell it falls in, the action and "
                       "point value, and (for a device-tied award) the "
                       "vehicle id — indefinitely. The location is exact only "
-                      "for scooter-position awards (report, QR scan, photo) "
+                      "for scooter-position awards (report, QR scan, photo, "
+                      "condition check) "
                       "— a shared vehicle in a public street. Every award "
                       "earned somewhere YOU were — completing your profile, "
                       "anything credited at a ride's start or end, and "
@@ -422,6 +426,31 @@ _PRIVACY = {
                       "/api/v1/dibs/live and the shareable /dibs/{id} "
                       "certificate, which stays reachable after expiry. "
                       "There is no deletion job.",
+        },
+        {
+            "data": "condition_checks",
+            "retention": "indefinite",
+            "detail": "Requires an account. A condition check stores your "
+                      "account, the scooter, the time, whether you did a test "
+                      "ride, how you showed you were at the scooter (a feature "
+                      "confirmation, the plate or the QR code), your answer for "
+                      "each report, and whether the fleet feed showed a rental "
+                      "or a move within 20 minutes. With no test ride your "
+                      "answers are discarded and only the account, scooter, "
+                      "time and 'no test ride' are kept. Admins can see which "
+                      "account resolved a report; other riders cannot. On "
+                      "account deletion the checks stay, with the account link "
+                      "removed; the points they earned are in the points ledger.",
+        },
+        {
+            "data": "admin_device_watches",
+            "retention": "indefinite (texts stop at expiry, at most 7 days)",
+            "detail": "Admins only. An SMS watch on one scooter stores the "
+                      "scooter, the admin's GitHub login, the admin-allowlisted "
+                      "account whose verified phone receives the texts, when "
+                      "they consented, the expiry, how many texts were sent "
+                      "(at most 20) and the last change seen. STOP ends it. "
+                      "Deleting that account deletes its watches.",
         },
         {
             "data": "referrals",

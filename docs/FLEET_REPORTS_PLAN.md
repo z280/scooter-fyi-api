@@ -1,7 +1,9 @@
 # Fleet Reports — reports that stick, and the stewardship that requires
 
-**Status:** Phase 1 implemented in #144, with the owner's 2026-10-09 overrides in #145; Phase 2 admin centre and Phase 3
-frontend pending. Phase 1b (condition checks, §4.4) is specified, not started.
+**Status:** Phase 1 implemented in #144, with the owner's 2026-10-09 overrides in #145. **Phase 1b
+(condition checks, §4.4) and Phase 2 (the admin centre, §4.1(5)) implemented together in one PR
+(owner's request, 2026-10-09) — decisions in §4.5.** Phase 3 frontend pending; its contract is
+`docs/reference/API.md` "Condition checks" and `needs_condition_check`.
 Revised 2026-10-07 against `main` (`e442e2c` api / `5aac9ba` frontend);
 Phase 1 re-verified every API citation against `main` at `044a424` on
 2026-10-09 — see §4.0 for what had moved and what was wrong.
@@ -664,7 +666,7 @@ was wrong:
 - **Acknowledging gone keeps a row forever**: withdrawing sets `not_gone`
   and records who withdrew it.
 
-### 4.4 Phase 1b: condition checks (SPEC ONLY — not built)
+### 4.4 Phase 1b: condition checks (IMPLEMENTED — see §4.5 for what was decided)
 
 *Owner, 2026-10-09.* A sticky report needs a way to be cleared by riders, not
 only by movement or an admin. Feature confirmation is where a rider is
@@ -735,6 +737,102 @@ reports in the window.
   that files them. An admin can reinstate a rider-resolved report (the one
   case where un-resolving is allowed, because the resolution was not an
   admin's judgement).
+
+### 4.5 Phases 1b + 2 as built (2026-10-09) — the decisions
+
+**Phase 1b — condition checks** (`src/condition_checks.py`,
+`src/api_condition_checks.py`, `sql/102`).
+
+- **Endpoints.** `GET /api/v1/devices/{vid}/conditions` and
+  `POST /api/v1/devices/{vid}/condition-checks`, signed in, per-account
+  limits 60/h and 20/h (a refused POST still spends quota). **Not** folded
+  into the feature POST: that one accepts anonymous reports, dedupes on its
+  own answer shape and is graded later; a check must be signed in, acts at
+  once and needs the GET's list first. The two are linked instead — the
+  feature POST's `id` is accepted as `feature_report_id`.
+- **"Negative rideability"** = standing `inaccessible`, `not_rideable` (with
+  reason), `damaged`, `dead_battery` (`fleet_reports.CONDITION_CHECK_TYPES` =
+  the suppressing set minus `not_found`). A standing **`not_found`** is never
+  asked; a test-ridden check resolves it automatically (outcome `found`) —
+  the rider found and rode it. `improperly_parked` never appears.
+- **Proof of presence is required** (added: an un-hiding resolution is the
+  mirror of griefing): a plate-valid feature confirmation by the same
+  account on the same vehicle under an hour old, the plate, or the QR.
+- **Every listed condition must be answered** on a test-ridden check
+  (`422 unanswered`); an answer for a report that stopped standing since the
+  GET is recorded `stale` and changes nothing. No standing condition →
+  `409 nothing_to_check` (stops "checks" on clean scooters for points).
+- **Test ride = No**: all answers discarded; one audit row
+  (`device_condition_checks.test_ride = false`) and nothing else.
+- **Test ride = Yes**: "no longer a problem" resolves through
+  `fleet_reports.resolve_report` — the one write path every resolver uses —
+  with `resolution_source = 'rider_check'`, the rider's account and
+  `resolved_by_check_id`; admin resolutions are `'admin'`. "Still a problem"
+  stamps `last_reconfirmed_at` / `reconfirm_count` and writes an answer row.
+  **A reconfirmation does not restart the hold** (§4.4 as written): a test
+  ride that moves the scooter past the stationary threshold clears all its
+  reports by the movement rule, reconfirmed or not. *Open question for the
+  owner — see the PR.*
+- **Points**: 10 (`condition_check`) on a test-ridden check; +40
+  (`condition_check_confirmed`) when the feed confirms; max 50. Withheld
+  (reason stored on the check) for **`own_reports_only`** (every report the
+  check acted on was the rider's own — the check still applies, it just pays
+  nothing, so "report it, then check it" is no loop), **`cooldown`** (one
+  paid check per vehicle per account per **24 h**), **`daily_cap`** (**10**
+  paid checks per account per rolling 24 h), `no_location`. The +40 only
+  follows a paid 10.
+- **Feed confirmation window: 20 minutes either side of the submission**,
+  checked every ingest cycle after `device_state` is written
+  (`condition_checks.confirm_pending_checks`). Signals: a rental episode
+  (`device_state.rental_started_at`) that started in the window; a move
+  (`first_observed_at_location` advanced past its value at check time) in
+  the window; or, seen at submission, a rental or a move in the 20 minutes
+  before. Either side, not only after, because "Did you do a test ride?" is
+  past tense — the ride normally starts before the form is sent. None by
+  20 minutes after → `unconfirmed`.
+- **`needs_condition_check`** on `/devices/current`, from the same single
+  pass as `suppressed` (`fleet_reports.suppressions_and_condition_checks`);
+  `null` when that query fails.
+- **Reinstatement**: an admin may reinstate a rider-resolved report from
+  `/admin/fleet` (stamped `reinstated_at/_by_login/reinstate_reason`); an
+  admin's resolution stays final. Points already paid are not clawed back.
+
+**Phase 2 — the admin centre** (`src/api_admin.py` `/admin/fleet/*`,
+`src/admin_watch.py`, templates `fleet_*.html`).
+
+- **Auth** is the existing GitHub-OAuth `auth.require_admin`; every POST
+  passes `_csrf_ok`. That session has no rider account, so page writes are
+  attributed to the **GitHub login** (`device_reports.resolved_by_login`,
+  `device_census_ack.*_by_login`, sql/102) while the `/api/v1/private`
+  routes keep attributing to the account. Pages call Phase 1's functions
+  (dossier, census, export, the census writes refactored into shared
+  helpers), so page and JSON cannot disagree.
+- **Reports queue** filters type, reason, neighbourhood and standing (and
+  open/resolved), 50 a page. The region is a point-in-polygon on the
+  report's own point, else its cell, else the vehicle's position, applied
+  in Python over the newest 5,000 matching rows. "Dedupe status" = other
+  reports of the same type on the vehicle within ±30 min, plus how many
+  accounts stand behind its standing reports.
+- **Dossier**: reports with provenance, condition checks with answers,
+  feature consensus and broken parts, census ack + note, stops with idle
+  time, hourly battery, SMS watches, and **"repeatedly hidden at the same
+  spot"**: all the vehicle's stops grouped within 50 m; a spot whose
+  suppressing reports fell in two or more separate stops is flagged.
+  Positions shown rounded to ~100 m.
+- **Reporter view**: per account (id + public username, never email) —
+  volume, vehicles, cells, days and hours active, counts by type, admin
+  voids, rider resolutions, and that account's condition checks (no-ride
+  checks, resolutions, feed confirmed / not). Detail: hour-of-day and res-8
+  cell spread.
+- **SMS watch**: the texts go to the **verified phone of an
+  admin-allowlisted account** named by email, with a consent tick, a
+  confirmation text first, STOP honoured (comms 409 and the
+  `sms_opted_out_at` mirror both end the watch), at most **20 texts** per
+  watch (`cap_reached`), expiry ≤ **7 days** (default 24 h), at most 10
+  live watches per account; one text per cycle summarising every change
+  (feed leave/rejoin, rental start/end, disabled, a > 50 m non-rental move).
+- **Census** and **export** pages render the Phase 1 data; CSV via
+  `/admin/fleet/export.csv`.
 
 ---
 

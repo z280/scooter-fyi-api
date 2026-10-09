@@ -413,6 +413,8 @@ else (curl, server-to-server) is unaffected by CORS.
 | `GET /api/v1/devices/current` | GeoJSON FeatureCollection of every device's current position/quality (no plate) |
 | `GET /api/v1/devices/history/hourly?days=1..14` | Fleet size per hour (last cycle in each hour), with per-model status counts where recorded |
 | `GET /api/v1/devices/{vehicle_identifier}/features` | Crowdsourced feature consensus for one vehicle |
+| `GET /api/v1/devices/{vehicle_identifier}/conditions` | Signed in: the standing negative-rideability reports a rider at the scooter is asked to confirm |
+| `POST /api/v1/devices/{vehicle_identifier}/condition-checks` | Signed in: a condition check — resolves / reconfirms those reports after a test ride; 10 points, +40 when the feed confirms the ride |
 | `GET /api/v1/vehicles/resolve?plate=…` | Plate → `{device_id, vehicle_identifier}` in the current snapshot (never the plate); 404 if none; 30/min per IP |
 | `GET /api/v1/equity-estimate` | Device share inside selected equity-rank tiers from the latest snapshot |
 | `GET /api/v1/h3/aggregates` | Per-H3-cell aggregates (device_count, trips_started_24h, battery, risk_share, dwell) at res 8/9/10 |
@@ -816,7 +818,7 @@ internet. Users must be members of an org in
 - `/admin/login` — start GitHub OAuth login
 - `/admin/auth/callback` — GitHub OAuth callback
 - `/admin/logout` — clear the admin session
-- `/admin` — redirects to `/admin/login` (signed out) or `/admin/cycles` (signed in)
+- `/admin` — index of every admin page (signed in), or a redirect to `/admin/login`
 - `/admin/cycles` — paginated cycle log with status colors
 - `/admin/cycles/{cycle_id}` — every phase timestamp, JSONB blob,
   transmission attempts, related failures
@@ -834,6 +836,31 @@ internet. Users must be members of an org in
 - `/admin/campaigns` — campaign registry + attribution;
   `/admin/campaigns/{code}/qr.png` and `.../qr.svg` — the campaign's QR;
   `/admin/campaigns/add` and `/admin/campaigns/archive` (POST)
+
+Fleet reports admin centre (docs/FLEET_REPORTS_PLAN.md Phase 2). Writes from
+these pages are attributed to the GitHub login; every POST is CSRF-checked:
+
+- `/admin/fleet` — the fleet-reports index
+- `/admin/fleet/reports?report_type=&reason=&region=&standing=&status=&page=` —
+  reports queue: type, reason, observed/reported times, reporter (account id +
+  public username), charge at report and whether it moved since, standing /
+  suppressing status, near-duplicates
+- `/admin/fleet/reports/{id}/resolve` (POST, `resolution`) — audited void /
+  resolve; `/admin/fleet/reports/{id}/reinstate` (POST, `reason`) — undo a
+  rider condition check's resolution (an admin's is final)
+- `/admin/fleet/devices/{vehicle_identifier}?days=14` — per-scooter dossier:
+  reports, condition checks, "repeatedly hidden at the same spot", feature
+  consensus and broken parts, census ack and note, moves and idle time,
+  hourly battery, SMS watches
+- `/admin/fleet/reporters?days=30&account_id=` — per-account report volume
+  and spread (types, vehicles, cells, days, hours) with rider resolutions
+- `/admin/fleet/watches` — SMS watch on one vehicle (an allowlisted admin
+  account's verified phone, consent tick, STOP, ≤ 20 texts, ≤ 7 days);
+  POST to subscribe, `/admin/fleet/watches/{id}/unsubscribe` (POST) to stop
+- `/admin/fleet/census?list=arrivals|missing|gone&hours=72` — the census, with
+  `/admin/fleet/census/{vid}/ack`, `/unack` and `/note` (POST)
+- `/admin/fleet/export?window_days=30&unmoved_days=7` — the advocacy export;
+  `/admin/fleet/export.csv?table=summary|inaccessible` downloads it
 
 ## Run locally
 

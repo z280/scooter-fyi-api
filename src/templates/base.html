@@ -23,11 +23,20 @@
     .status-upstream_failure { color: #c40; }
     .status-internal_failure { color: #c00; }
     .status-in_progress { color: #888; }
+    .flash-ok { color: #2a7; } .flash-err { color: #c00; }
+    .muted { color: #777; } .tag { display:inline-block; padding:1px 6px; border-radius:3px;
+           font-size:11px; background:#eee; } .tag-warn { background:#fde2c8; }
+    .tag-bad { background:#f8cfcf; } .tag-ok { background:#d4f0dc; }
+    form.inline { display:inline; margin:0; }
+    .filters { margin: 12px 0; } .filters select, .filters input { font-size: 13px; padding: 4px; }
+    h2 { margin-top: 28px; }
     code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
   </style>
 </head>
 <body>
 <nav>
+  <a href="/admin">Index</a>
+  <a href="/admin/fleet">Fleet</a>
   <a href="/admin/cycles">Cycles</a>
   <a href="/admin/scheduler">Scheduler</a>
   <a href="/admin/failures">Failures</a>

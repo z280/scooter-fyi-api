@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}admin · veo-audit admin{% endblock %}
+{% block content %}
+<h1>Admin</h1>
+
+<h2>Fleet reports</h2>
+<p class="muted">Reports that stick, and the stewardship that requires
+(docs/FLEET_REPORTS_PLAN.md). Every write here is attributed to your GitHub login.</p>
+<ul>
+  <li><a href="/admin/fleet/reports">Reports queue</a> — recent device reports, filterable by type, reason, region and standing; resolve / void / reinstate.</li>
+  <li><a href="/admin/fleet/reports?standing=yes">Standing reports</a> — what is hiding vehicles right now.</li>
+  <li><a href="/admin/fleet/reporters">Reporter view</a> — per-account volume and spread, with rider condition-check resolutions.</li>
+  <li><a href="/admin/fleet/census?list=missing">Census: missing</a> · <a href="/admin/fleet/census?list=arrivals">arrivals</a> · <a href="/admin/fleet/census?list=gone">gone</a></li>
+  <li><a href="/admin/fleet/watches">SMS watches</a> — be texted when one vehicle moves or changes state.</li>
+  <li><a href="/admin/fleet/export">Export for advocacy</a> — inaccessible, still-unmoved, broken parts, problem reports; CSV.</li>
+  <li>Per-scooter dossier: <code>/admin/fleet/devices/&lt;vehicle_identifier&gt;</code> (linked from every list).</li>
+</ul>
+
+<h2>Operations</h2>
+<ul>
+  <li><a href="/admin/cycles">Cycles</a> · <a href="/admin/failures">Failures</a> · <a href="/admin/scheduler">Scheduler</a></li>
+  <li><a href="/admin/analytics">Analytics</a> · <a href="/admin/campaigns">Campaigns</a></li>
+  <li><a href="/admin/regions?layer=neighborhood">Regions</a></li>
+  <li><a href="/admin/admins">Admin allowlist</a></li>
+</ul>
+{% endblock %}

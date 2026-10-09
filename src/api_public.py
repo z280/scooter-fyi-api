@@ -322,18 +322,37 @@ def _rental_outcomes() -> dict[str, tuple[int, int, int, int, int]] | None:
         return None
 
 
-def _suppressions(cycle_id: Any) -> dict[str, tuple[str, datetime]] | None:
-    """{vehicle_identifier: (reason, since)} for vehicles a standing signed-in
-    report suppresses (src/fleet_reports.py). None on failure, which the
-    payload emits as `suppressed: null` — unknown, not "not suppressed": a
-    client must not read an outage as a clean bill."""
+def _suppressions_and_checks(
+    cycle_id: Any,
+) -> tuple[dict[str, tuple[str, datetime]] | None, set[str] | None]:
+    """({vehicle_identifier: (reason, since)}, {vehicle needing a condition
+    check}) from ONE pass over the standing signed-in reports
+    (src/fleet_reports.py). (None, None) on failure, which the payload emits
+    as `suppressed: null` and `needs_condition_check: null` — unknown, not
+    "no": a client must not read an outage as a clean bill."""
     try:
         with connection() as conn:
             with conn.cursor() as cur:
-                return fleet_reports.suppressions(cur, cycle_id)
+                return fleet_reports.suppressions_and_condition_checks(cur, cycle_id)
     except Exception:  # noqa: BLE001
         log.warning("suppression unavailable — suppressed emitted as null this cycle")
+        return None, None
+
+
+def _suppressions(cycle_id: Any) -> dict[str, tuple[str, datetime]] | None:
+    """The suppression half of _suppressions_and_checks."""
+    return _suppressions_and_checks(cycle_id)[0]
+
+
+def _condition_check_field(needs: set[str] | None, vid: str | None) -> bool | None:
+    """`needs_condition_check` (plan §4.4): true when the vehicle has at least
+    one standing negative-rideability report (fleet_reports.
+    CONDITION_CHECK_TYPES), so the map can invite riders to check it. An
+    invitation, not a verdict; independent of reliability_tier and of
+    suppressed. None when the query failed."""
+    if needs is None:
         return None
+    return (vid or "") in needs
 
 
 def _suppression_fields(by: dict[str, tuple[str, datetime]] | None,
@@ -634,7 +653,7 @@ def _devices_current_impl(
     # Suppression (docs/FLEET_REPORTS_PLAN.md §2.5) — a separate query for the
     # same reason as rental_outcomes: the payload SELECT is read positionally.
     # None means "unknown this cycle" and is emitted as null, never as false.
-    suppressed_by = _suppressions(cycle_id)
+    suppressed_by, needs_check = _suppressions_and_checks(cycle_id)
 
     # The RAW vehicle_plate is emitted ONLY when include_plate is set — i.e.
     # from /api/v1/user/devices/current for an admin session. On the public
@@ -747,6 +766,9 @@ def _devices_current_impl(
             # payload: the client keeps it out of the rider's available set and
             # out of the planner, and its card says why.
             **_suppression_fields(suppressed_by, r[5]),
+            # Phase 1b (plan §4.4): standing not_rideable / dead_battery /
+            # damaged / inaccessible report → invite a rider condition check.
+            "needs_condition_check": _condition_check_field(needs_check, r[5]),
             # sql/072 — the one reliability signal that survived validation:
             # a vehicle's no-go rate persists at r=+0.275 across weeks, and
             # the worst 10% of vehicles carry 32.4% of all failures.

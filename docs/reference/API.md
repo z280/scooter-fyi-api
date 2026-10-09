@@ -812,6 +812,7 @@ between polls of the same cycle.
 | `suppressed` | bool \| null | **Should a rider be sent to this vehicle at all?** `true` when a signed-in, unresolved device report of any type **except `improperly_parked`** still stands under the signed-in rule above (not moved, charge not risen). The client keeps a suppressed vehicle out of the rider's available set and out of route planning — **excluded, not penalised** — and its card says why. **Deliberately separate from `reliability_tier`** (docs/FLEET_REPORTS_PLAN.md §2.5): a fully charged scooter behind a fence rides perfectly, so it is `suppressed` with reason `inaccessible` while its tier says whatever its hardware earns. Anonymous reports never suppress. `improperly_parked` never suppresses — a badly parked scooter is reachable and rideable, and the report is Veo's to act on. Broken parts from feature confirmation (`device_features.poor_condition`) never suppress — the scooter still rides. `null` when the suppression query failed this cycle: **unknown, not "not suppressed"**. |
 | `suppressed_reason` | string \| null | Why, when `suppressed`: the strongest standing report type, in this order — `inaccessible`, `not_found`, `not_rideable`, `damaged`, `dead_battery`. `null` otherwise. Copy for `inaccessible` must discourage retrieval ("on private property — don't go in"). |
 | `suppressed_since` | string \| null | ISO 8601: the oldest still-standing report of `suppressed_reason`'s type — "hidden for this reason since". `null` when not suppressed. |
+| `needs_condition_check` | bool \| null | `true` when the vehicle has at least one **standing negative-rideability report** — a signed-in, unresolved `not_rideable`, `dead_battery`, `damaged` or `inaccessible` report that still holds under the signed-in rule (not moved, charge not risen). The map uses it to **invite** a rider [condition check](#condition-checks--get-apiv1devicesvehicle_identifierconditions-and-post-condition-checks). An invitation, not a verdict: independent of `reliability_tier` and of `suppressed` (a vehicle suppressed only by `not_found` is `false` — nobody standing at it can be asked whether it is missing). `null` when the query failed this cycle. |
 | `feature_status` | string | How much to trust what we know about this vehicle's crowdsourced equipment: `"needs_features_confirmed"` (nobody has ever reported it — every device starts here), `"needs_review"` (two reports disagreed), or `"up_to_date"`. Always on the wire, never behind an `?include=` token: it is what a client's "☑️ Confirm Features" affordance reads to decide whether it is offering 12, 14 or 6 points, so opting in would mean showing the wrong number. See [`POST /api/v1/reports/device-features`](#post-apiv1reportsdevice-features). |
 | `device_features` | object \| null | `{ bell, cup_holder, phone_holder, basket, poor_condition[] }` — the current consensus. **`null` until something is known about the vehicle**, and each field inside is itself **tri-state: `true` / `false` / `null`** — `false` claims a rider looked and saw nothing, `null` says nobody has answered that question yet. Partial objects are normal: a vehicle known only through a ride-survey basket answer (or the Rover catalog seed) carries `basket` with the other three `null`, and a vehicle confirmed before the basket question existed (sql/058) carries `basket: null`. Filter with `=== true` and the distinction never bites — an unknown feature doesn't satisfy a "must have it" filter, same as an absent one. `poor_condition` lists which of the *present* features are not in good condition (always a subset of the `true` ones; empty means everything works). |
 | `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, active negative reports, and peer-relative dwell outliers (a dwell-outlier per the rules under `dwell_percentile_hood` costs one extra tier, stacking with the absolute-dwell demerits). `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
@@ -2622,6 +2623,116 @@ The vote is **per field**, which is what makes "2/3 of what's correct"
 reachable: three riders who each disagree about a different feature have no
 majority *answer set* at all, but a clear 2/3 on every individual field.
 
+### Condition checks — `GET /api/v1/devices/{vehicle_identifier}/conditions` and `POST …/condition-checks`
+
+docs/FLEET_REPORTS_PLAN.md §4.4 (Phase 1b). A rider standing at a scooter —
+usually straight after [confirming its features](#post-apiv1reportsdevice-features) —
+confirms whether its standing reports still hold. **Requires starting the
+scooter**: the check only acts when the rider says they did a test ride.
+Both routes require a **bearer token** (`401` without; a resolution is
+attributed and points are never anonymous). Rate limits, per account:
+`GET` 60/hour, `POST` 20/hour (`429` with `Retry-After`; a refused `POST`
+still spends quota).
+
+**Which reports are asked about.** Standing (signed in, unresolved, not
+moved, charge not risen) `inaccessible`, `not_rideable` (with its `reason`),
+`damaged` and `dead_battery` reports. A standing **`not_found`** is never
+asked — a rider at the scooter has found it — and is resolved automatically
+by a test-ridden check (`auto_resolves`). `improperly_parked` never appears.
+
+**Why a separate endpoint, not part of the feature POST.** The feature
+confirmation accepts anonymous reports and is graded later; a check must be
+signed in, acts immediately, and needs this list first. They are linked
+instead: the feature POST's `id` is accepted as `feature_report_id`, which
+is the check's proof of presence, so the rider never types the plate twice.
+
+#### `GET /api/v1/devices/{vehicle_identifier}/conditions`
+
+```json
+{ "vehicle_identifier": "8c4a1f0d2e9b7a35", "as_of": "2026-10-09T18:00:00+00:00",
+  "needs_condition_check": true,
+  "conditions": [
+    { "report_id": 812, "report_type": "inaccessible", "reason": null,
+      "observed_at": "2026-10-06T17:40:00+00:00", "reported_at": "2026-10-06T18:02:11+00:00",
+      "last_reconfirmed_at": null, "reconfirm_count": 0, "own_report": false,
+      "auto_resolves": false },
+    { "report_id": 830, "report_type": "not_rideable", "reason": "flat_tire",
+      "observed_at": "2026-10-08T09:00:00+00:00", "reported_at": "2026-10-08T09:05:00+00:00",
+      "last_reconfirmed_at": "2026-10-09T08:00:00+00:00", "reconfirm_count": 1,
+      "own_report": false, "auto_resolves": false } ],
+  "auto_resolves": [
+    { "report_id": 840, "report_type": "not_found", "reason": null, "…": "same fields",
+      "auto_resolves": true } ],
+  "points": { "base": 10, "feed_confirmed": 40, "max": 50,
+              "eligible": true, "withheld_reason": null },
+  "feed_window_minutes": 20 }
+```
+
+`conditions` are in suppression priority (`inaccessible`, `not_rideable`,
+`damaged`, `dead_battery`), oldest first within a type. Ask "Still a
+problem? Y/N" for each, showing `observed_at` (when the reporter saw it) and
+`reason`. `own_report` marks the asking rider's own report. `points` says
+what a test-ridden check would pay **this rider now**: `withheld_reason` is
+`own_reports_only`, `cooldown` or `daily_cap` when `eligible` is false. The
+reporter is never disclosed. `404` for a vehicle we never tracked.
+
+#### `POST /api/v1/devices/{vehicle_identifier}/condition-checks`
+
+```json
+{ "answers": [ { "report_id": 812, "still_a_problem": false },
+               { "report_id": 830, "still_a_problem": true } ],
+  "test_ride": true,
+  "feature_report_id": 9917 }
+```
+
+- **Proof of presence — at least one** of `feature_report_id` (the `id` from
+  your own plate-valid `POST /reports/device-features` on this vehicle, under
+  an hour old), `submitted_plate`, or `qr_raw_value` (the scanned sticker).
+  None that holds → `422 presence_not_proven`.
+- **`test_ride: false`** → `200` with `discarded: true`: **every answer is
+  thrown away**, no report changes, no points. One minimal audit row
+  (account, vehicle, time) is kept.
+- **`test_ride: true`** → every listed condition must be answered (`422
+  unanswered` with the missing `report_ids` — re-`GET` and ask again). Each
+  `still_a_problem: false` **resolves** that report (`resolution_source:
+  "rider_check"`, attributed to your account and the check — distinct from
+  an admin void); each `true` **reconfirms** it (`last_reconfirmed_at`,
+  `reconfirm_count`; the report keeps holding until the vehicle moves, as
+  before — a reconfirmation does not restart it, and a test ride that moves
+  the scooter clears its reports by the movement rule). Standing
+  `not_found` reports are resolved (`found`). An answer for a report that
+  stopped standing since the `GET` is kept as `stale` and changes nothing.
+  Resolving the last standing report un-suppresses the vehicle on the next
+  request.
+
+```json
+{ "check_id": 501, "vehicle_identifier": "8c4a1f0d2e9b7a35",
+  "submitted_at": "2026-10-09T18:03:00+00:00", "test_ride": true, "discarded": false,
+  "resolved": [812], "reconfirmed": [830], "found": [840], "stale": [],
+  "points_awarded": 10, "points_pending": 40, "points_withheld_reason": null,
+  "feed_status": "pending", "feed_window_minutes": 20 }
+```
+
+**Points (max 50 per check).** `points_awarded` is the 10, paid now.
+`points_pending: 40` is paid later, by the ingest cycle, when the feed
+confirms the test ride: a rental episode (`is_reserved`) that **started**
+within 20 minutes either side of the submission, or a move recorded within
+that window (the question is past tense, so a ride that began just before
+the form counts). No signal by 20 minutes after the check → `unconfirmed`,
+no +40. The +40 only ever follows a paid 10. `points_withheld_reason`:
+`own_reports_only` (every report the check acted on was yours — it still
+applies, it just pays nothing), `cooldown` (already paid for this vehicle
+in the last 24 h), `daily_cap` (10 paid checks in the last 24 h),
+`no_location`, or `no_test_ride`.
+
+**Errors.** Every refusal is `{"detail": {"code", "message", …}}`:
+`404 unknown_vehicle`; `409 nothing_to_check` (no standing condition — the
+form should not have been offered); `422 presence_not_proven`,
+`unanswered` (`report_ids`), `unknown_report` (a report on another vehicle,
+`report_ids`), `not_a_condition` (a report of a type that is not asked
+about, `report_ids`); plus FastAPI's own `422` for a malformed body
+(no proof field at all, a duplicated `report_id`).
+
 ### `POST /api/v1/reports/discount`
 
 **Equity receipt claims (sql/093, docs/PLAN_EQUITY_RECEIPTS.md Phase 1).** A `multipart/form-data` request carrying `vehicle_plate` (or any claim field) is a receipt claim:
@@ -2872,7 +2983,9 @@ touches.
 report: from the next request it counts toward neither
 `has_negative_report` nor `suppressed`, nor the export. → `{id,
 vehicle_identifier, report_type, reported_at, resolved_at, resolved_by,
-resolution}`. Final — `409` if already resolved (there is no un-resolve, so
+resolution, resolution_source: "admin"}`. A rider's condition check
+resolves through the same write path with `resolution_source:
+"rider_check"`; only those can be reinstated (from `/admin/fleet`). Final — `409` if already resolved (there is no un-resolve, so
 the audit trail cannot be rewritten), `404` for no such report. The `/h3`
 aggregate honours a resolution only from cycles after it, so a published
 cycle is never reshaded.
@@ -2929,8 +3042,15 @@ suppression: {suppressed, suppressed_reason, suppressed_since},
 reports: [{id, report_type, reason, remapped_from_reason, observed_at,
 reported_at, signed_in, reporter_account_id, reporter_email,
 range_at_report_meters, moved_since, standing, resolved_at, resolved_by,
-resolution}], features: {feature_status, present, poor_condition,
-confirmed_at, broken_parts} | null, census: ack}`. Newest report first.
+resolution, resolution_source, resolved_by_check_id, last_reconfirmed_at,
+reconfirm_count, reinstated_at, reinstated_by, reinstate_reason,
+reporter_public_username}], condition_checks: [{id, account_id,
+public_username, submitted_at, test_ride, proof, reports_resolved,
+reports_reconfirmed, feed_status, feed_signal, points, points_withheld,
+answers: [{report_id, still_a_problem, outcome, own_report}]}],
+features: {feature_status, present, poor_condition,
+confirmed_at, broken_parts} | null, census: ack}`. `resolved_by` is the
+admin's email, or the GitHub login when resolved from `/admin/fleet`. Newest report first.
 `standing` = counts toward suppression right now. Movement history is
 `/devices/{vehicle_identifier}/history`. `404` when nothing knows the vehicle.
 
@@ -3797,6 +3917,8 @@ the whole ledger — not just the returned page.
 | Action | Points | Earned by |
 |---|---|---|
 | `qr_scan` | 100 | First scan of a given device by you |
+| `condition_check_confirmed` | +40 | The feed confirms a paid condition check's test ride (a rental episode or a move within 20 min of it) — see [condition checks](#condition-checks--get-apiv1devicesvehicle_identifierconditions-and-post-condition-checks) |
+| `condition_check` | 10 | A [condition check](#condition-checks--get-apiv1devicesvehicle_identifierconditions-and-post-condition-checks) with `test_ride: true`, whatever the answers. Once per vehicle per 24 h, at most 10 a day, never for checking only your own reports |
 | `device_features_review` | 14 | A valid `POST /reports/device-features` on a device whose `feature_status` is `needs_review` |
 | `device_features_first` | 12 | A valid `POST /reports/device-features` on a device nobody has confirmed before |
 | `report_not_rideable` | 10 | `not_rideable` device report |

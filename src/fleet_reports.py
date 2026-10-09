@@ -79,6 +79,29 @@ SUPPRESSION_REASON_PRIORITY: tuple[str, ...] = (
 #: two tuples; tests/test_fleet_reports.py holds that.
 NON_SUPPRESSING_REPORT_TYPES: tuple[str, ...] = ("improperly_parked",)
 
+#: "Negative rideability" for a condition check (plan §4.4, Phase 1b): the
+#: standing reports a rider at the scooter is asked "Still a problem? Y/N"
+#: about. Exactly the suppressing types minus `not_found` — a rider standing
+#: at the scooter has already answered that one (it is here), so it is never
+#: asked; see FOUND_ON_CHECK_TYPES. `improperly_parked` never appears: it
+#: does not suppress, and it is a report to Veo, not a rideability claim.
+#: Ordered as SUPPRESSION_REASON_PRIORITY, which is the order they are listed.
+CONDITION_CHECK_TYPES: tuple[str, ...] = (
+    "inaccessible",
+    "not_rideable",
+    "damaged",
+    "dead_battery",
+)
+
+#: Standing reports a test-ride check resolves WITHOUT asking: a rider who
+#: started and rode the scooter has found it. Listed on the GET as
+#: `auto_resolves: true` so the client can say so, never asked.
+FOUND_ON_CHECK_TYPES: tuple[str, ...] = ("not_found",)
+
+#: Who resolved a report (device_reports.resolution_source, sql/102).
+RESOLUTION_SOURCE_ADMIN = "admin"
+RESOLUTION_SOURCE_RIDER_CHECK = "rider_check"
+
 #: How much the charge must RISE over the reading at report time before the
 #: rise counts as somebody servicing the vehicle. A battery swap or a charge
 #: is a jump of tens of percent; the feed's range is otherwise frozen while a
@@ -179,6 +202,40 @@ def suppressions(cur, cycle_id: Any) -> dict[str, tuple[str, datetime]]:
     return out
 
 
+def suppressions_and_condition_checks(
+    cur, cycle_id: Any,
+) -> tuple[dict[str, tuple[str, datetime]], set[str]]:
+    """One pass over the standing reports for the whole cycle, answering two
+    questions: `suppressions()` (above), and which vehicles carry a standing
+    CONDITION_CHECK_TYPES report — `needs_condition_check` on
+    /devices/current (plan §4.4). The second is an invitation to riders, not
+    a verdict, and is independent of both `reliability_tier` and
+    `suppressed`, even though in practice most such vehicles are also
+    suppressed."""
+    cur.execute(_open_reports_sql(single_vehicle=False), _params(cycle_id))
+    suppressed: dict[str, tuple[str, datetime]] = {}
+    needs_check: set[str] = set()
+    for vid, report_type, reported_at, _id in cur.fetchall():
+        suppressed.setdefault(vid, (report_type, reported_at))
+        if report_type in CONDITION_CHECK_TYPES:
+            needs_check.add(vid)
+    return suppressed, needs_check
+
+
+def standing_report_ids_all(cur, cycle_id: Any) -> set[int]:
+    """Ids of every standing report on a vehicle in `cycle_id` — the reports
+    queue's "standing" filter."""
+    cur.execute(_open_reports_sql(single_vehicle=False), _params(cycle_id))
+    return {int(row[3]) for row in cur.fetchall()}
+
+
+def standing_report_ids(cur, cycle_id: Any, vehicle_identifier: str) -> list[int]:
+    """Ids of the standing reports on one vehicle, priority order."""
+    cur.execute(_open_reports_sql(single_vehicle=True),
+                _params(cycle_id, vid=vehicle_identifier))
+    return [int(row[3]) for row in cur.fetchall()]
+
+
 def open_reports_for(cur, cycle_id: Any, vehicle_identifier: str) -> list[dict[str, Any]]:
     """The standing reports on one vehicle, priority first — what the
     identify answer shows a rider standing in front of a hidden scooter.
@@ -189,6 +246,89 @@ def open_reports_for(cur, cycle_id: Any, vehicle_identifier: str) -> list[dict[s
         {"report_type": t, "reported_at": at.isoformat() if at else None}
         for _vid, t, at, _id in cur.fetchall()
     ]
+
+
+# ---------------------------------------------------------------------------
+# Resolving a report — one implementation for every resolver
+# ---------------------------------------------------------------------------
+
+class ReportNotFound(LookupError):
+    """No device report with that id."""
+
+
+class ReportAlreadyResolved(Exception):
+    """The report is resolved already; resolutions are final."""
+
+
+def resolve_report(
+    cur, report_id: int, *, source: str, resolution: str,
+    account_id: int | None = None, login: str | None = None,
+    check_id: int | None = None,
+) -> tuple:
+    """Resolve one report, attributed. THE one write path for a resolution:
+    the Phase 1 admin endpoint (source 'admin', the admin's account), the
+    /admin pages (source 'admin', the GitHub login — that session has no
+    rider account) and a rider's condition check (source 'rider_check',
+    the rider's account and the check id) all come through here, so the
+    audit columns cannot be filled differently by different callers.
+
+    Returns (id, vehicle_identifier, report_type, reported_at, resolved_at).
+    Raises ReportNotFound / ReportAlreadyResolved. Final: there is no
+    un-resolve, except an admin reinstating a RIDER resolution
+    (`reinstate_report`)."""
+    if source not in (RESOLUTION_SOURCE_ADMIN, RESOLUTION_SOURCE_RIDER_CHECK):
+        raise ValueError(f"unknown resolution source {source!r}")
+    cur.execute(
+        """
+        UPDATE device_reports
+           SET resolved_at = NOW(), resolved_by = %s, resolution = %s,
+               resolution_source = %s, resolved_by_login = %s,
+               resolved_by_check_id = %s
+         WHERE id = %s AND resolved_at IS NULL
+        RETURNING id, vehicle_identifier, report_type, reported_at, resolved_at
+        """,
+        (account_id, resolution, source, login, check_id, report_id),
+    )
+    row = cur.fetchone()
+    if row is not None:
+        return row
+    cur.execute("SELECT 1 FROM device_reports WHERE id = %s", (report_id,))
+    if cur.fetchone() is None:
+        raise ReportNotFound(report_id)
+    raise ReportAlreadyResolved(report_id)
+
+
+class NotRiderResolved(Exception):
+    """Only a rider-check resolution can be reinstated."""
+
+
+def reinstate_report(cur, report_id: int, *, login: str, reason: str) -> None:
+    """Undo a RIDER's resolution (plan §4.4, "Griefing controls"): a false
+    "no longer a problem" un-hides a vehicle, and an admin can put the
+    report back. An ADMIN's resolution is final and is refused. The rider's
+    answer stays in device_condition_check_answers, and who reinstated it
+    and why is stamped on the report, so the history is not erased.
+    Points already paid for the check are not clawed back (the ledger is
+    append-only)."""
+    cur.execute(
+        """
+        UPDATE device_reports
+           SET resolved_at = NULL, resolved_by = NULL, resolution = NULL,
+               resolution_source = NULL, resolved_by_login = NULL,
+               resolved_by_check_id = NULL,
+               reinstated_at = NOW(), reinstated_by_login = %s,
+               reinstate_reason = %s
+         WHERE id = %s AND resolution_source = %s
+        RETURNING id
+        """,
+        (login, reason, report_id, RESOLUTION_SOURCE_RIDER_CHECK),
+    )
+    if cur.fetchone() is not None:
+        return
+    cur.execute("SELECT 1 FROM device_reports WHERE id = %s", (report_id,))
+    if cur.fetchone() is None:
+        raise ReportNotFound(report_id)
+    raise NotRiderResolved(report_id)
 
 
 # ---------------------------------------------------------------------------
