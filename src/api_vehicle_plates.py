@@ -22,6 +22,17 @@ the two directions the client needs are answered here instead:
            plate. Rate-limited per IP so it cannot be walked to build a
            plate -> HMAC-identifier table.
 
+  IDENTIFY GET /api/v1/vehicles/resolve?qr=<raw payload>&explain=true (public)
+           The same lookup, extended for docs/FLEET_REPORTS_PLAN.md §2.7: a
+           rider standing in front of a scooter the map does not show can ask
+           WHY. `qr=` takes the sticker's raw payload (src/qr.py's
+           extract_plate reads the plate out of it), and `explain=true` adds
+           the reason — on_map / suppressed / missing / gone — reading
+           device_state for vehicles that have left the feed. Same rule as
+           the plain lookup, by the owner's decision of 2026-10-08: public,
+           30/min per IP, never echoes the plate, 404 for none or ambiguous.
+           One plate oracle with one policy, not two.
+
 Both resolve against the CURRENT snapshot — the newest complete cycle, via
 api_public.latest_complete_cycle, the same one /api/v1/devices/current serves —
 because `device_id` is Veo's bike_id and may rotate per trip: an id from an
@@ -43,13 +54,17 @@ logger (RedactPlateQuery below is that filter's historical name).
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
+from . import fleet_reports, vehicle_identity
 from .accounts import SessionUser, require_session
 from .api_public import latest_complete_cycle
 from .client_ip import real_client_ip
+from .identity import hash_plate
+from .qr import extract_plate
 from .pg import connection
 from .log_redaction import RedactSensitiveQuery
 from .ratelimit import enforce
@@ -64,6 +79,9 @@ MAX_DEVICE_IDS = 50
 _MAX_DEVICE_ID_LEN = 64
 #: Generous for a plate (Veo's are 7 digits) plus hand-typed separators.
 _MAX_PLATE_LEN = 32
+#: A sticker's raw payload is a deep-link URL; sql/032 stores them, and none
+#: is anywhere near this. Bounded so the endpoint never parses a novel.
+_MAX_QR_LEN = 1024
 
 # (limit, window_seconds).
 # Forward: the client batches on-screen ids, so a rider panning the map makes a
@@ -93,6 +111,17 @@ _PLATE_SEPARATORS = re.compile(r"[\s-]+")
 _SQL_NORMALIZED_PLATE = (
     "upper(regexp_replace(r.vehicle_plate, '[[:space:]-]+', '', 'g'))"
 )
+#: The same, over device_state's copy of the plate (sql/004).
+_SQL_NORMALIZED_STATE_PLATE = (
+    "upper(regexp_replace(ds.vehicle_plate, '[[:space:]-]+', '', 'g'))"
+)
+
+#: `last_seen` on a vehicle that has left the feed is rounded to 3 decimals
+#: (~100 m), the public CSV's rule. "Where we last saw it" needs a
+#: neighbourhood, not a doorstep — and the vehicles most likely to have left
+#: the feed include the ones reported inaccessible, whose exact point is
+#: somebody's yard (plan §6).
+_LAST_SEEN_DECIMALS = 3
 
 
 _PLATE_QUERY = re.compile(r"([?&]plate=)[^&#]*")
@@ -197,18 +226,47 @@ def vehicle_plates(
 def resolve_plate(
     request: Request,
     response: Response,
-    plate: str = Query(..., description="Plate as printed / scanned; separators ignored"),
+    plate: str | None = Query(
+        None, description="Plate as printed / scanned; separators ignored"),
+    qr: str | None = Query(
+        None, description="A sticker's raw QR payload, as the camera read it. "
+                          "Alternative to `plate`; exactly one is required."),
+    explain: bool = Query(
+        False, description="Also say WHY the vehicle is or is not on the map "
+                           "(docs/FLEET_REPORTS_PLAN.md §2.7), and answer for "
+                           "vehicles that have left the feed."),
 ) -> dict[str, Any]:
-    """plate -> the vehicle carrying it in the current snapshot.
+    """plate (or QR payload) -> the vehicle carrying it.
 
-    Public. Returns only `device_id` and `vehicle_identifier` — both already
-    in the public devices payload — never the plate. 404 when no vehicle in
-    the current snapshot carries it (or, defensively, when more than one
-    does: missing beats wrong).
+    Public. Returns only identifiers the public devices payload already
+    carries — never the plate. 404 when no vehicle carries it, or,
+    defensively, when more than one does: missing beats wrong.
+
+    Without `explain` this is exactly the original lookup: the current
+    snapshot only, `{device_id, vehicle_identifier}`. With `explain=true`
+    the answer adds `status` and its evidence, and a vehicle that has LEFT
+    the feed (missing, or acknowledged gone) answers 200 instead of 404 —
+    from device_state, with `device_id: null` because a stale bike_id may
+    belong to another vehicle now.
     """
-    if len(plate) > _MAX_PLATE_LEN:
+    if (plate is None) == (qr is None):
+        # FastAPI's own answer for a missing required query parameter, kept so
+        # a client that sent nothing sees the same status it always did.
+        raise HTTPException(422, detail="exactly one of plate or qr is required")
+    if qr is not None:
+        if len(qr) > _MAX_QR_LEN:
+            raise HTTPException(400, detail=f"qr is at most {_MAX_QR_LEN} characters")
+        raw_plate = extract_plate(qr)
+        if not raw_plate or len(raw_plate) > _MAX_PLATE_LEN:
+            # Nothing a plate could be (a wifi QR, an unrelated URL). Refused
+            # before the rate limit: it reveals nothing, so it costs nothing.
+            raise HTTPException(400, detail={"error": "unreadable",
+                                             "message": "no plate in this QR code"})
+    else:
+        raw_plate = plate
+    if len(raw_plate) > _MAX_PLATE_LEN:
         raise HTTPException(400, detail=f"plate is at most {_MAX_PLATE_LEN} characters")
-    want = normalize_plate(plate)
+    want = normalize_plate(raw_plate)
     if not want:
         raise HTTPException(400, detail="plate must not be empty")
     ip = real_client_ip(request) or "?"
@@ -216,12 +274,13 @@ def resolve_plate(
     # The 404 is raised AFTER the connection block: an exception inside it
     # rolls the transaction back, which would un-record the rate-limit event
     # — and misses are exactly the enumeration traffic the limit is for.
+    explained: dict[str, Any] | None = None
     with connection() as conn:
         with conn.cursor() as cur:
             enforce(cur, bucket="vehicle_resolve_ip", key=ip,
                     limit=LIMIT_RESOLVE_PER_IP[0],
                     window_seconds=LIMIT_RESOLVE_PER_IP[1])
-            cycle_id, _snapshot_time = latest_complete_cycle(cur)
+            cycle_id, snapshot_time = latest_complete_cycle(cur)
             cur.execute(
                 f"""
                 SELECT DISTINCT r.device_id, r.vehicle_identifier
@@ -234,7 +293,17 @@ def resolve_plate(
                 (cycle_id, want),
             )
             rows = cur.fetchall()
+            if explain and len(rows) == 1:
+                explained = _explain_on_map(cur, cycle_id, snapshot_time, rows[0][1])
+            elif explain and not rows:
+                explained = _explain_off_feed(cur, cycle_id, snapshot_time,
+                                              raw_plate, want)
 
+    response.headers["Cache-Control"] = _RESOLVE_CACHE_HEADER
+    if explain and explained is not None:
+        if rows:
+            explained["device_id"] = rows[0][0]
+        return explained
     if len(rows) != 1:
         raise HTTPException(
             404,
@@ -242,5 +311,100 @@ def resolve_plate(
             headers={"Cache-Control": _RESOLVE_CACHE_HEADER},
         )
     device_id, vehicle_identifier = rows[0]
-    response.headers["Cache-Control"] = _RESOLVE_CACHE_HEADER
     return {"device_id": device_id, "vehicle_identifier": vehicle_identifier}
+
+
+def _iso(v: datetime | None) -> str | None:
+    return v.isoformat() if v else None
+
+
+def _card(vid: str, *, model: str | None, form_factor: str | None) -> dict[str, Any]:
+    """What a modal can show for a vehicle with no marker: the public label
+    and what kind of vehicle it is. Nothing here is not already public."""
+    return {
+        "public_name": vehicle_identity.public_name(vid),
+        "vehicle_model_name": model,
+        "form_factor": form_factor,
+    }
+
+
+def _explain_on_map(cur, cycle_id: Any, snapshot_time: datetime,
+                    vid: str) -> dict[str, Any]:
+    """A vehicle in the current snapshot: on the map, or suppressed."""
+    reports = fleet_reports.open_reports_for(cur, cycle_id, vid)
+    cur.execute(
+        """
+        SELECT current_vehicle_model_name, current_form_factor
+          FROM device_state WHERE vehicle_identifier = %s
+        """,
+        (vid,),
+    )
+    row = cur.fetchone() or (None, None)
+    first = reports[0] if reports else None
+    return {
+        "device_id": None,  # filled by the caller from the snapshot row
+        "vehicle_identifier": vid,
+        "status": "suppressed" if first else "on_map",
+        "suppressed_reason": first["report_type"] if first else None,
+        "suppressed_since": first["reported_at"] if first else None,
+        "open_reports": reports,
+        "last_observed_at": _iso(snapshot_time),
+        "hours_missing": None,
+        "last_seen": None,
+        "gone_acknowledged_at": None,
+        **_card(vid, model=row[0], form_factor=row[1]),
+        "as_of": _iso(snapshot_time),
+    }
+
+
+def _explain_off_feed(cur, cycle_id: Any, snapshot_time: datetime,
+                      raw_plate: str, want: str) -> dict[str, Any] | None:
+    """A vehicle the current snapshot does not carry: missing, or gone.
+
+    Matched in device_state by the HMAC identifier (src/identity.py's
+    hash_plate, over the plate as read and as normalised — the ingest hashes
+    the plate exactly as the feed spells it) or by the normalised stored
+    plate. None — a 404 — when nothing matches, or more than one vehicle
+    does."""
+    candidates = sorted({v for v in (hash_plate(raw_plate), hash_plate(want)) if v})
+    cur.execute(
+        f"""
+        SELECT ds.vehicle_identifier, ds.last_observed_at,
+               ds.current_lat, ds.current_lon,
+               ds.current_vehicle_model_name, ds.current_form_factor,
+               a.status, a.acknowledged_at
+          FROM device_state ds
+          LEFT JOIN device_census_ack a USING (vehicle_identifier)
+         WHERE ds.vehicle_identifier = ANY(%s)
+            OR (ds.vehicle_plate IS NOT NULL AND {_SQL_NORMALIZED_STATE_PLATE} = %s)
+         LIMIT 2
+        """,
+        (candidates, want),
+    )
+    rows = cur.fetchall()
+    if len(rows) != 1:
+        return None
+    vid, last_seen_at, lat, lon, model, form_factor, ack_status, ack_at = rows[0]
+    gone = ack_status == fleet_reports.CENSUS_STATUS_GONE
+    reports = fleet_reports.open_reports_for(cur, cycle_id, vid)
+    hours = (round((snapshot_time - last_seen_at).total_seconds() / 3600.0, 1)
+             if last_seen_at and snapshot_time else None)
+    return {
+        "device_id": None,
+        "vehicle_identifier": vid,
+        "status": "gone" if gone else "missing",
+        # Not suppressed: a vehicle the feed does not carry is on nobody's map
+        # whatever its reports say. The reports still explain it.
+        "suppressed_reason": None,
+        "suppressed_since": None,
+        "open_reports": reports,
+        "last_observed_at": _iso(last_seen_at),
+        "hours_missing": hours,
+        "last_seen": (
+            {"lat": round(float(lat), _LAST_SEEN_DECIMALS),
+             "lon": round(float(lon), _LAST_SEEN_DECIMALS)}
+            if lat is not None and lon is not None else None),
+        "gone_acknowledged_at": _iso(ack_at) if gone else None,
+        **_card(vid, model=model, form_factor=form_factor),
+        "as_of": _iso(snapshot_time),
+    }

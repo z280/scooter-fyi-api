@@ -198,6 +198,12 @@ NAV_DISTANCE_STEP_METERS = NAV_DISTANCE_STEP_KM * 1000
 # dead_battery is intentionally ABSENT: it is not in the points list, and
 # this mapping faithfully preserves that asymmetry rather than guessing a
 # value for it.
+#
+# inaccessible (sql/100) is intentionally ABSENT too, for a different reason:
+# a signed-in inaccessible report takes a vehicle off every rider's map
+# (src/fleet_reports.py), and paying for that would pay for griefing — one
+# account suppressing a neighbourhood's fleet for points
+# (docs/FLEET_REPORTS_PLAN.md risk 2).
 REPORT_TYPE_POINTS: dict[str, tuple[str, int]] = {
     "not_rideable":      ("report_not_rideable", POINTS_REPORT_NOT_RIDEABLE),
     "not_found":         ("report_not_found", POINTS_REPORT_NOT_FOUND),

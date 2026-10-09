@@ -4,7 +4,8 @@ personal data.
 Two routes take something a rider would not want written down in a request
 line:
 
-  * `GET /api/v1/vehicles/resolve?plate=…`  — a vehicle plate;
+  * `GET /api/v1/vehicles/resolve?plate=…` (or `?qr=…`) — a vehicle plate,
+    or the QR payload that carries one;
   * `GET /api/v1/geocode/reverse?lat=…&lng=…` — a coordinate, which for a
     saved place IS the rider's home or workplace.
 
@@ -33,7 +34,8 @@ from urllib.parse import urlsplit
 
 #: path -> the query parameters to redact on it.
 REDACTED_QUERY_PARAMS: dict[str, tuple[str, ...]] = {
-    "/api/v1/vehicles/resolve": ("plate",),
+    # `qr` is a sticker's raw payload, which carries the plate (`…&number=`).
+    "/api/v1/vehicles/resolve": ("plate", "qr"),
     "/api/v1/geocode/reverse": ("lat", "lng"),
     # The Photon sidecar's reverse endpoint, as httpx and Sentry see the
     # upstream call (`http://photon:2322/reverse?lat=…&lon=…`). Photon spells

@@ -29,18 +29,38 @@ ROOT = Path(__file__).resolve().parents[1]
 #:     permanent, which is the stalkable-by-strangers version of this feature.
 #:   * first_observed_at_location <= dr.reported_at — drop it and a report
 #:     never clears, so a repaired scooter stays condemned forever.
-#:   * current_range_meters < ... — drop it and a recharged scooter does too.
+#:   * current_range_meters < range_at_report + rise — drop it and a
+#:     recharged scooter does too. It is a RISE test against the reading
+#:     stored with the report (sql/100), never a level: the level test it
+#:     replaced cleared a report on a 100% scooter the moment it was filed.
+#:   * range_at_report_meters IS NULL — a report with no reading must hold.
+#:   * resolved_at IS NULL — drop it and an admin's void does nothing.
 CLAUSES = (
     "dr.account_id IS NOT NULL",
     "ds.first_observed_at_location <= dr.reported_at",
-    "r.current_range_meters <",
+    "r.current_range_meters < dr.range_at_report_meters +",
+    "dr.range_at_report_meters IS NULL",
+    "dr.resolved_at IS NULL",
 )
 
 SOURCES = (
     "src/api_public.py",
     "src/api_h3.py",
     "tests/test_negative_report_hold_pg.py",
+    # The suppression flag uses the same hold rule (minus the reliability type
+    # filter) — a vehicle must not be hidden by a report the tier has already
+    # cleared, or vice versa.
+    "src/fleet_reports.py",
 )
+
+
+def test_no_rendering_still_uses_the_full_charge_level_test() -> None:
+    # docs/FLEET_REPORTS_PLAN.md §2.4. `current_range_meters < <full>` made a
+    # fully charged scooter unreportable.
+    for rel in SOURCES:
+        text = " ".join((ROOT / rel).read_text().split())
+        assert "r.current_range_meters < %(full)s" not in text, rel
+        assert "OR r.current_range_meters < %s)" not in text, rel
 
 
 @pytest.mark.parametrize("rel", SOURCES)
