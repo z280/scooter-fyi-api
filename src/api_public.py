@@ -16,7 +16,6 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from . import boundaries
 from .api_device_features import feature_payload
-from .api_frontend_reports import reliability_report_type_sql
 from .device_features import STATUS_NEEDS_CONFIRMED as FEATURE_STATUS_NEEDS_CONFIRMED
 from .daily_sla import COMPLIANCE_THRESHOLD as SLA_THRESHOLD, DENVER_TZ, _AVG_FIELDS
 from .dwell_stats import stats_for_cycle
@@ -32,7 +31,6 @@ from .fleet_equity import summarize as fleet_equity_summary
 from .fleet_outcomes import summarize as fleet_outcomes_summary
 from .pg import connection
 from . import battery_model, fleet_reports, vehicle_identity
-from .fleet_reports import charge_rise_meters
 from .quality import (
     dwell_percentile_wire,
     smart_ride_grade,
@@ -322,49 +320,58 @@ def _rental_outcomes() -> dict[str, tuple[int, int, int, int, int]] | None:
         return None
 
 
-def _suppressions_and_checks(
-    cycle_id: Any,
-) -> tuple[dict[str, tuple[str, datetime]] | None, set[str] | None]:
-    """({vehicle_identifier: (reason, since)}, {vehicle needing a condition
-    check}) from ONE pass over the standing signed-in reports
-    (src/fleet_reports.py). (None, None) on failure, which the payload emits
-    as `suppressed: null` and `needs_condition_check: null` — unknown, not
-    "no": a client must not read an outage as a clean bill."""
+def _negative_states(cycle_id: Any) -> dict[str, dict[str, Any]] | None:
+    """{vehicle_identifier: {risk, reason, reason_detail, since, ...}} for
+    every vehicle with an uncleared negative report (src/fleet_reports.py),
+    from the same SQL builder as the has_negative_report column. None on
+    failure, emitted as nulls: unknown, not "no report"."""
     try:
         with connection() as conn:
             with conn.cursor() as cur:
-                return fleet_reports.suppressions_and_condition_checks(cur, cycle_id)
+                return fleet_reports.negative_states(cur, cycle_id)
     except Exception:  # noqa: BLE001
-        log.warning("suppression unavailable — suppressed emitted as null this cycle")
-        return None, None
-
-
-def _suppressions(cycle_id: Any) -> dict[str, tuple[str, datetime]] | None:
-    """The suppression half of _suppressions_and_checks."""
-    return _suppressions_and_checks(cycle_id)[0]
-
-
-def _condition_check_field(needs: set[str] | None, vid: str | None) -> bool | None:
-    """`needs_condition_check` (plan §4.4): true when the vehicle has at least
-    one standing negative-rideability report (fleet_reports.
-    CONDITION_CHECK_TYPES), so the map can invite riders to check it. An
-    invitation, not a verdict; independent of reliability_tier and of
-    suppressed. None when the query failed."""
-    if needs is None:
+        log.warning("negative-report details unavailable — emitted as null this cycle")
         return None
-    return (vid or "") in needs
 
 
-def _suppression_fields(by: dict[str, tuple[str, datetime]] | None,
-                        vid: str | None) -> dict[str, Any]:
+def _negative_state(raw: Any) -> str | None:
+    """Column 20 → 'high' | 'unknown' | None. A bare True (older fixtures,
+    and the meaning the column had before 2026-10-09) reads as 'high'."""
+    if raw is True or raw == "high":
+        return "high"
+    if raw == "unknown":
+        return "unknown"
+    return None
+
+
+def _negative_report_fields(by: dict[str, dict[str, Any]] | None, vid: str | None,
+                            state: str | None) -> dict[str, Any]:
+    """The label fields (owner, 2026-10-09). NOTHING HIDES A SCOOTER: these
+    say why a vehicle is high risk (or unknown), and a client must never use
+    them to drop a vehicle from the map, the available set or a plan."""
+    hit = (by or {}).get(vid or "")
     if by is None:
-        return {"suppressed": None, "suppressed_reason": None, "suppressed_since": None}
-    hit = by.get(vid or "")
+        return {"negative_report_risk": ({"high": "high_risk", "unknown": "unknown"}
+                                         .get(state) if state else None),
+                "negative_report_reason": None, "negative_report_reason_detail": None,
+                "negative_report_since": None, "needs_condition_check": None,
+                "latest_report": None}
     if hit is None:
-        return {"suppressed": False, "suppressed_reason": None, "suppressed_since": None}
-    reason, since = hit
-    return {"suppressed": True, "suppressed_reason": reason,
-            "suppressed_since": since.isoformat() if since else None}
+        return {"negative_report_risk": None, "negative_report_reason": None,
+                "negative_report_reason_detail": None, "negative_report_since": None,
+                "needs_condition_check": False, "latest_report": None}
+    return {
+        "negative_report_risk": hit["risk"],
+        "negative_report_reason": hit["reason"],
+        "negative_report_reason_detail": hit["reason_detail"],
+        "negative_report_since": hit["since"].isoformat() if hit["since"] else None,
+        "needs_condition_check": hit["needs_condition_check"],
+        # The NEWEST uncleared negative report — for the details tile ("so
+        # users know if a ride was reported inaccessible"). Never the
+        # reporter, never a location; `anonymous` says whether anybody
+        # signed it.
+        "latest_report": hit["latest_report"],
+    }
 
 
 def _outcome(outcomes: dict[str, tuple[int, int, int, int, int]] | None,
@@ -451,7 +458,7 @@ def _devices_current_impl(
             # free until a new cycle lands (~every 10 min). Weak because the
             # body is not a pure function of the cycle: has_negative_report
             # uses a wall-clock NOW() - 24h window and sees reports filed
-            # mid-cycle (so does `suppressed`, and an admin resolving a
+            # mid-cycle (so do the negative-report fields, and an admin resolving a
             # report), and the device_state columns (failed starts, dwell
             # start, rental outcomes/grade, confirmed features) are joined
             # live — the next cycle's ingest updates them a little before
@@ -481,7 +488,14 @@ def _devices_current_impl(
                 "plate" if include_plate else "",
                 viewed_by or "",
             ))
-            etag = f'W/"{resource}:{cycle_id}:{filter_key}"'
+            # Negative-report inputs change mid-cycle (a report filed or
+            # resolved), and the label/latest_report fields read them live,
+            # so they are in the tag too (fleet_reports.reports_stamp).
+            try:
+                stamp = fleet_reports.reports_stamp(cur)
+            except Exception:  # noqa: BLE001 — a tag without it is just weaker
+                stamp = ""
+            etag = f'W/"{resource}:{cycle_id}:{stamp}:{filter_key}"'
             # Authenticated responses vary by the bearer and (for admins) can
             # carry raw plates — a private cache must key on Authorization and
             # never silently reuse across tokens within a freshness window.
@@ -519,42 +533,12 @@ def _devices_current_impl(
                 )
                 params.extend([min_lon, max_lon, min_lat, max_lat])
 
-            # has_negative_report — TWO RULES, because two kinds of report
-            # are worth different amounts.
-            #
-            # ANONYMOUS (and every map-pin `negative_reports` row, which has no
-            # account column at all): the original rule. A report against THIS
-            # vehicle in the SAME h3_10 cell, ≤24h old. Nobody stands behind it,
-            # so it ages out on a clock and goes stale the moment the scooter
-            # moves to another cell.
-            #
-            # SIGNED IN: holds until the scooter MOVES or its charge RISES. A
-            # rider who put their account behind "this one does not
-            # work" is making an accountable claim, and 24 hours is an arbitrary
-            # answer to it — the honest question is not "how long ago?" but "has
-            # anything happened since?". Two things count as something happening,
-            # and both mean somebody dealt with the vehicle:
-            #
-            #   * It moved. `device_state.first_observed_at_location` is reset on
-            #     any move past the ingest's stationary threshold, so comparing
-            #     it to the report time catches a move WITHIN a cell too — which
-            #     the 24h rule's h3_10 scoping never did.
-            #   * Its charge ROSE since the report — by at least
-            #     fleet_reports.charge_rise_meters() over the reading stored
-            #     with it (device_reports.range_at_report_meters, sql/100). A
-            #     swapped or charged battery is a service visit; a scooter
-            #     nobody has touched does not refill. A RISE, never a LEVEL:
-            #     the old `current range < full` test cleared a report on a
-            #     scooter that was already at 100% when it was filed, so a
-            #     fully charged scooter could not be reported at all
-            #     (docs/FLEET_REPORTS_PLAN.md §2.4).
-            #
-            # Every branch over device_reports skips a report an admin has
-            # resolved (sql/100). negative_reports has no resolution state.
-            #
-            # The flag therefore outlives 24 hours for an accountable report and
-            # clears the instant the fleet actually responds, which is the
-            # behaviour both halves of that trade deserve.
+            # has_negative_report — the owner's rules of 2026-10-09, built
+            # ONCE in src/fleet_reports.py (uncleared_negative_sql) and used by
+            # every consumer. Column 20 carries the vehicle's negative-report
+            # STATE: 'high' (an uncleared signed-in report, or an anonymous one
+            # under 24 h old → high_risk), 'unknown' (only faded anonymous
+            # reports → reliability "unknown", never "ok"), or NULL.
             sql = (
                 "SELECT r.device_id, r.form_factor, r.latitude, r.longitude, r.spatial_status, "
                 "       r.vehicle_identifier, r.is_disabled, r.is_reserved, "
@@ -564,46 +548,9 @@ def _devices_current_impl(
                 "       r.range_rank_all_by_type, r.range_rank_all_devices, "
                 "       r.range_rank_h3_8_peers, r.range_rank_h3_9_peers, "
                 "       r.range_rank_h3_10_peers, "
-                "       (EXISTS ("
-                "           SELECT 1 FROM negative_reports nr "
-                "           WHERE nr.vehicle_identifier = r.vehicle_identifier "
-                "             AND nr.h3_10_index = r.h3_10_index "
-                "             AND nr.reported_at >= NOW() - INTERVAL '24 hours'"
-                "       ) OR EXISTS ("
-                "           SELECT 1 FROM device_reports dr "
-                "           WHERE dr.vehicle_identifier = r.vehicle_identifier "
-                "             AND dr.h3_10_index = r.h3_10_index "
-                "             AND dr.reported_at >= NOW() - INTERVAL '24 hours'"
-                "             AND dr.resolved_at IS NULL "
-                # Parking and access complaints (improperly_parked,
-                # inaccessible) are excluded here: they say nothing about
-                # whether it rides.
-                f"             AND {reliability_report_type_sql('dr')} "
-                "       ) OR EXISTS ("
-                # The accountable report. Deliberately NOT scoped to h3_10 and
-                # deliberately not time-boxed: `first_observed_at_location`
-                # already answers "has it moved?" more precisely than a cell
-                # comparison can, and a report that has not been answered does
-                # not become untrue at the 24-hour mark.
-                "           SELECT 1 FROM device_reports dr "
-                "           WHERE dr.vehicle_identifier = r.vehicle_identifier "
-                "             AND dr.account_id IS NOT NULL "
-                "             AND dr.resolved_at IS NULL "
-                f"             AND {reliability_report_type_sql('dr')} "
-                # Not moved since the report. NULL here means device_state has
-                # no row for this vehicle, which is not evidence of a move — so
-                # the flag holds, which is the safe direction for a claim that
-                # the scooter does not work.
-                "             AND (ds.first_observed_at_location IS NULL "
-                "                  OR ds.first_observed_at_location <= dr.reported_at) "
-                # ...and its charge has not risen since. A NULL on either side
-                # (a report filed before sql/100 or while the vehicle was out
-                # of the feed; a pedal bike; a feed that dropped the field)
-                # likewise clears nothing.
-                "             AND (dr.range_at_report_meters IS NULL "
-                "                  OR r.current_range_meters IS NULL "
-                "                  OR r.current_range_meters < dr.range_at_report_meters + %s) "
-                "       )) AS has_negative_report, "
+                "       " + fleet_reports.negative_state_sql(
+                    vid="r.vehicle_identifier", current_range="r.current_range_meters",
+                    now="NOW()") + " AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
                 "       r.vehicle_use_type, r.vehicle_model_name, "
@@ -629,13 +576,9 @@ def _devices_current_impl(
                 f"WHERE {' AND '.join(where)} "
                 "ORDER BY r.device_id"
             )
-            # PARAMETER ORDER, and it is load-bearing. psycopg binds `%s` by
-            # POSITION, and the signed-in reliability clause's placeholder is in
-            # the SELECT list — which the server reads before the WHERE. So the
-            # full-charge threshold goes FIRST, ahead of every filter param
-            # built above. Appending it instead silently shifts every filter by
-            # one and the endpoint starts answering a different question.
-            cur.execute(sql, [charge_rise_meters(), *params])
+            # No placeholder in the SELECT list: the negative-state fragment
+            # inlines its constants, so the filter params bind in order.
+            cur.execute(sql, params)
             rows = cur.fetchall()
 
     # Peer-relative dwell stats are computed over the FULL denver_core
@@ -650,10 +593,10 @@ def _devices_current_impl(
     # dwell_stats - load once, look up per device.
     rental_outcomes = _rental_outcomes()
 
-    # Suppression (docs/FLEET_REPORTS_PLAN.md §2.5) — a separate query for the
-    # same reason as rental_outcomes: the payload SELECT is read positionally.
-    # None means "unknown this cycle" and is emitted as null, never as false.
-    suppressed_by, needs_check = _suppressions_and_checks(cycle_id)
+    # Negative-report label details — a separate query for the same reason as
+    # rental_outcomes: the payload SELECT is read positionally. None means
+    # "unknown this cycle" and is emitted as null, never as "no report".
+    negative_by = _negative_states(cycle_id)
 
     # The RAW vehicle_plate is emitted ONLY when include_plate is set — i.e.
     # from /api/v1/user/devices/current for an admin session. On the public
@@ -700,7 +643,7 @@ def _devices_current_impl(
             is_reserved=r[7],
             number_failed_starts=number_failed_starts,
             first_observed_at_location=r[23],
-            has_negative_report=bool(r[20]),
+            has_negative_report=_negative_state(r[20]) == "high",
             is_dwell_outlier=is_dwell_outlier,
             # The payload's one clock (see now_utc above) — the same instant
             # parked_hours and battery_reading use, and the same one
@@ -712,7 +655,8 @@ def _devices_current_impl(
             number_failed_starts=number_failed_starts,
             first_observed_at_location=r[23],
             quality_designation=quality,
-            has_negative_report=bool(r[20]),
+            has_negative_report=_negative_state(r[20]) == "high",
+            has_faded_negative_report=_negative_state(r[20]) == "unknown",
             is_dwell_outlier=is_dwell_outlier,
             peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
             battery_percent=battery_percent,
@@ -750,25 +694,20 @@ def _devices_current_impl(
                 round((now_utc - r[23]).total_seconds() / 3600.0, 1)
                 if r[23] else None),
             "propulsion_type": r[9],
-            "has_negative_report": bool(r[20]),
+            # True while an uncleared negative report makes this vehicle
+            # high_risk (owner, 2026-10-09). A faded anonymous report reads
+            # false here and "unknown" in negative_report_risk.
+            "has_negative_report": _negative_state(r[20]) == "high",
             "quality_designation": quality,
             "number_failed_starts": number_failed_starts,
             "first_observed_at_location": r[23].isoformat() if r[23] else None,
             "reliability_tier": reliability,
-            # SUPPRESSION IS NOT RELIABILITY, and the two must never be merged
-            # (docs/FLEET_REPORTS_PLAN.md §2.5). reliability_tier answers "will
-            # it ride?"; `suppressed` answers "should a rider be sent to it?".
-            # A fully charged scooter behind a fence rides perfectly, so it is
-            # `suppressed` with reason `inaccessible` and its tier is whatever
-            # its hardware earns. Rating it high_risk instead would tell the
-            # rider something false about the hardware and re-merge exactly the
-            # two questions the plan separates. The vehicle stays IN this
-            # payload: the client keeps it out of the rider's available set and
-            # out of the planner, and its card says why.
-            **_suppression_fields(suppressed_by, r[5]),
-            # Phase 1b (plan §4.4): standing not_rideable / dead_battery /
-            # damaged / inaccessible report → invite a rider condition check.
-            "needs_condition_check": _condition_check_field(needs_check, r[5]),
+            # WHY it is high risk / unknown (owner, 2026-10-09). No report
+            # hides a scooter: the reliability label is the only effect, and
+            # these fields are for the card's "High risk: reported not
+            # rideable (acceleration)" line. needs_condition_check invites a
+            # rider condition check (Phase 1b).
+            **_negative_report_fields(negative_by, r[5], _negative_state(r[20])),
             # sql/072 — the one reliability signal that survived validation:
             # a vehicle's no-go rate persists at r=+0.275 across weeks, and
             # the worst 10% of vehicles carry 32.4% of all failures.

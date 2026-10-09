@@ -444,7 +444,7 @@ def resolve_report(
     user: SessionUser = Depends(require_admin),
 ) -> dict[str, Any]:
     """Void or resolve one device report. From the next request it counts
-    for nothing — not toward has_negative_report, not toward suppression,
+    for nothing — not toward has_negative_report or the reliability label,
     not in the export. Attributed (resolved_by = the admin's account) and
     final: there is no un-resolve, so the audit trail cannot be rewritten;
     a mistaken void is undone by the next rider's report. 409 when already
@@ -593,7 +593,7 @@ def device_dossier(
     """Everything the reports side knows about one vehicle: every device
     report (type, reason, decoy remap, observed and reported times, the
     reporter's account when signed in, the charge at report time, whether it
-    still stands, and its resolution), the suppression it produces now, its
+    still stands, and its resolution), the negative-report label it sets now, its
     feature consensus with any broken parts, and its census acknowledgement.
     Movement and battery HISTORY are /api/v1/private/devices/{vid}/history.
     404 when neither device_state nor any report knows the vehicle."""
@@ -632,8 +632,13 @@ def device_dossier(
                        dr.resolution, dr.resolution_source, dr.resolved_by_check_id,
                        dr.last_reconfirmed_at, dr.reconfirm_count,
                        dr.reinstated_at, dr.reinstated_by_login, dr.reinstate_reason,
-                       acc.public_username
+                       acc.public_username, COALESCE(dr.baseline_at, dr.reported_at),
+                       dr.baseline_pending,
+                       geo_distance_m(COALESCE(dr.baseline_lat, dr.vehicle_lat_at_report),
+                                      COALESCE(dr.baseline_lon, dr.vehicle_lon_at_report),
+                                      ds.current_lat, ds.current_lon)
                   FROM device_reports dr
+                  LEFT JOIN device_state ds ON ds.vehicle_identifier = dr.vehicle_identifier
                   LEFT JOIN accounts acc ON acc.id = dr.account_id
                   LEFT JOIN accounts res ON res.id = dr.resolved_by
                  WHERE dr.vehicle_identifier = %s
@@ -645,13 +650,13 @@ def device_dossier(
             reports = cur.fetchall()
             if state is None and not reports:
                 raise HTTPException(404, "no vehicle with that identifier")
-            standing = fleet_reports.open_reports_for(cur, cycle_id, vehicle_identifier)
+            negative = fleet_reports.negative_state_for(cur, cycle_id, vehicle_identifier)
             ack = _ack_state(cur, vehicle_identifier)["ack"] if state else None
-            standing_ids = _standing_ids(cur, cycle_id, vehicle_identifier)
+            standing_ids = set(fleet_reports.standing_report_ids(
+                cur, cycle_id, vehicle_identifier))
             checks = condition_checks.checks_for_vehicle(cur, vehicle_identifier)
 
     parked_since = state[3] if state else None
-    first = standing[0] if standing else None
     out: dict[str, Any] = {
         **_vehicle(vehicle_identifier, state[0] if state else None),
         "as_of": _iso(snap),
@@ -664,10 +669,12 @@ def device_dossier(
             "in_feed": bool(state[14]),
             "current_range_meters": state[13],
         },
-        "suppression": {
-            "suppressed": bool(first) and bool(state and state[14]),
-            "suppressed_reason": first["report_type"] if first else None,
-            "suppressed_since": first["reported_at"] if first else None,
+        # Owner, 2026-10-09: a report labels, it never hides.
+        "negative_report": None if negative is None else {
+            "risk": negative["risk"],
+            "reason": negative["reason"],
+            "reason_detail": negative["reason_detail"],
+            "since": _iso(negative["since"]),
         },
         "reports": [
             {
@@ -681,9 +688,17 @@ def device_dossier(
                 "reporter_account_id": r[6],
                 "reporter_email": r[7],
                 "range_at_report_meters": r[8],
-                "moved_since": bool(parked_since and parked_since > r[5]),
-                # Counts toward suppression right now (signed in, unresolved,
-                # not moved, charge not risen).
+                # Any move past the ingest's stationary threshold since the
+                # report's baseline — informational: under the owner's rules
+                # only a >= 100 m move (plus a charge rise, for rideability)
+                # clears it, so see distance_from_baseline_m and `standing`.
+                "moved_since": bool(parked_since and parked_since > r[20]),
+                "baseline_at": _iso(r[20]),
+                "baseline_pending": bool(r[21]),
+                "distance_from_baseline_m": (round(float(r[22])) if r[22] is not None
+                                             else None),
+                # Uncleared right now under the owner's rules
+                # (src/fleet_reports.py), so it sets the reliability label.
                 "standing": int(r[0]) in standing_ids,
                 "resolved_at": _iso(r[9]),
                 "resolved_by": r[10],
@@ -708,7 +723,7 @@ def device_dossier(
             "present": {k: state[9 + i] for i, k in enumerate(FEATURE_KEYS)},
             "poor_condition": list(state[7] or []),
             "confirmed_at": _iso(state[8]),
-            # Broken parts NEVER suppress (plan §2.9); they are shown here
+            # Broken parts are not reports (plan §2.9); they are shown here
             # and counted in the export.
             "broken_parts": [k for k in fleet_reports.BROKEN_PART_ORDER
                              if state[9 + FEATURE_KEYS.index(k)]
@@ -717,9 +732,3 @@ def device_dossier(
         "census": ack,
     }
     return out
-
-
-def _standing_ids(cur, cycle_id: Any, vid: str) -> set[int]:
-    cur.execute(fleet_reports._open_reports_sql(single_vehicle=True),
-                fleet_reports._params(cycle_id, vid=vid))
-    return {int(row[3]) for row in cur.fetchall()}

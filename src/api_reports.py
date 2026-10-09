@@ -5,11 +5,10 @@ PUBLIC:
     POST /api/v1/quality-feedback         positive/negative feedback on the
                                           quality_designation our system
                                           showed for a scooter at a cell
-    GET  /api/v1/devices/current          gains a `has_negative_report`
-                                          flag when a report at the
-                                          device's current h3_10 cell
-                                          is ≤24h old (wired in
-                                          api_public.py).
+    GET  /api/v1/devices/current          a pin is an anonymous negative
+                                          report: high risk for 24 h, then
+                                          "unknown" until cleared
+                                          (src/fleet_reports.py).
 
 PRIVATE (admin session scope required):
     GET  /api/v1/private/reports             list all reports
@@ -99,14 +98,11 @@ def submit_report(
 
     # Look up the device in device_state. We want two things from this row:
     #   1. plate backfill (when the caller only gave us an identifier)
-    #   2. the SCOOTER'S current h3 cells — these are what we'll store as
-    #      the canonical h3_*_index on the report row. Reason: the
-    #      has_negative_report flag on /devices/current matches the
-    #      device's CURRENT h3 against the report's h3, so storing the
-    #      reporter's clicked-location h3 would make the flag silently
-    #      fail any time the reporter stood ≥75 m from the scooter
-    #      (one res-10 cell). Anchoring to the scooter's actual position
-    #      makes "report sticks until scooter moves" work as advertised.
+    #   2. the SCOOTER'S current h3 cells — stored as the canonical
+    #      h3_*_index on the report row, for the aggregates. (Whether the
+    #      pin still counts is decided by src/fleet_reports.py from the
+    #      pin's point: a 100 m move plus a charge rise, or an off-the-map
+    #      reappearance with a full battery, clears it.)
     device_h3_8 = device_h3_9 = device_h3_10 = None
     if ident:
         with connection() as conn:

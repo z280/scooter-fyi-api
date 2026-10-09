@@ -1,24 +1,20 @@
-"""How long a "this one is broken" report counts for, against real Postgres.
+"""How long a negative report counts, and what clears it — the owner's rules
+of 2026-10-09 — against real Postgres.
 
-Two rules, by whether anybody stands behind the report (see
-src/api_frontend_reports.py's statement of them):
+  * signed in  -> high risk until CLEARED; no time limit;
+  * anonymous  -> high risk for 24 h, then "unknown", never "ok" until cleared;
+  * rideability (not_rideable, damaged, dead_battery) clears on a >= 100 m
+    move AND a charge rise, or on reappearing >= 100 m away with a FULL
+    battery after going off the map;
+  * location (inaccessible, not_found) clears on a >= 100 m move, or on
+    reappearing >= 100 m away after going off the map;
+  * a move under 100 m never clears; time never clears;
+  * an admin resolve clears; a reconfirmation re-baselines.
 
-  * ANONYMOUS — 24 hours, in the vehicle's h3_10 cell. Nobody's name is on it,
-    so it ages out on a clock.
-  * SIGNED IN — until the vehicle MOVES or its charge RISES over what it
-    read when the report was filed (sql/100's range_at_report_meters). An
-    accountable claim is not answered by time passing. It used to be "comes
-    back at a FULL CHARGE", a level test that cleared a report on a 100%
-    scooter the instant it was filed (docs/FLEET_REPORTS_PLAN.md §2.4).
-
-Any report an admin has resolved (sql/100) counts on neither branch.
-
-These run the REAL `has_negative_report` SQL, which is the only way to test
-this: the predicate is three correlated subqueries over `device_reports`,
-`device_state` and the telemetry row, and a fake connection would be asserting
-on the test's own idea of the query rather than on the query. The positional
-`%s` binding in api_public.py's SELECT list is exercised here too — get its
-order wrong and every filter shifts by one, which no unit test would notice.
+These run the REAL SQL — fleet_reports.negative_state_sql, the one builder
+/devices/current and /h3 embed — against one synthetic telemetry row, which
+is the only honest way to test it: the predicate spans device_reports,
+negative_reports, device_state, device_history and the telemetry row.
 
 SKIPS unless VEO_TEST_PG_DSN points at a reachable, migratable database.
 """
@@ -34,18 +30,25 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
-from src.fleet_reports import charge_rise_meters  # noqa: E402
+from src.fleet_reports import (  # noqa: E402
+    charge_rise_meters, full_battery_meters, negative_state_sql,
+)
 from src.quality import full_charge_range_meters  # noqa: E402
 
 SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 
 NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 FULL = full_charge_range_meters()
+FULL95 = full_battery_meters()
 HALF = FULL // 2
 RISE = charge_rise_meters()
 VID = "0123456789abcdef"
-CELL = 614553222213795839  # any valid bigint h3_10; the SQL only compares it
-OTHER_CELL = CELL + 2
+A = (39.7392, -104.9903)
+DEG_PER_M = 1 / 111_195.0          # latitude degrees per metre
+
+
+def north(m: float, of=A) -> tuple[float, float]:
+    return (of[0] + m * DEG_PER_M, of[1])
 
 
 def _reachable(dsn: str) -> bool:
@@ -69,259 +72,258 @@ def pg():
             cur.execute(path.read_text())
     conn.commit()
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM device_reports")
-        cur.execute("DELETE FROM negative_reports")
-        cur.execute("DELETE FROM device_state")
+        for t in ("device_reports", "negative_reports", "device_state"):
+            cur.execute(f"DELETE FROM {t} WHERE vehicle_identifier = %s", (VID,))
+        cur.execute("DELETE FROM device_history WHERE vehicle_identifier = %s", (VID,))
     conn.commit()
     yield conn
     conn.rollback()
+    with conn.cursor() as cur:
+        for t in ("device_reports", "negative_reports", "device_state", "device_history"):
+            cur.execute(f"DELETE FROM {t} WHERE vehicle_identifier = %s", (VID,))
+    conn.commit()
     conn.close()
 
 
 def _account(conn) -> int:
-    """A real account row, because `device_reports.account_id` is a FK."""
     with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO accounts (email) VALUES (%s) RETURNING id",
-            (f"hold-{uuid.uuid4().hex[:8]}@example.test",),
-        )
+        cur.execute("INSERT INTO accounts (email) VALUES (%s) RETURNING id",
+                    (f"hold-{uuid.uuid4().hex[:8]}@example.test",))
         return cur.fetchone()[0]
 
 
-def _report(conn, *, account_id, at, report_type="not_rideable", cell=CELL,
-            range_at_report=HALF, resolved_at=None):
+def _report(conn, *, account_id, at=NOW - timedelta(days=3), report_type="not_rideable",
+            at_pos=A, range_at_report=HALF, resolved_at=None, **baseline) -> int:
+    cols = {"vehicle_identifier": VID, "report_type": report_type, "reported_at": at,
+            "account_id": account_id, "range_at_report_meters": range_at_report,
+            "resolved_at": resolved_at,
+            "resolution_source": "admin" if resolved_at else None,
+            "vehicle_lat_at_report": at_pos[0] if at_pos else None,
+            "vehicle_lon_at_report": at_pos[1] if at_pos else None, **baseline}
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO device_reports "
-            "  (vehicle_identifier, report_type, reported_at, h3_10_index, account_id, "
-            "   range_at_report_meters, resolved_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (VID, report_type, at, cell, account_id, range_at_report, resolved_at),
-        )
+            f"INSERT INTO device_reports ({', '.join(cols)}) "
+            f"VALUES ({', '.join(['%s'] * len(cols))}) RETURNING id",
+            list(cols.values()))
+        rid = cur.fetchone()[0]
+    conn.commit()
+    return rid
+
+
+def _pin(conn, *, at, pos=A):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO negative_reports (vehicle_identifier, reported_at, report_lat, "
+            "report_lon, h3_8_index, h3_9_index, h3_10_index) VALUES (%s, %s, %s, %s, 1, 1, 1)",
+            (VID, at, pos[0], pos[1]))
     conn.commit()
 
 
-def _device_state(conn, *, parked_since):
+def _at(conn, pos, *, last_seen=NOW):
+    """The vehicle's current position (device_state), as the ingest left it."""
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO device_state "
-            "  (vehicle_identifier, first_observed_at_location, "
-            "   first_ever_observed_at, last_observed_at) "
-            "VALUES (%s, %s, %s, %s) "
-            "ON CONFLICT (vehicle_identifier) DO UPDATE SET "
-            "  first_observed_at_location = EXCLUDED.first_observed_at_location",
-            (VID, parked_since, parked_since, parked_since),
-        )
+            "INSERT INTO device_state (vehicle_identifier, current_lat, current_lon, "
+            "first_observed_at_location, first_ever_observed_at, last_observed_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (vehicle_identifier) DO UPDATE SET current_lat = EXCLUDED.current_lat, "
+            "current_lon = EXCLUDED.current_lon, last_observed_at = EXCLUDED.last_observed_at",
+            (VID, pos[0], pos[1], NOW - timedelta(days=5), NOW - timedelta(days=90), last_seen))
     conn.commit()
 
 
-def _flagged(conn, *, cell=CELL, range_meters=HALF) -> bool:
-    """Run the shipped predicate against one synthetic telemetry row.
+def _off_map(conn, *, last_seen_at, last_pos=A):
+    """A stop closed because the vehicle left the feed (sql/083 'absent')."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO device_history (vehicle_identifier, snapshot_time, departed_at, lat, "
+            "lon, spatial_status, device_id_observed, departure_reason) "
+            "VALUES (%s, %s, %s, %s, %s, 'denver_core', 'x', 'absent')",
+            (VID, last_seen_at - timedelta(days=1), last_seen_at, last_pos[0], last_pos[1]))
+    conn.commit()
 
-    The SQL is a copy of api_public.py's `has_negative_report` expression with
-    the correlated row supplied inline — a copy because the endpoint's query
-    needs a whole cycle's telemetry to run at all, and the thing under test is
-    the predicate. `test_reliability_sql_is_mirrored` below is what keeps the
-    copy honest.
-    """
-    from src.api_frontend_reports import reliability_report_type_sql
 
+def _state(conn, *, range_meters=HALF):
+    """'high' | 'unknown' | None, from the shipped builder."""
     sql = f"""
-    SELECT (EXISTS (
-        SELECT 1 FROM negative_reports nr
-        WHERE nr.vehicle_identifier = r.vehicle_identifier
-          AND nr.h3_10_index = r.h3_10_index
-          AND nr.reported_at >= %(now)s - INTERVAL '24 hours'
-    ) OR EXISTS (
-        SELECT 1 FROM device_reports dr
-        WHERE dr.vehicle_identifier = r.vehicle_identifier
-          AND dr.h3_10_index = r.h3_10_index
-          AND dr.reported_at >= %(now)s - INTERVAL '24 hours'
-          AND dr.resolved_at IS NULL
-          AND {reliability_report_type_sql('dr')}
-    ) OR EXISTS (
-        SELECT 1 FROM device_reports dr
-        WHERE dr.vehicle_identifier = r.vehicle_identifier
-          AND dr.account_id IS NOT NULL
-          AND dr.resolved_at IS NULL
-          AND {reliability_report_type_sql('dr')}
-          AND (ds.first_observed_at_location IS NULL
-               OR ds.first_observed_at_location <= dr.reported_at)
-          AND (dr.range_at_report_meters IS NULL
-               OR r.current_range_meters IS NULL
-               OR r.current_range_meters < dr.range_at_report_meters + %(rise)s)
-    )) AS has_negative_report
-    FROM (SELECT %(vid)s::text AS vehicle_identifier,
-                 %(cell)s::bigint AS h3_10_index,
-                 %(range)s::int AS current_range_meters) r
-    LEFT JOIN device_state ds USING (vehicle_identifier)
+        SELECT {negative_state_sql(vid="r.vehicle_identifier",
+                                   current_range="r.current_range_meters",
+                                   now="%(now)s")}
+          FROM (SELECT %(vid)s::text AS vehicle_identifier,
+                       %(range)s::int AS current_range_meters) r
+          LEFT JOIN device_state ds USING (vehicle_identifier)
     """
     with conn.cursor() as cur:
-        cur.execute(
-            sql,
-            {"now": NOW, "rise": RISE, "vid": VID, "cell": cell, "range": range_meters},
-        )
-        return bool(cur.fetchone()[0])
+        cur.execute(sql, {"now": NOW, "vid": VID, "range": range_meters})
+        return cur.fetchone()[0]
 
 
 # ---------------------------------------------------------------------------
-# Anonymous: the clock still runs
+# Time: signed in never clears; anonymous fades, never to "ok"
 # ---------------------------------------------------------------------------
 
-
-def test_anonymous_report_counts_for_24h(pg):
-    _device_state(pg, parked_since=NOW - timedelta(days=3))
-    _report(pg, account_id=None, at=NOW - timedelta(hours=2))
-    assert _flagged(pg) is True
-
-
-def test_anonymous_report_expires(pg):
-    _device_state(pg, parked_since=NOW - timedelta(days=3))
-    _report(pg, account_id=None, at=NOW - timedelta(hours=25))
-    assert _flagged(pg) is False
+def test_a_signed_in_report_never_clears_on_time(pg):
+    _at(pg, A)
+    _report(pg, account_id=_account(pg), at=NOW - timedelta(days=400))
+    assert _state(pg) == "high"
 
 
-def test_anonymous_report_does_not_follow_the_vehicle(pg):
-    # Scoped to the cell it was filed in, unchanged.
-    _device_state(pg, parked_since=NOW - timedelta(days=3))
-    _report(pg, account_id=None, at=NOW - timedelta(hours=2))
-    assert _flagged(pg, cell=OTHER_CELL) is False
+def test_an_anonymous_report_is_high_for_24h_then_unknown_never_cleared(pg):
+    _at(pg, A)
+    rid = _report(pg, account_id=None, at=NOW - timedelta(hours=2))
+    assert _state(pg) == "high"
+    with pg.cursor() as cur:
+        cur.execute("UPDATE device_reports SET reported_at = %s WHERE id = %s",
+                    (NOW - timedelta(hours=25), rid))
+    pg.commit()
+    assert _state(pg) == "unknown"
+    with pg.cursor() as cur:
+        cur.execute("UPDATE device_reports SET reported_at = %s WHERE id = %s",
+                    (NOW - timedelta(days=60), rid))
+    pg.commit()
+    assert _state(pg) == "unknown"          # time alone never clears it
+    _at(pg, north(150))                     # cleared by the rules, not the clock
+    assert _state(pg, range_meters=HALF + RISE) is None
+
+
+def test_a_map_pin_fades_to_unknown_and_clears_by_the_rules(pg):
+    _at(pg, A)
+    _pin(pg, at=NOW - timedelta(hours=1))
+    assert _state(pg) == "high"
+    with pg.cursor() as cur:
+        cur.execute("UPDATE negative_reports SET reported_at = %s WHERE vehicle_identifier = %s",
+                    (NOW - timedelta(days=3), VID))
+    pg.commit()
+    assert _state(pg) == "unknown"
+    _off_map(pg, last_seen_at=NOW - timedelta(hours=10))
+    _at(pg, north(300))
+    assert _state(pg, range_meters=FULL95) is None
 
 
 # ---------------------------------------------------------------------------
-# Signed in: until something actually happens
+# Movement: under 100 m never clears
 # ---------------------------------------------------------------------------
 
-
-def test_signed_in_report_outlives_24_hours(pg):
-    # The whole change. A scooter nobody has repaired, moved or charged in
-    # three days IS still broken, and the old rule said otherwise every
-    # morning.
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3))
-    assert _flagged(pg) is True
+@pytest.mark.parametrize("report_type", ["not_rideable", "damaged", "dead_battery",
+                                         "inaccessible", "not_found"])
+def test_a_move_under_100m_never_clears_even_with_a_full_recharge(pg, report_type):
+    _report(pg, account_id=_account(pg), report_type=report_type, range_at_report=1000)
+    _at(pg, north(90))
+    assert _state(pg, range_meters=FULL) == "high"
 
 
-def test_moving_clears_it(pg):
-    acct = _account(pg)
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3))
-    # Parked somewhere new since the report: device_state resets this on any
-    # move past the ingest's stationary threshold.
-    _device_state(pg, parked_since=NOW - timedelta(hours=1))
-    assert _flagged(pg) is False
+@pytest.mark.parametrize("report_type", ["not_rideable", "damaged", "dead_battery"])
+def test_a_100m_move_without_a_rise_does_not_clear_a_rideability_report(pg, report_type):
+    _report(pg, account_id=_account(pg), report_type=report_type)
+    _at(pg, north(150))
+    assert _state(pg, range_meters=HALF) == "high"
+    assert _state(pg, range_meters=HALF + RISE - 1) == "high"   # under the threshold
+    assert _state(pg, range_meters=HALF + RISE) is None          # move + rise
 
 
-def test_moving_within_the_same_cell_clears_it_too(pg):
-    # The case the 24h/h3_10 rule could never see: a vehicle picked up and
-    # re-parked on the same block is still a vehicle somebody dealt with.
-    acct = _account(pg)
-    _report(pg, account_id=acct, at=NOW - timedelta(days=2))
-    _device_state(pg, parked_since=NOW - timedelta(minutes=30))
-    assert _flagged(pg, cell=CELL) is False
+@pytest.mark.parametrize("report_type", ["inaccessible", "not_found"])
+def test_a_100m_move_clears_a_location_report_with_no_battery_condition(pg, report_type):
+    _report(pg, account_id=_account(pg), report_type=report_type)
+    _at(pg, north(150))
+    assert _state(pg, range_meters=HALF - 5000) is None
 
 
-def test_a_charge_rise_clears_it(pg):
-    # A swapped or charged battery is a service visit. A scooter nobody has
-    # touched does not refill itself.
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=HALF)
-    assert _flagged(pg, range_meters=FULL) is False
+def test_a_rise_without_a_move_does_not_clear(pg):
+    _report(pg, account_id=_account(pg), range_at_report=1000)
+    _at(pg, A)
+    assert _state(pg, range_meters=FULL) == "high"
 
 
 def test_a_device_at_100_percent_can_be_reported_and_the_report_stands(pg):
-    # docs/FLEET_REPORTS_PLAN.md §2.4 — the regression test, written against
-    # the Apollo behind the fence. It sits at 100%, so the old LEVEL test
-    # (`current range < full`) cleared the report the instant it was filed. A
-    # charge cannot rise past full, so only a move clears this one.
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=FULL)
-    assert _flagged(pg, range_meters=FULL) is True
+    # §2.4, the Apollo behind the fence: no rise is possible past full, and a
+    # move alone is not servicing.
+    _report(pg, account_id=_account(pg), range_at_report=FULL)
+    _at(pg, A)
+    assert _state(pg, range_meters=FULL) == "high"
+    _at(pg, north(200))
+    assert _state(pg, range_meters=FULL) == "high"
 
 
-def test_a_rise_below_the_threshold_does_not_clear_it(pg):
-    # The feed's range is frozen while a vehicle sits, but not perfectly
-    # still; a few metres of drift is not a service visit.
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=HALF)
-    assert _flagged(pg, range_meters=HALF + RISE - 1) is True
-    assert _flagged(pg, range_meters=HALF + RISE) is False
+def test_no_recorded_charge_counts_a_rise_only_at_full(pg):
+    _report(pg, account_id=_account(pg), range_at_report=None)
+    _at(pg, north(150))
+    assert _state(pg, range_meters=HALF) == "high"
+    assert _state(pg, range_meters=FULL95) is None
 
 
-def test_a_falling_charge_does_not_clear_it(pg):
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=HALF)
-    assert _flagged(pg, range_meters=HALF - 1000) is True
+def test_an_unknown_position_or_battery_clears_nothing(pg):
+    _report(pg, account_id=_account(pg))
+    assert _state(pg, range_meters=FULL) == "high"           # no device_state row
+    _at(pg, north(150))
+    assert _state(pg, range_meters=None) == "high"            # no charge reading
+    _report(pg, account_id=_account(pg), report_type="inaccessible", at_pos=None)
+    assert _state(pg, range_meters=HALF + RISE) == "high"     # no baseline to move from
 
 
-def test_a_null_recorded_charge_clears_nothing(pg):
-    # A report filed before sql/100, or while the vehicle was out of the feed,
-    # has no reading to rise from. It must behave exactly as a NULL current
-    # range always has: clear nothing — even at a full charge.
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=None)
-    assert _flagged(pg, range_meters=FULL) is True
+# ---------------------------------------------------------------------------
+# Off the map and back
+# ---------------------------------------------------------------------------
 
+def test_off_map_and_back_far_away_full_clears_a_rideability_report(pg):
+    _report(pg, account_id=_account(pg), range_at_report=FULL)
+    _off_map(pg, last_seen_at=NOW - timedelta(hours=20))
+    _at(pg, north(400))
+    assert _state(pg, range_meters=FULL95 - 1) == "high"     # not full: stands
+    assert _state(pg, range_meters=FULL95) is None
+
+
+def test_off_map_and_back_far_away_clears_a_location_report_at_any_charge(pg):
+    _report(pg, account_id=_account(pg), report_type="inaccessible")
+    _off_map(pg, last_seen_at=NOW - timedelta(hours=20), last_pos=north(60))
+    _at(pg, north(170))                 # 110 m from where it was last seen
+    assert _state(pg, range_meters=1000) is None
+
+
+def test_off_map_and_back_at_the_same_spot_clears_nothing(pg):
+    _report(pg, account_id=_account(pg), report_type="inaccessible")
+    _off_map(pg, last_seen_at=NOW - timedelta(hours=20))
+    _at(pg, north(40))
+    assert _state(pg, range_meters=FULL) == "high"
+
+
+def test_an_absence_before_the_report_does_not_count(pg):
+    _report(pg, account_id=_account(pg), at=NOW - timedelta(days=3))
+    _off_map(pg, last_seen_at=NOW - timedelta(days=4), last_pos=north(-500))
+    _at(pg, A)
+    assert _state(pg, range_meters=FULL) == "high"
+
+
+# ---------------------------------------------------------------------------
+# Verification, re-baselining, and what is not negative
+# ---------------------------------------------------------------------------
 
 def test_a_resolved_report_counts_for_nothing(pg):
-    # The safety valve (§2.6(1)): an admin's void ends the report on BOTH
-    # branches, immediately.
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3), resolved_at=NOW)
+    _at(pg, A)
+    _report(pg, account_id=_account(pg), resolved_at=NOW)
     _report(pg, account_id=None, at=NOW - timedelta(hours=2), resolved_at=NOW)
-    assert _flagged(pg) is False
+    assert _state(pg) is None
 
 
-def test_an_inaccessible_report_never_counts(pg):
-    # §2.1: it says nothing about whether the scooter rides. The suppression
-    # flag is what picks it up (tests/test_fleet_reports_pg.py).
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=1), report_type="inaccessible")
-    _report(pg, account_id=None, at=NOW - timedelta(hours=1), report_type="inaccessible")
-    assert _flagged(pg) is False
+def test_a_reconfirmation_rebaselines_position_and_charge(pg):
+    b = north(500)
+    _report(pg, account_id=_account(pg), range_at_report=1000,
+            baseline_lat=b[0], baseline_lon=b[1], baseline_range_meters=HALF,
+            baseline_at=NOW - timedelta(hours=1))
+    _at(pg, north(50, of=b))            # 550 m from the original spot, 50 from the new
+    assert _state(pg, range_meters=FULL) == "high"
+    _at(pg, north(150, of=b))
+    assert _state(pg, range_meters=HALF + RISE - 1) == "high"   # rise is from the new charge
+    assert _state(pg, range_meters=HALF + RISE) is None
 
 
-def test_an_unknown_position_does_not_clear_it(pg):
-    # No device_state row is not evidence of a move. The flag holds, which is
-    # the safe direction for a claim that the scooter does not work.
-    acct = _account(pg)
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3))
-    assert _flagged(pg) is True
+def test_a_pending_baseline_cannot_clear(pg):
+    _report(pg, account_id=_account(pg), report_type="inaccessible", baseline_pending=True)
+    _at(pg, north(300))
+    assert _state(pg) == "high"
 
 
-def test_an_unknown_battery_does_not_clear_it(pg):
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3))
-    assert _flagged(pg, range_meters=None) is True
-
-
-def test_a_parking_complaint_never_counts(pg):
-    # improperly_parked is a compliance signal. A scooter blocking a ramp can
-    # still be a great ride, and this rule must not change that.
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(
-        pg,
-        account_id=acct,
-        at=NOW - timedelta(days=3),
-        report_type="improperly_parked",
-    )
-    assert _flagged(pg) is False
-
-
-def test_a_signed_in_report_follows_the_vehicle_across_cells(pg):
-    # Not cell-scoped, deliberately: if it has not moved, the cell cannot have
-    # changed, and if it has moved the movement check has already cleared it.
-    # So a cell mismatch alone must not clear an unanswered report.
-    acct = _account(pg)
-    _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3))
-    assert _flagged(pg, cell=OTHER_CELL) is True
+def test_improperly_parked_changes_no_label(pg):
+    _at(pg, A)
+    _report(pg, account_id=_account(pg), report_type="improperly_parked")
+    _report(pg, account_id=None, at=NOW - timedelta(hours=1), report_type="improperly_parked")
+    assert _state(pg) is None

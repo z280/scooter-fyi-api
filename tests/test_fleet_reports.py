@@ -7,7 +7,7 @@ tests/test_fleet_reports_pg.py.
     and that a client sending neither still works;
   * observed_at: a date or a timestamp, defaulted, never future, never older
     than 30 days;
-  * suppression fields on /devices/current, and that an outage reads null;
+  * the negative-report label fields on /devices/current (no hiding fields), and that an outage reads null;
   * the public CSV never carries an inaccessible report's location;
   * the identify extension's input rules (qr= / plate=, unreadable QRs);
   * every census, export, resolve and dossier route is admin-only.
@@ -113,18 +113,18 @@ def _insert_sql(sink) -> str:
 # The inaccessible type
 # ---------------------------------------------------------------------------
 
-def test_inaccessible_is_a_storable_type_outside_reliability():
+def test_inaccessible_is_a_storable_negative_type():
+    # Owner, 2026-10-09: every negative report — inaccessible included —
+    # makes the vehicle high risk; only improperly_parked is excluded.
     assert "inaccessible" in _REPORT_TYPES
-    assert "inaccessible" in NON_RELIABILITY_REPORT_TYPES
+    assert NON_RELIABILITY_REPORT_TYPES == ("improperly_parked",)
     clause = reliability_report_type_sql("dr")
-    assert "'inaccessible'" in clause and "'improperly_parked'" in clause
-    for keep in ("not_rideable", "dead_battery", "damaged", "not_found"):
-        assert keep not in clause
+    assert "'improperly_parked'" in clause and "inaccessible" not in clause
 
 
 def test_inaccessible_earns_no_points():
-    # Paying for a report that hides a vehicle from every rider pays for
-    # griefing (plan risk 2).
+    # Paying for a report that marks a vehicle high risk pays for griefing
+    # (plan risk 2).
     assert "inaccessible" not in REPORT_TYPE_POINTS
 
 
@@ -135,21 +135,21 @@ def test_inaccessible_is_accepted_and_stored(monkeypatch):
     assert "inaccessible" in _insert(sink)
 
 
-def test_every_report_type_is_classified_for_suppression():
-    # A new type must be put in exactly one of the two tuples on purpose: a
-    # type missing from both would never suppress, silently.
-    sup = set(fleet_reports.SUPPRESSION_REASON_PRIORITY)
-    non = set(fleet_reports.NON_SUPPRESSING_REPORT_TYPES)
-    assert not sup & non
-    assert sup | non == set(_REPORT_TYPES)
-    assert fleet_reports.SUPPRESSION_REASON_PRIORITY[:2] == ("inaccessible", "not_found")
+def test_every_report_type_is_classified_negative_or_not():
+    # A new type must be put in exactly one of the two tuples on purpose.
+    neg = set(fleet_reports.NEGATIVE_REPORT_PRIORITY)
+    non = set(fleet_reports.NON_NEGATIVE_REPORT_TYPES)
+    assert not neg & non
+    assert neg | non == set(_REPORT_TYPES)
+    assert fleet_reports.NEGATIVE_REPORT_PRIORITY[:2] == ("inaccessible", "not_found")
+    assert set(fleet_reports.RIDEABILITY_REPORT_TYPES) | set(
+        fleet_reports.LOCATION_REPORT_TYPES) == neg
 
 
-def test_improperly_parked_does_not_suppress():
-    # Owner, 2026-10-09: "the improperly parked is a report to veo" — not a
-    # reason to steer riders away from a reachable, rideable scooter.
-    assert "improperly_parked" not in fleet_reports.SUPPRESSION_REASON_PRIORITY
-    assert "improperly_parked" in fleet_reports.NON_SUPPRESSING_REPORT_TYPES
+def test_improperly_parked_is_not_negative():
+    # Owner, 2026-10-09: "the improperly parked is a report to veo".
+    assert "improperly_parked" not in fleet_reports.NEGATIVE_REPORT_PRIORITY
+    assert "improperly_parked" in fleet_reports.NON_NEGATIVE_REPORT_TYPES
 
 
 def test_the_insert_records_the_charge_at_report_time(monkeypatch):
@@ -158,6 +158,9 @@ def test_the_insert_records_the_charge_at_report_time(monkeypatch):
     client.post("/api/v1/reports/device", json={**_BODY, "report_type": "not_rideable"})
     sql = _insert_sql(sink)
     assert "range_at_report_meters" in sql
+    # ...and where the VEHICLE was, the baseline a 100 m clearing move is
+    # measured from (owner, 2026-10-09).
+    assert "vehicle_lat_at_report" in sql and "vehicle_lon_at_report" in sql
     assert "FROM raw_telemetry_points" in sql
 
 
@@ -370,42 +373,60 @@ def test_the_public_csv_drops_an_inaccessible_reports_coordinates(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Suppression fields on /devices/current
+# Negative-report label fields on /devices/current (no hiding fields remain)
 # ---------------------------------------------------------------------------
 
-def test_suppression_fields_for_a_suppressed_vehicle():
-    by = {_VID: ("inaccessible", _TS)}
-    assert api_public._suppression_fields(by, _VID) == {
-        "suppressed": True, "suppressed_reason": "inaccessible",
-        "suppressed_since": _TS.isoformat()}
-    assert api_public._suppression_fields(by, "0" * 16)["suppressed"] is False
+def test_label_fields_for_a_reported_vehicle():
+    by = {_VID: {"risk": "high_risk", "reason": "not_rideable",
+                 "reason_detail": "acceleration", "since": _TS, "signed_in": True,
+                 "needs_condition_check": True,
+                 "latest_report": {"report_type": "not_rideable", "reason": "acceleration",
+                                   "observed_at": _TS.isoformat(),
+                                   "reported_at": _TS.isoformat(), "anonymous": False}}}
+    assert api_public._negative_report_fields(by, _VID, "high") == {
+        "negative_report_risk": "high_risk", "negative_report_reason": "not_rideable",
+        "negative_report_reason_detail": "acceleration",
+        "negative_report_since": _TS.isoformat(), "needs_condition_check": True,
+        "latest_report": by[_VID]["latest_report"]}
+    clean = api_public._negative_report_fields(by, "0" * 16, None)
+    assert clean["negative_report_risk"] is None and clean["needs_condition_check"] is False
 
 
-def test_an_unavailable_suppression_query_reads_null_not_false():
-    # A client must not read an outage as a clean bill.
-    assert api_public._suppression_fields(None, _VID) == {
-        "suppressed": None, "suppressed_reason": None, "suppressed_since": None}
+def test_an_unavailable_detail_query_reads_null_not_false():
+    # A client must not read an outage as a clean bill; the risk still comes
+    # from the payload's own column.
+    out = api_public._negative_report_fields(None, _VID, "unknown")
+    assert out["negative_report_risk"] == "unknown"
+    assert out["needs_condition_check"] is None and out["negative_report_reason"] is None
 
 
-def test_the_suppression_query_failing_does_not_break_the_map(monkeypatch):
+def test_the_detail_query_failing_does_not_break_the_map(monkeypatch):
     @contextmanager
     def _boom():
         raise RuntimeError("db down")
         yield  # pragma: no cover
 
     monkeypatch.setattr(api_public, "connection", _boom)
-    assert api_public._suppressions("cycle") is None
+    assert api_public._negative_states("cycle") is None
 
 
-def test_suppression_is_documented_as_separate_from_reliability():
-    # §4.1(4): "or somebody will 'simplify' them together".
+def test_no_hiding_fields_remain():
+    # Owner, 2026-10-09: "all scooters with a negative report should be
+    # labeled as 'high risk', not hidden from the map".
     import inspect
-    src = inspect.getsource(api_public)
-    assert "SUPPRESSION IS NOT RELIABILITY" in src
-    assert "FLEET_REPORTS_PLAN.md §2.5" in src
-    # And quality.py — the tier — never reads it.
-    from src import quality
-    assert "suppress" not in inspect.getsource(quality)
+    for mod in (api_public, api_vehicle_plates, api_fleet_reports):
+        src = inspect.getsource(mod)
+        for gone in ('"suppressed"', '"suppressed_reason"', '"suppressed_since"',
+                     '"status": "suppressed"'):
+            assert gone not in src, (mod.__name__, gone)
+
+
+def test_the_column_state_maps_to_the_tier_inputs():
+    assert api_public._negative_state("high") == "high"
+    assert api_public._negative_state(True) == "high"
+    assert api_public._negative_state("unknown") == "unknown"
+    assert api_public._negative_state(None) is None
+    assert api_public._negative_state(False) is None
 
 
 # ---------------------------------------------------------------------------
@@ -514,3 +535,15 @@ def test_every_new_private_route_is_in_the_gating_list():
     listed = {(m, p.replace(_VID, "{vehicle_identifier}").replace("/1/", "/{report_id}/"))
               for m, p, _b in _ADMIN_ROUTES}
     assert paths == listed
+
+
+def test_a_faded_anonymous_report_reads_unknown_never_ok():
+    from src.quality import compute_reliability_tier
+
+    now = datetime(2026, 10, 9, 12, tzinfo=timezone.utc)
+    kw = dict(number_failed_starts=0, first_observed_at_location=now - timedelta(hours=1),
+              quality_designation="good", battery_percent=90, now=now)
+    assert compute_reliability_tier(has_negative_report=False, **kw) == "ok"
+    assert compute_reliability_tier(has_negative_report=False,
+                                    has_faded_negative_report=True, **kw) == "unknown"
+    assert compute_reliability_tier(has_negative_report=True, **kw) == "high_risk"

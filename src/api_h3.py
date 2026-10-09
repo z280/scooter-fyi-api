@@ -39,10 +39,9 @@ from typing import Any
 import h3
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
-from .api_frontend_reports import reliability_report_type_sql
+from . import fleet_reports
 from .api_public import _if_none_match_hit
 from .dwell_stats import stats_for_cycle
-from .fleet_reports import charge_rise_meters
 from .pg import connection
 from .quality import (
     compute_battery_percent,
@@ -113,50 +112,17 @@ def h3_aggregates(
                        r.current_range_meters, r.max_range_meters_for_type,
                        ds.number_failed_starts, ds.first_observed_at_location,
                        ds.recent_no_go_mask,
-                       (EXISTS (
-                           SELECT 1 FROM negative_reports nr
-                           WHERE nr.vehicle_identifier = r.vehicle_identifier
-                             AND nr.h3_10_index = r.h3_10_index
-                             AND nr.reported_at > %(snap)s - INTERVAL '24 hours'
-                             AND nr.reported_at <= %(snap)s
-                       ) OR EXISTS (
-                           SELECT 1 FROM device_reports dr
-                           WHERE dr.vehicle_identifier = r.vehicle_identifier
-                             AND dr.h3_10_index = r.h3_10_index
-                             AND dr.reported_at > %(snap)s - INTERVAL '24 hours'
-                             AND dr.reported_at <= %(snap)s
-                             AND (dr.resolved_at IS NULL OR dr.resolved_at > %(snap)s)
-                             AND """ + reliability_report_type_sql("dr") + """
-                       ) OR EXISTS (
-                           -- The signed-in rule, mirrored from
-                           -- api_public.py's /devices/current. It MUST be
-                           -- mirrored: this aggregate and that endpoint are
-                           -- two renderings of one signal, and a rider who
-                           -- sees a cell shaded high-risk and then taps the
-                           -- scooter inside it is owed the same answer twice.
-                           --
-                           -- No 24h window and no cell scoping, for the
-                           -- reasons that comment gives; it clears when the
-                           -- vehicle moves or its charge RISES (never a
-                           -- level: docs/FLEET_REPORTS_PLAN.md §2.4).
-                           --
-                           -- Resolution is bounded by the snapshot like
-                           -- everything else here: a report resolved after
-                           -- this cycle still counted for it, so resolving
-                           -- one never reshades a published cycle. The
-                           -- `dr.resolved_at IS NULL` half is the live case.
-                           SELECT 1 FROM device_reports dr
-                           WHERE dr.vehicle_identifier = r.vehicle_identifier
-                             AND dr.account_id IS NOT NULL
-                             AND dr.reported_at <= %(snap)s
-                             AND (dr.resolved_at IS NULL OR dr.resolved_at > %(snap)s)
-                             AND """ + reliability_report_type_sql("dr") + """
-                             AND (ds.first_observed_at_location IS NULL
-                                  OR ds.first_observed_at_location <= dr.reported_at)
-                             AND (dr.range_at_report_meters IS NULL
-                                  OR r.current_range_meters IS NULL
-                                  OR r.current_range_meters < dr.range_at_report_meters + %(rise)s)
-                       )) AS has_negative_report
+                       -- The owner's rules (2026-10-09), from the ONE builder
+                       -- /devices/current uses (src/fleet_reports.py), bounded
+                       -- by this cycle's snapshot: a report filed or resolved
+                       -- after it never reshades a published cycle.
+                       """ + fleet_reports.negative_state_sql(
+                           vid="r.vehicle_identifier",
+                           current_range="r.current_range_meters",
+                           now="%(snap)s",
+                           dr_filter="AND dr.reported_at <= %(snap)s "
+                                     "AND (dr.resolved_at IS NULL OR dr.resolved_at > %(snap)s)",
+                           nr_filter="AND nr.reported_at <= %(snap)s") + """ AS has_negative_report
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
                 WHERE r.cycle_id = %(cycle)s
@@ -165,7 +131,6 @@ def h3_aggregates(
                 {
                     "cycle": cycle_id,
                     "snap": snapshot_time,
-                    "rise": charge_rise_meters(),
                 },
             )
             device_rows = cur.fetchall()
@@ -215,7 +180,7 @@ def h3_aggregates(
             is_reserved=is_reserved,
             number_failed_starts=fs,
             first_observed_at_location=first_obs,
-            has_negative_report=bool(has_neg),
+            has_negative_report=has_neg is True or has_neg == "high",
             is_dwell_outlier=is_outlier,
             now=snapshot_time,
         )
@@ -224,7 +189,8 @@ def h3_aggregates(
             number_failed_starts=fs,
             first_observed_at_location=first_obs,
             quality_designation=quality,
-            has_negative_report=bool(has_neg),
+            has_negative_report=has_neg is True or has_neg == "high",
+            has_faded_negative_report=has_neg == "unknown",
             is_dwell_outlier=is_outlier,
             peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
             battery_percent=battery,

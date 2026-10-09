@@ -208,7 +208,7 @@ when one scooter moves or changes state. We store the scooter, the
 admin&rsquo;s GitHub login, the admin account whose verified phone receives
 the texts, when they consented, the expiry (at most 7 days), how many texts
 were sent and the last change seen</td>
-<td>Letting an admin follow a scooter reported as hidden or missing.
+<td>Letting an admin follow a scooter that has been reported or has gone missing.
 Texts go only to a verified number on an admin-allowlisted account, at most
 20 per watch, and STOP ends them</td></tr>
 <tr><td>Referrals and stand-downs</td><td>Someone at a dibs certificate may
@@ -531,7 +531,9 @@ address and user-agent the report arrived with, which are retained for
 abuse detection because several of these forms accept anonymous
 submissions. A device report also records when you say you saw the
 problem, why the scooter would not ride (if you said) and the scooter&rsquo;s
-charge when the report arrived. If an admin voids a report, or marks a
+charge and position when the report arrived &mdash; the baseline a clearing
+move is measured from. A report only ever changes the scooter&rsquo;s risk
+label; it never hides the scooter. If an admin voids a report, or marks a
 vanished vehicle as permanently gone, the record keeps which admin account
 (or admin GitHub login) did it and why; if a rider&rsquo;s condition check
 resolves or reconfirms a report, the record keeps which check did, and an

@@ -34,6 +34,16 @@ SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 _NOW = datetime.now(timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_now():
+    """Re-read the clock per test. A module-level instant taken at collection
+    goes stale in a long full-suite run: once the suite reaches this file more
+    than five minutes after collection, `_NOW + 5 min` is already in the past
+    and an end lands before the ride's server-side start."""
+    global _NOW
+    _NOW = datetime.now(timezone.utc)
+
+
 def _reachable(dsn: str) -> bool:
     try:
         with psycopg.connect(dsn, connect_timeout=3):

@@ -2,9 +2,9 @@
 
 What only a real database can show:
 
-  * suppression's SQL — signed-in, unresolved, not moved, charge not risen —
-    end to end through /api/v1/devices/current, alongside a reliability_tier
-    it must not touch;
+  * the owner's 2026-10-09 rules end to end through /api/v1/devices/current:
+    a negative report sets the reliability label and never hides a scooter
+    (the rule-by-rule SQL tests are tests/test_negative_report_hold_pg.py);
   * the identify extension (`/vehicles/resolve?explain=true`) reading
     device_state for vehicles the feed no longer carries, and the four
     reasons it answers with;
@@ -128,23 +128,39 @@ class _Fleet:
     def report(self, vid: str, report_type: str, *, account_id: int | None,
                at: datetime = SNAP - timedelta(days=3), range_at_report: int | None = HALF,
                reason: str | None = None, submitted_reason: str | None = None,
-               observed_at: datetime | None = None) -> int:
+               observed_at: datetime | None = None,
+               at_pos: tuple[float, float] | None = (39.7392123, -104.9903456)) -> int:
         with self.conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO device_reports (
                     vehicle_identifier, report_type, reported_at, account_id,
                     range_at_report_meters, reason, submitted_reason, observed_at,
-                    h3_10_index
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 622236750537375743)
+                    h3_10_index, vehicle_lat_at_report, vehicle_lon_at_report
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 622236750537375743, %s, %s)
                 RETURNING id
                 """,
                 (vid, report_type, at, account_id, range_at_report, reason,
-                 submitted_reason, observed_at or at),
+                 submitted_reason, observed_at or at,
+                 at_pos[0] if at_pos else None, at_pos[1] if at_pos else None),
             )
             rid = cur.fetchone()[0]
         self.conn.commit()
         return rid
+
+    def move(self, vid: str, metres_north: float, *, range_m: int | None = None):
+        """Put the vehicle `metres_north` of the fixture's spot (device_state,
+        as the ingest leaves it), optionally with a new charge."""
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE device_state SET current_lat = %s, current_lon = %s, "
+                        "first_observed_at_location = %s WHERE vehicle_identifier = %s",
+                        (39.7392123 + metres_north / 111_195.0, -104.9903456,
+                         SNAP - timedelta(hours=1), vid))
+            if range_m is not None:
+                cur.execute("UPDATE raw_telemetry_points SET current_range_meters = %s "
+                            "WHERE cycle_id = %s AND vehicle_identifier = %s",
+                            (range_m, self.cycle, vid))
+        self.conn.commit()
 
     def cleanup(self):
         self.conn.rollback()
@@ -222,74 +238,154 @@ def _devices(fleet) -> dict[str, dict]:
 # Suppression on /devices/current, and its independence from reliability
 # ---------------------------------------------------------------------------
 
-def test_inaccessible_suppresses_and_leaves_the_tier_alone(fleet):
-    # The Apollo behind the fence: 100%, signed-in inaccessible report.
+def test_an_inaccessible_report_labels_high_risk_and_hides_nothing(fleet):
+    # The Apollo behind the fence: 100%, signed-in inaccessible report. Owner,
+    # 2026-10-09: "labeled as 'high risk', not hidden from the map".
     acct = fleet.account()
     apollo = fleet.vehicle("9100001", range_m=FULL)
     control = fleet.vehicle("9100002", range_m=FULL)
     fleet.report(apollo, "inaccessible", account_id=acct, range_at_report=FULL)
     d = _devices(fleet)
-    assert d[apollo]["suppressed"] is True
-    assert d[apollo]["suppressed_reason"] == "inaccessible"
-    assert d[apollo]["suppressed_since"].startswith("2099-05-29")
-    assert d[apollo]["has_negative_report"] is False
-    # The tier is exactly what an unreported twin earns.
-    assert d[apollo]["reliability_tier"] == d[control]["reliability_tier"]
-    assert d[control]["suppressed"] is False
-    assert d[control]["suppressed_reason"] is None
+    assert apollo in d                                     # still on the map
+    assert d[apollo]["reliability_tier"] == "high_risk"
+    assert d[apollo]["has_negative_report"] is True
+    assert d[apollo]["negative_report_risk"] == "high_risk"
+    assert d[apollo]["negative_report_reason"] == "inaccessible"
+    assert d[apollo]["negative_report_since"].startswith("2099-05-29")
+    for gone in ("suppressed", "suppressed_reason", "suppressed_since"):
+        assert gone not in d[apollo]
+    assert d[control]["negative_report_risk"] is None
+    assert d[control]["has_negative_report"] is False
 
 
-def test_improperly_parked_neither_suppresses_nor_touches_the_tier(fleet):
-    # Owner, 2026-10-09: a badly parked scooter is a report to Veo, not a
-    # reason to steer riders away. It stays on the map and in the export.
+def test_improperly_parked_changes_no_label(fleet):
     acct = fleet.account()
     v = fleet.vehicle("9100003")
+    control = fleet.vehicle("9100013")
     fleet.report(v, "improperly_parked", account_id=acct)
     d = _devices(fleet)
-    assert d[v]["suppressed"] is False
-    assert d[v]["suppressed_reason"] is None
+    assert d[v]["negative_report_risk"] is None
     assert d[v]["has_negative_report"] is False
+    assert d[v]["reliability_tier"] == d[control]["reliability_tier"]
 
 
-def test_not_found_suppresses(fleet):
+def test_not_found_labels_high_risk(fleet):
     acct = fleet.account()
     v = fleet.vehicle("9100012")
     fleet.report(v, "not_found", account_id=acct)
     fleet.report(v, "improperly_parked", account_id=acct)
     d = _devices(fleet)
-    assert d[v]["suppressed"] is True
-    assert d[v]["suppressed_reason"] == "not_found"
+    assert d[v]["reliability_tier"] == "high_risk"
+    assert d[v]["negative_report_reason"] == "not_found"
 
 
-def test_a_signed_in_report_still_suppresses_a_week_later(fleet):
+def test_the_reason_detail_names_why_it_wont_ride(fleet):
     acct = fleet.account()
-    v = fleet.vehicle("9100004", parked_since=SNAP - timedelta(days=30))
-    fleet.report(v, "not_rideable", account_id=acct, at=SNAP - timedelta(days=8))
-    assert fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)[v][0] == "not_rideable"
+    v = fleet.vehicle("9100014")
+    fleet.report(v, "not_rideable", account_id=acct, reason="acceleration")
+    d = _devices(fleet)[v]
+    assert (d["negative_report_reason"], d["negative_report_reason_detail"]) == (
+        "not_rideable", "acceleration")
 
 
-def test_an_anonymous_report_never_suppresses(fleet):
-    v = fleet.vehicle("9100005")
-    fleet.report(v, "inaccessible", account_id=None, at=SNAP - timedelta(hours=1))
-    assert v not in fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)
+def test_an_anonymous_report_fades_to_unknown_not_ok(fleet):
+    # Parked an hour, so nothing but the report can make it high risk.
+    v = fleet.vehicle("9100005", parked_since=SNAP - timedelta(hours=1))
+    twin = fleet.vehicle("9100015", parked_since=SNAP - timedelta(hours=1))
+    rid = fleet.report(v, "damaged", account_id=None, at=datetime.now(timezone.utc)
+                       - timedelta(hours=2))
+    d = _devices(fleet)[v]
+    assert d["reliability_tier"] == "high_risk" and d["negative_report_risk"] == "high_risk"
+    with fleet.conn.cursor() as cur:
+        cur.execute("UPDATE device_reports SET reported_at = %s WHERE id = %s",
+                    (datetime.now(timezone.utc) - timedelta(hours=30), rid))
+    fleet.conn.commit()
+    devices = _devices(fleet)
+    d = devices[v]
+    assert devices[twin]["reliability_tier"] == "ok"
+    assert d["reliability_tier"] == "unknown"
+    assert d["negative_report_risk"] == "unknown"
+    assert d["has_negative_report"] is False
 
 
-def test_moving_clears_suppression(fleet):
+def test_a_signed_in_report_has_no_time_limit(fleet):
     acct = fleet.account()
-    v = fleet.vehicle("9100006", parked_since=SNAP - timedelta(hours=1))
-    fleet.report(v, "inaccessible", account_id=acct, at=SNAP - timedelta(days=2))
-    assert v not in fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)
+    v = fleet.vehicle("9100004")
+    fleet.report(v, "not_rideable", account_id=acct, at=SNAP - timedelta(days=300))
+    assert fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)[v]["risk"] \
+        == "high_risk"
 
 
-def test_a_charge_rise_clears_suppression_and_a_full_scooter_stays(fleet):
+def test_a_short_move_never_clears_and_a_long_one_needs_a_rise(fleet):
     acct = fleet.account()
-    swapped = fleet.vehicle("9100007", range_m=FULL)
-    fleet.report(swapped, "dead_battery", account_id=acct, range_at_report=1000)
-    at_full = fleet.vehicle("9100008", range_m=FULL)
-    fleet.report(at_full, "inaccessible", account_id=acct, range_at_report=FULL)
-    s = fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)
-    assert swapped not in s
-    assert at_full in s
+    v = fleet.vehicle("9100006")
+    fleet.report(v, "dead_battery", account_id=acct, range_at_report=1000)
+    fleet.move(v, 60, range_m=FULL)                   # recharged, but 60 m
+    assert v in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
+    fleet.move(v, 160, range_m=1000)                  # far, but no rise
+    assert v in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
+    fleet.move(v, 160, range_m=FULL)                  # far and recharged
+    assert v not in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
+    assert _devices(fleet)[v]["negative_report_risk"] is None
+
+
+def test_a_long_move_clears_a_location_report(fleet):
+    acct = fleet.account()
+    v = fleet.vehicle("9100007")
+    fleet.report(v, "inaccessible", account_id=acct)
+    fleet.move(v, 99)
+    assert v in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
+    fleet.move(v, 101)
+    assert v not in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
+
+
+def test_latest_report_is_the_newest_uncleared_one_not_the_strongest(fleet):
+    # Owner, 2026-10-09: "The most recent report should be displayed on the
+    # scooter details tile."
+    a = fleet.account()
+    v = fleet.vehicle("9100030")
+    fleet.report(v, "inaccessible", account_id=a, at=SNAP - timedelta(days=4))
+    newest = fleet.report(v, "not_rideable", account_id=None, reason="flat_tire",
+                          at=SNAP - timedelta(hours=3),
+                          observed_at=SNAP - timedelta(hours=5))
+    fleet.report(v, "improperly_parked", account_id=a, at=SNAP - timedelta(hours=1))
+    d = _devices(fleet)[v]
+    assert d["negative_report_reason"] == "inaccessible"         # strongest
+    lr = d["latest_report"]
+    assert lr == {"report_type": "not_rideable", "reason": "flat_tire",
+                  "observed_at": (SNAP - timedelta(hours=5)).isoformat(),
+                  "reported_at": (SNAP - timedelta(hours=3)).isoformat(),
+                  "anonymous": True}                              # parking excluded
+    # A cleared report drops out; the next newest takes its place.
+    with fleet.conn.cursor() as cur:
+        cur.execute("UPDATE device_reports SET resolved_at = NOW(), resolution_source = "
+                    "'admin' WHERE id = %s", (newest,))
+    fleet.conn.commit()
+    lr = _devices(fleet)[v]["latest_report"]
+    assert lr["report_type"] == "inaccessible" and lr["anonymous"] is False
+    clean = fleet.vehicle("9100031")
+    fleet.report(clean, "improperly_parked", account_id=a)
+    assert _devices(fleet)[clean]["latest_report"] is None
+
+
+def test_the_etag_changes_when_a_report_lands_mid_cycle(fleet):
+    app = FastAPI()
+    app.include_router(api_public.router)
+    c = TestClient(app)
+    v = fleet.vehicle("9100032")
+    tag = c.get("/api/v1/devices/current").headers["etag"]
+    assert c.get("/api/v1/devices/current",
+                 headers={"If-None-Match": tag}).status_code == 304
+    rid = fleet.report(v, "damaged", account_id=fleet.account())
+    r = c.get("/api/v1/devices/current", headers={"If-None-Match": tag})
+    assert r.status_code == 200 and r.headers["etag"] != tag
+    tag2 = r.headers["etag"]
+    with fleet.conn.cursor() as cur:
+        cur.execute("UPDATE device_reports SET resolved_at = NOW(), resolution_source = "
+                    "'admin' WHERE id = %s", (rid,))
+    fleet.conn.commit()
+    assert c.get("/api/v1/devices/current",
+                 headers={"If-None-Match": tag2}).status_code == 200
 
 
 def test_the_strongest_reason_wins_and_since_is_its_oldest_report(fleet):
@@ -298,31 +394,31 @@ def test_the_strongest_reason_wins_and_since_is_its_oldest_report(fleet):
     fleet.report(v, "not_rideable", account_id=a, at=SNAP - timedelta(days=4))
     fleet.report(v, "inaccessible", account_id=a, at=SNAP - timedelta(days=2))
     fleet.report(v, "inaccessible", account_id=b, at=SNAP - timedelta(days=1))
-    reason, since = fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)[v]
-    assert reason == "inaccessible"
-    assert since == SNAP - timedelta(days=2)
+    st = fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)[v]
+    assert st["reason"] == "inaccessible"
+    assert st["since"] == SNAP - timedelta(days=2)
 
 
-def test_broken_parts_from_feature_confirmation_never_suppress(fleet):
+def test_broken_parts_from_feature_confirmation_change_no_label(fleet):
     v = fleet.vehicle("9100010", features={
         "status": "up_to_date", "bell": True, "cup_holder": True,
         "phone_holder": False, "basket": True, "poor": ["bell", "cup_holder", "basket"]})
     d = _devices(fleet)
-    assert d[v]["suppressed"] is False
+    assert d[v]["negative_report_risk"] is None
     assert d[v]["device_features"]  # still rendered as equipment
 
 
-def test_resolving_a_report_clears_suppression_immediately_and_is_attributed(fleet):
+def test_resolving_a_report_clears_the_label_immediately_and_is_attributed(fleet):
     acct = fleet.account()
     v = fleet.vehicle("9100011")
     rid = fleet.report(v, "inaccessible", account_id=acct)
-    assert v in fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)
+    assert v in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
     admin = _admin_client(fleet, api_fleet_reports.router)
     r = admin.post(f"/api/v1/private/reports/{rid}/resolve",
                    json={"resolution": "void: the yard gate was open, I checked"})
     assert r.status_code == 200, r.text
     assert r.json()["resolved_by"] == "fr-admin@example.test"
-    assert v not in fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)
+    assert v not in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
     with fleet.conn.cursor() as cur:
         cur.execute("SELECT resolved_by, resolution FROM device_reports WHERE id = %s", (rid,))
         by, why = cur.fetchone()
@@ -343,21 +439,22 @@ def _resolve(**params):
         "/api/v1/vehicles/resolve", params=params)
 
 
-def test_a_suppressed_device_resolves_from_a_scan_and_names_the_report(fleet):
-    # The acceptance test for §2.7, written against the Apollo behind the
-    # fence: it is off the map, the rider is standing in front of it, and
-    # the app explains itself.
+def test_a_reported_device_resolves_from_a_scan_and_names_the_report(fleet):
+    # §2.7's acceptance test, under the owner's 2026-10-09 rules: the Apollo
+    # behind the fence is ON the map, labelled high risk, and a scan says why.
     acct = fleet.account()
     v = fleet.vehicle("9100020", range_m=FULL, device_id="bike-apollo")
     fleet.report(v, "inaccessible", account_id=acct, range_at_report=FULL)
     r = _resolve(qr="https://veo.example/unlock?number=9100020&src=sticker", explain="true")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["status"] == "suppressed"
+    assert body["status"] == "on_map"
     assert body["device_id"] == "bike-apollo"
     assert body["vehicle_identifier"] == v
-    assert body["suppressed_reason"] == "inaccessible"
+    assert body["negative_report_risk"] == "high_risk"
+    assert body["negative_report_reason"] == "inaccessible"
     assert body["open_reports"][0]["report_type"] == "inaccessible"
+    assert body["open_reports"][0]["risk"] == "high_risk"
     assert body["public_name"]
     assert "9100020" not in r.text  # never echoes the plate
 
@@ -398,7 +495,7 @@ def test_a_missing_vehicle_still_shows_its_standing_report(fleet):
     fleet.report(v, "inaccessible", account_id=acct)
     body = _resolve(plate="9100024", explain="true").json()
     assert body["status"] == "missing"
-    assert body["suppressed_reason"] is None
+    assert body["negative_report_reason"] == "inaccessible"
     assert [o["report_type"] for o in body["open_reports"]] == ["inaccessible"]
 
 
@@ -677,11 +774,15 @@ def test_the_dossier_shows_reports_reasons_parts_and_census(fleet):
     assert reports[standing]["standing"] is True
     assert reports[standing]["reporter_email"] == "fr-rider@example.test"
     assert reports[standing]["observed_at"].startswith("2099-05-28")
-    assert reports[anon]["signed_in"] is False and reports[anon]["standing"] is False
-    # In the dossier as Veo's to act on, but it never hides the scooter.
+    # Anonymous and five days old: still uncleared (it faded to unknown).
+    assert reports[anon]["signed_in"] is False and reports[anon]["standing"] is True
+    # In the dossier as Veo's to act on, but it changes no label.
     assert reports[parked]["report_type"] == "improperly_parked"
     assert reports[parked]["standing"] is False
-    assert body["suppression"]["suppressed"] is True
+    assert body["negative_report"]["risk"] == "high_risk"
+    assert body["negative_report"]["reason"] == "not_rideable"
+    assert reports[standing]["distance_from_baseline_m"] == 0
+    assert "suppression" not in body
     assert body["features"]["broken_parts"] == ["basket"]
     assert admin.get(f"/api/v1/private/devices/{'e' * 16}/reports").status_code == 404
 
