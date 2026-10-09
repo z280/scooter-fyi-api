@@ -51,8 +51,20 @@ its validation as "never get 25 m from the kerb", a MAXIMUM distance. A round
 trip that returns to the same rack therefore counts as a no-go. That is
 deliberate (sql/087 kept `rentals_no_go` on the old definition so
 `smart_ride_grade` stays calibrated), but it means copy of the form "never left
-the kerb" overstates what is counted by however many loop rides there are. That
-quantity has not been measured.
+the kerb" overstates what is counted by however many loop rides there are.
+
+NEVER LEFT THE SPOT (sql/099). That quantity has since been measured
+(2026-10-07 08:02Z .. 2026-10-08 17:12Z, rebuilt from raw_telemetry_points):
+about 57% of no-gos are round trips whose furthest point is more than 50 m
+away (median 540 m); about 43% never left the spot, 660 of 30,727 rentals
+(2.1%). So the response now ALSO carries `stayed` / `stayed_rate`: rentals
+whose vehicle never got more than 50 m (`stayed_radius_meters`,
+IN_PLACE_RADIUS_M) from where it was unlocked and was released there. It is
+counted from `device_state.rentals_stayed` over its OWN denominator,
+`rentals_observed_stayed_era`, because it started at the sql/099 deploy
+(`stayed_counted_since`) while `rentals` counts from sql/089. The no-go figure,
+its radius and its wording are unchanged. smart_ride_grade now reads the
+stayed pair.
 """
 
 from __future__ import annotations
@@ -61,6 +73,9 @@ import logging
 from typing import Any
 
 from .config import load
+# sql/099's radius. Imported, not restated: it is the in-place circle the
+# ingest counts against.
+from .device_state import IN_PLACE_RADIUS_M as STAYED_RADIUS_METERS
 from .pg import connection
 
 log = logging.getLogger(__name__)
@@ -73,6 +88,16 @@ log = logging.getLogger(__name__)
 #: WITH their counts and a null rate, so the caller can say "not enough rides
 #: yet" rather than silently dropping a model from the list.
 MIN_RENTALS_FOR_RATE = 200
+
+
+#: The migration that started the stayed counter; its applied_at is published
+#: as `stayed_counted_since`.
+STAYED_COUNTED_SINCE_MIGRATION = "099_rentals_stayed.sql"
+
+STAYED_DEFINITION = (
+    "never left the spot: the vehicle never got more than 50 m from where it "
+    "was unlocked, and was released there"
+)
 
 
 def _rate(no_gos: int, rentals: int) -> float | None:
@@ -96,11 +121,11 @@ def _radius_meters() -> float:
 COUNTED_SINCE_MIGRATION = "089_reset_rental_outcome_counters.sql"
 
 
-def _counted_since_at(cur) -> str | None:
-    """When the reset actually ran in THIS database, as ISO 8601, or None."""
+def _counted_since_at(cur, migration: str = COUNTED_SINCE_MIGRATION) -> str | None:
+    """When `migration` actually ran in THIS database, as ISO 8601, or None."""
     cur.execute(
         "SELECT applied_at FROM schema_migrations WHERE filename = %s",
-        (COUNTED_SINCE_MIGRATION,),
+        (migration,),
     )
     row = cur.fetchone()
     return row[0].isoformat() if row and row[0] else None
@@ -110,7 +135,9 @@ _SQL = """
 SELECT COALESCE(current_vehicle_model_name, 'Unknown') AS model,
        COALESCE(SUM(rentals_observed), 0)      AS rentals,
        COALESCE(SUM(rentals_no_go), 0)         AS no_gos,
-       COUNT(*)                                AS vehicles
+       COUNT(*)                                AS vehicles,
+       COALESCE(SUM(rentals_observed_stayed_era), 0) AS stayed_rentals,
+       COALESCE(SUM(rentals_stayed), 0)        AS stayed
 FROM device_state
 WHERE rentals_observed > 0
 GROUP BY 1
@@ -126,10 +153,12 @@ def summarize() -> dict[str, Any]:
     `rentals` count being zero.
     """
     since_at: str | None = None
+    stayed_since: str | None = None
     try:
         with connection() as conn:
             with conn.cursor() as cur:
                 since_at = _counted_since_at(cur)
+                stayed_since = _counted_since_at(cur, STAYED_COUNTED_SINCE_MIGRATION)
                 cur.execute(_SQL)
                 rows = [
                     {
@@ -137,6 +166,8 @@ def summarize() -> dict[str, Any]:
                         "rentals": int(r[1]),
                         "no_gos": int(r[2]),
                         "vehicles": int(r[3]),
+                        "stayed_rentals": int(r[4]),
+                        "stayed": int(r[5]),
                     }
                     for r in cur.fetchall()
                 ]
@@ -144,16 +175,20 @@ def summarize() -> dict[str, Any]:
         log.exception("fleet outcomes summary failed")
         rows = []
 
-    return summarize_rows(rows, _radius_meters(), counted_since_at=since_at)
+    return summarize_rows(rows, _radius_meters(), counted_since_at=since_at,
+                          stayed_counted_since=stayed_since)
 
 
 def summarize_rows(
     rows: list[dict[str, Any]], radius_meters: float,
     counted_since_at: str | None = None,
+    stayed_counted_since: str | None = None,
 ) -> dict[str, Any]:
     """The arithmetic, split out so it is testable without a database."""
     rentals = sum(r["rentals"] for r in rows)
     no_gos = sum(r["no_gos"] for r in rows)
+    stayed_rentals = sum(r.get("stayed_rentals", 0) for r in rows)
+    stayed = sum(r.get("stayed", 0) for r in rows)
 
     by_model = [
         {
@@ -162,6 +197,10 @@ def summarize_rows(
             "no_gos": r["no_gos"],
             "vehicles": r["vehicles"],
             "no_go_rate": _rate(r["no_gos"], r["rentals"]),
+            # sql/099, over its own (shorter) window and denominator.
+            "stayed_rentals": r.get("stayed_rentals", 0),
+            "stayed": r.get("stayed", 0),
+            "stayed_rate": _rate(r.get("stayed", 0), r.get("stayed_rentals", 0)),
         }
         for r in rows
     ]
@@ -185,5 +224,15 @@ def summarize_rows(
         "no_go_rate": _rate(no_gos, rentals),
         "min_rentals_for_rate": MIN_RENTALS_FOR_RATE,
         "vehicles": sum(r["vehicles"] for r in rows),
+        # sql/099: never left the spot. Its own window and denominator: the
+        # counter started at the sql/099 deploy, after the sql/089 reset.
+        "stayed_window": "since_stayed_counter",
+        "stayed_counted_since": stayed_counted_since,
+        "stayed_counted_since_migration": "sql/099",
+        "stayed_radius_meters": float(STAYED_RADIUS_METERS),
+        "stayed_rentals": stayed_rentals,
+        "stayed": stayed,
+        "stayed_rate": _rate(stayed, stayed_rentals),
+        "stayed_definition": STAYED_DEFINITION,
         "by_model": by_model,
     }

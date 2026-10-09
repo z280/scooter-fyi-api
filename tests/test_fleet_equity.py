@@ -160,7 +160,8 @@ def test_a_full_window_is_complete(monkeypatch):
 
 
 def test_a_broken_boundary_file_reads_degraded_not_ok(monkeypatch):
-    rows = [("unknown", 1, 900, 50, 0, 0), ("outside", 2, 100, 5, 0, 0)]
+    # The SQL's shape: (..., max_known, stayed, stayed_known).
+    rows = [("unknown", 1, 900, 50, 0, 0, 0, 0), ("outside", 2, 100, 5, 0, 0, 0, 0)]
     monkeypatch.setattr(fleet_equity, "connection", _fake(rows, None))
     assert fleet_equity.summarize("7d")["status"] == "degraded"
 
@@ -179,3 +180,37 @@ def test_the_route_rejects_an_unknown_window():
     app = FastAPI()
     app.include_router(api_public.router)
     assert TestClient(app).get("/api/v1/fleet/outcomes/equity?window=1y").status_code == 400
+
+
+# --- sql/099: never left the spot -------------------------------------------
+
+def test_stayed_is_reported_over_the_rentals_that_recorded_it():
+    """Rows from before sql/099 hold stayed = stayed_known = 0 ("not
+    recorded"): they count as rentals but never dilute the stayed rate."""
+    recorded = [("outside", 1000 + c, 100, 10, 4, 100, 2, 100) for c in range(40)]  # 80/4000
+    before = [("outside", 1000 + c, 100, 10, 4, 100) for c in range(40)]              # no stayed
+    out = summarize_areas(recorded + before)
+    side = out["outside"]
+    assert side["rentals"] == 8000
+    assert (side["stayed_known"], side["stayed"], side["stayed_rate"]) == (4000, 80, 0.02)
+    assert side["stayed_ci95"] == [0.02, 0.02]
+    # The 25 m figures are untouched.
+    assert side["ended_within_radius_rate"] == 0.1
+
+
+def test_stayed_rate_is_withheld_under_the_floor():
+    out = summarize_areas([("EQ_001", c, 100, 10, 0, 100, 1, 4) for c in range(40)])
+    assert out["inside"]["stayed_known"] == 160 < FLOOR
+    assert out["inside"]["stayed_rate"] is None and out["inside"]["stayed_ci95"] is None
+
+
+def test_the_payload_states_when_stayed_started_and_its_radius(monkeypatch):
+    since = datetime(2026, 10, 9, 20, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(fleet_equity, "connection", _fake([], since))
+    out = fleet_equity.summarize("7d", now=datetime(2026, 10, 10, 12, 30, tzinfo=timezone.utc))
+    assert out["stayed_counted_since"] == "2026-10-09T20:30:00+00:00"
+    assert out["stayed_hours_covered"] == 15
+    assert out["stayed_radius_meters"] == 50.0
+    assert out["stayed_definition"].startswith("never left the spot")
+    for side in ("inside", "outside"):
+        assert {"stayed", "stayed_known", "stayed_rate", "stayed_ci95"} <= set(out[side])

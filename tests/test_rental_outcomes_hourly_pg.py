@@ -60,3 +60,64 @@ def test_three_rentals_land_in_the_rollup_and_agree_with_the_counters(pg):
     # Same transaction, same definition: the rollup and the per-vehicle
     # counters can never disagree.
     assert (s["rentals_observed"], s["rentals_no_go"]) == (rentals, no_gos)
+
+
+def test_stayed_lands_in_both_counters_and_obeys_the_checks(pg):
+    """sql/099 end to end: in place, round trip, 25-50 m in place, real ride."""
+    import psycopg
+
+    with pg.cursor() as cur:
+        cur.execute("DELETE FROM rental_outcomes_hourly")
+    pg.commit()
+    clock = _Clock()
+    _park(pg, clock)
+    # 1. In place (failed start): no-go AND stayed.
+    _rent(pg, clock, [_north(3), _north(8)], release_at=_north(5), release_id="bike-2")
+    _park(pg, clock, device_id="bike-2")
+    # 2. Round trip out 400 m, back to 6 m: no-go, NOT stayed.
+    _rent(pg, clock, [_north(150), _north(400)], release_at=_north(6),
+          release_id="bike-3", device_id="bike-2")
+    _park(pg, clock, pos=_north(6), device_id="bike-3")
+    # 3. Never past 45 m, dropped 40 m from the unlock point: stayed, NOT a no-go.
+    _rent(pg, clock, [_north(30), _north(45)], release_at=_north(46),
+          release_id="bike-4", device_id="bike-3")
+    _park(pg, clock, pos=_north(46), device_id="bike-4")
+    # 4. A real ride: neither.
+    _rent(pg, clock, [_north(300), _north(900)], release_at=_north(1600),
+          release_id="bike-5", device_id="bike-4")
+
+    with pg.cursor() as cur:
+        cur.execute("SELECT sum(rentals), sum(no_gos), sum(stayed), sum(stayed_known) "
+                    "FROM rental_outcomes_hourly")
+        rentals, no_gos, stayed, stayed_known = cur.fetchone()
+        cur.execute("SELECT rentals_observed, rentals_no_go, rentals_stayed, "
+                    "rentals_observed_stayed_era FROM device_state")
+        (observed, no_go, v_stayed, era), = cur.fetchall()
+    assert (rentals, no_gos, stayed, stayed_known) == (4, 2, 2, 4)
+    assert (observed, no_go, v_stayed, era) == (4, 2, 2, 4)
+
+    # The CHECKs: stayed can never exceed what it is counted against.
+    with pg.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute("UPDATE device_state SET rentals_stayed = rentals_observed_stayed_era + 1")
+    pg.rollback()
+    with pg.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute("UPDATE rental_outcomes_hourly SET stayed = rentals + 1, "
+                        "stayed_known = rentals + 1")
+    pg.rollback()
+    with pg.cursor() as cur:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            cur.execute("UPDATE rental_outcomes_hourly SET stayed = stayed_known + 1")
+    pg.rollback()
+
+
+def test_rows_before_sql_099_default_to_not_recorded(pg):
+    with pg.cursor() as cur:
+        cur.execute("DELETE FROM rental_outcomes_hourly")
+        cur.execute(
+            "INSERT INTO rental_outcomes_hourly (hour, h3_9, model, radius_m, equity_area, "
+            "rentals, no_gos) VALUES ('2026-10-08T10:00:00+00', 1, 'Cosmo', 25, 'outside', 9, 1) "
+            "RETURNING stayed, stayed_known")
+        assert cur.fetchone() == (0, 0)
+    pg.rollback()

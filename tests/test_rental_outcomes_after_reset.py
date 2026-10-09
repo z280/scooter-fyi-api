@@ -39,10 +39,10 @@ def _fake_db(monkeypatch, rows):
 
 
 def test_the_query_keeps_a_mask_whose_counters_were_reset(monkeypatch):
-    seen = _fake_db(monkeypatch, [("v1", 0, 0, 0b011)])
+    seen = _fake_db(monkeypatch, [("v1", 0, 0, 0b011, 0, 0)])
     out = api_public._rental_outcomes()
     assert "recent_no_go_mask <> 0" in seen["sql"]
-    assert out == {"v1": (0, 0, 0b011)}
+    assert out == {"v1": (0, 0, 0b011, 0, 0)}
 
 
 def test_such_a_vehicle_still_reads_high_risk():
