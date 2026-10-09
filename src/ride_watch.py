@@ -12,7 +12,7 @@ query, not a full table scan" the performance requirement asks for.
 
 Two transitions only:
   watching  -> left_feed  vehicle_identifier CHECKED OUT this cycle —
-                           see _is_checked_out below.
+                           see is_checked_out below.
   left_feed -> resolved   vehicle_identifier AVAILABLE again. Records the
                            observed lat/lon/battery on tracked_rides as
                            the GBFS-side end signal, independent of any
@@ -96,7 +96,7 @@ class WatchUpdateStats:
     finalized_validations: int = 0
 
 
-def _is_checked_out(device: TaggedDevice | None) -> bool:
+def is_checked_out(device: TaggedDevice | None) -> bool:
     """True when this cycle says the vehicle is in someone's hands — the
     module docstring's "WHAT CHECKED OUT ACTUALLY LOOKS LIKE" measurement.
 
@@ -113,6 +113,10 @@ def _is_checked_out(device: TaggedDevice | None) -> bool:
     measurement window shows disabled-but-unreserved vehicles sitting
     still (1.1 m per step). A disabled vehicle mid-rental is already
     covered by `is_reserved` being true alongside it.
+
+    PUBLIC because src/dibs_watch.py asks the identical question of the
+    identical feed, and two answers to "is this vehicle out" would differ
+    exactly when it mattered.
     """
     return device is None or device.is_reserved is True
 
@@ -126,11 +130,11 @@ def _classify(
     newly_reappeared: list[tuple[int, uuid.UUID, TaggedDevice]] = []
     for watch_id, tracked_ride_id, vehicle_identifier, status in watch_rows:
         device = observed.get(vehicle_identifier)
-        checked_out = _is_checked_out(device)
+        checked_out = is_checked_out(device)
         if status == "watching" and checked_out:
             newly_left.append((watch_id, tracked_ride_id))
         elif status == "left_feed" and not checked_out:
-            # `device` is necessarily non-None here: _is_checked_out is
+            # `device` is necessarily non-None here: is_checked_out is
             # True for every absent vehicle, so "not checked out" implies
             # "observed this cycle" — and the resolve branch below needs
             # the observation to stamp gbfs_end_lat/lon/battery from.
