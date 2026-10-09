@@ -42,10 +42,10 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from .api_frontend_reports import reliability_report_type_sql
 from .api_public import _if_none_match_hit
 from .dwell_stats import stats_for_cycle
+from .fleet_reports import charge_rise_meters
 from .pg import connection
 from .quality import (
     compute_battery_percent,
-    full_charge_range_meters,
     compute_quality_designation,
     compute_reliability_tier,
     recent_rentals_no_go,
@@ -125,6 +125,7 @@ def h3_aggregates(
                              AND dr.h3_10_index = r.h3_10_index
                              AND dr.reported_at > %(snap)s - INTERVAL '24 hours'
                              AND dr.reported_at <= %(snap)s
+                             AND (dr.resolved_at IS NULL OR dr.resolved_at > %(snap)s)
                              AND """ + reliability_report_type_sql("dr") + """
                        ) OR EXISTS (
                            -- The signed-in rule, mirrored from
@@ -136,16 +137,25 @@ def h3_aggregates(
                            --
                            -- No 24h window and no cell scoping, for the
                            -- reasons that comment gives; it clears when the
-                           -- vehicle moves or comes back charged.
+                           -- vehicle moves or its charge RISES (never a
+                           -- level: docs/FLEET_REPORTS_PLAN.md §2.4).
+                           --
+                           -- Resolution is bounded by the snapshot like
+                           -- everything else here: a report resolved after
+                           -- this cycle still counted for it, so resolving
+                           -- one never reshades a published cycle. The
+                           -- `dr.resolved_at IS NULL` half is the live case.
                            SELECT 1 FROM device_reports dr
                            WHERE dr.vehicle_identifier = r.vehicle_identifier
                              AND dr.account_id IS NOT NULL
                              AND dr.reported_at <= %(snap)s
+                             AND (dr.resolved_at IS NULL OR dr.resolved_at > %(snap)s)
                              AND """ + reliability_report_type_sql("dr") + """
                              AND (ds.first_observed_at_location IS NULL
                                   OR ds.first_observed_at_location <= dr.reported_at)
-                             AND (r.current_range_meters IS NULL
-                                  OR r.current_range_meters < %(full)s)
+                             AND (dr.range_at_report_meters IS NULL
+                                  OR r.current_range_meters IS NULL
+                                  OR r.current_range_meters < dr.range_at_report_meters + %(rise)s)
                        )) AS has_negative_report
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
@@ -155,7 +165,7 @@ def h3_aggregates(
                 {
                     "cycle": cycle_id,
                     "snap": snapshot_time,
-                    "full": full_charge_range_meters(),
+                    "rise": charge_rise_meters(),
                 },
             )
             device_rows = cur.fetchall()

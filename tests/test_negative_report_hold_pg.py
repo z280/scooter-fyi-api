@@ -5,8 +5,13 @@ src/api_frontend_reports.py's statement of them):
 
   * ANONYMOUS — 24 hours, in the vehicle's h3_10 cell. Nobody's name is on it,
     so it ages out on a clock.
-  * SIGNED IN — until the vehicle MOVES or comes back at a FULL CHARGE. An
-    accountable claim is not answered by time passing.
+  * SIGNED IN — until the vehicle MOVES or its charge RISES over what it
+    read when the report was filed (sql/100's range_at_report_meters). An
+    accountable claim is not answered by time passing. It used to be "comes
+    back at a FULL CHARGE", a level test that cleared a report on a 100%
+    scooter the instant it was filed (docs/FLEET_REPORTS_PLAN.md §2.4).
+
+Any report an admin has resolved (sql/100) counts on neither branch.
 
 These run the REAL `has_negative_report` SQL, which is the only way to test
 this: the predicate is three correlated subqueries over `device_reports`,
@@ -29,6 +34,7 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
+from src.fleet_reports import charge_rise_meters  # noqa: E402
 from src.quality import full_charge_range_meters  # noqa: E402
 
 SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
@@ -36,6 +42,7 @@ SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 FULL = full_charge_range_meters()
 HALF = FULL // 2
+RISE = charge_rise_meters()
 VID = "0123456789abcdef"
 CELL = 614553222213795839  # any valid bigint h3_10; the SQL only compares it
 OTHER_CELL = CELL + 2
@@ -81,13 +88,15 @@ def _account(conn) -> int:
         return cur.fetchone()[0]
 
 
-def _report(conn, *, account_id, at, report_type="not_rideable", cell=CELL):
+def _report(conn, *, account_id, at, report_type="not_rideable", cell=CELL,
+            range_at_report=HALF, resolved_at=None):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO device_reports "
-            "  (vehicle_identifier, report_type, reported_at, h3_10_index, account_id) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (VID, report_type, at, cell, account_id),
+            "  (vehicle_identifier, report_type, reported_at, h3_10_index, account_id, "
+            "   range_at_report_meters, resolved_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (VID, report_type, at, cell, account_id, range_at_report, resolved_at),
         )
     conn.commit()
 
@@ -128,16 +137,19 @@ def _flagged(conn, *, cell=CELL, range_meters=HALF) -> bool:
         WHERE dr.vehicle_identifier = r.vehicle_identifier
           AND dr.h3_10_index = r.h3_10_index
           AND dr.reported_at >= %(now)s - INTERVAL '24 hours'
+          AND dr.resolved_at IS NULL
           AND {reliability_report_type_sql('dr')}
     ) OR EXISTS (
         SELECT 1 FROM device_reports dr
         WHERE dr.vehicle_identifier = r.vehicle_identifier
           AND dr.account_id IS NOT NULL
+          AND dr.resolved_at IS NULL
           AND {reliability_report_type_sql('dr')}
           AND (ds.first_observed_at_location IS NULL
                OR ds.first_observed_at_location <= dr.reported_at)
-          AND (r.current_range_meters IS NULL
-               OR r.current_range_meters < %(full)s)
+          AND (dr.range_at_report_meters IS NULL
+               OR r.current_range_meters IS NULL
+               OR r.current_range_meters < dr.range_at_report_meters + %(rise)s)
     )) AS has_negative_report
     FROM (SELECT %(vid)s::text AS vehicle_identifier,
                  %(cell)s::bigint AS h3_10_index,
@@ -147,7 +159,7 @@ def _flagged(conn, *, cell=CELL, range_meters=HALF) -> bool:
     with conn.cursor() as cur:
         cur.execute(
             sql,
-            {"now": NOW, "full": FULL, "vid": VID, "cell": cell, "range": range_meters},
+            {"now": NOW, "rise": RISE, "vid": VID, "cell": cell, "range": range_meters},
         )
         return bool(cur.fetchone()[0])
 
@@ -209,22 +221,71 @@ def test_moving_within_the_same_cell_clears_it_too(pg):
     assert _flagged(pg, cell=CELL) is False
 
 
-def test_a_full_charge_clears_it(pg):
+def test_a_charge_rise_clears_it(pg):
     # A swapped or charged battery is a service visit. A scooter nobody has
     # touched does not refill itself.
     acct = _account(pg)
     _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3))
+    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=HALF)
     assert _flagged(pg, range_meters=FULL) is False
 
 
-def test_nearly_full_does_not_clear_it(pg):
-    # 99% is not 100%, and the threshold is the same number the battery
-    # readout calls full — see quality.full_charge_range_meters.
+def test_a_device_at_100_percent_can_be_reported_and_the_report_stands(pg):
+    # docs/FLEET_REPORTS_PLAN.md §2.4 — the regression test, written against
+    # the Apollo behind the fence. It sits at 100%, so the old LEVEL test
+    # (`current range < full`) cleared the report the instant it was filed. A
+    # charge cannot rise past full, so only a move clears this one.
     acct = _account(pg)
     _device_state(pg, parked_since=NOW - timedelta(days=5))
-    _report(pg, account_id=acct, at=NOW - timedelta(days=3))
-    assert _flagged(pg, range_meters=FULL - 1) is True
+    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=FULL)
+    assert _flagged(pg, range_meters=FULL) is True
+
+
+def test_a_rise_below_the_threshold_does_not_clear_it(pg):
+    # The feed's range is frozen while a vehicle sits, but not perfectly
+    # still; a few metres of drift is not a service visit.
+    acct = _account(pg)
+    _device_state(pg, parked_since=NOW - timedelta(days=5))
+    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=HALF)
+    assert _flagged(pg, range_meters=HALF + RISE - 1) is True
+    assert _flagged(pg, range_meters=HALF + RISE) is False
+
+
+def test_a_falling_charge_does_not_clear_it(pg):
+    acct = _account(pg)
+    _device_state(pg, parked_since=NOW - timedelta(days=5))
+    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=HALF)
+    assert _flagged(pg, range_meters=HALF - 1000) is True
+
+
+def test_a_null_recorded_charge_clears_nothing(pg):
+    # A report filed before sql/100, or while the vehicle was out of the feed,
+    # has no reading to rise from. It must behave exactly as a NULL current
+    # range always has: clear nothing — even at a full charge.
+    acct = _account(pg)
+    _device_state(pg, parked_since=NOW - timedelta(days=5))
+    _report(pg, account_id=acct, at=NOW - timedelta(days=3), range_at_report=None)
+    assert _flagged(pg, range_meters=FULL) is True
+
+
+def test_a_resolved_report_counts_for_nothing(pg):
+    # The safety valve (§2.6(1)): an admin's void ends the report on BOTH
+    # branches, immediately.
+    acct = _account(pg)
+    _device_state(pg, parked_since=NOW - timedelta(days=5))
+    _report(pg, account_id=acct, at=NOW - timedelta(days=3), resolved_at=NOW)
+    _report(pg, account_id=None, at=NOW - timedelta(hours=2), resolved_at=NOW)
+    assert _flagged(pg) is False
+
+
+def test_an_inaccessible_report_never_counts(pg):
+    # §2.1: it says nothing about whether the scooter rides. The suppression
+    # flag is what picks it up (tests/test_fleet_reports_pg.py).
+    acct = _account(pg)
+    _device_state(pg, parked_since=NOW - timedelta(days=5))
+    _report(pg, account_id=acct, at=NOW - timedelta(days=1), report_type="inaccessible")
+    _report(pg, account_id=None, at=NOW - timedelta(hours=1), report_type="inaccessible")
+    assert _flagged(pg) is False
 
 
 def test_an_unknown_position_does_not_clear_it(pg):

@@ -16,23 +16,46 @@
 -- --------------------------------------------------------------------------
 -- device_reports.report_type
 -- --------------------------------------------------------------------------
-ALTER TABLE device_reports
-    DROP CONSTRAINT IF EXISTS device_reports_report_type_allowed;
--- The original inline constraint from sql/013, in case an instance predates
--- sql/023 having renamed it.
-ALTER TABLE device_reports
-    DROP CONSTRAINT IF EXISTS device_reports_report_type_check;
+-- REPLAY SAFETY (fixed in place by sql/100's change, same repair as the
+-- user_points block below and sql/029's). This block used to DROP and re-ADD
+-- the constraint unconditionally with the five values known when it was
+-- written, so replaying it after sql/100 widened the list (adding
+-- 'inaccessible') died with a CheckViolation on the first stored
+-- 'inaccessible' row. Guarded on the value THIS migration installs: once
+-- 'not_rideable' is permitted no 'failed_unlock' row can exist (the
+-- constraint would have rejected it), so there is nothing left to rewrite.
+-- Production never re-runs this file (schema_migrations), so editing it in
+-- place changes nothing there.
+DO $$
+DECLARE
+    current_def text;
+BEGIN
+    SELECT pg_get_constraintdef(oid) INTO current_def
+      FROM pg_constraint
+     WHERE conname = 'device_reports_report_type_allowed'
+       AND conrelid = 'device_reports'::regclass
+       AND contype = 'c';
 
-UPDATE device_reports
-   SET report_type = 'not_rideable'
- WHERE report_type = 'failed_unlock';
+    IF current_def IS NULL OR position('not_rideable' in current_def) = 0 THEN
+        ALTER TABLE device_reports
+            DROP CONSTRAINT IF EXISTS device_reports_report_type_allowed;
+        -- The original inline constraint from sql/013, in case an instance
+        -- predates sql/023 having renamed it.
+        ALTER TABLE device_reports
+            DROP CONSTRAINT IF EXISTS device_reports_report_type_check;
 
-ALTER TABLE device_reports
-    ADD CONSTRAINT device_reports_report_type_allowed
-    CHECK (report_type IN (
-        'not_rideable', 'dead_battery', 'damaged', 'improperly_parked',
-        'not_found'
-    ));
+        UPDATE device_reports
+           SET report_type = 'not_rideable'
+         WHERE report_type = 'failed_unlock';
+
+        ALTER TABLE device_reports
+            ADD CONSTRAINT device_reports_report_type_allowed
+            CHECK (report_type IN (
+                'not_rideable', 'dead_battery', 'damaged', 'improperly_parked',
+                'not_found'
+            ));
+    END IF;
+END $$;
 
 -- --------------------------------------------------------------------------
 -- user_points.action

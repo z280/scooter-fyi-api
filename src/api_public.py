@@ -31,12 +31,12 @@ from .fleet_equity import WINDOWS as EQUITY_WINDOWS
 from .fleet_equity import summarize as fleet_equity_summary
 from .fleet_outcomes import summarize as fleet_outcomes_summary
 from .pg import connection
-from . import battery_model, vehicle_identity
+from . import battery_model, fleet_reports, vehicle_identity
+from .fleet_reports import charge_rise_meters
 from .quality import (
     dwell_percentile_wire,
     smart_ride_grade,
     compute_battery_percent,
-    full_charge_range_meters,
     compute_quality_designation,
     compute_reliability_tier,
     recent_rentals_no_go,
@@ -322,6 +322,32 @@ def _rental_outcomes() -> dict[str, tuple[int, int, int, int, int]] | None:
         return None
 
 
+def _suppressions(cycle_id: Any) -> dict[str, tuple[str, datetime]] | None:
+    """{vehicle_identifier: (reason, since)} for vehicles a standing signed-in
+    report suppresses (src/fleet_reports.py). None on failure, which the
+    payload emits as `suppressed: null` — unknown, not "not suppressed": a
+    client must not read an outage as a clean bill."""
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                return fleet_reports.suppressions(cur, cycle_id)
+    except Exception:  # noqa: BLE001
+        log.warning("suppression unavailable — suppressed emitted as null this cycle")
+        return None
+
+
+def _suppression_fields(by: dict[str, tuple[str, datetime]] | None,
+                        vid: str | None) -> dict[str, Any]:
+    if by is None:
+        return {"suppressed": None, "suppressed_reason": None, "suppressed_since": None}
+    hit = by.get(vid or "")
+    if hit is None:
+        return {"suppressed": False, "suppressed_reason": None, "suppressed_since": None}
+    reason, since = hit
+    return {"suppressed": True, "suppressed_reason": reason,
+            "suppressed_since": since.isoformat() if since else None}
+
+
 def _outcome(outcomes: dict[str, tuple[int, int, int, int, int]] | None,
              vid: str | None) -> tuple[int, int, int, int, int]:
     return (outcomes or {}).get(vid or "", (0, 0, 0, 0, 0))
@@ -406,7 +432,8 @@ def _devices_current_impl(
             # free until a new cycle lands (~every 10 min). Weak because the
             # body is not a pure function of the cycle: has_negative_report
             # uses a wall-clock NOW() - 24h window and sees reports filed
-            # mid-cycle, and the device_state columns (failed starts, dwell
+            # mid-cycle (so does `suppressed`, and an admin resolving a
+            # report), and the device_state columns (failed starts, dwell
             # start, rental outcomes/grade, confirmed features) are joined
             # live — the next cycle's ingest updates them a little before
             # that cycle is marked complete, and feature confirmations land
@@ -482,8 +509,8 @@ def _devices_current_impl(
             # so it ages out on a clock and goes stale the moment the scooter
             # moves to another cell.
             #
-            # SIGNED IN: holds until the scooter MOVES or comes back at a FULL
-            # CHARGE. A rider who put their account behind "this one does not
+            # SIGNED IN: holds until the scooter MOVES or its charge RISES. A
+            # rider who put their account behind "this one does not
             # work" is making an accountable claim, and 24 hours is an arbitrary
             # answer to it — the honest question is not "how long ago?" but "has
             # anything happened since?". Two things count as something happening,
@@ -493,8 +520,18 @@ def _devices_current_impl(
             #     any move past the ingest's stationary threshold, so comparing
             #     it to the report time catches a move WITHIN a cell too — which
             #     the 24h rule's h3_10 scoping never did.
-            #   * Its battery came back to 100%. A swapped or charged battery is
-            #     a service visit; a scooter nobody has touched does not refill.
+            #   * Its charge ROSE since the report — by at least
+            #     fleet_reports.charge_rise_meters() over the reading stored
+            #     with it (device_reports.range_at_report_meters, sql/100). A
+            #     swapped or charged battery is a service visit; a scooter
+            #     nobody has touched does not refill. A RISE, never a LEVEL:
+            #     the old `current range < full` test cleared a report on a
+            #     scooter that was already at 100% when it was filed, so a
+            #     fully charged scooter could not be reported at all
+            #     (docs/FLEET_REPORTS_PLAN.md §2.4).
+            #
+            # Every branch over device_reports skips a report an admin has
+            # resolved (sql/100). negative_reports has no resolution state.
             #
             # The flag therefore outlives 24 hours for an accountable report and
             # clears the instant the fleet actually responds, which is the
@@ -518,8 +555,10 @@ def _devices_current_impl(
                 "           WHERE dr.vehicle_identifier = r.vehicle_identifier "
                 "             AND dr.h3_10_index = r.h3_10_index "
                 "             AND dr.reported_at >= NOW() - INTERVAL '24 hours'"
-                # Parking complaints (improperly_parked) are excluded here:
-                # they feed the compliance aggregate, not ride reliability.
+                "             AND dr.resolved_at IS NULL "
+                # Parking and access complaints (improperly_parked,
+                # inaccessible) are excluded here: they say nothing about
+                # whether it rides.
                 f"             AND {reliability_report_type_sql('dr')} "
                 "       ) OR EXISTS ("
                 # The accountable report. Deliberately NOT scoped to h3_10 and
@@ -530,6 +569,7 @@ def _devices_current_impl(
                 "           SELECT 1 FROM device_reports dr "
                 "           WHERE dr.vehicle_identifier = r.vehicle_identifier "
                 "             AND dr.account_id IS NOT NULL "
+                "             AND dr.resolved_at IS NULL "
                 f"             AND {reliability_report_type_sql('dr')} "
                 # Not moved since the report. NULL here means device_state has
                 # no row for this vehicle, which is not evidence of a move — so
@@ -537,10 +577,13 @@ def _devices_current_impl(
                 # the scooter does not work.
                 "             AND (ds.first_observed_at_location IS NULL "
                 "                  OR ds.first_observed_at_location <= dr.reported_at) "
-                # ...and not charged back to full. A NULL range (a pedal bike,
-                # or a feed that dropped the field) likewise clears nothing.
-                "             AND (r.current_range_meters IS NULL "
-                "                  OR r.current_range_meters < %s) "
+                # ...and its charge has not risen since. A NULL on either side
+                # (a report filed before sql/100 or while the vehicle was out
+                # of the feed; a pedal bike; a feed that dropped the field)
+                # likewise clears nothing.
+                "             AND (dr.range_at_report_meters IS NULL "
+                "                  OR r.current_range_meters IS NULL "
+                "                  OR r.current_range_meters < dr.range_at_report_meters + %s) "
                 "       )) AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
@@ -573,7 +616,7 @@ def _devices_current_impl(
             # full-charge threshold goes FIRST, ahead of every filter param
             # built above. Appending it instead silently shifts every filter by
             # one and the endpoint starts answering a different question.
-            cur.execute(sql, [full_charge_range_meters(), *params])
+            cur.execute(sql, [charge_rise_meters(), *params])
             rows = cur.fetchall()
 
     # Peer-relative dwell stats are computed over the FULL denver_core
@@ -587,6 +630,11 @@ def _devices_current_impl(
     # adding a column there shifts indices silently. Same shape as
     # dwell_stats - load once, look up per device.
     rental_outcomes = _rental_outcomes()
+
+    # Suppression (docs/FLEET_REPORTS_PLAN.md §2.5) — a separate query for the
+    # same reason as rental_outcomes: the payload SELECT is read positionally.
+    # None means "unknown this cycle" and is emitted as null, never as false.
+    suppressed_by = _suppressions(cycle_id)
 
     # The RAW vehicle_plate is emitted ONLY when include_plate is set — i.e.
     # from /api/v1/user/devices/current for an admin session. On the public
@@ -688,6 +736,17 @@ def _devices_current_impl(
             "number_failed_starts": number_failed_starts,
             "first_observed_at_location": r[23].isoformat() if r[23] else None,
             "reliability_tier": reliability,
+            # SUPPRESSION IS NOT RELIABILITY, and the two must never be merged
+            # (docs/FLEET_REPORTS_PLAN.md §2.5). reliability_tier answers "will
+            # it ride?"; `suppressed` answers "should a rider be sent to it?".
+            # A fully charged scooter behind a fence rides perfectly, so it is
+            # `suppressed` with reason `inaccessible` and its tier is whatever
+            # its hardware earns. Rating it high_risk instead would tell the
+            # rider something false about the hardware and re-merge exactly the
+            # two questions the plan separates. The vehicle stays IN this
+            # payload: the client keeps it out of the rider's available set and
+            # out of the planner, and its card says why.
+            **_suppression_fields(suppressed_by, r[5]),
             # sql/072 — the one reliability signal that survived validation:
             # a vehicle's no-go rate persists at r=+0.275 across weeks, and
             # the worst 10% of vehicles carry 32.4% of all failures.

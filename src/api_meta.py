@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 _PRIVACY = {
-    "updated": "2026-10-08",
+    "updated": "2026-10-09",
     "contact": "mhtc@z280.com",
     "retention": [
         {
@@ -157,10 +157,17 @@ _PRIVACY = {
                       "the plan you say you were on — on trust, with no screenshot "
                       "asked for — and optionally an approximate start time and "
                       "where you think the ride started and ended. "
+                      "A device report also records when you say you saw the "
+                      "problem, why a scooter would not ride if you said, and "
+                      "the scooter's charge when the report arrived; when an "
+                      "admin voids a report, or marks a vanished vehicle as "
+                      "permanently gone, the record keeps which admin account "
+                      "did it and why (removed if that account is deleted). "
                       "Public aggregates and the CSV export never include reporter "
                       "identity (no IP, no email — only an authenticated yes/no "
                       "flag), never the scooter code itself (only its one-way "
-                      "identifier), and round any point to about 100 m.",
+                      "identifier), and round any point to about 100 m; an "
+                      "'inaccessible' report's point is never published at all.",
         },
         {
             "data": "accounts",

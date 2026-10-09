@@ -1,7 +1,15 @@
 # Fleet Reports — reports that stick, and the stewardship that requires
 
-**Status:** specified, not started. Revised 2026-10-07 against `main`
-(`e442e2c` api / `5aac9ba` frontend).
+**Status:** Phase 1 implemented in #144; Phase 2 admin centre and Phase 3
+frontend pending. Phase 1b (condition checks, §4.4) is specified, not started.
+Revised 2026-10-07 against `main` (`e442e2c` api / `5aac9ba` frontend);
+Phase 1 re-verified every API citation against `main` at `044a424` on
+2026-10-09 — see §4.0 for what had moved and what was wrong.
+
+**Phases.** Phase 1 = §4.1 items 1-4, 6 and 7 (the API: data model,
+suppression, identify, census and export endpoints). Phase 1b = §4.4
+(condition checks). Phase 2 = §4.1(5), the admin pages, built on Phase 1's
+`/api/v1/private/*` JSON. Phase 3 = §4.2, the frontend.
 
 **Read §2.2 first if you are here to implement.** The first revision of this
 plan got the current behaviour wrong: it described reports-until-movement as new
@@ -318,6 +326,49 @@ reporting again is the most interesting row in the system — a van emptied, or 
 vehicle recovered. Do not delete the ack on reappearance; surface the
 contradiction.
 
+### 2.9 Broken parts come from feature confirmation (`poor_condition`)
+
+*Owner, 2026-10-09.* The advocacy export must count broken **bells, cup
+holders and baskets** (and phone holders, which the same data carries). That
+data **already exists**: when a rider confirms a scooter's features
+(`POST /api/v1/reports/device-features`, the frontend's
+`device-features.ts`), they are asked which of the features present are not
+in good condition, stored as `device_feature_reports.poor_condition` (sql/055;
+basket since sql/058) and folded by `src/device_features.py` into
+`device_state.features_poor_condition` under the consensus rules — first
+valid report authoritative, a disagreeing report opens `needs_review`, a
+2-of-3 vote resolves it. **There is no second capture path, and none should
+be built** (an earlier draft of this decision proposed a `damaged_parts`
+field on device reports; it was withdrawn before it shipped).
+
+- **Definition.** A vehicle has a broken *part* when its consensus says the
+  part is present **and** lists it in `poor_condition`, and the vehicle is
+  not in `needs_review`. A later report saying the part is fine disagrees
+  with the consensus and moves the vehicle to `needs_review`, so disputed
+  ones are counted separately (`under_review`), never as broken. The sample
+  is vehicles the feed carried in the export window; the denominator is
+  vehicles whose consensus has the part.
+- **Broken parts never suppress.** A scooter with a broken bell still rides
+  and is still reachable; hiding it would be §2.5's mistake in reverse. It
+  counts in the export and the per-device dossier, and nowhere a rider is
+  routed.
+
+### 2.10 Why not rideable: a reason, two decoys, and when it was seen
+
+*Owner, 2026-10-09.* A `not_rideable` report may say why: `acceleration`,
+`flat_tire`, `wheel`, `lighting`, `seat`, `handlebar` (`device_reports.reason`,
+sql/100; NULL = unspecified, so older clients keep working). The same picker
+offers two **decoys** that are not reasons but different reports, and the
+**server** re-files them so every client gets it right: "cannot find" →
+`inaccessible` (the owner's mapping — read it as "I could not get to it";
+`not_found` remains the type for "it is not where the map says"), "dead
+battery" → `dead_battery`. The decoy picked is kept in
+`device_reports.submitted_reason`, so a remap is visible rather than silent.
+`observed_at` — when the rider saw it — is optional, defaults to the
+submission time, and is refused in the future or more than 30 days back. The
+reason breakdown and observed dates go to the admin export and the dossier;
+the public CSV gains nothing.
+
 ---
 
 ## 3. What exists today (so nobody re-derives it)
@@ -368,6 +419,34 @@ contradiction.
 ---
 
 ## 4. The work
+
+### 4.0 Phase 1 re-verification (2026-10-09, against `044a424`)
+
+Every `file:line` in §3 was re-checked before building. What moved, and what
+was wrong:
+
+- **§2.4 is still a live bug, confirmed.** The level test had moved to
+  `api_public.py:~545` and `api_h3.py:~140`, and **a test asserted the bug**:
+  `test_negative_report_hold_pg.py::test_a_full_charge_clears_it`. Replaced by
+  a rise test and by §5's "100% can be reported and stands" test.
+- **The next migration number was 100**, not 089: `main` had reached
+  `sql/099`. Checked with `scripts/check_migration_numbers.py` and the open
+  PR list.
+- **`sql/037`'s device_reports block was unguarded.** §4.1(1) says `sql/029`
+  documents why an unguarded drop/re-add of this constraint is a replay
+  bug — but `sql/037` still had one, so the first stored `inaccessible` row
+  would have broken the next whole-directory replay. Guarded in place (as
+  `sql/037`'s own `user_points` block already was).
+- **Resolution state (§4.1(3b)) and the `first_ever_observed_at` index were
+  both still absent**, as the plan said.
+- **`docs/reference/API.md` still described `has_negative_report` as the
+  24-hour cell rule only**, two rules out of date. Rewritten.
+- **The public monthly CSV publishes every device report's point rounded to
+  ~100 m.** For `inaccessible` that is somebody's yard, and §6 refuses "a map
+  of addresses where scooters disappear": its coordinates are blanked there.
+- **§5's "the resolve endpoint refuses an unauthenticated caller" and risk 5's
+  mitigation contradicted the owner's 2026-10-08 decision** that #143 wrote
+  into §4.1(6). Both are amended below.
 
 ### 4.1 API
 
@@ -458,6 +537,11 @@ contradiction.
      machinery.
    - **Export for advocacy**: "N vehicles reported inaccessible, M still
      unmoved after X days". That is Veo's retrieval obligation, documented.
+     Plus vehicles with an unresolved **broken bell, cup holder or basket**
+     (and phone holder) from feature confirmation (§2.9), and the
+     not-rideable reason breakdown with observed dates (§2.10). The data is
+     Phase 1's `GET /api/v1/private/reports/export` (JSON and CSV, with
+     window, sample and definitions); the page is Phase 2.
 
 6. **Resolve endpoint** (§2.7) — `POST /api/v1/devices/identify`, taking the
    raw QR payload exactly as `qr-scan.ts` yields it and returning the device
@@ -481,6 +565,15 @@ contradiction.
    and gone vehicles rather than adding a second plate oracle with a
    different policy. The forward direction (vehicle → plate) stays
    signed-in only (`GET /api/v1/vehicles/plates`).
+
+   **Phase 1 built the extension, not a second endpoint:**
+   `GET /api/v1/vehicles/resolve` takes `qr=` (the raw payload, read with
+   `qr.py`'s `extract_plate`) as an alternative to `plate=`, and
+   `explain=true` returns `status` — `on_map`, `suppressed`, `missing`,
+   `gone` — with the standing reports, reading `device_state` (matched by
+   `identity.py`'s `hash_plate` or the stored plate) for vehicles the feed no
+   longer carries. Same public, 30/min-per-IP, never-echo, 404-on-none-or-
+   ambiguous rule. "Filtered" is the client's to detect.
 
 7. **Census endpoints and pages** (§2.8) — newest arrivals by
    `first_ever_observed_at DESC`; missing by `last_observed_at` older than a
@@ -534,6 +627,101 @@ contradiction.
    which is what the rider already gets today and the reason this exists.
 7. The census lists are admin-only. No rider-facing work.
 
+### 4.3 Phase 1 decisions worth keeping visible
+
+- **Anonymous reports never suppress.** They keep feeding
+  `has_negative_report` for 24 hours in their cell, as before; hiding a
+  vehicle from every rider needs an account behind it (risk 2).
+- **Suppression uses the accountable hold rule** — not moved since, charge not
+  risen, unresolved — for every report type, `improperly_parked` included
+  because §2.2(2) and §5 say so. That one has a live counter-argument (a
+  sidewalk-blocker is reachable, and riding it away fixes the complaint);
+  dropping it is a one-line change to `SUPPRESSION_REASON_PRIORITY`.
+- **`suppressed_reason` priority:** `inaccessible`, `not_found`,
+  `not_rideable`, `damaged`, `dead_battery`, `improperly_parked`.
+- **The charge rise that clears a report is 5% of a full charge** (~2.3 km),
+  far above the feed's parked drift and far below any swap. Reports filed
+  before sql/100 have no recorded charge and so clear only on movement — the
+  §2.4 fix applying to them too.
+- **`inaccessible` earns no points**; paying for a suppressing report pays
+  for griefing.
+- **Resolving a report is final** (no un-resolve) and attributed to the
+  admin's account; the `/h3` aggregate honours it only from later cycles.
+- **Acknowledging gone keeps a row forever**: withdrawing sets `not_gone`
+  and records who withdrew it.
+
+### 4.4 Phase 1b: condition checks (SPEC ONLY — not built)
+
+*Owner, 2026-10-09.* A sticky report needs a way to be cleared by riders, not
+only by movement or an admin. Feature confirmation is where a rider is
+already standing at the scooter answering questions, so condition checks
+ride along with it.
+
+**The flow (frontend in Phase 3).**
+
+1. After a rider confirms features, ask: *"Would you like to confirm
+   condition (ride-ability) as well? (requires starting scooter)"*.
+2. If yes, list the scooter's **standing negative rideability reports** with
+   their observed dates. "Negative rideability" = unresolved `not_rideable`
+   (with its reason, if any), `dead_battery`, `damaged` and `inaccessible`
+   reports that still hold under the accountable rule (§2.2/§2.4: not moved,
+   charge not risen) — exactly `open_reports` on identify, minus
+   `improperly_parked` and `not_found`, which a rider standing at the scooter
+   cannot meaningfully re-check (it is parked badly or it is here). For each:
+   *"Still a problem? Y/N"*.
+3. Then: *"Did you do a test ride? Y/N"*.
+   - **No** → every condition answer is discarded. Nothing is stored against
+     the reports and no points are awarded.
+   - **Yes** → each "no longer a problem" **resolves** that report — the same
+     resolution columns as an admin void (`resolved_at`, `resolved_by`,
+     `resolution`), attributed to a *rider check* rather than an admin (a
+     `resolution_source` of `rider_check` vs `admin`, or a separate
+     `condition_checks` table the resolution points at; the implementer
+     chooses, but the audit must say which). Each "still a problem"
+     **reconfirms** it: a reconfirmation row (who, when, observed) that the
+     dossier shows and the export can count, without restarting the report's
+     clock — persistence is already "until it moves".
+
+**The map flag.** `needs_condition_check` on `/devices/current`: `true` for a
+vehicle with at least one standing negative rideability report (as defined
+above), so the map can invite riders to check it. It is an invitation, not a
+verdict, and is independent of both `reliability_tier` and `suppressed` —
+though in practice most `needs_condition_check` vehicles are suppressed, which
+is why the identify modal (§2.7) is where the invitation is most useful.
+
+**Points (owner's rule, via the existing `points.py` ledger).** At most **50**
+per check:
+
+- **10** for completing the condition form with "Did you do a test ride?" =
+  **Yes**, whatever the condition answers are;
+- **+40** when the feed **confirms** that test ride: the vehicle shows a
+  reservation episode or movement within a short window after the check
+  (suggest 15 minutes, reusing the reservation-episode and movement signals
+  `device_state.py` already derives);
+- test ride = **No**: answers discarded, **no points**.
+
+Anti-abuse, the implementer's choice but documented: one award per vehicle
+per account per 24 hours; a daily cap per account (suggest 10 checks); the
++40 only when the confirming episode starts after the check was submitted;
+and the 10 only when the account has not already resolved that vehicle's
+reports in the window.
+
+**Interactions to get right.**
+
+- **Persistence (§2.2).** A rider resolution is a resolution: the report
+  stops counting immediately, exactly like an admin void. Reports filed
+  *after* the check are new evidence and stand on their own.
+- **Suppression (§2.5).** Resolving the last standing report unsuppresses the
+  vehicle on the next request. A false "no longer a problem" is therefore a
+  way to un-hide a vehicle — the mirror image of griefing — which is why it
+  requires a test ride, and why the +40 depends on the feed agreeing.
+- **Griefing controls (§2.6(2)).** The Phase 2 reporter view must show rider
+  resolutions alongside reports, per account: an account that resolves
+  reports nobody else's rides corroborate is the same signal as an account
+  that files them. An admin can reinstate a rider-resolved report (the one
+  case where un-resolving is allowed, because the resolution was not an
+  admin's judgement).
+
 ---
 
 ## 5. Tests
@@ -573,8 +761,11 @@ Scan-to-identify (§2.7):
   generic "not found".
 - A payload `plateFromQr` reads as nothing — a wifi QR, a URL — reaches
   "unreadable" without a network call.
-- The resolve endpoint refuses an unauthenticated caller, and rate-limits a
-  scripted one at the same ceiling as `qr-scan`.
+- ~~The resolve endpoint refuses an unauthenticated caller, and rate-limits a
+  scripted one at the same ceiling as `qr-scan`.~~ **Superseded** by the
+  owner's 2026-10-08 decision (§4.1(6)): the test is that identify misses are
+  charged to the same 30/min per-IP bucket as the plain plate lookup, and
+  that the response never echoes the plate.
 - `rotateMode` wraps over three modes in both directions.
 
 Census (§2.8):
@@ -599,7 +790,7 @@ Census (§2.8):
 | 2 | **Griefing.** One account suppresses a neighbourhood. | §2.6(2)'s reporter view; consider a per-account rate limit beyond the dedupe window. |
 | 3 | **"Inaccessible" becomes a way to point at a household.** | See below. This is the one that would do real harm. |
 | 4 | Suppression hides a problem instead of surfacing it. | The vehicle stays visible to **admins** and in the export; it is removed from *rider* candidacy only — and §2.7 lets any rider standing in front of it ask why. |
-| 5 | **The resolve endpoint becomes a plate-enumeration oracle.** It hands out the plate → `vehicle_identifier` mapping the salt exists to withhold. | §4.1(6): `require_session` + an account rate bucket. Never open it, however reasonable the argument sounds. |
+| 5 | **The resolve endpoint becomes a plate-enumeration oracle.** It hands out the plate → `vehicle_identifier` mapping the salt exists to withhold. | *Superseded by the owner, 2026-10-08 (§4.1(6)).* The mitigation was `require_session` + an account bucket; the owner chose a public lookup at 30/min per IP, never echoing the plate, 404 on none or ambiguous — and one plate oracle with one policy, which is why identify extends `/vehicles/resolve` rather than adding a second endpoint. `last_seen` on a missing vehicle is rounded to ~100 m. |
 | 6 | **The missing list is noise and nobody reads it.** An hourly threshold lists the overnight van every night. | §2.8's 72-hour floor, taken from the measurement in `device_state.py`'s own header rather than guessed. |
 | 7 | A map-coupled identify modal passes review and fails the only case it was built for. | §4.2(5): the acceptance test is a device with **no marker**. |
 

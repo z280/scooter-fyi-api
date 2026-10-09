@@ -25,7 +25,7 @@ from typing import Any
 
 import h3
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from . import geo
 from .accounts import SessionUser, optional_session, require_session
@@ -53,7 +53,18 @@ router = APIRouter()
 # api_public.py / api_h3.py. A parking complaint says nothing about whether
 # the scooter rides. 'not_found' (sql/029) is NOT excluded — see that
 # migration's header for why a missing vehicle IS a reliability signal.
-_REPORT_TYPES = ("not_rideable", "dead_battery", "damaged", "improperly_parked", "not_found")
+#
+# 'inaccessible' (sql/100, docs/FLEET_REPORTS_PLAN.md §2.1) is the other axis:
+# "the vehicle may be perfectly fine; you cannot lawfully or reasonably reach
+# it" — private property, a locked yard, inside a fence. It is excluded from
+# reliability like improperly_parked, and is instead the strongest input to
+# the separate `suppressed` flag (src/fleet_reports.py). It earns no points
+# (src/points.py): paying for a report that hides a vehicle from every rider
+# would pay for griefing.
+_REPORT_TYPES = (
+    "not_rideable", "dead_battery", "damaged", "improperly_parked", "not_found",
+    "inaccessible",
+)
 
 # DEPRECATED input aliases — accepted on the wire, normalised to the
 # canonical spelling before anything reads them. REMOVE once no client
@@ -90,12 +101,21 @@ _ACCEPTED_REPORT_TYPES = _REPORT_TYPES + tuple(_DEPRECATED_REPORT_TYPE_ALIASES)
 #   * ANONYMOUS — and every `negative_reports` map-pin row, which has no
 #     account column at all — counts for 24 hours, in the vehicle's h3_10 cell
 #     at report time. Nobody's name is on it, so it ages out on a clock.
-#   * SIGNED IN counts until the vehicle MOVES or comes back at a FULL CHARGE.
-#     A rider who put their account behind "this one does not work" is making
-#     an accountable claim, and the useful question about it is not "how long
+#   * SIGNED IN counts until the vehicle MOVES or its charge RISES. A rider
+#     who put their account behind "this one does not work" is making an
+#     accountable claim, and the useful question about it is not "how long
 #     ago?" but "has anything happened since?" — a move past the ingest's
-#     stationary threshold, or a battery back at 100%, both mean somebody
+#     stationary threshold, or a charge that went UP since the report
+#     (device_reports.range_at_report_meters, sql/100), both mean somebody
 #     dealt with the vehicle. Neither is time.
+#
+#     A rise, never a level. This used to read "comes back at a FULL CHARGE",
+#     tested as `current range < 100%`, which cleared a report on a fully
+#     charged scooter the instant it was filed: a 100% Apollo behind a fence
+#     was unreportable (docs/FLEET_REPORTS_PLAN.md §2.4).
+#
+#   * Any report an admin has RESOLVED (sql/100's resolved_at) counts for
+#     nothing, on either branch.
 #
 # The consequence worth naming: a signed-in report on a scooter nobody touches
 # holds indefinitely, which is the point. A scooter nobody has repaired, moved
@@ -106,7 +126,9 @@ _ACCEPTED_REPORT_TYPES = _REPORT_TYPES + tuple(_DEPRECATED_REPORT_TYPE_ALIASES)
 # Single source of truth for the exclusion applied in the /devices/current
 # and /h3 aggregate queries. A scooter blocking a sidewalk can still be a
 # great ride, so parking complaints stay out of the "worth the walk?" signal.
-NON_RELIABILITY_REPORT_TYPES = ("improperly_parked",)
+# An inaccessible scooter can be a great ride too; whether a rider should be
+# SENT to it is the suppression flag's question, not this one's (§2.5).
+NON_RELIABILITY_REPORT_TYPES = ("improperly_parked", "inaccessible")
 
 
 def reliability_report_type_sql(alias: str = "dr") -> str:
@@ -121,6 +143,27 @@ def reliability_report_type_sql(alias: str = "dr") -> str:
     excluded = ", ".join("'{}'".format(t.replace("'", "''")) for t in NON_RELIABILITY_REPORT_TYPES)
     return f"{alias}.report_type NOT IN ({excluded})"
 
+
+# WHY NOT RIDEABLE (owner, 2026-10-09; sql/100). A not_rideable report may
+# say why. NULL — an old client, or a rider who skipped the question — is
+# "unspecified" and is accepted exactly as before.
+NOT_RIDEABLE_REASONS = ("acceleration", "flat_tire", "wheel", "lighting", "seat", "handlebar")
+
+# The picker also offers two DECOYS: choices a rider reaches for under "why
+# won't it ride?" that are really different reports. The server re-files
+# them, so every client gets it right whatever it sends, and keeps the
+# original choice in `submitted_reason` so the remap is visible:
+#   "cannot find"  -> inaccessible (owner's mapping: you cannot get to it)
+#   "dead battery" -> dead_battery
+NOT_RIDEABLE_DECOYS = {"cannot_find": "inaccessible", "dead_battery": "dead_battery"}
+
+# observed_at — when the rider saw the problem. Optional; defaults to the
+# submission time. A date in the future, or older than this, is refused: a
+# month-old sighting is not evidence about the vehicle as it is now, and the
+# report's hold rule (until it moves) is measured from reported_at anyway.
+OBSERVED_AT_MAX_AGE = timedelta(days=30)
+# Clock skew between a phone and the server is not "the future".
+_OBSERVED_AT_SKEW = timedelta(minutes=10)
 
 _DEDUPE_WINDOW_MINUTES = 30
 
@@ -176,9 +219,50 @@ _summary_cache = _SummaryCache()
 class DeviceReportIn(BaseModel):
     vehicle_identifier: str = Field(..., min_length=16, max_length=16, pattern=r"^[0-9a-f]{16}$")
     report_type: str = Field(..., pattern=f"^({'|'.join(_ACCEPTED_REPORT_TYPES)})$")
+    # A date ("2026-10-08", read as that day in Denver) or a timestamp. A
+    # timestamp without an offset is read as UTC.
     observed_at: datetime | None = None
     lat: float | None = Field(default=None, ge=-90, le=90)
     lng: float | None = Field(default=None, ge=-180, le=180)
+    # not_rideable only: one of NOT_RIDEABLE_REASONS, or a decoy in
+    # NOT_RIDEABLE_DECOYS (which re-files the report). Absent = unspecified.
+    reason: str | None = Field(
+        default=None,
+        pattern=f"^({'|'.join(NOT_RIDEABLE_REASONS + tuple(NOT_RIDEABLE_DECOYS))})$",
+    )
+    # Set by the decoy remap, never by the client: the decoy that re-filed
+    # this report. A private attribute, so no request body can set it.
+    _submitted_reason: str | None = PrivateAttr(default=None)
+
+    @property
+    def submitted_reason(self) -> str | None:
+        return self._submitted_reason
+
+    @field_validator("observed_at", mode="before")
+    @classmethod
+    def _observed_date(cls, value: Any) -> Any:
+        if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value.strip()):
+            try:
+                d = date.fromisoformat(value.strip())
+            except ValueError:
+                raise ValueError("observed_at is not a real date")
+            return datetime(d.year, d.month, d.day, tzinfo=_DENVER)
+        return value
+
+    @field_validator("observed_at")
+    @classmethod
+    def _observed_window(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if value > now + _OBSERVED_AT_SKEW:
+            raise ValueError("observed_at is in the future")
+        if value < now - OBSERVED_AT_MAX_AGE:
+            raise ValueError(
+                f"observed_at is more than {OBSERVED_AT_MAX_AGE.days} days ago")
+        return value
 
     @field_validator("report_type")
     @classmethod
@@ -196,6 +280,24 @@ class DeviceReportIn(BaseModel):
             "is still on the pre-sql/037 spelling", value, canonical,
         )
         return canonical
+
+    @model_validator(mode="after")
+    def _reason_belongs_to_not_rideable(self) -> "DeviceReportIn":
+        """A reason is an answer to "why won't it ride?", so only a
+        not_rideable report carries one. A decoy re-files the report under
+        the type it really is and drops the reason; the choice is kept in
+        submitted_reason. Runs after report_type's alias normalisation, so a
+        pre-sql/037 'failed_unlock' client gets the same treatment."""
+        if self.reason is None:
+            return self
+        if self.report_type != "not_rideable":
+            raise ValueError("reason is only accepted on a not_rideable report")
+        remapped = NOT_RIDEABLE_DECOYS.get(self.reason)
+        if remapped is not None:
+            self._submitted_reason = self.reason
+            self.report_type = remapped
+            self.reason = None
+        return self
 
 
 @router.post("/api/v1/reports/device")
@@ -265,17 +367,33 @@ def submit_device_report(
                 row = cur.fetchone()
                 h3_10 = int(row[0]) if row and row[0] is not None else None
 
+            # range_at_report_meters (sql/100): the charge as the feed last
+            # published it, so the report clears on a RISE rather than on a
+            # level (§2.4). Only a reading from the last hour counts as "at
+            # report time"; anything older, or a vehicle not in the feed, is
+            # NULL, and a NULL clears nothing. A subquery rather than a
+            # separate SELECT so the handler's round trips stay as they were.
             cur.execute(
                 """
                 INSERT INTO device_reports (
                     vehicle_identifier, report_type, observed_at, lat, lng,
-                    h3_10_index, account_id, reporter_ip, reporter_user_agent
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    h3_10_index, account_id, reporter_ip, reporter_user_agent,
+                    reason, submitted_reason, range_at_report_meters
+                ) VALUES (%s, %s, COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, (
+                    SELECT r.current_range_meters
+                      FROM raw_telemetry_points r
+                     WHERE r.vehicle_identifier = %s
+                       AND r.snapshot_time >= NOW() - INTERVAL '1 hour'
+                     ORDER BY r.snapshot_time DESC
+                     LIMIT 1
+                ))
                 RETURNING id, reported_at
                 """,
                 (payload.vehicle_identifier, payload.report_type, payload.observed_at,
                  payload.lat, payload.lng, h3_10,
-                 user.account_id if user else None, ip, ua),
+                 user.account_id if user else None, ip, ua,
+                 payload.reason, payload.submitted_reason,
+                 payload.vehicle_identifier),
             )
             new_id, reported_at = cur.fetchone()
 
@@ -305,8 +423,13 @@ def submit_device_report(
         "device report id=%d vehicle=%s type=%s auth=%s points=%d",
         new_id, payload.vehicle_identifier, payload.report_type, user is not None, points_awarded,
     )
-    return {"id": int(new_id), "reported_at": reported_at.isoformat(),
-            "deduped": False, "points_awarded": points_awarded}
+    out = {"id": int(new_id), "reported_at": reported_at.isoformat(),
+           "deduped": False, "points_awarded": points_awarded}
+    if payload.submitted_reason is not None:
+        # Say what it was filed as, so a client can word its thank-you right.
+        out["report_type"] = payload.report_type
+        out["remapped_from_reason"] = payload.submitted_reason
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +1040,10 @@ def reports_summary(
     return cached
 
 
+#: Report types whose coordinates never appear in the public monthly CSV.
+_UNLOCATED_IN_PUBLIC_EXPORT = frozenset({"inaccessible"})
+
+
 def _round3(v: float | None) -> float | str:
     return "" if v is None else round(float(v), 3)
 
@@ -977,6 +1104,15 @@ def reports_export_monthly(
         "lat", "lng", "amount_charged_cents", "authenticated_or_has_receipt",
     ])
     for reported_at, vid, rtype, lat, lng, authed in device_rows:
+        # An inaccessible report's point is somebody's yard, garage or
+        # building. The report is about a spot being unreachable, never about
+        # who lives there (docs/FLEET_REPORTS_PLAN.md §6), so its coordinates
+        # stay out of the public file even at ~100 m — repeated rows at one
+        # rounded point would be exactly the map of addresses the plan
+        # refuses to build. The row itself stays: it is Veo's retrieval
+        # obligation, and the count is the evidence.
+        if rtype in _UNLOCATED_IN_PUBLIC_EXPORT:
+            lat = lng = None
         w.writerow(["device", reported_at.isoformat(), vid, rtype,
                     _round3(lat), _round3(lng), "", str(bool(authed)).lower()])
     for created_at, _ride_ended, zone, lat, lng, amount, has_receipt, region, vid in discount_rows:
