@@ -1,4 +1,4 @@
-"""sql/098: "never left the spot" (50 m), beside the unchanged 25 m no-go.
+"""sql/099: "never left the spot" (50 m), beside the unchanged 25 m no-go.
 
 A rental STAYED when the vehicle never got more than IN_PLACE_RADIUS_M from
 its unlock point (final fix included) and was released inside it: every
@@ -137,7 +137,7 @@ def test_the_fleet_prior_is_the_measured_stayed_rate():
 
 
 def test_round_trips_no_longer_lower_the_grade(client, monkeypatch):
-    """Two vehicles, 40 rentals each since sql/098, none stayed: one has 30
+    """Two vehicles, 40 rentals each since sql/099, none stayed: one has 30
     round-trip no-gos, the other none. Same grade."""
     def grade(no_gos):
         monkeypatch.setattr(api_public, "_rental_outcomes",
@@ -167,7 +167,7 @@ def test_the_fleet_rate_lands_near_the_old_median_grade():
 
 def test_cold_start_gates_on_rentals_since_the_counter_started(client, monkeypatch):
     """rentals_observed has counted since sql/089, rentals_stayed starts at 0:
-    a vehicle with 300 observed rentals but only 3 since sql/098 has no grade
+    a vehicle with 300 observed rentals but only 3 since sql/099 has no grade
     yet, rather than a flattering one built on 0/300."""
     monkeypatch.setattr(api_public, "_rental_outcomes",
                         lambda: {"8c4a1f0d2e9b7a35": (300, 12, 0, 0, GRADE_MIN_RENTALS - 2)})

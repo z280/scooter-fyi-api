@@ -77,13 +77,13 @@ BEGIN
 END $$;
 
 COMMENT ON COLUMN device_state.rentals_stayed IS
-    'Completed rentals, since sql/098, that never left the spot: the vehicle '
+    'Completed rentals, since sql/099, that never left the spot: the vehicle '
     'never got more than 50 m (IN_PLACE_RADIUS_M) from where it was unlocked, '
     'final fix included, and was released there. Every in-place release '
     '(failed start or reservation blip). A subset of rentals_observed_stayed_era.';
 
 COMMENT ON COLUMN device_state.rentals_observed_stayed_era IS
-    'Completed rentals since sql/098 (when it ran: schema_migrations.applied_at): '
+    'Completed rentals since sql/099 (when it ran: schema_migrations.applied_at): '
     'the denominator for rentals_stayed and the n smart_ride_grade gates on. '
     'Incremented with rentals_observed, which counts from the earlier sql/089 reset.';
 
@@ -106,10 +106,10 @@ END $$;
 COMMENT ON COLUMN rental_outcomes_hourly.stayed IS
     'Of rentals, how many never left the spot (never more than 50 m from the '
     'unlock point, released there): device_state.rentals_stayed''s definition. '
-    'Recorded since sql/098; 0 with stayed_known = 0 means not recorded.';
+    'Recorded since sql/099; 0 with stayed_known = 0 means not recorded.';
 
 COMMENT ON COLUMN rental_outcomes_hourly.stayed_known IS
-    'Rentals for which stayed was recorded (every rental written since sql/098). '
+    'Rentals for which stayed was recorded (every rental written since sql/099). '
     'The denominator for stayed: rate = stayed / stayed_known.';
 
 RESET lock_timeout;

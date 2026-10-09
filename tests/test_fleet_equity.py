@@ -182,10 +182,10 @@ def test_the_route_rejects_an_unknown_window():
     assert TestClient(app).get("/api/v1/fleet/outcomes/equity?window=1y").status_code == 400
 
 
-# --- sql/098: never left the spot -------------------------------------------
+# --- sql/099: never left the spot -------------------------------------------
 
 def test_stayed_is_reported_over_the_rentals_that_recorded_it():
-    """Rows from before sql/098 hold stayed = stayed_known = 0 ("not
+    """Rows from before sql/099 hold stayed = stayed_known = 0 ("not
     recorded"): they count as rentals but never dilute the stayed rate."""
     recorded = [("outside", 1000 + c, 100, 10, 4, 100, 2, 100) for c in range(40)]  # 80/4000
     before = [("outside", 1000 + c, 100, 10, 4, 100) for c in range(40)]              # no stayed

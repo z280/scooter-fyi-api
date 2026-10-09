@@ -29,7 +29,7 @@ def _rollup(cur) -> list[tuple]:
 
 # Row layout: (hour, h3_9, model, radius_m, equity_area,
 #              rentals, no_gos, no_gos_max, max_known, origin_unknown,
-#              stayed, stayed_known)   <- the last two sql/098
+#              stayed, stayed_known)   <- the last two sql/099
 COUNTS = slice(5, 10)
 STAYED = slice(10, 12)
 AREA = 4

@@ -171,7 +171,7 @@ from src import api_public  # noqa: E402
 
 # (model, rentals, no_gos, vehicles, stayed_rentals, stayed) — the shape of
 # the GROUP BY, verified against a real Postgres `device_state` while this was
-# written. The last two are sql/098's, over their own (shorter) window.
+# written. The last two are sql/099's, over their own (shorter) window.
 _ROWS = [("Cosmo", 1500, 131, 2, 600, 12), ("Rover", 300, 150, 1, 100, 9)]
 
 
@@ -188,7 +188,7 @@ class _FakeCur:
     def execute(self, sql, params=None):
         self._last = sql
         if "schema_migrations" in sql:
-            # The windows' starts: when the sql/089 reset ran, and when sql/098
+            # The windows' starts: when the sql/089 reset ran, and when sql/099
             # started the stayed counter.
             assert params in ((fleet_outcomes.COUNTED_SINCE_MIGRATION,),
                               (fleet_outcomes.STAYED_COUNTED_SINCE_MIGRATION,))
@@ -311,7 +311,7 @@ class TestTheEndpoint:
         assert "," not in r.headers["ETag"]
 
 
-# --- sql/098: never left the spot -------------------------------------------
+# --- sql/099: never left the spot -------------------------------------------
 
 def stayed_model(name, rentals, no_gos, stayed_rentals, stayed, vehicles=10):
     return {**model(name, rentals, no_gos, vehicles),
@@ -333,7 +333,7 @@ class TestNeverLeftTheSpot:
         assert out["stayed_radius_meters"] == 50.0
         assert out["stayed_window"] == "since_stayed_counter"
         assert out["stayed_counted_since"] == "2026-10-09T20:30:00+00:00"
-        assert out["stayed_counted_since_migration"] == "sql/098"
+        assert out["stayed_counted_since_migration"] == "sql/099"
         assert out["stayed_definition"] == (
             "never left the spot: the vehicle never got more than 50 m from where "
             "it was unlocked, and was released there")

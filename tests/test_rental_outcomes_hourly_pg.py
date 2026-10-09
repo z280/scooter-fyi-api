@@ -63,7 +63,7 @@ def test_three_rentals_land_in_the_rollup_and_agree_with_the_counters(pg):
 
 
 def test_stayed_lands_in_both_counters_and_obeys_the_checks(pg):
-    """sql/098 end to end: in place, round trip, 25-50 m in place, real ride."""
+    """sql/099 end to end: in place, round trip, 25-50 m in place, real ride."""
     import psycopg
 
     with pg.cursor() as cur:
@@ -112,7 +112,7 @@ def test_stayed_lands_in_both_counters_and_obeys_the_checks(pg):
     pg.rollback()
 
 
-def test_rows_before_sql_098_default_to_not_recorded(pg):
+def test_rows_before_sql_099_default_to_not_recorded(pg):
     with pg.cursor() as cur:
         cur.execute("DELETE FROM rental_outcomes_hourly")
         cur.execute(

@@ -445,7 +445,7 @@ last step; `analytics_backfill` filled the history once.
 | `GET /api/v1/analytics/dwell` | Average dwell per region × model, with sample size |
 | `GET /api/v1/analytics/fleet-status` | Available / in use / out of service / off-map |
 | `GET /api/v1/analytics/fleet-counts` | Devices visible now; ever seen, by model |
-| `GET /api/v1/fleet/outcomes` | Share of rentals that ended where they began, fleet + by model, since the sql/089 counter reset; plus `stayed` / `stayed_rate` (never left the spot: never more than 50 m from the unlock point, released there) since sql/098, with its own sample (`stayed_rentals`) and start (`stayed_counted_since`) |
+| `GET /api/v1/fleet/outcomes` | Share of rentals that ended where they began, fleet + by model, since the sql/089 counter reset; plus `stayed` / `stayed_rate` (never left the spot: never more than 50 m from the unlock point, released there) since sql/099, with its own sample (`stayed_rentals`) and start (`stayed_counted_since`) |
 | `GET /api/v1/fleet/outcomes/equity?window=7d\|28d` | The same, for rentals unlocked inside vs outside the official Equity Areas (incl. `stayed` / `stayed_known` / `stayed_rate` per side) |
 
 #### Counting eras

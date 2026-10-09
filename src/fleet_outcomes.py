@@ -53,7 +53,7 @@ deliberate (sql/087 kept `rentals_no_go` on the old definition so
 `smart_ride_grade` stays calibrated), but it means copy of the form "never left
 the kerb" overstates what is counted by however many loop rides there are.
 
-NEVER LEFT THE SPOT (sql/098). That quantity has since been measured
+NEVER LEFT THE SPOT (sql/099). That quantity has since been measured
 (2026-10-07 08:02Z .. 2026-10-08 17:12Z, rebuilt from raw_telemetry_points):
 about 57% of no-gos are round trips whose furthest point is more than 50 m
 away (median 540 m); about 43% never left the spot, 660 of 30,727 rentals
@@ -61,7 +61,7 @@ away (median 540 m); about 43% never left the spot, 660 of 30,727 rentals
 whose vehicle never got more than 50 m (`stayed_radius_meters`,
 IN_PLACE_RADIUS_M) from where it was unlocked and was released there. It is
 counted from `device_state.rentals_stayed` over its OWN denominator,
-`rentals_observed_stayed_era`, because it started at the sql/098 deploy
+`rentals_observed_stayed_era`, because it started at the sql/099 deploy
 (`stayed_counted_since`) while `rentals` counts from sql/089. The no-go figure,
 its radius and its wording are unchanged. smart_ride_grade now reads the
 stayed pair.
@@ -73,7 +73,7 @@ import logging
 from typing import Any
 
 from .config import load
-# sql/098's radius. Imported, not restated: it is the in-place circle the
+# sql/099's radius. Imported, not restated: it is the in-place circle the
 # ingest counts against.
 from .device_state import IN_PLACE_RADIUS_M as STAYED_RADIUS_METERS
 from .pg import connection
@@ -92,7 +92,7 @@ MIN_RENTALS_FOR_RATE = 200
 
 #: The migration that started the stayed counter; its applied_at is published
 #: as `stayed_counted_since`.
-STAYED_COUNTED_SINCE_MIGRATION = "098_rentals_stayed.sql"
+STAYED_COUNTED_SINCE_MIGRATION = "099_rentals_stayed.sql"
 
 STAYED_DEFINITION = (
     "never left the spot: the vehicle never got more than 50 m from where it "
@@ -197,7 +197,7 @@ def summarize_rows(
             "no_gos": r["no_gos"],
             "vehicles": r["vehicles"],
             "no_go_rate": _rate(r["no_gos"], r["rentals"]),
-            # sql/098, over its own (shorter) window and denominator.
+            # sql/099, over its own (shorter) window and denominator.
             "stayed_rentals": r.get("stayed_rentals", 0),
             "stayed": r.get("stayed", 0),
             "stayed_rate": _rate(r.get("stayed", 0), r.get("stayed_rentals", 0)),
@@ -224,11 +224,11 @@ def summarize_rows(
         "no_go_rate": _rate(no_gos, rentals),
         "min_rentals_for_rate": MIN_RENTALS_FOR_RATE,
         "vehicles": sum(r["vehicles"] for r in rows),
-        # sql/098: never left the spot. Its own window and denominator: the
-        # counter started at the sql/098 deploy, after the sql/089 reset.
+        # sql/099: never left the spot. Its own window and denominator: the
+        # counter started at the sql/099 deploy, after the sql/089 reset.
         "stayed_window": "since_stayed_counter",
         "stayed_counted_since": stayed_counted_since,
-        "stayed_counted_since_migration": "sql/098",
+        "stayed_counted_since_migration": "sql/099",
         "stayed_radius_meters": float(STAYED_RADIUS_METERS),
         "stayed_rentals": stayed_rentals,
         "stayed": stayed,

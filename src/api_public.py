@@ -286,7 +286,7 @@ def _if_none_match_hit(request: Request, etag: str) -> bool:
 def _rental_outcomes() -> dict[str, tuple[int, int, int, int, int]] | None:
     """{vehicle_identifier: (rentals_observed, rentals_no_go,
     recent_no_go_mask, rentals_stayed, rentals_observed_stayed_era)} for the
-    fleet. The last two are sql/098 and are what smart_ride_grade reads.
+    fleet. The last two are sql/099 and are what smart_ride_grade reads.
 
     sql/072. One row per device, two integers - small enough to fetch whole
     rather than join, and fetching it separately keeps the payload SELECT (all
@@ -697,8 +697,8 @@ def _devices_current_impl(
             # makes reliability_tier high_risk on its own, so a client that
             # mirrors the tier needs it.
             "recent_rentals_no_go": recent_no_go,
-            # sql/098 — never left the spot (50 m), over its own window
-            # (rentals_observed_stayed_era, which starts at the sql/098
+            # sql/099 — never left the spot (50 m), over its own window
+            # (rentals_observed_stayed_era, which starts at the sql/099
             # deploy). The grade reads these two, not the no-go pair: a round
             # trip back to the rack is a no-go but a ride that worked.
             "rentals_stayed": rentals_stayed,
@@ -937,10 +937,10 @@ def fleet_outcomes(request: Request, response: Response) -> Any:
     * `min_rentals_for_rate` with a null `no_go_rate` — a model under the
       floor keeps its counts and loses its percentage, so the client can say
       "not enough rides yet" instead of the model vanishing from the list.
-    * `stayed` / `stayed_rentals` / `stayed_rate` (sql/098) — "never left
+    * `stayed` / `stayed_rentals` / `stayed_rate` (sql/099) — "never left
       the spot": never more than `stayed_radius_meters` (50 m) from the
       unlock point and released there. Its own window, `stayed_window` /
-      `stayed_counted_since` (when sql/098 ran), and its own denominator,
+      `stayed_counted_since` (when sql/099 ran), and its own denominator,
       because it starts later than the no-go counters. `no_go_rate` is
       unchanged.
 

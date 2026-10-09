@@ -527,11 +527,11 @@ def compute_quality_designation(
 #
 # One number, 65-100, for "how likely is this scooter to actually take me
 # somewhere". Derived from ONE signal: the share of a vehicle's completed
-# rentals that NEVER LEFT THE SPOT (sql/098, device_state.rentals_stayed): the
+# rentals that NEVER LEFT THE SPOT (sql/099, device_state.rentals_stayed): the
 # vehicle never got more than IN_PLACE_RADIUS_M (50 m) from where it was
 # unlocked, final fix included, and was released there.
 #
-# WHY NOT rentals_no_go ANY MORE (owner decision, 2026-10-09). Until sql/098
+# WHY NOT rentals_no_go ANY MORE (owner decision, 2026-10-09). Until sql/099
 # the grade read rentals_no_go, END displacement within 25 m. Measured on
 # production (rebuilt from raw_telemetry_points, 2026-10-07 08:02Z ..
 # 2026-10-08 17:12Z), about 57% of those no-gos are round trips: their
@@ -578,7 +578,7 @@ GRADE_FLOOR = 65
 GRADE_CEILING = 100
 # Fleet "never left the spot" rate: 660 of 30,727 completed rentals (2.1%),
 # 2026-10-07 08:02Z .. 2026-10-08 17:12Z, rebuilt from raw_telemetry_points
-# with sql/098's definition (furthest point incl. the final fix <= 50 m, drop
+# with sql/099's definition (furthest point incl. the final fix <= 50 m, drop
 # <= 50 m). The prior a thinly-observed vehicle is pulled toward. (It replaces
 # GRADE_FLEET_NO_GO_RATE = 0.085, the 25 m end-displacement rate.)
 GRADE_FLEET_STAYED_RATE = 0.021
@@ -588,7 +588,7 @@ GRADE_FLEET_STAYED_RATE = 0.021
 GRADE_PRIOR_STRENGTH = 20.0
 # Slope: how many grade points a unit of rate costs. NOT RE-MEASURED: the
 # per-vehicle distribution of the stayed rate could not be measured offline
-# (rentals_stayed starts at 0 with sql/098), so the old slope (210, set so the
+# (rentals_stayed starts at 0 with sql/099), so the old slope (210, set so the
 # no-go median ~6% landed near 87 and the floor at ~17%, the per-vehicle p90)
 # is scaled by the ratio of the fleet rates, 0.085 -> 0.021:
 # 210 x 0.085 / 0.021 = 850. That puts a per-vehicle median of ~1.5%
@@ -599,7 +599,7 @@ GRADE_POINTS_PER_RATE = 850.0
 # Below this many observed rentals there is no grade at all. Not a low grade -
 # no grade, so a client can say "not enough rides yet" instead of implying
 # something was measured. Counted over the SAME window as rentals_stayed
-# (rentals_observed_stayed_era, sql/098), not over rentals_observed: the latter
+# (rentals_observed_stayed_era, sql/099), not over rentals_observed: the latter
 # has counted since sql/089 while rentals_stayed starts at 0, and dividing one
 # by the other would read every vehicle as cleaner than it is.
 GRADE_MIN_RENTALS = 5
@@ -611,7 +611,7 @@ def smart_ride_grade(rentals_observed: int | None,
 
     `rentals_observed` must be the count over the same window as
     `rentals_stayed`: device_state.rentals_observed_stayed_era, never the
-    longer-running rentals_observed (sql/098).
+    longer-running rentals_observed (sql/099).
 
     Beta-smoothed toward the fleet rate so that few observations produce a
     grade near the fleet's, not an extreme one. See the block above for why

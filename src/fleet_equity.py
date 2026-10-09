@@ -34,9 +34,9 @@ WHAT THE NUMBER IS, AND IS NOT.
   Neither says why: the vehicle, the app, the weather and a rider changing
   their mind all look the same here.
 
-  `stayed_rate` (sql/098): the share that never left the spot, i.e. never got
+  `stayed_rate` (sql/099): the share that never left the spot, i.e. never got
   more than 50 m (`stayed_radius_meters`) from the unlock point and was
-  released there, over `stayed_known` (rentals written since sql/098, which
+  released there, over `stayed_known` (rentals written since sql/099, which
   recorded it). Rows from before `stayed_counted_since` hold 0/0, meaning
   "not recorded", so a window that opens before it is reported over the
   recorded part only (`stayed_hours_covered`).
@@ -170,7 +170,7 @@ def _side(acc: dict[str, Any]) -> dict[str, Any]:
         "never_left_radius": km,
         "never_left_radius_rate": round(km / mk, 4) if rated_max else None,
         "never_left_radius_ci95": _ci(cluster_ratio([(c[2], c[3]) for c in cells])) if rated_max else None,
-        # sql/098: never left the spot (50 m), over the rentals that recorded it.
+        # sql/099: never left the spot (50 m), over the rentals that recorded it.
         "stayed_known": sk,
         "stayed": st,
         "stayed_rate": round(st / sk, 4) if rated_stayed else None,
@@ -181,7 +181,7 @@ def _side(acc: dict[str, Any]) -> dict[str, Any]:
 def summarize_areas(rows: list[tuple]) -> dict[str, Any]:
     """rows: (equity_area, h3_9, rentals, no_gos, no_gos_max, max_known
     [, stayed, stayed_known]), summed per (area, cell) over the window; the
-    two sql/098 counts default to 0 (not recorded). Pure: testable without a
+    two sql/099 counts default to 0 (not recorded). Pure: testable without a
     database."""
     inside, outside = _zero(), _zero()
     excluded = {"unknown_origin": 0, "outside_city": 0, "unrecorded": 0}
@@ -246,7 +246,7 @@ SELECT MIN(hour) FROM rental_outcomes_hourly
 WHERE radius_m = %s AND equity_area <> 'unrecorded'
 """
 
-# When sql/098 ran, i.e. when `stayed` started being recorded.
+# When sql/099 ran, i.e. when `stayed` started being recorded.
 _SQL_STAYED_SINCE = "SELECT applied_at FROM schema_migrations WHERE filename = %s"
 
 
@@ -292,7 +292,7 @@ def summarize(window: str = "7d", *, now: datetime | None = None) -> dict[str, A
     hours_covered = (
         max(0, int((end - covered_from).total_seconds() // 3600)) if covered_from else 0
     )
-    # The same for `stayed`, which started later (sql/098). Whole hours only:
+    # The same for `stayed`, which started later (sql/099). Whole hours only:
     # the hour the migration ran is partly recorded, and stayed_known (not the
     # clock) is what keeps that hour's rate exact.
     stayed_from = max(start, stayed_since) if stayed_since else None
@@ -311,7 +311,7 @@ def summarize(window: str = "7d", *, now: datetime | None = None) -> dict[str, A
         "radius_meters": radius,
         "min_rentals_for_rate": MIN_RENTALS_FOR_RATE,
         "definition": "end_displacement",
-        # sql/098: never left the spot.
+        # sql/099: never left the spot.
         "stayed_counted_since": stayed_since.isoformat() if stayed_since else None,
         "stayed_hours_covered": min(stayed_hours, days * 24),
         "stayed_radius_meters": float(STAYED_RADIUS_METERS),
