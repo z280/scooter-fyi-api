@@ -112,17 +112,11 @@ def h3_aggregates(
                        r.current_range_meters, r.max_range_meters_for_type,
                        ds.number_failed_starts, ds.first_observed_at_location,
                        ds.recent_no_go_mask,
-                       -- The owner's rules (2026-10-09), from the ONE builder
-                       -- /devices/current uses (src/fleet_reports.py), bounded
-                       -- by this cycle's snapshot: a report filed or resolved
-                       -- after it never reshades a published cycle.
-                       """ + fleet_reports.negative_state_sql(
-                           vid="r.vehicle_identifier",
-                           current_range="r.current_range_meters",
-                           now="%(snap)s",
-                           dr_filter="AND dr.reported_at <= %(snap)s "
-                                     "AND (dr.resolved_at IS NULL OR dr.resolved_at > %(snap)s)",
-                           nr_filter="AND nr.reported_at <= %(snap)s") + """ AS has_negative_report
+                       -- Placeholder: the state comes from ONE pass over the
+                       -- builder below (fleet_reports.negative_states, bounded
+                       -- by this cycle's snapshot), not a per-row subquery,
+                       -- which cost ~2-3 s per request (2026-10-09).
+                       NULL AS has_negative_report
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
                 WHERE r.cycle_id = %(cycle)s
@@ -134,6 +128,9 @@ def h3_aggregates(
                 },
             )
             device_rows = cur.fetchall()
+            negative_by = fleet_reports.negative_states(
+                cur, cycle_id, snapshot_time=snapshot_time,
+                where="AND r.spatial_status = 'denver_core'")
 
             # Trailing-24h trip starts, anchored at snapshot_time so the
             # payload is fully determined by the cycle (ETag-safe).
@@ -165,9 +162,12 @@ def h3_aggregates(
         return acc
 
     for (h3_idx, vid, is_disabled, is_reserved, range_m, max_range_m,
-         failed_starts, first_obs, recent_mask, has_neg) in device_rows:
+         failed_starts, first_obs, recent_mask, _placeholder) in device_rows:
         if h3_idx is None:
             continue
+        entry = negative_by.get(vid)
+        has_neg = (None if not entry else
+                   "high" if entry.get("risk") == fleet_reports.RISK_HIGH else "unknown")
         acc = _cell(h3.int_to_str(int(h3_idx)))
         acc.devices += 1
 

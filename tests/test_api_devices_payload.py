@@ -101,6 +101,10 @@ def _fake_db(monkeypatch):
     # map silently; it now (correctly) caps reliability at "unknown", so
     # say what these tests mean: the query ran and found no rentals.
     monkeypatch.setattr(api_public, "_rental_outcomes", lambda: {})
+    # Same for the negative-report pass: the fake cursor cannot answer it, and
+    # a FAILED pass now (correctly) reads every vehicle "unknown". These tests
+    # mean "the pass ran and found no reports".
+    monkeypatch.setattr(api_public, "_negative_states", lambda cycle_id: {})
     monkeypatch.setattr(
         api_public, "stats_for_cycle",
         lambda cycle_id, snapshot_time: {

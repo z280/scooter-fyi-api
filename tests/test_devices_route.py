@@ -76,6 +76,9 @@ def client(monkeypatch):
 
     monkeypatch.setattr(api_public, "connection", _conn)
     monkeypatch.setattr(api_public, "stats_for_cycle", lambda cycle_id, snapshot_time: {})
+    # The negative-report pass ran and found nothing (a failed pass reads every
+    # vehicle "unknown", which is not what these route tests are about).
+    monkeypatch.setattr(api_public, "_negative_states", lambda cycle_id: {})
     app = FastAPI()
     app.include_router(api_public.router)
     return TestClient(app)

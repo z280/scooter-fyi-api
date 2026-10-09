@@ -247,16 +247,29 @@ def negative_state_sql(**kw: Any) -> str:
             f"FROM ({uncleared_negative_sql(**kw)}) x)")
 
 
-def _fleet_rows_sql() -> str:
+def _fleet_rows_sql(*, at_snapshot: bool = False, where: str = "") -> str:
+    """Every uncleared negative report on every vehicle in the cycle, in ONE
+    lateral pass. `at_snapshot` bounds it to %(snap)s (reports filed or
+    resolved after it don't count), which is what /api/v1/h3 needs to keep
+    its cycle-keyed ETag honest."""
+    if at_snapshot:
+        rules = uncleared_negative_sql(
+            vid="r.vehicle_identifier", current_range="r.current_range_meters",
+            now="%(snap)s",
+            dr_filter="AND dr.reported_at <= %(snap)s "
+                      "AND (dr.resolved_at IS NULL OR dr.resolved_at > %(snap)s)",
+            nr_filter="AND nr.reported_at <= %(snap)s")
+    else:
+        rules = uncleared_negative_sql(
+            vid="r.vehicle_identifier", current_range="r.current_range_meters",
+            now="NOW()")
     return f"""
         SELECT r.vehicle_identifier, x.src, x.id, x.report_type, x.reason,
                x.reported_at, x.signed_in, x.high, x.observed_at
           FROM raw_telemetry_points r
           LEFT JOIN device_state ds ON ds.vehicle_identifier = r.vehicle_identifier
-          CROSS JOIN LATERAL ({uncleared_negative_sql(
-              vid="r.vehicle_identifier", current_range="r.current_range_meters",
-              now="NOW()")}) x
-         WHERE r.cycle_id = %(cycle)s
+          CROSS JOIN LATERAL ({rules}) x
+         WHERE r.cycle_id = %(cycle)s {where}
     """
 
 
@@ -308,11 +321,15 @@ def _summarise(rows: list[tuple]) -> dict[str, Any]:
     }
 
 
-def negative_states(cur, cycle_id: Any) -> dict[str, dict[str, Any]]:
+def negative_states(cur, cycle_id: Any, *, snapshot_time: Any = None,
+                    where: str = "") -> dict[str, dict[str, Any]]:
     """{vehicle_identifier: {risk, reason, reason_detail, since, signed_in,
     needs_condition_check}} for every vehicle in the cycle with an uncleared
-    negative report."""
-    cur.execute(_fleet_rows_sql(), {"cycle": cycle_id})
+    negative report. With `snapshot_time`, as of that instant."""
+    params: dict[str, Any] = {"cycle": cycle_id}
+    if snapshot_time is not None:
+        params["snap"] = snapshot_time
+    cur.execute(_fleet_rows_sql(at_snapshot=snapshot_time is not None, where=where), params)
     by: dict[str, list[tuple]] = {}
     for row in cur.fetchall():
         by.setdefault(row[0], []).append(row)

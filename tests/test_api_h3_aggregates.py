@@ -113,6 +113,24 @@ def _fake_db(monkeypatch):
     monkeypatch.setattr(api_h3, "connection", _conn)
     monkeypatch.setattr(api_h3, "stats_for_cycle", lambda cycle_id, snapshot_time: {})
 
+    # /h3 now reads report state from ONE fleet_reports.negative_states pass,
+    # not a per-row column. Answer it from the same fixture rows: their last
+    # column still says which vehicles carry a report (read at call time, so
+    # tests that monkeypatch _DEVICE_ROWS are honoured).
+    from src import fleet_reports
+
+    def _states(cur, cycle_id, **kw):
+        out = {}
+        for row in _DEVICE_ROWS:
+            flag = row[-1]
+            if flag is True or flag == "high":
+                out[row[1]] = {"risk": fleet_reports.RISK_HIGH}
+            elif flag == "unknown":
+                out[row[1]] = {"risk": fleet_reports.RISK_UNKNOWN}
+        return out
+
+    monkeypatch.setattr(fleet_reports, "negative_states", _states)
+
 
 def _request(headers: dict[str, str] | None = None) -> Request:
     return Request({
