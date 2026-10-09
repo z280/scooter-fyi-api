@@ -228,7 +228,11 @@ def dibs_release(dibs_id: str) -> dict[str, Any]:
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE dibs SET expires_at = NOW() "
+                # `released_at` alongside the expiry, and only on the row
+                # this call actually releases — the WHERE clause already
+                # means a second call changes nothing, so a claim that ran
+                # out on its own clock can never be back-labelled as given up.
+                "UPDATE dibs SET expires_at = NOW(), released_at = NOW() "
                 "WHERE id = %s AND expires_at > NOW() RETURNING id",
                 (dibs_id,),
             )
@@ -366,7 +370,7 @@ def _fetch(dibs_id: str) -> dict[str, Any] | None:
             cur.execute(
                 "SELECT id, vehicle_identifier, vehicle_name, plate, "
                 "       claimed_by, claimed_at, expires_at, NOW(), "
-                "       device_type, lat, lon "
+                "       device_type, lat, lon, released_at "
                 "FROM dibs WHERE id = %s",
                 (dibs_id,),
             )
@@ -385,6 +389,7 @@ def _fetch(dibs_id: str) -> dict[str, Any] | None:
         "device_type": row[8],
         "lat": row[9],
         "lon": row[10],
+        "released_at": row[11],
     }
 
 
@@ -406,6 +411,13 @@ def get_dibs(dibs_id: str) -> dict[str, Any]:
         # the point: "I had dibs, you took it anyway" is a real thing to be
         # able to show. So this reports the fact rather than 404ing on it.
         "active": d["expires_at"] > d["now"],
+        # WHY it is no longer active, when it is not. Null means it ran
+        # out on its own clock; a timestamp means the holder handed it
+        # back, and those are different facts about the same person.
+        # Always present, so a reader need not infer from a missing key.
+        "released_at": (
+            d["released_at"].isoformat() if d["released_at"] else None
+        ),
         "denver_time": _denver(d["claimed_at"]),
     }
 
@@ -540,6 +552,19 @@ def dibs_page(dibs_id: str) -> HTMLResponse:
             f'<strong>{who}</strong> has dibs on <strong>{what}</strong>{plate}'
         )
         verdict = '<p class="verdict verdict--live">Still good.</p>'
+    elif d.get('released_at'):
+        # GAVE IT BACK, which is not the same as ran out of time, and
+        # the page said the latter about both until sql/098. The reader
+        # here is almost always about to take the scooter, so the verdict
+        # has to be just as clear — but the claimant handed it over, and
+        # reporting that as expiry both understates them and invites
+        # "my dibs were still fresh and you took it".
+        claim_line = (
+            f'<strong>{who}</strong> had dibs on <strong>{what}</strong>{plate}, '
+            f'but gave them up at '
+            f'<strong>{_esc(_denver(d["released_at"]))}</strong> — so it is'
+        )
+        verdict = '<p class="verdict verdict--void">free for anyone.</p>'
     else:
         claim_line = (
             f'<strong>{who}</strong> had dibs on <strong>{what}</strong>{plate}, '
