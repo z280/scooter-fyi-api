@@ -54,13 +54,12 @@ router = APIRouter()
 # the scooter rides. 'not_found' (sql/029) is NOT excluded — see that
 # migration's header for why a missing vehicle IS a reliability signal.
 #
-# 'inaccessible' (sql/100, docs/FLEET_REPORTS_PLAN.md §2.1) is the other axis:
-# "the vehicle may be perfectly fine; you cannot lawfully or reasonably reach
-# it" — private property, a locked yard, inside a fence. It is excluded from
-# reliability like improperly_parked, and is instead the strongest input to
-# the separate `suppressed` flag (src/fleet_reports.py). It earns no points
-# (src/points.py): paying for a report that hides a vehicle from every rider
-# would pay for griefing.
+# 'inaccessible' (sql/100, docs/FLEET_REPORTS_PLAN.md §2.1): "the vehicle may
+# be perfectly fine; you cannot lawfully or reasonably reach it". Since the
+# owner's 2026-10-09 rules it is a negative report like the rest — the
+# vehicle reads high risk until it moves 100 m (src/fleet_reports.py) — and
+# it still earns no points (src/points.py): paying for a report that marks a
+# vehicle high risk would pay for griefing.
 _REPORT_TYPES = (
     "not_rideable", "dead_battery", "damaged", "improperly_parked", "not_found",
     "inaccessible",
@@ -94,41 +93,29 @@ _DEPRECATED_REPORT_TYPE_ALIASES = {"failed_unlock": "not_rideable"}
 # normalisation.
 _ACCEPTED_REPORT_TYPES = _REPORT_TYPES + tuple(_DEPRECATED_REPORT_TYPE_ALIASES)
 
-# HOW LONG A REPORT COUNTS FOR — two answers, by whether anybody stands
-# behind it. The predicates live in api_public.py and api_h3.py (the two
-# renderings of the signal); this is the statement of the rule they implement.
+# HOW LONG A REPORT COUNTS FOR (owner, 2026-10-09). The rule and its one SQL
+# implementation live in src/fleet_reports.py (uncleared_negative_sql); in
+# short:
 #
-#   * ANONYMOUS — and every `negative_reports` map-pin row, which has no
-#     account column at all — counts for 24 hours, in the vehicle's h3_10 cell
-#     at report time. Nobody's name is on it, so it ages out on a clock.
-#   * SIGNED IN counts until the vehicle MOVES or its charge RISES. A rider
-#     who put their account behind "this one does not work" is making an
-#     accountable claim, and the useful question about it is not "how long
-#     ago?" but "has anything happened since?" — a move past the ingest's
-#     stationary threshold, or a charge that went UP since the report
-#     (device_reports.range_at_report_meters, sql/100), both mean somebody
-#     dealt with the vehicle. Neither is time.
+#   * a SIGNED-IN negative report makes the vehicle high risk until it is
+#     CLEARED — no time limit;
+#   * an ANONYMOUS one (and every map-pin `negative_reports` row) is high risk
+#     for 24 hours, then fades to UNKNOWN — never back to "ok" — until cleared;
+#   * a rideability report clears on a >= 100 m move AND a charge rise, or on
+#     reappearing >= 100 m away with a full battery after going off the map; a
+#     location report (inaccessible, not_found) on a >= 100 m move or an
+#     off-the-map reappearance >= 100 m away; a move under 100 m never clears,
+#     and neither does time;
+#   * an admin resolve or a rider condition check ("no longer a problem" after
+#     a test ride) clears it; a rider's "still a problem" re-baselines it.
 #
-#     A rise, never a level. This used to read "comes back at a FULL CHARGE",
-#     tested as `current range < 100%`, which cleared a report on a fully
-#     charged scooter the instant it was filed: a 100% Apollo behind a fence
-#     was unreportable (docs/FLEET_REPORTS_PLAN.md §2.4).
-#
-#   * Any report an admin has RESOLVED (sql/100's resolved_at) counts for
-#     nothing, on either branch.
-#
-# The consequence worth naming: a signed-in report on a scooter nobody touches
-# holds indefinitely, which is the point. A scooter nobody has repaired, moved
-# or charged in a week IS still broken, and the old 24-hour expiry was telling
-# riders otherwise every morning.
+# Nothing hides a scooter: the only effect is the reliability label.
 
-# Report types that must NOT drive has_negative_report / reliability_tier.
-# Single source of truth for the exclusion applied in the /devices/current
-# and /h3 aggregate queries. A scooter blocking a sidewalk can still be a
-# great ride, so parking complaints stay out of the "worth the walk?" signal.
-# An inaccessible scooter can be a great ride too; whether a rider should be
-# SENT to it is the suppression flag's question, not this one's (§2.5).
-NON_RELIABILITY_REPORT_TYPES = ("improperly_parked", "inaccessible")
+# Owner, 2026-10-09: every negative report — inaccessible and not_found
+# included — makes the vehicle high risk; improperly_parked alone changes no
+# label (it is a report to Veo). The clearing rules live in
+# src/fleet_reports.py, which is now the one implementation.
+NON_RELIABILITY_REPORT_TYPES = ("improperly_parked",)
 
 
 def reliability_report_type_sql(alias: str = "dr") -> str:
@@ -380,7 +367,8 @@ def submit_device_report(
                 INSERT INTO device_reports (
                     vehicle_identifier, report_type, observed_at, lat, lng,
                     h3_10_index, account_id, reporter_ip, reporter_user_agent,
-                    reason, submitted_reason, range_at_report_meters
+                    reason, submitted_reason, range_at_report_meters,
+                    vehicle_lat_at_report, vehicle_lon_at_report
                 ) VALUES (%s, %s, COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, (
                     SELECT r.current_range_meters
                       FROM raw_telemetry_points r
@@ -388,13 +376,20 @@ def submit_device_report(
                        AND r.snapshot_time >= NOW() - INTERVAL '1 hour'
                      ORDER BY r.snapshot_time DESC
                      LIMIT 1
-                ))
+                ),
+                -- Where the VEHICLE was (sql/102): the baseline a 100 m
+                -- clearing move is measured from (src/fleet_reports.py).
+                (SELECT ds.current_lat FROM device_state ds
+                  WHERE ds.vehicle_identifier = %s),
+                (SELECT ds.current_lon FROM device_state ds
+                  WHERE ds.vehicle_identifier = %s))
                 RETURNING id, reported_at
                 """,
                 (payload.vehicle_identifier, payload.report_type, payload.observed_at,
                  payload.lat, payload.lng, h3_10,
                  user.account_id if user else None, ip, ua,
                  payload.reason, payload.submitted_reason,
+                 payload.vehicle_identifier, payload.vehicle_identifier,
                  payload.vehicle_identifier),
             )
             new_id, reported_at = cur.fetchone()

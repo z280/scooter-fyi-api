@@ -27,7 +27,9 @@ the two directions the client needs are answered here instead:
            rider standing in front of a scooter the map does not show can ask
            WHY. `qr=` takes the sticker's raw payload (src/qr.py's
            extract_plate reads the plate out of it), and `explain=true` adds
-           the reason — on_map / suppressed / missing / gone — reading
+           the reason — on_map / missing / gone — plus any uncleared
+           negative report and the risk it sets (no report hides a scooter:
+           owner, 2026-10-09), reading
            device_state for vehicles that have left the feed. Same rule as
            the plain lookup, by the owner's decision of 2026-10-08: public,
            30/min per IP, never echoes the plate, 404 for none or ambiguous.
@@ -318,6 +320,17 @@ def _iso(v: datetime | None) -> str | None:
     return v.isoformat() if v else None
 
 
+def _negative_fields(state: dict[str, Any] | None) -> dict[str, Any]:
+    """Same meaning as /devices/current's negative_report_* fields."""
+    if state is None:
+        return {"negative_report_risk": None, "negative_report_reason": None,
+                "negative_report_reason_detail": None, "negative_report_since": None}
+    return {"negative_report_risk": state["risk"],
+            "negative_report_reason": state["reason"],
+            "negative_report_reason_detail": state["reason_detail"],
+            "negative_report_since": _iso(state["since"])}
+
+
 def _card(vid: str, *, model: str | None, form_factor: str | None) -> dict[str, Any]:
     """What a modal can show for a vehicle with no marker: the public label
     and what kind of vehicle it is. Nothing here is not already public."""
@@ -330,8 +343,10 @@ def _card(vid: str, *, model: str | None, form_factor: str | None) -> dict[str, 
 
 def _explain_on_map(cur, cycle_id: Any, snapshot_time: datetime,
                     vid: str) -> dict[str, Any]:
-    """A vehicle in the current snapshot: on the map, or suppressed."""
+    """A vehicle in the current snapshot: on the map — always, whatever its
+    reports say (owner, 2026-10-09: a report labels, it never hides)."""
     reports = fleet_reports.open_reports_for(cur, cycle_id, vid)
+    state = fleet_reports.negative_state_for(cur, cycle_id, vid)
     cur.execute(
         """
         SELECT current_vehicle_model_name, current_form_factor
@@ -340,13 +355,11 @@ def _explain_on_map(cur, cycle_id: Any, snapshot_time: datetime,
         (vid,),
     )
     row = cur.fetchone() or (None, None)
-    first = reports[0] if reports else None
     return {
         "device_id": None,  # filled by the caller from the snapshot row
         "vehicle_identifier": vid,
-        "status": "suppressed" if first else "on_map",
-        "suppressed_reason": first["report_type"] if first else None,
-        "suppressed_since": first["reported_at"] if first else None,
+        "status": "on_map",
+        **_negative_fields(state),
         "open_reports": reports,
         "last_observed_at": _iso(snapshot_time),
         "hours_missing": None,
@@ -387,16 +400,14 @@ def _explain_off_feed(cur, cycle_id: Any, snapshot_time: datetime,
     vid, last_seen_at, lat, lon, model, form_factor, ack_status, ack_at = rows[0]
     gone = ack_status == fleet_reports.CENSUS_STATUS_GONE
     reports = fleet_reports.open_reports_for(cur, cycle_id, vid)
+    state = fleet_reports.negative_state_for(cur, cycle_id, vid)
     hours = (round((snapshot_time - last_seen_at).total_seconds() / 3600.0, 1)
              if last_seen_at and snapshot_time else None)
     return {
         "device_id": None,
         "vehicle_identifier": vid,
         "status": "gone" if gone else "missing",
-        # Not suppressed: a vehicle the feed does not carry is on nobody's map
-        # whatever its reports say. The reports still explain it.
-        "suppressed_reason": None,
-        "suppressed_since": None,
+        **_negative_fields(state),
         "open_reports": reports,
         "last_observed_at": _iso(last_seen_at),
         "hours_missing": hours,

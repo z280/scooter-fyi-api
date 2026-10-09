@@ -7,12 +7,13 @@ rideability reports and asked, for each, "Still a problem? Y/N", then "Did
 you do a test ride? Y/N".
 
 WHICH REPORTS ARE ASKED ABOUT. fleet_reports.CONDITION_CHECK_TYPES:
-standing (signed-in, unresolved, not moved, charge not risen) `inaccessible`,
-`not_rideable` (with its reason), `damaged` and `dead_battery` reports —
-exactly what suppresses, minus `not_found`. A standing `not_found` is never
-asked: a rider who test-rode the scooter has found it, so a test-ridden
-check resolves those automatically (`found`). `improperly_parked` never
-appears: it does not suppress and is a report to Veo.
+uncleared (src/fleet_reports.py's rules; signed in or anonymous) device
+reports of type `inaccessible`, `not_rideable` (with its reason), `damaged`
+and `dead_battery` — every negative type minus `not_found`. A standing
+`not_found` is never asked: a rider who test-rode the scooter has found it,
+so a test-ridden check resolves those automatically (`found`).
+`improperly_parked` never appears: it is not a negative report. Map-pin
+`negative_reports` rows have no report to resolve and are not listed.
 
 TEST RIDE = NO DISCARDS EVERYTHING. Every condition answer is thrown away:
 no answer rows, no report changes, no points. One minimal audit row is kept
@@ -24,10 +25,12 @@ fleet_reports.resolve_report — the same write path an admin void uses —
 with `resolution_source = 'rider_check'`, the rider's account and the check
 id, so the audit always says which kind of resolution it was. "Still a
 problem" RECONFIRMS it: `last_reconfirmed_at` / `reconfirm_count` on the
-report plus an answer row (who, when). A reconfirmation does NOT restart
-the report's hold — persistence is already "until it moves" (§4.4) — so a
-test ride that moves the scooter past the stationary threshold still clears
-every report on it by the movement rule, reconfirmed or not.
+report plus an answer row (who, when) — and it RE-BASELINES the report
+(owner, 2026-10-09): `baseline_pending` holds it through the test ride, and
+once the ride settles (`settle_baselines`, below) its baseline position and
+charge become the vehicle's then, so a later clear needs a NEW >= 100 m move
+(plus a charge rise, for a rideability report) from there. Other reports are
+untouched and follow the ordinary rules (src/fleet_reports.py).
 
 PROOF OF PRESENCE IS REQUIRED. A false "no longer a problem" un-hides a
 vehicle — the mirror image of griefing — so a check must carry one of: a
@@ -361,14 +364,18 @@ def submit_check(
             continue
         acted_own.append(own)
         if still:
+            # Re-baseline: pending through the test ride, then the vehicle's
+            # position and charge once it settles (settle_baselines).
             cur.execute(
                 """
                 UPDATE device_reports
                    SET last_reconfirmed_at = NOW(),
-                       reconfirm_count = reconfirm_count + 1
+                       reconfirm_count = reconfirm_count + 1,
+                       baseline_pending = TRUE,
+                       baseline_check_id = %s
                  WHERE id = %s
                 """,
-                (rid,),
+                (check_id, rid),
             )
             _answer_row(rid, True, OUTCOME_RECONFIRMED, own)
         else:
@@ -463,6 +470,66 @@ def feed_signal(
     return None
 
 
+#: A test ride still in a rental this long after the check settles anyway,
+#: at the position the rental froze (where it was rented from).
+MAX_SETTLE_WAIT = timedelta(hours=2)
+
+
+def settle_baselines(cur, snapshot_time: datetime) -> int:
+    """Re-baseline the reports a test-ridden check reconfirmed (owner,
+    2026-10-09: "still a problem" re-baselines that report at the vehicle's
+    state after the test ride settles).
+
+    A check settles once its FEED_WINDOW has closed (by the feed's clock) and
+    the vehicle is out of any rental — or MAX_SETTLE_WAIT has passed. Each of
+    its still-pending reports gets `baseline_lat/lon` = the vehicle's current
+    position (device_state, which a rental freezes and its release updates),
+    `baseline_range_meters` = its latest charge, `baseline_at` = the
+    snapshot, and stops being pending. Only reports this check owns
+    (`baseline_check_id`) are touched. Returns how many checks settled."""
+    cur.execute(
+        """
+        SELECT c.id, c.vehicle_identifier, c.submitted_at, ds.rental_started_at
+          FROM device_condition_checks c
+          LEFT JOIN device_state ds USING (vehicle_identifier)
+         WHERE c.test_ride AND c.reports_reconfirmed > 0
+           AND c.baseline_settled_at IS NULL
+         ORDER BY c.submitted_at
+         FOR UPDATE OF c SKIP LOCKED
+        """
+    )
+    settled = 0
+    for cid, vid, submitted_at, rental_started in cur.fetchall():
+        if snapshot_time < submitted_at + FEED_WINDOW:
+            continue
+        if rental_started is not None and snapshot_time < submitted_at + MAX_SETTLE_WAIT:
+            continue
+        cur.execute(
+            """
+            UPDATE device_reports dr
+               SET baseline_lat = ds.current_lat,
+                   baseline_lon = ds.current_lon,
+                   baseline_range_meters = (
+                       SELECT r.current_range_meters FROM raw_telemetry_points r
+                        WHERE r.vehicle_identifier = dr.vehicle_identifier
+                          AND r.snapshot_time <= %(snap)s
+                        ORDER BY r.snapshot_time DESC LIMIT 1),
+                   baseline_at = %(snap)s,
+                   baseline_pending = FALSE
+              FROM device_state ds
+             WHERE ds.vehicle_identifier = dr.vehicle_identifier
+               AND dr.baseline_check_id = %(cid)s AND dr.baseline_pending
+            """,
+            {"snap": snapshot_time, "cid": cid},
+        )
+        cur.execute(
+            "UPDATE device_condition_checks SET baseline_settled_at = %s WHERE id = %s",
+            (snapshot_time, cid),
+        )
+        settled += 1
+    return settled
+
+
 def confirm_pending_checks(snapshot_time: datetime) -> dict[str, int]:
     """One cycle's pass: settle pending checks against device_state as the
     cycle just left it. Called from src/cycle.py after
@@ -472,7 +539,8 @@ def confirm_pending_checks(snapshot_time: datetime) -> dict[str, int]:
     `snapshot_time` is the feed's clock, and the window closes against it:
     a cycle that ran late must not expire a check whose confirming rental it
     simply has not seen yet."""
-    stats = {"pending": 0, "confirmed": 0, "unconfirmed": 0, "paid": 0}
+    stats = {"pending": 0, "confirmed": 0, "unconfirmed": 0, "paid": 0,
+             "baselines_settled": 0}
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -524,8 +592,9 @@ def confirm_pending_checks(snapshot_time: datetime) -> dict[str, int]:
                         (snapshot_time, cid),
                     )
                     stats["unconfirmed"] += 1
+            stats["baselines_settled"] = settle_baselines(cur, snapshot_time)
         conn.commit()
-    if stats["pending"]:
+    if stats["pending"] or stats["baselines_settled"]:
         log.info("condition checks: %s", stats)
     return stats
 

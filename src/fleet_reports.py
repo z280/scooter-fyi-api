@@ -1,49 +1,77 @@
-"""Fleet reports: suppression, report holding, and the census
-(docs/FLEET_REPORTS_PLAN.md, Phase 1).
+"""Fleet reports: negative reports, how they clear, and the census
+(docs/FLEET_REPORTS_PLAN.md; rules rewritten by the owner on 2026-10-09).
 
-TWO AXES, KEPT APART ON PURPOSE (§2.5). `reliability_tier` answers "will it
-ride?". `suppressed` answers "should a rider be sent to it at all?". A
-scooter behind a fence at 100% rides perfectly; rating it `high_risk` to keep
-it off the map would tell the rider something false about the hardware, and
-it would re-merge exactly the two questions the plan exists to separate. So
-suppression is its own flag with its own reason, computed here, and nothing in
-src/quality.py reads it. DO NOT "simplify" the two together.
+THE OWNER'S RULES (2026-10-09), which replace Phase 1's suppression:
 
-WHAT SUPPRESSES. A SIGNED-IN, UNRESOLVED device report of a type in
-SUPPRESSION_REASON_PRIORITY (every type except improperly_parked), on a vehicle that has not moved since the report
-and whose charge has not RISEN since it (`report holds`, below). Anonymous
-reports never suppress: they still feed has_negative_report for 24 hours in
-their cell, as they always have, but hiding a vehicle from every rider is the
-strongest thing this system does and it needs somebody accountable behind it
-— that is the griefing control (§2.6(2), risk 2), and it is why the reporter
-view an admin needs can be per-account at all.
+  "The logic should be move + battery increase, or going off the map and
+  appearing in a new location with a full battery = improved/reset. A move
+  of <100m should not reset any negative reported device, ever. Nor should
+  simply 24h time. Reports of non-rideability should persist until they are
+  verified as resolved by a successful movement and an increase in battery
+  (otherwise indicating servicing)."
+  "Persist and flag as high risk should be the only result of any report.
+  24h fade can apply for anonymous reports, but they should fade into
+  unknown risk, not likely ridable. But all scooters with a negative report
+  should be labeled as 'high risk', not hidden from the map."
+  Location reports: "A 100 m+ move clears them."
 
-BROKEN PARTS DO NOT SUPPRESS. A broken bell, cup holder, basket or phone
-holder is recorded through feature confirmation (`device_feature_reports.
-poor_condition`, folded into `device_state.features_poor_condition` by
-src/device_features.py), not through device reports. The scooter still rides
-and is still reachable, so it stays on the map; it counts in the advocacy
-export (`broken_parts_summary`) and the Phase 2 dossier instead. See the
-plan's §2.9.
+NO REPORT HIDES A SCOOTER. The only effect of a negative report is the
+vehicle's reliability label. This deliberately overrides the plan's §2.5
+("do not overload reliability_tier"): the owner wants the tier to BE the
+label. There is no `suppressed` flag any more; /devices/current carries
+`negative_report_risk` / `_reason` / `_since` so a card can say WHY it is
+high risk, and clients must not hide on any of it.
 
-WHEN A REPORT HOLDS (§2.2-§2.4). Until the vehicle MOVES
-(`device_state.first_observed_at_location` is reset by the ingest on any move
-past the stationary threshold, so `<= reported_at` means "not moved since"),
-or its charge RISES by at least `charge_rise_meters()` over what it read when
-the report was filed (`device_reports.range_at_report_meters`). A LEVEL test
-("it reads 100%, so somebody charged it") is what this replaced: it cleared a
-report on a fully charged scooter the instant it was filed. NULL on either
-side of the comparison clears nothing — no evidence of a service visit is not
-evidence of one.
+NEGATIVE REPORT TYPES (NEGATIVE_REPORT_PRIORITY): not_rideable (any reason),
+damaged, dead_battery — RIDEABILITY reports — and inaccessible, not_found —
+LOCATION reports. improperly_parked is not negative: it changes no label and
+is a report to Veo. Map-pin `negative_reports` rows (anonymous, no type) are
+treated as anonymous rideability reports.
+
+WHAT A REPORT DOES while it is uncleared:
+  * signed in  -> high_risk, with no time limit at all;
+  * anonymous  -> high_risk for ANONYMOUS_HIGH_RISK_HOURS (24 h), then
+                  "unknown" — never back to "ok" until it is cleared.
+
+HOW A REPORT CLEARS (`uncleared_negative_sql`):
+  * rideability: the vehicle is >= CLEAR_MOVE_METERS (100 m, straight line)
+    from where it was when reported AND its charge rose by at least
+    charge_rise_meters() (5% of a full charge) over the charge then; OR it
+    went OFF THE MAP (a device_history stop closed as 'absent', i.e. out of
+    the feed longer than device_state.ABSENT_STOP_AFTER) after the report
+    and reappeared >= 100 m from where it was last seen with a FULL battery
+    (>= FULL_BATTERY_PERCENT, 95%);
+  * location: >= 100 m from where it was reported, or reappeared >= 100 m
+    from its last-seen spot after going off the map. No battery condition;
+  * a move under 100 m never clears anything, and time never clears;
+  * verification clears: an admin resolve, or a rider condition check with a
+    test ride answering "no longer a problem" (resolution_source);
+  * a reconfirmation ("still a problem", test ride) RE-BASELINES the report
+    at the vehicle's position and charge once the test ride settles, so a
+    later clear needs a NEW 100 m move (plus a rise) from there. While the
+    test ride is settling (`baseline_pending`) the report cannot clear.
+
+The baseline is `COALESCE(baseline_*, *_at_report)`: the vehicle's position
+and charge when the report was filed (vehicle_lat/lon_at_report,
+range_at_report_meters), overridden by a reconfirmation. A report with no
+known charge at report time (filed before sql/100, or while the vehicle was
+out of the feed) counts a "rise" only when the vehicle now reads full. A
+report with no known position cannot clear by moving — only by the off-map
+path or verification.
+
+ONE IMPLEMENTATION. The SQL is built here, once, and /devices/current
+(api_public), the /h3 aggregate (api_h3), the identify path, the condition
+checks and the admin pages all use it; tests/test_reliability_sql_mirrored.py
+holds every consumer to the builder.
+
+BROKEN PARTS (feature confirmation's poor_condition) are not reports: they
+change no label (§2.9); they count in the export and the dossier.
 
 THE CENSUS (§2.8). Newest arrivals sort on `first_ever_observed_at` ("never
-reset"), never `first_observed_at_location` ("reset on movement"), which would
-report every scooter that moved this morning as new. Missing is
-`last_observed_at` older than N hours (default 72, from device_state.py's
-fleet measurement: 2-12 h absences are the overnight van). Permanently gone is
-an admin acknowledgement in `device_census_ack`, which an ingest cycle never
-touches; a gone vehicle that is seen again is surfaced, never silently
-relisted, and its acknowledgement is not deleted.
+reset"), never `first_observed_at_location` ("reset on movement"). Missing is
+`last_observed_at` older than N hours (default 72). Permanently gone is an
+admin acknowledgement in `device_census_ack`, which an ingest cycle never
+touches; a gone vehicle seen again is surfaced, never silently relisted.
 """
 
 from __future__ import annotations
@@ -54,71 +82,65 @@ from typing import Any
 from .device_features import FEATURE_PRESENCE_COLUMNS, STATUS_NEEDS_REVIEW
 from .quality import full_charge_range_meters
 
-#: The report types that suppress, and — when several hold at once — the
-#: order `suppressed_reason` reports them in: the reason that most changes
-#: what a rider should do comes first. `inaccessible` heads it because it is
-#: the one whose copy has to stop somebody climbing a fence (§2.1); `not_found`
-#: next, because the rider would walk to a spot with nothing there.
-#:
-#: `improperly_parked` is deliberately ABSENT (owner, 2026-10-09, overriding
-#: the plan's §2.2(2)/§5): "Improperly Parked is not the same as
-#: Inaccessible/Can't Find it. The latter should avoid especially if on
-#: private property, the improperly parked is a report to veo." A badly
-#: parked scooter is reachable and rideable — riding it away even fixes the
-#: complaint — so it stays on the map. It is still stored, counted in the
-#: admin export and the dossier, and is Veo's to act on.
-SUPPRESSION_REASON_PRIORITY: tuple[str, ...] = (
+#: Every negative report type, in the order `negative_report_reason` names
+#: them when several stand: location reports first (they change what a rider
+#: should DO — "don't go in", "it isn't there"), then rideability.
+NEGATIVE_REPORT_PRIORITY: tuple[str, ...] = (
     "inaccessible",
     "not_found",
     "not_rideable",
     "damaged",
     "dead_battery",
 )
+RIDEABILITY_REPORT_TYPES: tuple[str, ...] = ("not_rideable", "damaged", "dead_battery")
+LOCATION_REPORT_TYPES: tuple[str, ...] = ("inaccessible", "not_found")
 
-#: Report types that never suppress. Every type is in exactly one of these
-#: two tuples; tests/test_fleet_reports.py holds that.
-NON_SUPPRESSING_REPORT_TYPES: tuple[str, ...] = ("improperly_parked",)
+#: Not negative: changes no label (owner, 2026-10-09: "the improperly parked
+#: is a report to veo"). Every type is in exactly one of these two tuples.
+NON_NEGATIVE_REPORT_TYPES: tuple[str, ...] = ("improperly_parked",)
 
-#: "Negative rideability" for a condition check (plan §4.4, Phase 1b): the
-#: standing reports a rider at the scooter is asked "Still a problem? Y/N"
-#: about. Exactly the suppressing types minus `not_found` — a rider standing
-#: at the scooter has already answered that one (it is here), so it is never
-#: asked; see FOUND_ON_CHECK_TYPES. `improperly_parked` never appears: it
-#: does not suppress, and it is a report to Veo, not a rideability claim.
-#: Ordered as SUPPRESSION_REASON_PRIORITY, which is the order they are listed.
+#: The standing reports a rider at the scooter is asked "Still a problem?"
+#: about (Phase 1b): the negative types minus `not_found` — a rider standing
+#: at the scooter has found it; FOUND_ON_CHECK_TYPES are resolved by a
+#: test-ridden check without asking.
 CONDITION_CHECK_TYPES: tuple[str, ...] = (
     "inaccessible",
     "not_rideable",
     "damaged",
     "dead_battery",
 )
-
-#: Standing reports a test-ride check resolves WITHOUT asking: a rider who
-#: started and rode the scooter has found it. Listed on the GET as
-#: `auto_resolves: true` so the client can say so, never asked.
 FOUND_ON_CHECK_TYPES: tuple[str, ...] = ("not_found",)
 
-#: Who resolved a report (device_reports.resolution_source, sql/102).
 RESOLUTION_SOURCE_ADMIN = "admin"
 RESOLUTION_SOURCE_RIDER_CHECK = "rider_check"
 
-#: How much the charge must RISE over the reading at report time before the
-#: rise counts as somebody servicing the vehicle. A battery swap or a charge
-#: is a jump of tens of percent; the feed's range is otherwise frozen while a
-#: vehicle sits (battery_model: 99.4% of parked 2-minute steps show no change)
-#: but is not perfectly still, so a bare `>` would let a few metres of jitter
-#: clear a report. 5% of a full charge (~2.3 km) is far below any real
-#: service visit and far above that noise.
+RISK_HIGH = "high_risk"
+RISK_UNKNOWN = "unknown"
+
+#: The straight-line move that can clear a report. Under it, nothing clears
+#: (owner: "A move of <100m should not reset any negative reported device,
+#: ever"). It is also well past the feed's jitter and device_state's 50 m
+#: in-place radius.
+CLEAR_MOVE_METERS = 100
+
+#: An anonymous report is high risk this long, then fades to unknown.
+ANONYMOUS_HIGH_RISK_HOURS = 24
+
+#: How much the charge must RISE over the baseline to count as servicing:
+#: 5% of a full charge (~2.3 km of range). The feed's range is frozen while a
+#: vehicle sits (battery_model: 99.4% of parked 2-minute steps show no
+#: change); a swap or a charge is tens of percent.
 CHARGE_RISE_FRACTION = 0.05
 
-#: The default missing threshold, in hours (§2.8). Not ABSENT_STOP_AFTER (one
-#: hour): device_state.py's header measures 8.4% of the fleet absent for under
-#: 12 h at any moment — the overnight pulls — and a list that shows them every
-#: night is a list nobody reads.
+#: "Full" for the off-the-map path. The feed's range is an integer percent
+#: mapped through a 100-step table (quality.compute_battery_percent), so this
+#: is the table's 95% entry, not a guess at a range.
+FULL_BATTERY_PERCENT = 95
+
+#: The default missing threshold, in hours (§2.8).
 DEFAULT_MISSING_HOURS = 72
 
-#: Broken-part export order: the three the owner named first, then the
-#: fourth the feature data also carries.
+#: Broken-part export order.
 BROKEN_PART_ORDER: tuple[str, ...] = ("bell", "cup_holder", "basket", "phone_holder")
 
 CENSUS_STATUS_GONE = "gone"
@@ -126,125 +148,237 @@ CENSUS_STATUS_NOT_GONE = "not_gone"
 
 
 def charge_rise_meters() -> int:
-    """Metres of range a vehicle must gain over its reading at report time
-    for the gain to clear the report. Derived from the one definition of a
-    full charge, so it cannot drift from the battery readout."""
+    """Metres of range a vehicle must gain over its baseline for the gain to
+    count as servicing. Derived from the one definition of a full charge."""
     return int(round(full_charge_range_meters() * CHARGE_RISE_FRACTION))
 
 
+def full_battery_meters() -> int:
+    """The current_range_meters at which the battery readout says
+    FULL_BATTERY_PERCENT — read from the same lookup table the percentage
+    comes from, so "full" means what the readout means."""
+    from .quality import _soc_lut
+
+    lut = _soc_lut()
+    return int(lut[round(FULL_BATTERY_PERCENT / 100 * (len(lut) - 1))])
+
+
 # ---------------------------------------------------------------------------
-# Suppression
+# Uncleared negative reports — THE one SQL implementation
 # ---------------------------------------------------------------------------
 
-def _open_reports_sql(*, single_vehicle: bool) -> str:
-    """Signed-in, unresolved reports that still HOLD, with the telemetry row
-    of the given cycle supplying the current range.
+def _in(values: tuple[str, ...]) -> str:
+    return "(" + ", ".join(f"'{v}'" for v in values) + ")"
 
-    The hold clauses are the accountable has_negative_report branch's, with
-    the suppressing types in place of the reliability-type filter, and they are
-    mirrored in api_public.py and api_h3.py —
-    tests/test_reliability_sql_mirrored.py keeps the copies honest.
 
-    For the whole fleet the telemetry join is INNER: only vehicles in the
-    cycle are on /devices/current, so only they need a flag. For one vehicle
-    it is LEFT, because the identify path asks about vehicles that have left
-    the feed; with no telemetry row the current range is NULL, and a NULL
-    clears nothing.
+def uncleared_negative_sql(*, vid: str, current_range: str, now: str,
+                           dr_filter: str = "AND dr.resolved_at IS NULL",
+                           nr_filter: str = "",
+                           include_pins: bool = True) -> str:
+    """A SELECT of the uncleared negative reports on the vehicle `vid`.
+
+    Columns: src ('device_reports' | 'negative_reports'), id, report_type,
+    reason, reported_at, signed_in, high (true while it makes the vehicle
+    high_risk; false once an anonymous report has faded to unknown),
+    observed_at (when the rider saw it; reported_at when not given).
+
+    `vid`, `current_range` and `now` are SQL expressions from the caller
+    (e.g. `r.vehicle_identifier`, `r.current_range_meters`, `NOW()` or a
+    snapshot placeholder); the device_state row must be in scope as `ds`.
+    `dr_filter` / `nr_filter` restrict which rows count — the /h3 aggregate
+    bounds them by its snapshot. Constants are inlined (code-controlled, never
+    user input) so the fragment works under either psycopg placeholder style.
+    The rules are the module docstring's.
     """
-    join = "LEFT JOIN" if single_vehicle else "JOIN"
-    vehicle_filter = "AND dr.vehicle_identifier = %(vid)s" if single_vehicle else ""
+    m = CLEAR_MOVE_METERS
+    rise = charge_rise_meters()
+    full = full_battery_meters()
+    moved = (f"COALESCE(geo_distance_m(n.base_lat, n.base_lon, "
+             f"ds.current_lat, ds.current_lon) >= {m}, FALSE)")
+    rose = (f"COALESCE({current_range} >= n.base_range + {rise} "
+            f"OR (n.base_range IS NULL AND {current_range} >= {full}), FALSE)")
+    is_full = f"COALESCE({current_range} >= {full}, FALSE)"
+    off_map = f"""EXISTS (
+                SELECT 1 FROM device_history h
+                 WHERE h.vehicle_identifier = {vid}
+                   AND h.departure_reason = 'absent'
+                   AND h.departed_at >= n.base_at
+                   AND ds.last_observed_at > h.departed_at
+                   AND geo_distance_m(h.lat, h.lon, ds.current_lat, ds.current_lon) >= {m})"""
+    pins = f"""
+          UNION ALL
+          SELECT 'negative_reports', nr.id, 'not_rideable', NULL::text, nr.reported_at,
+                 nr.reported_at, FALSE, nr.report_lat, nr.report_lon, NULL::integer, nr.reported_at, FALSE
+            FROM negative_reports nr
+           WHERE nr.vehicle_identifier = {vid}
+             {nr_filter}""" if include_pins else ""
     return f"""
-        SELECT dr.vehicle_identifier, dr.report_type, dr.reported_at, dr.id
-          FROM device_reports dr
-          {join} raw_telemetry_points r
-                 ON r.cycle_id = %(cycle)s
-                AND r.vehicle_identifier = dr.vehicle_identifier
-          LEFT JOIN device_state ds
-                 ON ds.vehicle_identifier = dr.vehicle_identifier
-         WHERE dr.account_id IS NOT NULL
-           AND dr.resolved_at IS NULL
-           AND dr.report_type = ANY(%(types)s::text[])
-           {vehicle_filter}
-           AND (ds.first_observed_at_location IS NULL
-                OR ds.first_observed_at_location <= dr.reported_at)
-           AND (dr.range_at_report_meters IS NULL
-                OR r.current_range_meters IS NULL
-                OR r.current_range_meters < dr.range_at_report_meters + %(rise)s)
-         ORDER BY dr.vehicle_identifier,
-                  array_position(%(types)s::text[], dr.report_type),
-                  dr.reported_at, dr.id
+        SELECT n.src, n.id, n.report_type, n.reason, n.reported_at, n.signed_in,
+               (n.signed_in OR n.reported_at >= {now}
+                    - INTERVAL '{ANONYMOUS_HIGH_RISK_HOURS} hours') AS high,
+               n.observed_at
+          FROM (
+          SELECT 'device_reports' AS src, dr.id, dr.report_type, dr.reason, dr.reported_at,
+                 COALESCE(dr.observed_at, dr.reported_at) AS observed_at,
+                 dr.account_id IS NOT NULL AS signed_in,
+                 COALESCE(dr.baseline_lat, dr.vehicle_lat_at_report) AS base_lat,
+                 COALESCE(dr.baseline_lon, dr.vehicle_lon_at_report) AS base_lon,
+                 COALESCE(dr.baseline_range_meters, dr.range_at_report_meters) AS base_range,
+                 COALESCE(dr.baseline_at, dr.reported_at) AS base_at,
+                 dr.baseline_pending AS pending
+            FROM device_reports dr
+           WHERE dr.vehicle_identifier = {vid}
+             AND dr.report_type IN {_in(NEGATIVE_REPORT_PRIORITY)}
+             {dr_filter}{pins}
+          ) n
+         WHERE n.pending OR NOT (
+               CASE WHEN n.report_type IN {_in(RIDEABILITY_REPORT_TYPES)}
+                    THEN ({moved} AND {rose}) OR ({is_full} AND {off_map})
+                    ELSE {moved} OR {off_map}
+               END)"""
+
+
+def negative_state_sql(**kw: Any) -> str:
+    """One vehicle's negative-report state as a scalar subquery: 'high'
+    (high_risk), 'unknown' (only faded anonymous reports), or NULL (none).
+    Embedded in the /devices/current and /h3 SELECTs."""
+    return (f"(SELECT CASE WHEN COUNT(*) = 0 THEN NULL "
+            f"WHEN bool_or(x.high) THEN 'high' ELSE 'unknown' END "
+            f"FROM ({uncleared_negative_sql(**kw)}) x)")
+
+
+def _fleet_rows_sql() -> str:
+    return f"""
+        SELECT r.vehicle_identifier, x.src, x.id, x.report_type, x.reason,
+               x.reported_at, x.signed_in, x.high, x.observed_at
+          FROM raw_telemetry_points r
+          LEFT JOIN device_state ds ON ds.vehicle_identifier = r.vehicle_identifier
+          CROSS JOIN LATERAL ({uncleared_negative_sql(
+              vid="r.vehicle_identifier", current_range="r.current_range_meters",
+              now="NOW()")}) x
+         WHERE r.cycle_id = %(cycle)s
     """
 
 
-def _params(cycle_id: Any, **extra: Any) -> dict[str, Any]:
+def _vehicle_rows_sql() -> str:
+    """One vehicle, in the feed or not: with no telemetry row its current
+    charge is NULL, which proves no rise and no full battery."""
+    return f"""
+        SELECT v.vid, x.src, x.id, x.report_type, x.reason,
+               x.reported_at, x.signed_in, x.high, x.observed_at
+          FROM (SELECT %(vid)s::text AS vid) v
+          LEFT JOIN device_state ds ON ds.vehicle_identifier = v.vid
+          LEFT JOIN raw_telemetry_points r
+                 ON r.cycle_id = %(cycle)s AND r.vehicle_identifier = v.vid
+          CROSS JOIN LATERAL ({uncleared_negative_sql(
+              vid="v.vid", current_range="r.current_range_meters", now="NOW()")}) x
+    """
+
+
+def _priority(t: str) -> int:
+    return NEGATIVE_REPORT_PRIORITY.index(t)
+
+
+def _summarise(rows: list[tuple]) -> dict[str, Any]:
+    """Rows for ONE vehicle → its label. The reason is the strongest type
+    among the reports that set the risk (the high ones when any are high);
+    `since` is the oldest of that type."""
+    high = [r for r in rows if r[7]]
+    basis = high or rows
+    top = min(basis, key=lambda r: (_priority(r[3]), r[5], r[2]))
+    # The NEWEST uncleared report, whatever its priority (owner, 2026-10-09:
+    # "the most recent report should be displayed on the scooter details
+    # tile"): by when it was seen, then filed, then id.
+    newest = max(rows, key=lambda r: (r[8] or r[5], r[5], r[2]))
     return {
-        "cycle": cycle_id,
-        "types": list(SUPPRESSION_REASON_PRIORITY),
-        "rise": charge_rise_meters(),
-        **extra,
+        "risk": RISK_HIGH if high else RISK_UNKNOWN,
+        "latest_report": {
+            "report_type": newest[3],
+            "reason": newest[4],
+            "observed_at": (newest[8] or newest[5]).isoformat(),
+            "reported_at": newest[5].isoformat(),
+            "anonymous": not newest[6],
+        },
+        "reason": top[3],
+        "reason_detail": top[4],
+        "since": min(r[5] for r in basis if r[3] == top[3]),
+        "signed_in": any(r[6] for r in basis),
+        "needs_condition_check": any(
+            r[1] == "device_reports" and r[3] in CONDITION_CHECK_TYPES for r in rows),
     }
 
 
-def suppressions(cur, cycle_id: Any) -> dict[str, tuple[str, datetime]]:
-    """{vehicle_identifier: (suppressed_reason, suppressed_since)} for every
-    vehicle in `cycle_id` that a standing report suppresses.
-
-    The reason is the highest-priority type among its standing reports
-    (SUPPRESSION_REASON_PRIORITY); `since` is the OLDEST standing report of
-    that type — "how long has this been hidden for this reason".
-    """
-    cur.execute(_open_reports_sql(single_vehicle=False), _params(cycle_id))
-    out: dict[str, tuple[str, datetime]] = {}
-    for vid, report_type, reported_at, _id in cur.fetchall():
-        # Rows arrive ordered by (vehicle, priority, age): the first row per
-        # vehicle is the answer. setdefault keeps it.
-        out.setdefault(vid, (report_type, reported_at))
-    return out
+def negative_states(cur, cycle_id: Any) -> dict[str, dict[str, Any]]:
+    """{vehicle_identifier: {risk, reason, reason_detail, since, signed_in,
+    needs_condition_check}} for every vehicle in the cycle with an uncleared
+    negative report."""
+    cur.execute(_fleet_rows_sql(), {"cycle": cycle_id})
+    by: dict[str, list[tuple]] = {}
+    for row in cur.fetchall():
+        by.setdefault(row[0], []).append(row)
+    return {vid: _summarise(rows) for vid, rows in by.items()}
 
 
-def suppressions_and_condition_checks(
-    cur, cycle_id: Any,
-) -> tuple[dict[str, tuple[str, datetime]], set[str]]:
-    """One pass over the standing reports for the whole cycle, answering two
-    questions: `suppressions()` (above), and which vehicles carry a standing
-    CONDITION_CHECK_TYPES report — `needs_condition_check` on
-    /devices/current (plan §4.4). The second is an invitation to riders, not
-    a verdict, and is independent of both `reliability_tier` and
-    `suppressed`, even though in practice most such vehicles are also
-    suppressed."""
-    cur.execute(_open_reports_sql(single_vehicle=False), _params(cycle_id))
-    suppressed: dict[str, tuple[str, datetime]] = {}
-    needs_check: set[str] = set()
-    for vid, report_type, reported_at, _id in cur.fetchall():
-        suppressed.setdefault(vid, (report_type, reported_at))
-        if report_type in CONDITION_CHECK_TYPES:
-            needs_check.add(vid)
-    return suppressed, needs_check
+def uncleared_reports_for(cur, cycle_id: Any, vehicle_identifier: str,
+                          *, device_reports_only: bool = False) -> list[dict[str, Any]]:
+    """The uncleared negative reports on one vehicle, strongest first."""
+    cur.execute(_vehicle_rows_sql(), {"cycle": cycle_id, "vid": vehicle_identifier})
+    rows = [r for r in cur.fetchall()
+            if not device_reports_only or r[1] == "device_reports"]
+    rows.sort(key=lambda r: (_priority(r[3]), r[5], r[2]))
+    return [
+        {"src": r[1], "id": int(r[2]), "report_type": r[3], "reason": r[4],
+         "reported_at": r[5], "signed_in": bool(r[6]),
+         "risk": RISK_HIGH if r[7] else RISK_UNKNOWN}
+        for r in rows
+    ]
 
 
-def standing_report_ids_all(cur, cycle_id: Any) -> set[int]:
-    """Ids of every standing report on a vehicle in `cycle_id` — the reports
-    queue's "standing" filter."""
-    cur.execute(_open_reports_sql(single_vehicle=False), _params(cycle_id))
-    return {int(row[3]) for row in cur.fetchall()}
+def reports_stamp(cur) -> str:
+    """A cheap fingerprint of every input that changes a vehicle's
+    negative-report fields between cycles — a new report or pin, a
+    resolution, a reinstatement, a reconfirmation or a settled baseline — so
+    the /devices/current ETag changes with them rather than serving a stale
+    304 for the rest of the cycle. (An anonymous report crossing its 24 h
+    mark mid-cycle still waits for the next cycle; that is at most minutes.)"""
+    cur.execute(
+        """
+        SELECT (SELECT COALESCE(MAX(id), 0) FROM device_reports),
+               (SELECT COALESCE(MAX(id), 0) FROM negative_reports),
+               (SELECT MAX(GREATEST(resolved_at, reinstated_at, baseline_at,
+                                    last_reconfirmed_at)) FROM device_reports)
+        """
+    )
+    row = cur.fetchone() or ()
+    return "-".join(str(v) for v in row)
+
+
+def negative_state_for(cur, cycle_id: Any, vehicle_identifier: str) -> dict[str, Any] | None:
+    cur.execute(_vehicle_rows_sql(), {"cycle": cycle_id, "vid": vehicle_identifier})
+    rows = cur.fetchall()
+    return _summarise(rows) if rows else None
 
 
 def standing_report_ids(cur, cycle_id: Any, vehicle_identifier: str) -> list[int]:
-    """Ids of the standing reports on one vehicle, priority order."""
-    cur.execute(_open_reports_sql(single_vehicle=True),
-                _params(cycle_id, vid=vehicle_identifier))
-    return [int(row[3]) for row in cur.fetchall()]
+    """Ids of the uncleared device reports on one vehicle, strongest first."""
+    return [r["id"] for r in uncleared_reports_for(
+        cur, cycle_id, vehicle_identifier, device_reports_only=True)]
+
+
+def standing_report_ids_all(cur, cycle_id: Any) -> set[int]:
+    """Ids of every uncleared device report on a vehicle in `cycle_id`."""
+    cur.execute(_fleet_rows_sql(), {"cycle": cycle_id})
+    return {int(r[2]) for r in cur.fetchall() if r[1] == "device_reports"}
 
 
 def open_reports_for(cur, cycle_id: Any, vehicle_identifier: str) -> list[dict[str, Any]]:
-    """The standing reports on one vehicle, priority first — what the
-    identify answer shows a rider standing in front of a hidden scooter.
-    Never carries the reporter."""
-    cur.execute(_open_reports_sql(single_vehicle=True),
-                _params(cycle_id, vid=vehicle_identifier))
+    """The uncleared reports on one vehicle, strongest first — what the
+    identify answer shows. Never carries the reporter."""
     return [
-        {"report_type": t, "reported_at": at.isoformat() if at else None}
-        for _vid, t, at, _id in cur.fetchall()
+        {"report_type": r["report_type"], "reason": r["reason"],
+         "reported_at": r["reported_at"].isoformat() if r["reported_at"] else None,
+         "risk": r["risk"]}
+        for r in uncleared_reports_for(cur, cycle_id, vehicle_identifier)
     ]
 
 

@@ -193,7 +193,7 @@ def test_the_queue_renders_and_filters(fleet):
     r = c.get("/admin/fleet/reports")
     assert r.status_code == 200, r.text
     row = "<code>not_rideable</code> · flat_tire"
-    assert row in r.text and "suppressing" in r.text and "never suppresses" in r.text
+    assert row in r.text and "uncleared" in r.text and "no label" in r.text
     assert "example.test" not in r.text      # no reporter emails
     r = c.get("/admin/fleet/reports", params={"report_type": "improperly_parked"})
     assert row not in r.text and "<code>improperly_parked</code>" in r.text
@@ -313,14 +313,14 @@ def test_an_admin_can_reinstate_a_rider_resolution(fleet):
         fleet_reports.resolve_report(cur, rid, source="rider_check",
                                      resolution="rider check", account_id=a)
     fleet.conn.commit()
-    assert v not in fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)
+    assert v not in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
     r = _app().post(f"/admin/fleet/reports/{rid}/reinstate",
                     data={"reason": "the feed never saw a ride"}, headers=_ORIGIN)
     assert "reinstated" in r.headers["location"]
     row = fleet.one("SELECT resolved_at, resolution_source, reinstated_by_login, "
                     "reinstate_reason FROM device_reports WHERE id = %s", rid)
     assert row == (None, None, "octo-admin", "the feed never saw a ride")
-    assert v in fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)
+    assert v in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
 
 
 # ---------------------------------------------------------------------------

@@ -65,7 +65,9 @@ evaluated in order (first match wins):
               | number_failed_starts == 1 AND dwell ≥ 24h
               | dwell ≥ 72h                       (ghost-scooter idle)
               | dwell-outlier vs peers AND dwell ≥ 48h
-    unknown   : device never state-tracked (no plate → both inputs None)
+    unknown   : an uncleared anonymous negative report past its 24 h
+                (src/fleet_reports.py; never "ok" until cleared)
+              | device never state-tracked (no plate → both inputs None)
               | quality_designation == "N/A"     (disabled/reserved/rangeless)
               | battery_percent < 10              (near-empty; see below)
               | number_failed_starts == 1         (uncorroborated by dwell)
@@ -647,8 +649,15 @@ def compute_reliability_tier(
     battery_percent: int | None = None,
     now: datetime | None = None,
     recent_rentals_no_go: int | None = None,
+    has_faded_negative_report: bool = False,
 ) -> str:
-    """Return "ok", "unknown", or "high_risk". Rules in module docstring."""
+    """Return "ok", "unknown", or "high_risk". Rules in module docstring.
+
+    `has_faded_negative_report`: an uncleared ANONYMOUS negative report older
+    than 24 h (src/fleet_reports.py). It no longer makes the vehicle high
+    risk, but it can never read "ok" until the report is cleared (owner,
+    2026-10-09: anonymous reports "should fade into unknown risk, not likely
+    ridable")."""
     fs = number_failed_starts or 0
     if first_observed_at_location is not None:
         now = now or datetime.now(timezone.utc)
@@ -667,6 +676,8 @@ def compute_reliability_tier(
     if is_dwell_outlier and dwell_hours >= _RELIABILITY_OUTLIER_DWELL_HOURS:
         return "high_risk"
 
+    if has_faded_negative_report:
+        return "unknown"  # a faded anonymous report: never "ok" until cleared
     if number_failed_starts is None and first_observed_at_location is None:
         return "unknown"  # never state-tracked (upstream payload had no plate)
     if quality_designation == "N/A":
