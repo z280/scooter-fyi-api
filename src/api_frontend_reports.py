@@ -153,9 +153,11 @@ NOT_RIDEABLE_REASONS = ("acceleration", "flat_tire", "wheel", "lighting", "seat"
 # won't it ride?" that are really different reports. The server re-files
 # them, so every client gets it right whatever it sends, and keeps the
 # original choice in `submitted_reason` so the remap is visible:
-#   "cannot find"  -> inaccessible (owner's mapping: you cannot get to it)
+#   "cannot find"  -> not_found (owner, 2026-10-09: it is not where the map
+#                     says; `inaccessible` stays its own type, for a scooter
+#                     you can SEE but cannot reach)
 #   "dead battery" -> dead_battery
-NOT_RIDEABLE_DECOYS = {"cannot_find": "inaccessible", "dead_battery": "dead_battery"}
+NOT_RIDEABLE_DECOYS = {"cannot_find": "not_found", "dead_battery": "dead_battery"}
 
 # observed_at — when the rider saw the problem. Optional; defaults to the
 # submission time. A date in the future, or older than this, is refused: a
@@ -1040,8 +1042,11 @@ def reports_summary(
     return cached
 
 
-#: Report types whose coordinates never appear in the public monthly CSV.
-_UNLOCATED_IN_PUBLIC_EXPORT = frozenset({"inaccessible"})
+#: Report types whose coordinates never appear in the public monthly CSV: the
+#: two that steer riders away (owner, 2026-10-09), because either can point
+#: at private property — the yard a scooter is fenced into, or the driveway
+#: it was last reported in and is not in any more.
+_UNLOCATED_IN_PUBLIC_EXPORT = frozenset({"inaccessible", "not_found"})
 
 
 def _round3(v: float | None) -> float | str:
@@ -1104,8 +1109,8 @@ def reports_export_monthly(
         "lat", "lng", "amount_charged_cents", "authenticated_or_has_receipt",
     ])
     for reported_at, vid, rtype, lat, lng, authed in device_rows:
-        # An inaccessible report's point is somebody's yard, garage or
-        # building. The report is about a spot being unreachable, never about
+        # An inaccessible (or not_found) report's point can be somebody's
+        # yard, garage or building. The report is about a spot being unreachable, never about
         # who lives there (docs/FLEET_REPORTS_PLAN.md §6), so its coordinates
         # stay out of the public file even at ~100 m — repeated rows at one
         # rounded point would be exactly the map of addresses the plan

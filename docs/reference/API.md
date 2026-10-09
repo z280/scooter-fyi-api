@@ -809,8 +809,8 @@ between polls of the same cycle.
 | `range_rank_all_devices` | string \| null | **Opt-in via `?include=ranks`.** Same as above but `y` = all eligible scooters across types. |
 | `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | **Opt-in via `?include=ranks`.** Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
 | `has_negative_report` | bool | `true` when a report that says the vehicle **won't ride** still stands. Two rules, by whether anybody stands behind the report. **Anonymous** (and every map-pin `POST /api/v1/reports` row): filed against this `vehicle_identifier` in this exact `h3_10_index` cell within the last 24 h. **Signed in** (`POST /api/v1/reports/device` with a bearer token): until the vehicle **moves** (its `first_observed_at_location` is later than the report) or its charge **rises** by at least 5% of a full charge over what it read when the report was filed — no clock, no cell. *Until 2026-10 (sql/100) the signed-in rule cleared on any vehicle reading 100%, which made a fully charged scooter unreportable; it now needs a rise.* `improperly_parked` and `inaccessible` reports never count (they say nothing about whether it rides — see `suppressed`), and a report an admin has resolved counts for nothing. |
-| `suppressed` | bool \| null | **Should a rider be sent to this vehicle at all?** `true` when a signed-in, unresolved device report of any type still stands under the signed-in rule above (not moved, charge not risen). The client keeps a suppressed vehicle out of the rider's available set and out of route planning — **excluded, not penalised** — and its card says why. **Deliberately separate from `reliability_tier`** (docs/FLEET_REPORTS_PLAN.md §2.5): a fully charged scooter behind a fence rides perfectly, so it is `suppressed` with reason `inaccessible` while its tier says whatever its hardware earns. Anonymous reports never suppress. Broken parts from feature confirmation (`device_features.poor_condition`) never suppress — the scooter still rides. `null` when the suppression query failed this cycle: **unknown, not "not suppressed"**. |
-| `suppressed_reason` | string \| null | Why, when `suppressed`: the strongest standing report type, in this order — `inaccessible`, `not_found`, `not_rideable`, `damaged`, `dead_battery`, `improperly_parked`. `null` otherwise. Copy for `inaccessible` must discourage retrieval ("on private property — don't go in"). |
+| `suppressed` | bool \| null | **Should a rider be sent to this vehicle at all?** `true` when a signed-in, unresolved device report of any type **except `improperly_parked`** still stands under the signed-in rule above (not moved, charge not risen). The client keeps a suppressed vehicle out of the rider's available set and out of route planning — **excluded, not penalised** — and its card says why. **Deliberately separate from `reliability_tier`** (docs/FLEET_REPORTS_PLAN.md §2.5): a fully charged scooter behind a fence rides perfectly, so it is `suppressed` with reason `inaccessible` while its tier says whatever its hardware earns. Anonymous reports never suppress. `improperly_parked` never suppresses — a badly parked scooter is reachable and rideable, and the report is Veo's to act on. Broken parts from feature confirmation (`device_features.poor_condition`) never suppress — the scooter still rides. `null` when the suppression query failed this cycle: **unknown, not "not suppressed"**. |
+| `suppressed_reason` | string \| null | Why, when `suppressed`: the strongest standing report type, in this order — `inaccessible`, `not_found`, `not_rideable`, `damaged`, `dead_battery`. `null` otherwise. Copy for `inaccessible` must discourage retrieval ("on private property — don't go in"). |
 | `suppressed_since` | string \| null | ISO 8601: the oldest still-standing report of `suppressed_reason`'s type — "hidden for this reason since". `null` when not suppressed. |
 | `feature_status` | string | How much to trust what we know about this vehicle's crowdsourced equipment: `"needs_features_confirmed"` (nobody has ever reported it — every device starts here), `"needs_review"` (two reports disagreed), or `"up_to_date"`. Always on the wire, never behind an `?include=` token: it is what a client's "☑️ Confirm Features" affordance reads to decide whether it is offering 12, 14 or 6 points, so opting in would mean showing the wrong number. See [`POST /api/v1/reports/device-features`](#post-apiv1reportsdevice-features). |
 | `device_features` | object \| null | `{ bell, cup_holder, phone_holder, basket, poor_condition[] }` — the current consensus. **`null` until something is known about the vehicle**, and each field inside is itself **tri-state: `true` / `false` / `null`** — `false` claims a rider looked and saw nothing, `null` says nobody has answered that question yet. Partial objects are normal: a vehicle known only through a ride-survey basket answer (or the Rover catalog seed) carries `basket` with the other three `null`, and a vehicle confirmed before the basket question existed (sql/058) carries `basket: null`. Filter with `=== true` and the distinction never bites — an unknown feature doesn't satisfy a "must have it" filter, same as an absent one. `poor_condition` lists which of the *present* features are not in good condition (always a subset of the `true` ones; empty means everything works). |
@@ -2394,7 +2394,9 @@ lawfully or reasonably reach it**: private property, a locked yard, inside a
 fence, in a building. It does **not** feed `has_negative_report` /
 `reliability_tier` (it says nothing about whether it rides), earns **no
 points**, and — signed in — sets `suppressed` on `/devices/current` until the
-vehicle moves. Its coordinates never appear in the public monthly CSV.
+vehicle moves. Its coordinates never appear in the public monthly CSV (nor do
+a `not_found` report's). `inaccessible` is for a scooter you can **see but
+cannot reach**; "it isn't where the map says" is `not_found`.
 Ship the API before the button: an older backend 422s the new type.
 
 `reason` (optional, `not_rideable` only) — why it won't ride:
@@ -2404,7 +2406,7 @@ may be sent from the same picker, and the server re-files them:
 
 | `reason` sent with `not_rideable` | Stored as |
 |---|---|
-| `cannot_find` | `report_type: "inaccessible"`, no reason |
+| `cannot_find` | `report_type: "not_found"`, no reason |
 | `dead_battery` | `report_type: "dead_battery"`, no reason |
 
 A remapped report's response adds `"report_type"` (what it was filed as) and
@@ -2451,9 +2453,10 @@ signed-in ones until the scooter moves or its charge rises (see the
 `inaccessible`**. `improperly_parked` is a parking-compliance signal, not a
 ride-quality one: it still counts in `/reports/summary` and the monthly CSV
 export, but a badly-parked scooter can ride perfectly, so it deliberately
-does **not** flip `has_negative_report` / `reliability_tier`. Every signed-in
-report of **any** type, these two included, sets `suppressed` while it
-stands; an admin can resolve a report, after which it counts for nothing.
+does **not** flip `has_negative_report` / `reliability_tier`, nor set
+`suppressed`: it is a report to Veo. Every other signed-in report —
+`inaccessible` and `not_found` included — sets `suppressed` while it stands;
+an admin can resolve a report, after which it counts for nothing.
 (The frontend also opens Veo's public Zendesk "improperly parked" form
 pre-filled when a rider files one.)
 
@@ -2751,9 +2754,9 @@ Reports without coordinates aren't regionalizable and are excluded here
 Public CSV of a month's reports for DOTI and journalists. No auth,
 rate-limited (10/hour per IP). Columns never include reporter identity —
 no IPs, no emails, just an `authenticated` boolean for evidentiary
-weight. An `inaccessible` report's `lat`/`lng` are always blank: its point
-is somebody's yard, and the report is about a spot being unreachable, never
-about who lives there. The columns are unchanged (no `reason`, no
+weight. An `inaccessible` or `not_found` report's `lat`/`lng` are always
+blank: either point can be somebody's yard, and the report is about a spot,
+never about who lives there. The columns are unchanged (no `reason`, no
 `observed_at`).
 
 ---

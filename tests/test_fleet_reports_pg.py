@@ -239,14 +239,26 @@ def test_inaccessible_suppresses_and_leaves_the_tier_alone(fleet):
     assert d[control]["suppressed_reason"] is None
 
 
-def test_improperly_parked_suppresses_without_touching_the_tier(fleet):
+def test_improperly_parked_neither_suppresses_nor_touches_the_tier(fleet):
+    # Owner, 2026-10-09: a badly parked scooter is a report to Veo, not a
+    # reason to steer riders away. It stays on the map and in the export.
     acct = fleet.account()
     v = fleet.vehicle("9100003")
     fleet.report(v, "improperly_parked", account_id=acct)
     d = _devices(fleet)
-    assert d[v]["suppressed"] is True
-    assert d[v]["suppressed_reason"] == "improperly_parked"
+    assert d[v]["suppressed"] is False
+    assert d[v]["suppressed_reason"] is None
     assert d[v]["has_negative_report"] is False
+
+
+def test_not_found_suppresses(fleet):
+    acct = fleet.account()
+    v = fleet.vehicle("9100012")
+    fleet.report(v, "not_found", account_id=acct)
+    fleet.report(v, "improperly_parked", account_id=acct)
+    d = _devices(fleet)
+    assert d[v]["suppressed"] is True
+    assert d[v]["suppressed_reason"] == "not_found"
 
 
 def test_a_signed_in_report_still_suppresses_a_week_later(fleet):
@@ -586,8 +598,11 @@ def test_export_counts(fleet):
     fleet.report(nr, "not_rideable", account_id=None, reason="seat",
                  at=SNAP - timedelta(days=2))
     fleet.report(nr, "not_rideable", account_id=None, at=SNAP - timedelta(days=2))
-    fleet.report(nr, "inaccessible", account_id=None, submitted_reason="cannot_find",
+    fleet.report(nr, "not_found", account_id=None, submitted_reason="cannot_find",
+                 at=SNAP - timedelta(days=1))
+    fleet.report(nr, "not_found", account_id=None, submitted_reason="cannot_find",
                  at=SNAP - timedelta(days=40))  # outside the window: not counted
+    fleet.report(nr, "improperly_parked", account_id=a, at=SNAP - timedelta(days=1))
     fleet.report(nr, "dead_battery", account_id=None, submitted_reason="dead_battery",
                  at=SNAP - timedelta(days=1))
 
@@ -626,9 +641,12 @@ def test_export_counts(fleet):
     assert reasons["acceleration"]["reports"] == 0
     assert reasons["flat_tire"]["oldest_observed_at"].startswith("2099-05-29")
     assert reasons["flat_tire"]["median_report_lag_hours"] == 25.0  # (48 + 2) / 2
-    assert problems["remapped"] == {"cannot_find": 0, "dead_battery": 1}
+    assert problems["remapped"] == {"cannot_find": 1, "dead_battery": 1}
     by_type = {t["report_type"]: t["reports"] for t in problems["by_type"]}
     assert by_type["not_rideable"] == 4 and by_type["dead_battery"] == 1
+    assert by_type["not_found"] == 1
+    # Improperly parked still counts in the export: it is Veo's to act on.
+    assert by_type["improperly_parked"] == 1
 
     csv_r = admin.get("/api/v1/private/reports/export",
                       params={"window_days": 30, "unmoved_days": 7, "format": "csv"})
@@ -649,6 +667,7 @@ def test_the_dossier_shows_reports_reasons_parts_and_census(fleet):
     standing = fleet.report(v, "not_rideable", account_id=a, reason="wheel",
                             observed_at=SNAP - timedelta(days=4))
     anon = fleet.report(v, "damaged", account_id=None, at=SNAP - timedelta(days=5))
+    parked = fleet.report(v, "improperly_parked", account_id=a, at=SNAP - timedelta(days=2))
     admin = _admin_client(fleet, api_fleet_reports.router)
     r = admin.get(f"/api/v1/private/devices/{v}/reports")
     assert r.status_code == 200, r.text
@@ -659,6 +678,9 @@ def test_the_dossier_shows_reports_reasons_parts_and_census(fleet):
     assert reports[standing]["reporter_email"] == "fr-rider@example.test"
     assert reports[standing]["observed_at"].startswith("2099-05-28")
     assert reports[anon]["signed_in"] is False and reports[anon]["standing"] is False
+    # In the dossier as Veo's to act on, but it never hides the scooter.
+    assert reports[parked]["report_type"] == "improperly_parked"
+    assert reports[parked]["standing"] is False
     assert body["suppression"]["suppressed"] is True
     assert body["features"]["broken_parts"] == ["basket"]
     assert admin.get(f"/api/v1/private/devices/{'e' * 16}/reports").status_code == 404
@@ -674,10 +696,11 @@ def test_the_constraint_permits_inaccessible_and_the_reasons(fleet):
         cur.execute("INSERT INTO device_reports (vehicle_identifier, report_type, reason) "
                     "VALUES (%s, 'not_rideable', 'handlebar')", (v,))
         cur.execute("INSERT INTO device_reports (vehicle_identifier, report_type, "
-                    "submitted_reason) VALUES (%s, 'inaccessible', 'cannot_find')", (v,))
+                    "submitted_reason) VALUES (%s, 'not_found', 'cannot_find')", (v,))
     fleet.conn.commit()
     for bad in [("damaged", "seat", None), ("not_rideable", "vibes", None),
-                ("not_rideable", None, "cannot_find")]:
+                ("not_rideable", None, "cannot_find"),
+                ("inaccessible", None, "cannot_find")]:
         with fleet.conn.cursor() as cur:
             with pytest.raises(psycopg.errors.CheckViolation):
                 cur.execute("INSERT INTO device_reports (vehicle_identifier, report_type, "
@@ -715,3 +738,28 @@ def test_sql_100_replays_over_either_historical_constraint_name(fleet, historica
     fleet.conn.commit()
     assert set(rows) == {"device_reports_report_type_allowed"}
     assert "inaccessible" in rows["device_reports_report_type_allowed"]
+
+
+def test_sql_101_refiles_cannot_find_rows_stored_under_sql_100s_rule(fleet):
+    # sql/100 (as merged in #144) paired 'cannot_find' with 'inaccessible'.
+    # The owner corrected it to 'not_found'; sql/101 moves the constraint and
+    # re-files any row already stored the old way.
+    v = fleet.vehicle("9100082")
+    with fleet.conn.cursor() as cur:
+        cur.execute("ALTER TABLE device_reports DROP CONSTRAINT "
+                    "device_reports_submitted_reason_allowed")
+        cur.execute(
+            "ALTER TABLE device_reports ADD CONSTRAINT "
+            "device_reports_submitted_reason_allowed CHECK (submitted_reason IS NULL OR ("
+            "(submitted_reason = 'cannot_find' AND report_type = 'inaccessible') OR "
+            "(submitted_reason = 'dead_battery' AND report_type = 'dead_battery')))")
+        cur.execute("INSERT INTO device_reports (vehicle_identifier, report_type, "
+                    "submitted_reason) VALUES (%s, 'inaccessible', 'cannot_find') "
+                    "RETURNING id", (v,))
+        rid = cur.fetchone()[0]
+        cur.execute((SQL_DIR / "101_cannot_find_is_not_found.sql").read_text())
+        cur.execute("SELECT report_type FROM device_reports WHERE id = %s", (rid,))
+        assert cur.fetchone()[0] == "not_found"
+        # And a replay is a no-op.
+        cur.execute((SQL_DIR / "101_cannot_find_is_not_found.sql").read_text())
+    fleet.conn.commit()

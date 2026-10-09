@@ -1,6 +1,6 @@
 # Fleet Reports — reports that stick, and the stewardship that requires
 
-**Status:** Phase 1 implemented in #144; Phase 2 admin centre and Phase 3
+**Status:** Phase 1 implemented in #144, with the owner's 2026-10-09 overrides in #145; Phase 2 admin centre and Phase 3
 frontend pending. Phase 1b (condition checks, §4.4) is specified, not started.
 Revised 2026-10-07 against `main` (`e442e2c` api / `5aac9ba` frontend);
 Phase 1 re-verified every API citation against `main` at `044a424` on
@@ -161,6 +161,17 @@ actually remains on this axis is narrower than the original section claimed:
    included". It cannot, as written: that type is excluded from every branch by
    `reliability_report_type_sql`. Parking persistence has to ride §2.5's
    suppression flag, not `has_negative_report`.
+
+   **Overridden by the owner, 2026-10-09: `improperly_parked` does NOT
+   suppress.** *"Improperly Parked is not the same as Inaccessible/Can't Find
+   it. The latter should avoid especially if on private property, the
+   improperly parked is a report to veo."* A badly parked scooter is reachable
+   and rideable, so it stays on the map. It needs no persistence on any rider
+   axis: it is stored, counted in the admin export, the dossier and the
+   reports queue, and is Veo's to act on. `inaccessible` and `not_found` DO
+   suppress — riders are steered away — and, because either can point at
+   private property, neither's location is published (public CSV blank,
+   identify's `last_seen` rounded to ~100 m).
 3. **The full-charge clause is wrong** — §2.4, which is now this plan's one
    real finding about expiry.
 
@@ -360,9 +371,11 @@ field on device reports; it was withdrawn before it shipped).
 sql/100; NULL = unspecified, so older clients keep working). The same picker
 offers two **decoys** that are not reasons but different reports, and the
 **server** re-files them so every client gets it right: "cannot find" →
-`inaccessible` (the owner's mapping — read it as "I could not get to it";
-`not_found` remains the type for "it is not where the map says"), "dead
-battery" → `dead_battery`. The decoy picked is kept in
+`not_found` (owner, 2026-10-09, corrected after #144 shipped it as
+`inaccessible`; sql/101 moves the constraint and re-files any such row.
+`inaccessible` stays its own type, for a
+scooter you can see but cannot reach — fenced in, locked inside, private
+property), "dead battery" → `dead_battery`. The decoy picked is kept in
 `device_reports.submitted_reason`, so a remap is visible rather than silent.
 `observed_at` — when the rider saw it — is optional, defaults to the
 submission time, and is refused in the future or more than 30 days back. The
@@ -633,12 +646,13 @@ was wrong:
   `has_negative_report` for 24 hours in their cell, as before; hiding a
   vehicle from every rider needs an account behind it (risk 2).
 - **Suppression uses the accountable hold rule** — not moved since, charge not
-  risen, unresolved — for every report type, `improperly_parked` included
-  because §2.2(2) and §5 say so. That one has a live counter-argument (a
-  sidewalk-blocker is reachable, and riding it away fixes the complaint);
-  dropping it is a one-line change to `SUPPRESSION_REASON_PRIORITY`.
+  risen, unresolved — for every report type **except `improperly_parked`**
+  (owner's override of §2.2(2) and §5, 2026-10-09: a parking report is a
+  report to Veo, not a reason to steer riders away).
 - **`suppressed_reason` priority:** `inaccessible`, `not_found`,
-  `not_rideable`, `damaged`, `dead_battery`, `improperly_parked`.
+  `not_rideable`, `damaged`, `dead_battery`.
+- **Neither an `inaccessible` nor a `not_found` report's location is
+  published**: the public monthly CSV blanks both.
 - **The charge rise that clears a report is 5% of a full charge** (~2.3 km),
   far above the feed's parked drift and far below any swap. Reports filed
   before sql/100 have no recorded charge and so clear only on movement — the
@@ -665,9 +679,9 @@ ride along with it.
    their observed dates. "Negative rideability" = unresolved `not_rideable`
    (with its reason, if any), `dead_battery`, `damaged` and `inaccessible`
    reports that still hold under the accountable rule (§2.2/§2.4: not moved,
-   charge not risen) — exactly `open_reports` on identify, minus
-   `improperly_parked` and `not_found`, which a rider standing at the scooter
-   cannot meaningfully re-check (it is parked badly or it is here). For each:
+   charge not risen) — exactly `open_reports` on identify, minus `not_found`,
+   which a rider standing at the scooter has already answered (it is here).
+   `improperly_parked` never appears there: it does not suppress. For each:
    *"Still a problem? Y/N"*.
 3. Then: *"Did you do a test ride? Y/N"*.
    - **No** → every condition answer is discarded. Nothing is stored against
@@ -733,10 +747,15 @@ reports in the window.
   the change §4.1(3) was originally going to make, and the only test that fails
   if somebody unclocks those branches.
 - A `improperly_parked` report does not touch `has_negative_report` at all (it
-  is excluded by type), and persists only through §2.5's suppression flag.
+  is excluded by type) ~~, and persists only through §2.5's suppression
+  flag~~ — and, per the owner's 2026-10-09 override of §2.2(2), does not
+  suppress either; it still counts in the export and the dossier.
 - An `inaccessible` report does **not** change `reliability_tier`, and **does**
   set `suppressed`.
-- An `improperly_parked` report likewise suppresses without touching the tier.
+- ~~An `improperly_parked` report likewise suppresses without touching the
+  tier.~~ **Overridden by the owner, 2026-10-09:** an `improperly_parked`
+  report neither suppresses nor touches the tier. A `not_found` report does
+  suppress.
 - **A device at 100% battery can be reported and the report stands.** This
   FAILS TODAY — the shipped full-charge clause clears it immediately
   (`api_public.py:521-523`). It is the one test in this plan with a live bug to
