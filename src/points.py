@@ -173,6 +173,28 @@ FEATURE_POINT_ACTIONS: tuple[str, ...] = tuple(
 # than a minute-long feature inspection (12).
 POINTS_DEVICE_PHOTO = 10
 
+# --- Condition checks (docs/FLEET_REPORTS_PLAN.md §4.4, sql/102) ----------
+#
+# Owner's rule, 2026-10-09: at most 50 per check. 10 for completing the
+# condition form with "Did you do a test ride?" = Yes, whatever the answers;
+# +40 when the FEED confirms that test ride (a reservation episode or a move
+# within CONDITION_CHECK_FEED_WINDOW_MINUTES of the check — see
+# src/condition_checks.py); a "No" test ride earns nothing. Both even.
+POINTS_CONDITION_CHECK = 10
+POINTS_CONDITION_CHECK_FEED_CONFIRMED = 40
+POINTS_CONDITION_CHECK_MAX = POINTS_CONDITION_CHECK + POINTS_CONDITION_CHECK_FEED_CONFIRMED
+
+#: One condition-check award per vehicle per account per this many hours —
+#: the same cooldown, for the same reason, as the feature-confirmation award.
+CONDITION_CHECK_COOLDOWN_HOURS = 24
+#: And at most this many paid checks per account in any rolling 24 hours
+#: (the plan's suggestion). 10 x 50 = 500 points a day at the very most.
+CONDITION_CHECK_DAILY_CAP = 10
+
+CONDITION_CHECK_POINT_ACTIONS: tuple[str, ...] = (
+    "condition_check", "condition_check_confirmed",
+)
+
 # Step sizes for the two distance formulas above. Canonical unit is
 # KILOMETRES because that is the unit the rider-facing copy and
 # /points/schedule's `step_km` are written in ("+2 points per 2 km"); the
@@ -601,6 +623,61 @@ def credit_device_photo_points(
         points=POINTS_DEVICE_PHOTO, lat=lat, lng=lng,
         vehicle_identifier=vehicle_identifier,
         source_table="device_photos", source_id=str(photo_id),
+    )
+
+
+def condition_check_points_blocker(
+    cur, *, account_id: int, vehicle_identifier: str,
+) -> str | None:
+    """Why this account cannot be paid for a condition check on this vehicle
+    right now, or None when it can: 'cooldown' (already paid for this vehicle
+    in the last CONDITION_CHECK_COOLDOWN_HOURS) or 'daily_cap' (already paid
+    CONDITION_CHECK_DAILY_CAP checks in the last 24 hours).
+
+    Counted from the ledger (the base award only — the +40 is a consequence
+    of a paid check, not a second check). Advisory-locked on the account so
+    two concurrent checks cannot both see headroom."""
+    cur.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"condition_check:{account_id}",),
+    )
+    cur.execute(
+        """
+        SELECT COUNT(*) FILTER (WHERE vehicle_identifier = %s
+                                  AND created_at >= NOW() - make_interval(hours => %s)),
+               COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours')
+          FROM user_points
+         WHERE account_id = %s AND action = 'condition_check'
+           AND created_at >= NOW() - make_interval(hours => GREATEST(%s, 24))
+        """,
+        (vehicle_identifier, CONDITION_CHECK_COOLDOWN_HOURS, account_id,
+         CONDITION_CHECK_COOLDOWN_HOURS),
+    )
+    same_vehicle, today = cur.fetchone()
+    if int(same_vehicle or 0) > 0:
+        return "cooldown"
+    if int(today or 0) >= CONDITION_CHECK_DAILY_CAP:
+        return "daily_cap"
+    return None
+
+
+def credit_condition_check_points(
+    cur, *, account_id: int, vehicle_identifier: str, check_id: int,
+    lat: float, lng: float, confirmed: bool = False,
+) -> dict[str, Any] | None:
+    """The 10 (confirmed=False) or the +40 (confirmed=True) for one
+    condition check. Idempotent per check through credit_points' (source,
+    action) dedupe. The caller decides eligibility
+    (condition_check_points_blocker, and "the +40 only follows a paid 10");
+    this only writes the row. Credited at the SCOOTER's position, like the
+    device-report awards — a shared vehicle in a public street."""
+    return credit_points(
+        cur, account_id=account_id,
+        action="condition_check_confirmed" if confirmed else "condition_check",
+        points=(POINTS_CONDITION_CHECK_FEED_CONFIRMED if confirmed
+                else POINTS_CONDITION_CHECK),
+        lat=lat, lng=lng, vehicle_identifier=vehicle_identifier,
+        source_table="device_condition_checks", source_id=str(check_id),
     )
 
 

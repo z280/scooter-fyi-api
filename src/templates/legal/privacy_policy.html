@@ -192,6 +192,25 @@ message tells you a rental started and leaves the conclusion to you. Your
 number is never shown to anyone else, and the choice is per-claim: turning
 the switch off stops future claims being watched and does not change ones
 already made</td></tr>
+<tr><td>Condition checks</td><td>Requires an account. When you confirm whether
+a scooter&rsquo;s reported problems are still a problem: your account, the
+scooter, the time, whether you did a test ride, how you showed you were at
+the scooter (your feature confirmation, the plate or the QR code), your
+answer for each report, and whether the city&rsquo;s fleet feed later showed
+a rental or a move within 20 minutes. If you say you did not test-ride it,
+your answers are discarded and only the account, scooter, time and
+&ldquo;no test ride&rdquo; are kept</td>
+<td>Clearing reports that are no longer true, confirming ones that are, and
+paying condition-check points. Admins see which account resolved or
+reconfirmed a report, to spot abuse; other riders never do</td></tr>
+<tr><td>Admin SMS watches</td><td>Admins only. An admin can ask to be texted
+when one scooter moves or changes state. We store the scooter, the
+admin&rsquo;s GitHub login, the admin account whose verified phone receives
+the texts, when they consented, the expiry (at most 7 days), how many texts
+were sent and the last change seen</td>
+<td>Letting an admin follow a scooter reported as hidden or missing.
+Texts go only to a verified number on an admin-allowlisted account, at most
+20 per watch, and STOP ends them</td></tr>
 <tr><td>Referrals and stand-downs</td><td>Someone at a dibs certificate may
 give us an email address or phone number &mdash; their own, or someone
 else&rsquo;s &mdash; to refer a new rider or to &ldquo;stand down&rdquo;
@@ -463,7 +482,7 @@ account</td><td>Every points award you earn is recorded permanently —
 your account, the location it was earned at, the coarse map area (H3
 resolution-8 cell) it falls in, the action and point value, and, for
 device-tied awards, the vehicle. That location is exact only for
-scooter-position awards (report, QR scan, photo) &mdash; a shared vehicle
+scooter-position awards (report, QR scan, photo, condition check) &mdash; a shared vehicle
 in a public street. Every award earned somewhere <em>you</em> were
 &mdash; completing your profile, anything credited at a ride&rsquo;s start
 or end, and referral and stand-down awards &mdash; stores only the centre
@@ -514,13 +533,23 @@ submissions. A device report also records when you say you saw the
 problem, why the scooter would not ride (if you said) and the scooter&rsquo;s
 charge when the report arrived. If an admin voids a report, or marks a
 vanished vehicle as permanently gone, the record keeps which admin account
-did it and why. If you delete your account, these reports stay, with the
+(or admin GitHub login) did it and why; if a rider&rsquo;s condition check
+resolves or reconfirms a report, the record keeps which check did, and an
+admin reinstating a rider-resolved report is recorded the same way. If you
+delete your account, these reports stay, with the
 link to your account removed. Public aggregates and the CSV export never
 include reporter identity — no IP, no email, no user-agent; only an
 authenticated yes/no signal contributes to the aggregate. A report that a
 scooter is out of reach (&ldquo;inaccessible&rdquo;) or not where the map
 says (&ldquo;not found&rdquo;) never has its location published, even
 rounded &mdash; either can point at private property.</td></tr>
+<tr><td>Condition checks</td><td>Indefinite</td>
+<td>Kept as the audit trail of which reports riders cleared or confirmed.
+If you delete your account the checks stay, with the link to your account
+removed. The points they earned are in the points ledger.</td></tr>
+<tr><td>Admin SMS watches</td><td>Indefinite (texts stop at expiry, at most
+7 days)</td><td>The watch record stays after it ends, as an audit of who
+watched which scooter. Deleting the admin account deletes its watches.</td></tr>
 <tr><td>Missed-discount reports and receipt claims</td><td>Until you delete
 your account</td><td>These require an account, and are deleted with it
 (any receipt image is deleted sooner, after 18 months). This includes

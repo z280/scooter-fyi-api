@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}reports queue · veo-audit admin{% endblock %}
+{% block content %}
+<h1>Reports queue</h1>
+<p class="muted">As of snapshot {{ as_of | denver_ts }}. <b>Standing</b> = counts toward
+suppression right now (signed in, unresolved, not moved, charge not risen).
+<code>improperly_parked</code> never suppresses. Near-dupes = same vehicle and type within ±30 min.</p>
+{% include "_fleet_flash.html" %}
+
+<form method="get" class="filters">
+  <select name="report_type"><option value="">any type</option>
+    {% for t in report_types %}<option value="{{ t }}" {% if f.report_type == t %}selected{% endif %}>{{ t }}</option>{% endfor %}
+  </select>
+  <select name="reason"><option value="">any reason</option>
+    {% for r in reasons %}<option value="{{ r }}" {% if f.reason == r %}selected{% endif %}>{{ r }}</option>{% endfor %}
+  </select>
+  <select name="region"><option value="">any neighborhood</option>
+    {% for r in regions %}<option value="{{ r }}" {% if f.region == r %}selected{% endif %}>{{ r }}</option>{% endfor %}
+  </select>
+  <select name="standing"><option value="">standing or not</option>
+    <option value="yes" {% if f.standing == 'yes' %}selected{% endif %}>standing</option>
+    <option value="no" {% if f.standing == 'no' %}selected{% endif %}>not standing</option>
+  </select>
+  <select name="status"><option value="">open or resolved</option>
+    <option value="open" {% if f.status == 'open' %}selected{% endif %}>open</option>
+    <option value="resolved" {% if f.status == 'resolved' %}selected{% endif %}>resolved</option>
+  </select>
+  <button type="submit">Filter</button>
+  {% if f.region %}<span class="muted">(region filter scans the newest {{ region_scan_limit }} matching reports)</span>{% endif %}
+</form>
+
+<table>
+  <thead><tr><th>id</th><th>vehicle</th><th>type / reason</th><th>observed</th><th>reported</th>
+    <th>reporter</th><th>state at report</th><th>region</th><th>standing</th><th>dedupe</th><th>resolution</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ r.id }}</td>
+      <td><a href="/admin/fleet/devices/{{ r.vehicle_identifier }}">{{ r.display_name or r.vehicle_identifier }}</a></td>
+      <td><code>{{ r.report_type }}</code>{% if r.reason %} · {{ r.reason }}{% endif %}
+        {% if r.submitted_reason %}<br><span class="muted">picked “{{ r.submitted_reason }}”, re-filed</span>{% endif %}</td>
+      <td>{{ r.observed_at | denver_ts }}</td>
+      <td>{{ r.reported_at | denver_ts }}</td>
+      <td>{% if r.signed_in %}#{{ r.account_id }}{% if r.public_username %} {{ r.public_username }}{% endif %}
+          · <a href="/admin/fleet/reporters?account_id={{ r.account_id }}">view</a>{% else %}<span class="muted">anonymous</span>{% endif %}</td>
+      <td>{% if r.charge_pct_at_report is not none %}{{ r.charge_pct_at_report }}%{% else %}<span class="muted">charge ?</span>{% endif %}
+        {% if r.moved_since %}<br><span class="tag tag-ok">moved since</span>{% endif %}</td>
+      <td>{{ r.region or "—" }}</td>
+      <td>{% if r.standing %}<span class="tag tag-bad">{% if r.suppressing_type %}suppressing{% else %}standing{% endif %}</span>
+          {% if r.standing_accounts > 1 %}<br><span class="muted">{{ r.standing_accounts }} accounts</span>{% endif %}
+        {% elif not r.suppressing_type %}<span class="tag">never suppresses</span>
+        {% elif not r.signed_in %}<span class="tag">anonymous: 24 h cell only</span>
+        {% else %}<span class="muted">no</span>{% endif %}
+        {% if r.reconfirm_count %}<br><span class="tag tag-warn">reconfirmed ×{{ r.reconfirm_count }}</span>{% endif %}</td>
+      <td>{% if r.near_duplicates %}<span class="tag tag-warn">{{ r.near_duplicates }} near-dupe{{ 's' if r.near_duplicates != 1 }}</span>{% else %}—{% endif %}</td>
+      <td>
+        {% if r.resolved_at %}
+          <span class="tag">{{ r.resolution_source }}</span> {{ r.resolved_at | denver_ts }}<br><span class="muted">{{ r.resolution }}</span>
+          {% if r.resolution_source == 'rider_check' %}
+          <form method="post" action="/admin/fleet/reports/{{ r.id }}/reinstate" class="inline">
+            <input type="hidden" name="next" value="/admin/fleet/reports" />
+            <input name="reason" placeholder="why reinstate" required maxlength="500" size="14" />
+            <button type="submit">reinstate</button>
+          </form>{% endif %}
+        {% else %}
+          <form method="post" action="/admin/fleet/reports/{{ r.id }}/resolve" class="inline">
+            <input type="hidden" name="next" value="/admin/fleet/reports" />
+            <input name="resolution" placeholder="why (audited)" required maxlength="500" size="14" />
+            <button type="submit">resolve</button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="11"><em>No reports match.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p>
+  {% if page > 0 %}<a href="?report_type={{ f.report_type }}&reason={{ f.reason }}&region={{ f.region|urlencode }}&standing={{ f.standing }}&status={{ f.status }}&page={{ page - 1 }}">← newer</a>{% endif %}
+  {% if has_next %}<a href="?report_type={{ f.report_type }}&reason={{ f.reason }}&region={{ f.region|urlencode }}&standing={{ f.standing }}&status={{ f.status }}&page={{ page + 1 }}">older →</a>{% endif %}
+</p>
+{% endblock %}

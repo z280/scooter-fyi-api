@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}census · veo-audit admin{% endblock %}
+{% block content %}
+<h1>Census: {{ which }}</h1>
+<p><a href="?list=arrivals">Newest arrivals</a> · <a href="?list=missing&hours={{ hours }}">Missing</a> · <a href="?list=gone">Permanently gone</a>
+ · as of {{ data.as_of | denver_ts }}</p>
+<p>{% if data.gone_reappeared_count %}<span class="tag tag-warn">{{ data.gone_reappeared_count }} acknowledged-gone vehicle{{ 's' if data.gone_reappeared_count != 1 }} reappeared</span> — see <a href="?list=gone">gone</a> (reappeared sort first).{% else %}<span class="muted">No acknowledged-gone vehicle has reappeared.</span>{% endif %}</p>
+{% include "_fleet_flash.html" %}
+{% if which == "missing" %}
+<form method="get" class="filters"><input type="hidden" name="list" value="missing" />
+  absent at least <input name="hours" value="{{ hours }}" size="4" /> hours <button type="submit">go</button>
+  {% if data.total is defined %}<span class="muted">{{ data.total }} vehicles</span>{% endif %}</form>
+{% endif %}
+{% set back = "/admin/fleet/census?list=" ~ which ~ ("&hours=" ~ hours if which == "missing" else "") %}
+<table>
+  <thead><tr><th>vehicle</th><th>model</th><th>first ever seen</th><th>last seen</th>{% if which != "arrivals" %}<th>hours missing</th><th>acknowledgement</th><th>actions</th>{% endif %}</tr></thead>
+  <tbody>
+  {% for v in data.devices %}
+    <tr><td><a href="/admin/fleet/devices/{{ v.vehicle_identifier }}">{{ v.display_name or v.vehicle_identifier }}</a></td>
+      <td>{{ v.vehicle_model_name or "—" }}</td>
+      <td>{{ v.first_ever_observed_at | denver_ts }}</td><td>{{ v.last_observed_at | denver_ts }}</td>
+      {% if which != "arrivals" %}
+      <td>{{ v.hours_missing }}</td>
+      <td>{% if v.ack %}{{ v.ack.status }}{% if v.ack.reappeared %} <span class="tag tag-warn">reappeared</span>{% endif %}
+          {% if v.ack.acknowledged_by %}<br>by {{ v.ack.acknowledged_by }} {{ v.ack.acknowledged_at | denver_ts }}{% endif %}
+          {% if v.ack.note %}<br>note: {{ v.ack.note }}{% endif %}{% else %}—{% endif %}</td>
+      <td>
+        {% if v.ack and v.ack.status == "gone" %}
+        <form method="post" action="/admin/fleet/census/{{ v.vehicle_identifier }}/unack" class="inline">
+          <input type="hidden" name="next" value="{{ back }}" /><button type="submit">un-acknowledge</button></form>
+        {% else %}
+        <form method="post" action="/admin/fleet/census/{{ v.vehicle_identifier }}/ack" class="inline">
+          <input type="hidden" name="next" value="{{ back }}" /><input name="note" placeholder="note (optional)" size="12" maxlength="2000" />
+          <button type="submit">acknowledge gone</button></form>
+        {% endif %}
+        <form method="post" action="/admin/fleet/census/{{ v.vehicle_identifier }}/note" class="inline">
+          <input type="hidden" name="next" value="{{ back }}" /><input name="note" placeholder="note" size="12" maxlength="2000" />
+          <button type="submit">note</button></form>
+      </td>
+      {% endif %}</tr>
+  {% else %}
+    <tr><td colspan="7"><em>Nothing on this list.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p>{% if page > 0 %}<a href="?list={{ which }}&hours={{ hours }}&page={{ page - 1 }}">← previous</a>{% endif %}
+   {% if has_next %}<a href="?list={{ which }}&hours={{ hours }}&page={{ page + 1 }}">next →</a>{% endif %}</p>
+{% endblock %}

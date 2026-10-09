@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block title %}{{ d.display_name or d.vehicle_identifier }} · dossier{% endblock %}
+{% block content %}
+<h1>{{ d.display_name or d.vehicle_identifier }}</h1>
+<p><code>{{ d.vehicle_identifier }}</code>{% if d.vehicle_plate %} · plate <code>{{ d.vehicle_plate }}</code>{% endif %}
+ · as of {{ d.as_of | denver_ts }}</p>
+{% include "_fleet_flash.html" %}
+
+<h2>Now</h2>
+<table>
+  <tr><th>In feed</th><td>{% if d.state %}{{ "yes" if d.state.in_feed else "no" }}{% else %}<em>no device_state row</em>{% endif %}</td></tr>
+  {% if d.state %}
+  <tr><th>Model</th><td>{{ d.state.vehicle_model_name or "—" }} ({{ d.state.form_factor or "?" }})</td></tr>
+  <tr><th>Parked since</th><td>{{ d.state.parked_since | denver_ts }}</td></tr>
+  <tr><th>Charge</th><td>{% if charge_pct is not none %}{{ charge_pct }}%{% else %}—{% endif %}</td></tr>
+  <tr><th>First / last seen</th><td>{{ d.state.first_ever_observed_at | denver_ts }} / {{ d.state.last_observed_at | denver_ts }}</td></tr>
+  {% endif %}
+  <tr><th>Suppressed</th><td>{% if d.suppression.suppressed %}<span class="tag tag-bad">{{ d.suppression.suppressed_reason }}</span> since {{ d.suppression.suppressed_since | denver_ts }}{% else %}no{% endif %}</td></tr>
+  <tr><th>Census</th><td>{% if d.census %}{{ d.census.status }}{% if d.census.reappeared %} <span class="tag tag-warn">reappeared</span>{% endif %}
+      {% if d.census.acknowledged_by %} — by {{ d.census.acknowledged_by }} {{ d.census.acknowledged_at | denver_ts }}{% endif %}
+      {% if d.census.note %}<br>note: {{ d.census.note }} <span class="muted">({{ d.census.note_by }}, {{ d.census.note_at | denver_ts }})</span>{% endif %}
+      {% else %}<span class="muted">no acknowledgement</span>{% endif %}
+      <form method="post" action="/admin/fleet/census/{{ d.vehicle_identifier }}/note" class="inline">
+        <input type="hidden" name="next" value="/admin/fleet/devices/{{ d.vehicle_identifier }}" />
+        <input name="note" placeholder="note" maxlength="2000" size="24" value="{{ d.census.note if d.census and d.census.note else '' }}" />
+        <button type="submit">save note</button>
+      </form></td></tr>
+</table>
+
+<h2>Reports</h2>
+<table>
+  <thead><tr><th>id</th><th>type / reason</th><th>observed</th><th>reported</th><th>reporter</th>
+    <th>charge at report</th><th>changed after?</th><th>standing</th><th>resolution</th></tr></thead>
+  <tbody>
+  {% for r in d.reports %}
+    <tr>
+      <td>{{ r.id }}</td>
+      <td><code>{{ r.report_type }}</code>{% if r.reason %} · {{ r.reason }}{% endif %}{% if r.remapped_from_reason %}<br><span class="muted">picked “{{ r.remapped_from_reason }}”</span>{% endif %}</td>
+      <td>{{ r.observed_at | denver_ts }}</td>
+      <td>{{ r.reported_at | denver_ts }}</td>
+      <td>{% if r.signed_in %}<a href="/admin/fleet/reporters?account_id={{ r.reporter_account_id }}">#{{ r.reporter_account_id }}</a>{% if r.reporter_public_username %} {{ r.reporter_public_username }}{% endif %}{% else %}<span class="muted">anonymous</span>{% endif %}</td>
+      <td>{% if r.range_at_report_meters is not none %}{{ pct(r.range_at_report_meters) }}%{% else %}—{% endif %}</td>
+      <td>{% if r.moved_since %}<span class="tag tag-ok">moved</span>{% else %}<span class="muted">not moved</span>{% endif %}
+          {% if r.reconfirm_count %}<br><span class="tag tag-warn">reconfirmed ×{{ r.reconfirm_count }}</span> last {{ r.last_reconfirmed_at | denver_ts }}{% endif %}
+          {% if r.reinstated_at %}<br><span class="tag">reinstated</span> by {{ r.reinstated_by }}: {{ r.reinstate_reason }}{% endif %}</td>
+      <td>{{ "yes" if r.standing else "no" }}</td>
+      <td>{% if r.resolved_at %}<span class="tag">{{ r.resolution_source }}</span> {{ r.resolved_at | denver_ts }}
+            {% if r.resolved_by %}by {{ r.resolved_by }}{% endif %}{% if r.resolved_by_check_id %} (check #{{ r.resolved_by_check_id }}){% endif %}
+            <br><span class="muted">{{ r.resolution }}</span>
+            {% if r.resolution_source == 'rider_check' %}
+            <form method="post" action="/admin/fleet/reports/{{ r.id }}/reinstate" class="inline">
+              <input type="hidden" name="next" value="/admin/fleet/devices/{{ d.vehicle_identifier }}" />
+              <input name="reason" placeholder="why reinstate" required maxlength="500" size="14" />
+              <button type="submit">reinstate</button>
+            </form>{% endif %}
+          {% else %}
+            <form method="post" action="/admin/fleet/reports/{{ r.id }}/resolve" class="inline">
+              <input type="hidden" name="next" value="/admin/fleet/devices/{{ d.vehicle_identifier }}" />
+              <input name="resolution" placeholder="why (audited)" required maxlength="500" size="16" />
+              <button type="submit">resolve / void</button>
+            </form>
+          {% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="9"><em>No reports.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Repeatedly hidden at the same spot</h2>
+<p class="muted">Every stop this vehicle has had, grouped within 50 m; a spot that drew suppressing reports at
+two or more separate stops was reported, moved away and came back. Positions rounded to ~100 m.</p>
+<table>
+  <thead><tr><th>spot (~100 m)</th><th>stops there</th><th>stops with reports</th><th>reports</th><th>accounts</th><th>first / last</th></tr></thead>
+  <tbody>
+  {% for s in spots %}
+    <tr><td>{{ s.lat }}, {{ s.lon }} {% if s.repeated %}<span class="tag tag-bad">repeated</span>{% endif %}</td>
+      <td>{{ s.stops }}</td><td>{{ s.stops_with_reports }}</td><td>{{ s.reports }}</td><td>{{ s.accounts }}</td>
+      <td>{{ s.first | denver_ts }} / {{ s.last | denver_ts }}</td></tr>
+  {% else %}
+    <tr><td colspan="6"><em>No suppressing reports matched to a stop.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Condition checks</h2>
+<table>
+  <thead><tr><th>id</th><th>rider</th><th>submitted</th><th>test ride</th><th>proof</th><th>answers</th><th>feed</th><th>points</th></tr></thead>
+  <tbody>
+  {% for c in d.condition_checks %}
+    <tr><td>{{ c.id }}</td>
+      <td>{% if c.account_id %}<a href="/admin/fleet/reporters?account_id={{ c.account_id }}">#{{ c.account_id }}</a> {{ c.public_username or "" }}{% else %}—{% endif %}</td>
+      <td>{{ c.submitted_at | denver_ts }}</td>
+      <td>{{ "yes" if c.test_ride else "no (answers discarded)" }}</td>
+      <td>{{ c.proof }}</td>
+      <td>{% for a in c.answers %}#{{ a.report_id }} {{ a.outcome }}{% if a.own_report %} <span class="tag">own</span>{% endif %}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}</td>
+      <td>{{ c.feed_status }}{% if c.feed_signal %} ({{ c.feed_signal }}){% endif %}</td>
+      <td>{{ c.points }}{% if c.points_withheld %} <span class="muted">withheld: {{ c.points_withheld }}</span>{% endif %}</td></tr>
+  {% else %}
+    <tr><td colspan="8"><em>No condition checks.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Features</h2>
+{% if d.features %}
+<p>Status <code>{{ d.features.feature_status }}</code>{% if d.features.confirmed_at %}, confirmed {{ d.features.confirmed_at | denver_ts }}{% endif %}.
+ Present: {% for k, v in d.features.present.items() %}{{ k }}={{ "?" if v is none else ("yes" if v else "no") }}{% if not loop.last %}, {% endif %}{% endfor %}.
+ Broken parts: {% if d.features.broken_parts %}{% for p in d.features.broken_parts %}<span class="tag tag-warn">{{ p }}</span> {% endfor %}{% else %}none{% endif %}
+ <span class="muted">(broken parts never suppress)</span></p>
+{% else %}<p class="muted">No feature data.</p>{% endif %}
+
+<h2>Moves and idle time (last {{ days }} days)</h2>
+<form method="get" class="filters">window <input name="days" value="{{ days }}" size="3" /> days <button type="submit">go</button></form>
+<table>
+  <thead><tr><th>arrived</th><th>departed</th><th>idle h</th><th>how it left</th><th>failed starts</th><th>spot (~100 m)</th></tr></thead>
+  <tbody>
+  {% for s in stops %}
+    <tr><td>{{ s.arrived_at | denver_ts }}</td><td>{{ s.departed_at | denver_ts if s.departed_at else "still there" }}</td>
+      <td>{{ s.idle_hours }}</td><td>{{ s.departure_reason or "—" }}</td><td>{{ s.failed_starts }}</td>
+      <td>{{ "%.3f" % s.lat }}, {{ "%.3f" % s.lon }}</td></tr>
+  {% else %}
+    <tr><td colspan="6"><em>No stops in the window.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Battery (hourly, last {{ days }} days)</h2>
+<table>
+  <thead><tr><th>hour</th><th>min %</th><th>max %</th><th>reserved samples</th><th>samples</th></tr></thead>
+  <tbody>
+  {% for b in battery %}
+    <tr><td>{{ b.hour | denver_ts }}</td><td>{{ b.min_pct if b.min_pct is not none else "—" }}</td>
+      <td>{{ b.max_pct if b.max_pct is not none else "—" }}</td><td>{{ b.reserved_samples }}</td><td>{{ b.samples }}</td></tr>
+  {% else %}
+    <tr><td colspan="5"><em>No telemetry in the window.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>SMS watches on this vehicle</h2>
+<p><a href="/admin/fleet/watches?vehicle_identifier={{ d.vehicle_identifier }}">Watch this vehicle by SMS →</a></p>
+<ul>
+{% for w in watches %}
+  <li>#{{ w.id }} by {{ w.created_by_login }} → account #{{ w.account_id }} · until {{ w.expires_at | denver_ts }} ·
+    {% if w.live %}live, {{ w.texts_sent }} texts{% else %}ended ({{ w.ended_reason }}){% endif %}</li>
+{% else %}<li class="muted">none</li>{% endfor %}
+</ul>
+{% endblock %}

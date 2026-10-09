@@ -35,7 +35,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 
-from . import fleet_reports, vehicle_identity
+from . import condition_checks, fleet_reports, vehicle_identity
 from .accounts import SessionUser, require_admin
 from .api_public import latest_complete_cycle
 from .pg import connection
@@ -73,7 +73,8 @@ def _vehicle(row_vid: str, plate: str | None) -> dict[str, Any]:
 
 _ACK_COLUMNS = """
     a.status, a.acknowledged_at, a.last_observed_at_ack, a.note, a.note_at,
-    acc_ack.email, acc_note.email
+    COALESCE(acc_ack.email, a.acknowledged_by_login),
+    COALESCE(acc_note.email, a.note_by_login)
 """
 _ACK_JOINS = """
     LEFT JOIN device_census_ack a ON a.vehicle_identifier = ds.vehicle_identifier
@@ -296,6 +297,79 @@ def _ack_state(cur, vid: str) -> dict[str, Any]:
     return {"vehicle_identifier": vid, "ack": _ack(row[1:8], row[0]) if row else None}
 
 
+def acknowledge_gone(cur, vid: str, *, account_id: int | None, login: str | None,
+                     note: str | None) -> dict[str, Any]:
+    """Acknowledge a vehicle permanently gone, attributed to an account (the
+    /api/v1/private route) or a GitHub login (the /admin pages). Shared so the
+    two surfaces cannot write the row differently. 404 via HTTPException."""
+    last_seen = _require_known(cur, vid)
+    cur.execute(
+        """
+        INSERT INTO device_census_ack (
+            vehicle_identifier, status, acknowledged_by, acknowledged_by_login,
+            acknowledged_at, last_observed_at_ack, note, note_by, note_by_login,
+            note_at, updated_at
+        ) VALUES (%(vid)s, 'gone', %(by)s, %(login)s, NOW(), %(seen)s,
+                  %(note)s, %(note_by)s, %(note_login)s,
+                  CASE WHEN %(has_note)s THEN NOW() END, NOW())
+        ON CONFLICT (vehicle_identifier) DO UPDATE SET
+            status = 'gone',
+            acknowledged_by = EXCLUDED.acknowledged_by,
+            acknowledged_by_login = EXCLUDED.acknowledged_by_login,
+            acknowledged_at = EXCLUDED.acknowledged_at,
+            last_observed_at_ack = EXCLUDED.last_observed_at_ack,
+            withdrawn_by = NULL,
+            withdrawn_by_login = NULL,
+            withdrawn_at = NULL,
+            note = COALESCE(EXCLUDED.note, device_census_ack.note),
+            note_by = CASE WHEN EXCLUDED.note IS NOT NULL THEN EXCLUDED.note_by
+                           ELSE device_census_ack.note_by END,
+            note_by_login = CASE WHEN EXCLUDED.note IS NOT NULL THEN EXCLUDED.note_by_login
+                                 ELSE device_census_ack.note_by_login END,
+            note_at = COALESCE(EXCLUDED.note_at, device_census_ack.note_at),
+            updated_at = NOW()
+        """,
+        {"vid": vid, "by": account_id, "login": login, "seen": last_seen,
+         "note": note, "note_by": account_id if note else None,
+         "note_login": login if note else None, "has_note": note is not None},
+    )
+    return _ack_state(cur, vid)
+
+
+def withdraw_gone(cur, vid: str, *, account_id: int | None,
+                  login: str | None) -> dict[str, Any] | None:
+    """Withdraw a gone acknowledgement, keeping the row. None when there was
+    nothing to withdraw."""
+    cur.execute(
+        """
+        UPDATE device_census_ack
+           SET status = 'not_gone', withdrawn_by = %s, withdrawn_by_login = %s,
+               withdrawn_at = NOW(), updated_at = NOW()
+         WHERE vehicle_identifier = %s AND status = 'gone'
+        """,
+        (account_id, login, vid),
+    )
+    return _ack_state(cur, vid) if cur.rowcount else None
+
+
+def set_note(cur, vid: str, *, account_id: int | None, login: str | None,
+             note: str | None) -> dict[str, Any]:
+    _require_known(cur, vid)
+    cur.execute(
+        """
+        INSERT INTO device_census_ack (
+            vehicle_identifier, status, note, note_by, note_by_login, note_at, updated_at
+        ) VALUES (%(vid)s, 'not_gone', %(note)s, %(by)s, %(login)s, NOW(), NOW())
+        ON CONFLICT (vehicle_identifier) DO UPDATE SET
+            note = EXCLUDED.note, note_by = EXCLUDED.note_by,
+            note_by_login = EXCLUDED.note_by_login,
+            note_at = EXCLUDED.note_at, updated_at = NOW()
+        """,
+        {"vid": vid, "note": note, "by": account_id, "login": login},
+    )
+    return _ack_state(cur, vid)
+
+
 @router.put("/api/v1/private/census/{vehicle_identifier}/ack")
 def census_acknowledge(
     vehicle_identifier: _VID,
@@ -309,33 +383,8 @@ def census_acknowledge(
     note = (payload.note or "").strip() or None
     with connection() as conn:
         with conn.cursor() as cur:
-            last_seen = _require_known(cur, vehicle_identifier)
-            cur.execute(
-                """
-                INSERT INTO device_census_ack (
-                    vehicle_identifier, status, acknowledged_by, acknowledged_at,
-                    last_observed_at_ack, note, note_by, note_at, updated_at
-                ) VALUES (%(vid)s, 'gone', %(by)s, NOW(), %(seen)s,
-                          %(note)s, %(note_by)s,
-                          CASE WHEN %(has_note)s THEN NOW() END, NOW())
-                ON CONFLICT (vehicle_identifier) DO UPDATE SET
-                    status = 'gone',
-                    acknowledged_by = EXCLUDED.acknowledged_by,
-                    acknowledged_at = EXCLUDED.acknowledged_at,
-                    last_observed_at_ack = EXCLUDED.last_observed_at_ack,
-                    withdrawn_by = NULL,
-                    withdrawn_at = NULL,
-                    note = COALESCE(EXCLUDED.note, device_census_ack.note),
-                    note_by = COALESCE(EXCLUDED.note_by, device_census_ack.note_by),
-                    note_at = COALESCE(EXCLUDED.note_at, device_census_ack.note_at),
-                    updated_at = NOW()
-                """,
-                {"vid": vehicle_identifier, "by": user.account_id,
-                 "seen": last_seen, "note": note,
-                 "note_by": user.account_id if note else None,
-                 "has_note": note is not None},
-            )
-            out = _ack_state(cur, vehicle_identifier)
+            out = acknowledge_gone(cur, vehicle_identifier, account_id=user.account_id,
+                                   login=None, note=note)
         conn.commit()
     log.info("census ack gone vehicle=%s admin_account=%d", vehicle_identifier, user.account_id)
     return out
@@ -351,19 +400,10 @@ def census_unacknowledge(
     does not erase that it was made. 404 when there is nothing to withdraw."""
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE device_census_ack
-                   SET status = 'not_gone', withdrawn_by = %s, withdrawn_at = NOW(),
-                       updated_at = NOW()
-                 WHERE vehicle_identifier = %s AND status = 'gone'
-                """,
-                (user.account_id, vehicle_identifier),
-            )
-            changed = cur.rowcount
-            out = _ack_state(cur, vehicle_identifier) if changed else None
+            out = withdraw_gone(cur, vehicle_identifier, account_id=user.account_id,
+                                login=None)
         conn.commit()
-    if not changed:
+    if out is None:
         raise HTTPException(404, "that vehicle is not acknowledged gone")
     log.info("census ack withdrawn vehicle=%s admin_account=%d",
              vehicle_identifier, user.account_id)
@@ -382,19 +422,8 @@ def census_note(
     note = (payload.note or "").strip() or None
     with connection() as conn:
         with conn.cursor() as cur:
-            _require_known(cur, vehicle_identifier)
-            cur.execute(
-                """
-                INSERT INTO device_census_ack (
-                    vehicle_identifier, status, note, note_by, note_at, updated_at
-                ) VALUES (%(vid)s, 'not_gone', %(note)s, %(by)s, NOW(), NOW())
-                ON CONFLICT (vehicle_identifier) DO UPDATE SET
-                    note = EXCLUDED.note, note_by = EXCLUDED.note_by,
-                    note_at = EXCLUDED.note_at, updated_at = NOW()
-                """,
-                {"vid": vehicle_identifier, "note": note, "by": user.account_id},
-            )
-            out = _ack_state(cur, vehicle_identifier)
+            out = set_note(cur, vehicle_identifier, account_id=user.account_id,
+                           login=None, note=note)
         conn.commit()
     return out
 
@@ -425,25 +454,15 @@ def resolve_report(
         raise HTTPException(422, "resolution must not be blank")
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE device_reports
-                   SET resolved_at = NOW(), resolved_by = %s, resolution = %s
-                 WHERE id = %s AND resolved_at IS NULL
-                RETURNING id, vehicle_identifier, report_type, reported_at, resolved_at
-                """,
-                (user.account_id, resolution, report_id),
-            )
-            row = cur.fetchone()
-            if row is None:
-                cur.execute("SELECT resolved_at FROM device_reports WHERE id = %s",
-                            (report_id,))
-                existing = cur.fetchone()
+            try:
+                row = fleet_reports.resolve_report(
+                    cur, report_id, source=fleet_reports.RESOLUTION_SOURCE_ADMIN,
+                    resolution=resolution, account_id=user.account_id)
+            except fleet_reports.ReportNotFound:
+                raise HTTPException(404, "no such report")
+            except fleet_reports.ReportAlreadyResolved:
+                raise HTTPException(409, "report already resolved")
         conn.commit()
-    if row is None:
-        if existing is None:
-            raise HTTPException(404, "no such report")
-        raise HTTPException(409, "report already resolved")
     log.info("device report id=%d resolved by admin_account=%d", report_id, user.account_id)
     return {
         "id": int(row[0]),
@@ -453,6 +472,7 @@ def resolve_report(
         "resolved_at": _iso(row[4]),
         "resolved_by": user.email,
         "resolution": resolution,
+        "resolution_source": fleet_reports.RESOLUTION_SOURCE_ADMIN,
     }
 
 
@@ -607,8 +627,12 @@ def device_dossier(
                 """
                 SELECT dr.id, dr.report_type, dr.reason, dr.submitted_reason,
                        dr.observed_at, dr.reported_at, dr.account_id, acc.email,
-                       dr.range_at_report_meters, dr.resolved_at, res.email,
-                       dr.resolution
+                       dr.range_at_report_meters, dr.resolved_at,
+                       COALESCE(res.email, dr.resolved_by_login),
+                       dr.resolution, dr.resolution_source, dr.resolved_by_check_id,
+                       dr.last_reconfirmed_at, dr.reconfirm_count,
+                       dr.reinstated_at, dr.reinstated_by_login, dr.reinstate_reason,
+                       acc.public_username
                   FROM device_reports dr
                   LEFT JOIN accounts acc ON acc.id = dr.account_id
                   LEFT JOIN accounts res ON res.id = dr.resolved_by
@@ -624,6 +648,7 @@ def device_dossier(
             standing = fleet_reports.open_reports_for(cur, cycle_id, vehicle_identifier)
             ack = _ack_state(cur, vehicle_identifier)["ack"] if state else None
             standing_ids = _standing_ids(cur, cycle_id, vehicle_identifier)
+            checks = condition_checks.checks_for_vehicle(cur, vehicle_identifier)
 
     parked_since = state[3] if state else None
     first = standing[0] if standing else None
@@ -663,9 +688,21 @@ def device_dossier(
                 "resolved_at": _iso(r[9]),
                 "resolved_by": r[10],
                 "resolution": r[11],
+                # 'admin' or 'rider_check' (sql/102); NULL source on a
+                # resolved report predates it and was an admin's.
+                "resolution_source": (r[12] or ("admin" if r[9] else None)),
+                "resolved_by_check_id": r[13],
+                "last_reconfirmed_at": _iso(r[14]),
+                "reconfirm_count": int(r[15] or 0),
+                "reinstated_at": _iso(r[16]),
+                "reinstated_by": r[17],
+                "reinstate_reason": r[18],
+                "reporter_public_username": r[19],
             }
             for r in reports
         ],
+        # Rider condition checks on this vehicle (Phase 1b, plan §4.4).
+        "condition_checks": checks,
         "features": None if state is None else {
             "feature_status": state[6],
             "present": {k: state[9 + i] for i, k in enumerate(FEATURE_KEYS)},

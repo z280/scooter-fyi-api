@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}export · veo-audit admin{% endblock %}
+{% block content %}
+<h1>Export for advocacy</h1>
+<form method="get" class="filters">
+  window <input name="window_days" value="{{ window_days }}" size="4" /> days ·
+  still unmoved after <input name="unmoved_days" value="{{ unmoved_days }}" size="4" /> days
+  <button type="submit">go</button>
+  · CSV: <a href="/admin/fleet/export.csv?window_days={{ window_days }}&unmoved_days={{ unmoved_days }}&table=summary">summary</a>
+  · <a href="/admin/fleet/export.csv?window_days={{ window_days }}&unmoved_days={{ unmoved_days }}&table=inaccessible">inaccessible vehicles</a>
+</form>
+<p class="muted">Window {{ data.window.from | denver_ts }} → {{ data.window.to | denver_ts }}. Never exports a location.</p>
+
+<h2>{{ data.headline }}</h2>
+<table>
+  <tr><th>Vehicles reported inaccessible</th><td>{{ data.inaccessible.vehicles_reported }} ({{ data.inaccessible.vehicles_reported_signed_in }} by a signed-in rider)</td></tr>
+  <tr><th>Inaccessible reports</th><td>{{ data.inaccessible.reports }}</td></tr>
+  <tr><th>Still unmoved after {{ data.inaccessible.unmoved_days }} days</th><td>{{ data.inaccessible.still_unmoved }}</td></tr>
+</table>
+<p class="muted">{{ data.inaccessible.definition }}</p>
+
+<h2>Broken parts (feature confirmation)</h2>
+<p>Sample: {{ data.broken_parts.sample.vehicles_observed }} vehicles in the feed in the window,
+ {{ data.broken_parts.sample.vehicles_with_feature_answers }} with feature answers.</p>
+<table>
+  <thead><tr><th>part</th><th>broken</th><th>under review</th><th>vehicles with the part</th></tr></thead>
+  <tbody>{% for p in data.broken_parts.parts %}
+    <tr><td>{{ p.part }}</td><td>{{ p.broken }}</td><td>{{ p.under_review }}</td><td>{{ p.vehicles_with_part }}</td></tr>{% endfor %}</tbody>
+</table>
+<p class="muted">{{ data.broken_parts.definition }}</p>
+
+<h2>Problem reports by type</h2>
+<table>
+  <thead><tr><th>type</th><th>reports</th><th>vehicles</th><th>oldest observed</th><th>newest observed</th><th>median report lag h</th></tr></thead>
+  <tbody>{% for t in data.problem_reports.by_type %}
+    <tr><td>{{ t.report_type }}</td><td>{{ t.reports }}</td><td>{{ t.vehicles }}</td><td>{{ t.oldest_observed_at | denver_ts }}</td>
+      <td>{{ t.newest_observed_at | denver_ts }}</td><td>{{ t.median_report_lag_hours if t.median_report_lag_hours is not none else "—" }}</td></tr>{% endfor %}</tbody>
+</table>
+<h2>Not rideable: why</h2>
+<table>
+  <thead><tr><th>reason</th><th>reports</th><th>vehicles</th><th>oldest observed</th><th>newest observed</th></tr></thead>
+  <tbody>{% for r in data.problem_reports.not_rideable.reasons %}
+    <tr><td>{{ r.reason }}</td><td>{{ r.reports }}</td><td>{{ r.vehicles }}</td><td>{{ r.oldest_observed_at | denver_ts }}</td><td>{{ r.newest_observed_at | denver_ts }}</td></tr>{% endfor %}</tbody>
+</table>
+<p>Re-filed decoys: {% for k, n in data.problem_reports.remapped.items() %}{{ k }} {{ n }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
+<p class="muted">{{ data.problem_reports.definition }}</p>
+
+<h2>Inaccessible vehicles</h2>
+<table>
+  <thead><tr><th>vehicle</th><th>first / last report</th><th>reports</th><th>accounts</th><th>in feed</th><th>days since first</th><th>still unmoved</th></tr></thead>
+  <tbody>{% for v in data.inaccessible.vehicles %}
+    <tr><td><a href="/admin/fleet/devices/{{ v.vehicle_identifier }}">{{ v.public_name or v.vehicle_identifier }}</a></td>
+      <td>{{ v.first_reported_at | denver_ts }}<br>{{ v.last_reported_at | denver_ts }}</td><td>{{ v.reports }}</td>
+      <td>{{ v.distinct_reporting_accounts }}</td><td>{{ "yes" if v.in_feed else "no" }}</td>
+      <td>{{ v.days_since_first_report }}</td><td>{{ "yes" if v.still_unmoved else "no" }}</td></tr>
+  {% else %}<tr><td colspan="7"><em>None in the window.</em></td></tr>{% endfor %}</tbody>
+</table>
+{% endblock %}

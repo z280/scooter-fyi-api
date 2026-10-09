@@ -68,6 +68,9 @@ _DEVICE_FEATURE_ACTIONS = (
 # ledger pays.
 _DEVICE_PHOTO_ACTIONS = ("device_photo",)
 
+# Condition checks (sql/102, docs/FLEET_REPORTS_PLAN.md §4.4).
+_CONDITION_CHECK_ACTIONS = ("condition_check", "condition_check_confirmed")
+
 _FORMULA_ACTIONS = ("battery_contribution", "nav_distance_bonus")
 
 
@@ -168,8 +171,14 @@ def test_no_action_is_published_that_the_schedule_does_not_explain(schedule):
     assert set(schedule) == (
         set(_EXISTING_ACTIONS) | set(_RIDE_MODE_ACTIONS)
         | set(_DEVICE_FEATURE_ACTIONS) | set(_DEVICE_PHOTO_ACTIONS)
-        | set(_GROWTH_ACTIONS)
+        | set(_GROWTH_ACTIONS) | set(_CONDITION_CHECK_ACTIONS)
     ) - _RETIRED_ACTIONS
+
+
+def test_the_condition_check_awards_are_published_and_cap_at_50(schedule):
+    assert schedule["condition_check"] == {"points": 10}
+    assert schedule["condition_check_confirmed"] == {"points": 40}
+    assert points.POINTS_CONDITION_CHECK_MAX == 50
 
 
 def test_every_report_action_in_the_mapping_is_published(schedule):

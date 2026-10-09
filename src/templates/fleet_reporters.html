@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}reporters · veo-audit admin{% endblock %}
+{% block content %}
+<h1>Reporter view</h1>
+<p class="muted">Signed-in reports and rider condition checks per account over the last {{ days }} days.
+Account id and public username only. An account that files many suppressing reports across many
+cells, or resolves reports by checks the feed never corroborates, is the pattern to look at.</p>
+<form method="get" class="filters">window <input name="days" value="{{ days }}" size="3" /> days <button type="submit">go</button></form>
+
+{% if detail %}
+<h2>Account #{{ detail.account_id }} {{ detail.public_username or "" }}</h2>
+<p>Reports by hour of day (Denver):
+{% for h, n in detail.by_hour %}{% if n %}<span class="tag">{{ h }}h: {{ n }}</span> {% endif %}{% endfor %}</p>
+<p>Spread over H3 res-8 cells (~0.7 km²):
+{% for c, n in detail.cells %}<span class="tag">{{ c }} ×{{ n }}</span> {% else %}none{% endfor %}</p>
+<table>
+  <thead><tr><th>report</th><th>vehicle</th><th>type / reason</th><th>reported</th><th>resolution</th></tr></thead>
+  <tbody>
+  {% for r in detail.reports %}
+    <tr><td>{{ r.id }}</td><td><a href="/admin/fleet/devices/{{ r.vehicle_identifier }}">{{ r.display_name or r.vehicle_identifier }}</a></td>
+      <td>{{ r.report_type }}{% if r.reason %} · {{ r.reason }}{% endif %}</td><td>{{ r.reported_at | denver_ts }}</td>
+      <td>{% if r.resolved_at %}{{ r.resolution_source }} {{ r.resolved_at | denver_ts }}{% else %}open{% endif %}</td></tr>
+  {% else %}<tr><td colspan="5"><em>No reports in the window.</em></td></tr>{% endfor %}
+  </tbody>
+</table>
+<h3>Condition checks</h3>
+<table>
+  <thead><tr><th>check</th><th>vehicle</th><th>submitted</th><th>test ride</th><th>resolved</th><th>reconfirmed</th><th>feed</th><th>points</th></tr></thead>
+  <tbody>
+  {% for c in detail.checks %}
+    <tr><td>{{ c.id }}</td><td><a href="/admin/fleet/devices/{{ c.vehicle_identifier }}">{{ c.display_name or c.vehicle_identifier }}</a></td>
+      <td>{{ c.submitted_at | denver_ts }}</td><td>{{ "yes" if c.test_ride else "no" }}</td><td>{{ c.resolved }}</td>
+      <td>{{ c.reconfirmed }}</td><td>{{ c.feed_status }}</td><td>{{ c.points }}{% if c.withheld %} <span class="muted">({{ c.withheld }})</span>{% endif %}</td></tr>
+  {% else %}<tr><td colspan="8"><em>No checks in the window.</em></td></tr>{% endfor %}
+  </tbody>
+</table>
+<h2>All accounts</h2>
+{% endif %}
+
+<table>
+  <thead><tr><th>account</th><th>reports</th><th>vehicles</th><th>cells</th><th>days / hours active</th>
+    {% for t in report_types %}<th>{{ t }}</th>{% endfor %}
+    <th>voided by admin</th><th>rider-resolved</th><th>checks (no ride)</th><th>resolutions / reconfirms</th><th>feed confirmed / not</th><th>first / last</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr><td><a href="/admin/fleet/reporters?account_id={{ r.aid }}&days={{ days }}">#{{ r.aid }}</a> {{ r.public_username or "" }}</td>
+      <td>{{ r.reports or 0 }}</td><td>{{ r.vehicles or 0 }}</td><td>{{ r.cells or 0 }}</td>
+      <td>{{ r.days_active or 0 }} / {{ r.hours_of_day or 0 }}</td>
+      {% for t in report_types %}<td>{{ r.by_type[t] or 0 }}</td>{% endfor %}
+      <td>{{ r.voided or 0 }}</td><td>{{ r.rider_resolved or 0 }}</td>
+      <td>{{ r.checks or 0 }} ({{ r.no_ride_checks or 0 }})</td>
+      <td>{{ r.resolutions or 0 }} / {{ r.reconfirmations or 0 }}</td>
+      <td>{{ r.feed_confirmed or 0 }} / {{ r.feed_unconfirmed or 0 }}</td>
+      <td>{{ r.first_at | denver_ts }}<br>{{ r.last_at | denver_ts }}</td></tr>
+  {% else %}
+    <tr><td colspan="20"><em>No signed-in reports or checks in the window.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

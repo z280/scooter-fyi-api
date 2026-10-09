@@ -20,6 +20,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .api_admin import router as admin_router
 from .api_auth import router as auth_router
 from .api_device_features import router as device_features_router
+from .api_condition_checks import router as condition_checks_router
 from .api_dibs import router as dibs_router
 from .api_device_photos import router as device_photos_router
 from .api_device_recommendations import router as device_recommendations_router
@@ -146,6 +147,7 @@ app.include_router(points_router)
 app.include_router(device_recommendations_router)
 app.include_router(device_photos_router)
 app.include_router(device_features_router)
+app.include_router(condition_checks_router)
 app.include_router(dibs_router)
 # POST /api/v1/devices/qr-scan is deliberately NOT mounted (retired
 # 2026-10-06 with Keep a Scooter). It paid 100 points per vehicle for a

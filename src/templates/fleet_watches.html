@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}sms watches · veo-audit admin{% endblock %}
+{% block content %}
+<h1>SMS watches</h1>
+<p class="muted">Text an admin when one vehicle leaves or rejoins the feed, starts or ends a rental,
+is (un)disabled, or moves more than 50 m. Sent through z280-comms: STOP is honoured across the shared
+number, at most {{ max_texts }} texts per watch, and every watch expires (at most {{ max_hours }} h).
+The phone must be the VERIFIED phone of an account on the admin allowlist; the first text confirms the watch.</p>
+{% include "_fleet_flash.html" %}
+
+<h2>Start a watch</h2>
+<form method="post" action="/admin/fleet/watches">
+  <p>Vehicle identifier <input name="vehicle_identifier" value="{{ vehicle_identifier }}" size="18" required pattern="[0-9a-f]{16}" /></p>
+  <p>Text the verified phone of admin account (email) <input name="account_email" type="email" size="28" required /></p>
+  <p>For <input name="hours" type="number" min="1" max="{{ max_hours }}" value="{{ default_hours }}" size="4" /> hours</p>
+  <p><label><input type="checkbox" name="consent" value="1" required /> The owner of that account agrees to receive these texts (reply STOP to stop).</label></p>
+  <button type="submit">Start watching</button>
+</form>
+
+<h2>Watches</h2>
+<table>
+  <thead><tr><th>#</th><th>vehicle</th><th>by</th><th>texts account</th><th>created</th><th>expires</th><th>status</th><th>texts</th><th>last event</th><th></th></tr></thead>
+  <tbody>
+  {% for w in watches %}
+    <tr><td>{{ w.id }}</td>
+      <td><a href="/admin/fleet/devices/{{ w.vehicle_identifier }}">{{ w.display_name or w.vehicle_identifier }}</a></td>
+      <td>{{ w.created_by_login }}</td><td>#{{ w.account_id }} {{ w.public_username or "" }}</td>
+      <td>{{ w.created_at | denver_ts }}</td><td>{{ w.expires_at | denver_ts }}</td>
+      <td>{% if w.live %}<span class="tag tag-ok">live</span>{% else %}ended: {{ w.ended_reason }}{% if w.ended_by_login %} ({{ w.ended_by_login }}){% endif %}{% endif %}</td>
+      <td>{{ w.texts_sent }}</td><td>{{ w.last_event or "—" }}</td>
+      <td>{% if w.live %}<form method="post" action="/admin/fleet/watches/{{ w.id }}/unsubscribe" class="inline"><button type="submit">stop</button></form>{% endif %}</td></tr>
+  {% else %}
+    <tr><td colspan="10"><em>No watches.</em></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
