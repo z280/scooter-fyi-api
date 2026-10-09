@@ -62,7 +62,23 @@ def test_the_builder_carries_the_clause(clause: str) -> None:
 @pytest.mark.parametrize("rel", CONSUMERS)
 def test_every_consumer_embeds_the_builder(rel: str) -> None:
     text = (ROOT / rel).read_text()
+    if rel in ("src/api_public.py", "src/api_h3.py"):
+        # /devices/current reads every vehicle's state from ONE pass over the
+        # builder (fleet_reports.negative_states), never a per-row subquery:
+        # that subquery cost ~2.2 s of every map load (2026-10-09).
+        assert "fleet_reports.negative_states(" in text, rel
+        assert "negative_state_sql(" not in text, rel
+        return
     assert "negative_state_sql(" in text, rel
+
+
+def test_negative_states_pass_is_built_from_the_builder() -> None:
+    """The single pass /devices/current uses must itself come from the
+    builder, so it can never drift from the rules."""
+    src = (ROOT / "src/fleet_reports.py").read_text()
+    body = src[src.index("def _fleet_rows_sql"):]
+    body = body[:body.index("\ndef ", 10)]
+    assert "uncleared_negative_sql(" in body or "negative_state_sql(" in body
 
 
 @pytest.mark.parametrize("rel", CONSUMERS + ("src/fleet_reports.py",))

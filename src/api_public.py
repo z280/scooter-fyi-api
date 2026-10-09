@@ -334,6 +334,20 @@ def _negative_states(cycle_id: Any) -> dict[str, dict[str, Any]] | None:
         return None
 
 
+def _state_for(negative_by: dict[str, dict[str, Any]] | None, vid: Any) -> str | None:
+    """'high' | 'unknown' | None for one vehicle, from the single
+    negative_states pass. If that pass FAILED (None) every vehicle reads
+    'unknown': we cannot say it has no report, and the owner's rule is that a
+    reported scooter never reads likely-rideable, so we stop vouching for any
+    this cycle (same posture as _rental_outcomes)."""
+    if negative_by is None:
+        return "unknown"
+    entry = negative_by.get(vid or "")
+    if not entry:
+        return None
+    return "high" if entry.get("risk") == fleet_reports.RISK_HIGH else "unknown"
+
+
 def _negative_state(raw: Any) -> str | None:
     """Column 20 → 'high' | 'unknown' | None. A bare True (older fixtures,
     and the meaning the column had before 2026-10-09) reads as 'high'."""
@@ -548,9 +562,12 @@ def _devices_current_impl(
                 "       r.range_rank_all_by_type, r.range_rank_all_devices, "
                 "       r.range_rank_h3_8_peers, r.range_rank_h3_9_peers, "
                 "       r.range_rank_h3_10_peers, "
-                "       " + fleet_reports.negative_state_sql(
-                    vid="r.vehicle_identifier", current_range="r.current_range_meters",
-                    now="NOW()") + " AS has_negative_report, "
+                # Column 20 is a placeholder (positions below are fixed). The
+                # state used to be a correlated subquery here, run for every
+                # one of ~7,800 rows: ~2.2 s of a ~3.4 s build, for the dozen
+                # vehicles that have a report. It now comes from negative_by,
+                # the single pass below over the same SQL builder.
+                "       NULL AS has_negative_report, "
                 "       r.max_range_meters_for_type, "
                 "       ds.number_failed_starts, ds.first_observed_at_location, "
                 "       r.vehicle_use_type, r.vehicle_model_name, "
@@ -643,7 +660,7 @@ def _devices_current_impl(
             is_reserved=r[7],
             number_failed_starts=number_failed_starts,
             first_observed_at_location=r[23],
-            has_negative_report=_negative_state(r[20]) == "high",
+            has_negative_report=_state_for(negative_by, r[5]) == "high",
             is_dwell_outlier=is_dwell_outlier,
             # The payload's one clock (see now_utc above) — the same instant
             # parked_hours and battery_reading use, and the same one
@@ -655,8 +672,8 @@ def _devices_current_impl(
             number_failed_starts=number_failed_starts,
             first_observed_at_location=r[23],
             quality_designation=quality,
-            has_negative_report=_negative_state(r[20]) == "high",
-            has_faded_negative_report=_negative_state(r[20]) == "unknown",
+            has_negative_report=_state_for(negative_by, r[5]) == "high",
+            has_faded_negative_report=_state_for(negative_by, r[5]) == "unknown",
             is_dwell_outlier=is_dwell_outlier,
             peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
             battery_percent=battery_percent,
@@ -697,7 +714,7 @@ def _devices_current_impl(
             # True while an uncleared negative report makes this vehicle
             # high_risk (owner, 2026-10-09). A faded anonymous report reads
             # false here and "unknown" in negative_report_risk.
-            "has_negative_report": _negative_state(r[20]) == "high",
+            "has_negative_report": _state_for(negative_by, r[5]) == "high",
             "quality_designation": quality,
             "number_failed_starts": number_failed_starts,
             "first_observed_at_location": r[23].isoformat() if r[23] else None,
@@ -707,7 +724,7 @@ def _devices_current_impl(
             # these fields are for the card's "High risk: reported not
             # rideable (acceleration)" line. needs_condition_check invites a
             # rider condition check (Phase 1b).
-            **_negative_report_fields(negative_by, r[5], _negative_state(r[20])),
+            **_negative_report_fields(negative_by, r[5], _state_for(negative_by, r[5])),
             # sql/072 — the one reliability signal that survived validation:
             # a vehicle's no-go rate persists at r=+0.275 across weeks, and
             # the worst 10% of vehicles carry 32.4% of all failures.
