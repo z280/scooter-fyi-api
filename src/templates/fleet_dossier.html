@@ -15,7 +15,7 @@
   <tr><th>Charge</th><td>{% if charge_pct is not none %}{{ charge_pct }}%{% else %}—{% endif %}</td></tr>
   <tr><th>First / last seen</th><td>{{ d.state.first_ever_observed_at | denver_ts }} / {{ d.state.last_observed_at | denver_ts }}</td></tr>
   {% endif %}
-  <tr><th>Suppressed</th><td>{% if d.suppression.suppressed %}<span class="tag tag-bad">{{ d.suppression.suppressed_reason }}</span> since {{ d.suppression.suppressed_since | denver_ts }}{% else %}no{% endif %}</td></tr>
+  <tr><th>Negative report</th><td>{% if d.negative_report %}<span class="tag tag-bad">{{ d.negative_report.risk }}</span> {{ d.negative_report.reason }}{% if d.negative_report.reason_detail %} ({{ d.negative_report.reason_detail }}){% endif %} since {{ d.negative_report.since | denver_ts }}{% else %}none uncleared{% endif %} <span class="muted">(labels only — never hides)</span></td></tr>
   <tr><th>Census</th><td>{% if d.census %}{{ d.census.status }}{% if d.census.reappeared %} <span class="tag tag-warn">reappeared</span>{% endif %}
       {% if d.census.acknowledged_by %} — by {{ d.census.acknowledged_by }} {{ d.census.acknowledged_at | denver_ts }}{% endif %}
       {% if d.census.note %}<br>note: {{ d.census.note }} <span class="muted">({{ d.census.note_by }}, {{ d.census.note_at | denver_ts }})</span>{% endif %}
@@ -41,6 +41,8 @@
       <td>{% if r.signed_in %}<a href="/admin/fleet/reporters?account_id={{ r.reporter_account_id }}">#{{ r.reporter_account_id }}</a>{% if r.reporter_public_username %} {{ r.reporter_public_username }}{% endif %}{% else %}<span class="muted">anonymous</span>{% endif %}</td>
       <td>{% if r.range_at_report_meters is not none %}{{ pct(r.range_at_report_meters) }}%{% else %}—{% endif %}</td>
       <td>{% if r.moved_since %}<span class="tag tag-ok">moved</span>{% else %}<span class="muted">not moved</span>{% endif %}
+          {% if r.distance_from_baseline_m is not none %}<br><span class="muted">{{ r.distance_from_baseline_m }} m from baseline</span>{% endif %}
+          {% if r.baseline_pending %}<br><span class="tag">re-baselining</span>{% endif %}
           {% if r.reconfirm_count %}<br><span class="tag tag-warn">reconfirmed ×{{ r.reconfirm_count }}</span> last {{ r.last_reconfirmed_at | denver_ts }}{% endif %}
           {% if r.reinstated_at %}<br><span class="tag">reinstated</span> by {{ r.reinstated_by }}: {{ r.reinstate_reason }}{% endif %}</td>
       <td>{{ "yes" if r.standing else "no" }}</td>
@@ -68,7 +70,7 @@
 </table>
 
 <h2>Repeatedly hidden at the same spot</h2>
-<p class="muted">Every stop this vehicle has had, grouped within 50 m; a spot that drew suppressing reports at
+<p class="muted">Every stop this vehicle has had, grouped within 50 m; a spot that drew negative reports at
 two or more separate stops was reported, moved away and came back. Positions rounded to ~100 m.</p>
 <table>
   <thead><tr><th>spot (~100 m)</th><th>stops there</th><th>stops with reports</th><th>reports</th><th>accounts</th><th>first / last</th></tr></thead>
@@ -78,7 +80,7 @@ two or more separate stops was reported, moved away and came back. Positions rou
       <td>{{ s.stops }}</td><td>{{ s.stops_with_reports }}</td><td>{{ s.reports }}</td><td>{{ s.accounts }}</td>
       <td>{{ s.first | denver_ts }} / {{ s.last | denver_ts }}</td></tr>
   {% else %}
-    <tr><td colspan="6"><em>No suppressing reports matched to a stop.</em></td></tr>
+    <tr><td colspan="6"><em>No negative reports matched to a stop.</em></td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -107,7 +109,7 @@ two or more separate stops was reported, moved away and came back. Positions rou
 <p>Status <code>{{ d.features.feature_status }}</code>{% if d.features.confirmed_at %}, confirmed {{ d.features.confirmed_at | denver_ts }}{% endif %}.
  Present: {% for k, v in d.features.present.items() %}{{ k }}={{ "?" if v is none else ("yes" if v else "no") }}{% if not loop.last %}, {% endif %}{% endfor %}.
  Broken parts: {% if d.features.broken_parts %}{% for p in d.features.broken_parts %}<span class="tag tag-warn">{{ p }}</span> {% endfor %}{% else %}none{% endif %}
- <span class="muted">(broken parts never suppress)</span></p>
+ <span class="muted">(broken parts change no label)</span></p>
 {% else %}<p class="muted">No feature data.</p>{% endif %}
 
 <h2>Moves and idle time (last {{ days }} days)</h2>

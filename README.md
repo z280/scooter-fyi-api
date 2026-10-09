@@ -843,8 +843,8 @@ these pages are attributed to the GitHub login; every POST is CSRF-checked:
 - `/admin/fleet` — the fleet-reports index
 - `/admin/fleet/reports?report_type=&reason=&region=&standing=&status=&page=` —
   reports queue: type, reason, observed/reported times, reporter (account id +
-  public username), charge at report and whether it moved since, standing /
-  suppressing status, near-duplicates
+  public username), charge at report and whether it moved since, uncleared /
+  label status (no report hides a scooter), near-duplicates
 - `/admin/fleet/reports/{id}/resolve` (POST, `resolution`) — audited void /
   resolve; `/admin/fleet/reports/{id}/reinstate` (POST, `reason`) — undo a
   rider condition check's resolution (an admin's is final)

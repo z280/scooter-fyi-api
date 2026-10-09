@@ -16,9 +16,9 @@ T = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
 W = condition_checks.FEED_WINDOW
 
 
-def test_the_negative_rideability_set_is_the_suppressing_set_minus_not_found():
+def test_the_condition_set_is_the_negative_set_minus_not_found():
     assert set(fleet_reports.CONDITION_CHECK_TYPES) == (
-        set(fleet_reports.SUPPRESSION_REASON_PRIORITY) - {"not_found"})
+        set(fleet_reports.NEGATIVE_REPORT_PRIORITY) - {"not_found"})
     assert "improperly_parked" not in fleet_reports.CONDITION_CHECK_TYPES
     assert fleet_reports.FOUND_ON_CHECK_TYPES == ("not_found",)
 

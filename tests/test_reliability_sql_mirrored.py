@@ -1,17 +1,18 @@
-"""The signed-in reliability rule exists in two places, and must stay one rule.
+"""The negative-report rule exists ONCE, and every rendering uses it.
 
-`has_negative_report` is rendered twice — per device on /devices/current
-(api_public.py) and per cell on the /h3 aggregate (api_h3.py). A rider who sees
-a cell shaded high-risk and then taps the scooter inside it is owed the same
-answer twice, so the two predicates have to agree.
+`has_negative_report` / the reliability label is rendered per device on
+/devices/current (api_public.py) and per cell on the /h3 aggregate
+(api_h3.py); the identify path, the condition checks and the admin pages read
+the same rule through src/fleet_reports.py. A rider who sees a cell shaded
+high-risk and then taps the scooter inside it is owed the same answer twice.
 
-This is a drift guard, not a correctness test: it asserts that both queries
-carry each load-bearing clause of the rule, and that the Postgres suite's own
-copy does too. `tests/test_negative_report_hold_pg.py` is what proves the rule
-actually behaves, against a real database.
-
-Cheap, and it runs everywhere — which matters because the behavioural test
-skips without VEO_TEST_PG_DSN, and a skipped test guards nothing.
+Until 2026-10-09 the predicate was copied into each file and these tests
+checked the copies agreed. The owner's rules (move >= 100 m + charge rise,
+off-the-map + full battery, anonymous fade to unknown) are now built once,
+in fleet_reports.uncleared_negative_sql, and this guard checks that every
+consumer embeds the builder rather than a copy, and that the builder carries
+each load-bearing clause. tests/test_negative_report_hold_pg.py proves the
+rule behaves against a real database.
 """
 
 from __future__ import annotations
@@ -20,79 +21,69 @@ from pathlib import Path
 
 import pytest
 
+from src import fleet_reports
+
 ROOT = Path(__file__).resolve().parents[1]
 
-#: The three clauses that make the signed-in rule what it is. Each is here
-#: because losing it silently changes the behaviour rather than breaking:
-#:
-#:   * account_id IS NOT NULL — drop it and every anonymous report becomes
-#:     permanent, which is the stalkable-by-strangers version of this feature.
-#:   * first_observed_at_location <= dr.reported_at — drop it and a report
-#:     never clears, so a repaired scooter stays condemned forever.
-#:   * current_range_meters < range_at_report + rise — drop it and a
-#:     recharged scooter does too. It is a RISE test against the reading
-#:     stored with the report (sql/100), never a level: the level test it
-#:     replaced cleared a report on a 100% scooter the moment it was filed.
-#:   * range_at_report_meters IS NULL — a report with no reading must hold.
-#:   * resolved_at IS NULL — drop it and an admin's void does nothing.
+CONSUMERS = ("src/api_public.py", "src/api_h3.py",
+             "tests/test_negative_report_hold_pg.py")
+
+#: Each one silently changes behaviour if lost:
+#:   * the 100 m straight-line move ("a move of <100m should not reset");
+#:   * the RISE over the baseline charge (never a level — §2.4);
+#:   * the off-the-map path through device_history's 'absent' stops;
+#:   * the baseline override a reconfirmation writes, and its pending hold;
+#:   * resolution (admin / rider check) — the default filter;
+#:   * the anonymous 24 h high-risk window.
 CLAUSES = (
-    "dr.account_id IS NOT NULL",
-    "ds.first_observed_at_location <= dr.reported_at",
-    "r.current_range_meters < dr.range_at_report_meters +",
-    "dr.range_at_report_meters IS NULL",
-    "dr.resolved_at IS NULL",
-)
-
-SOURCES = (
-    "src/api_public.py",
-    "src/api_h3.py",
-    "tests/test_negative_report_hold_pg.py",
-    # The suppression flag uses the same hold rule (minus the reliability type
-    # filter) — a vehicle must not be hidden by a report the tier has already
-    # cleared, or vice versa.
-    "src/fleet_reports.py",
+    f"geo_distance_m(n.base_lat, n.base_lon, ds.current_lat, ds.current_lon) >= "
+    f"{fleet_reports.CLEAR_MOVE_METERS}",
+    f">= n.base_range + {fleet_reports.charge_rise_meters()}",
+    "h.departure_reason = 'absent'",
+    "COALESCE(dr.baseline_lat, dr.vehicle_lat_at_report)",
+    "COALESCE(dr.baseline_range_meters, dr.range_at_report_meters)",
+    "WHERE n.pending OR NOT",
+    "AND dr.resolved_at IS NULL",
+    f"INTERVAL '{fleet_reports.ANONYMOUS_HIGH_RISK_HOURS} hours'",
 )
 
 
-def test_no_rendering_still_uses_the_full_charge_level_test() -> None:
-    # docs/FLEET_REPORTS_PLAN.md §2.4. `current_range_meters < <full>` made a
-    # fully charged scooter unreportable.
-    for rel in SOURCES:
-        text = " ".join((ROOT / rel).read_text().split())
-        assert "r.current_range_meters < %(full)s" not in text, rel
-        assert "OR r.current_range_meters < %s)" not in text, rel
+def _builder_sql() -> str:
+    return " ".join(fleet_reports.uncleared_negative_sql(
+        vid="r.vehicle_identifier", current_range="r.current_range_meters",
+        now="NOW()").split())
 
 
-@pytest.mark.parametrize("rel", SOURCES)
 @pytest.mark.parametrize("clause", CLAUSES)
-def test_every_rendering_carries_the_clause(rel: str, clause: str) -> None:
+def test_the_builder_carries_the_clause(clause: str) -> None:
+    assert clause in _builder_sql(), clause
+
+
+@pytest.mark.parametrize("rel", CONSUMERS)
+def test_every_consumer_embeds_the_builder(rel: str) -> None:
     text = (ROOT / rel).read_text()
-    # Whitespace is normalised because one copy is a Python-concatenated
-    # string and another is a triple-quoted block with different indentation.
-    assert clause in " ".join(text.split()), f"{rel} has lost: {clause}"
+    assert "negative_state_sql(" in text, rel
 
 
-def test_the_anonymous_window_is_still_24_hours() -> None:
-    # The other half of the trade. If this disappears, anonymous reports have
-    # quietly inherited the signed-in rule — which would make a report from
-    # nobody-in-particular permanent.
-    for rel in ("src/api_public.py", "src/api_h3.py"):
-        text = (ROOT / rel).read_text()
-        assert "INTERVAL '24 hours'" in text, rel
+@pytest.mark.parametrize("rel", CONSUMERS + ("src/fleet_reports.py",))
+def test_no_copy_of_a_retired_rule_survives(rel: str) -> None:
+    text = " ".join((ROOT / rel).read_text().split())
+    # The stationary-threshold "moved" clear (first_observed_at_location
+    # against the report), the 24 h h3-cell anonymous expiry, the charge-
+    # rise-alone clear and the full-charge LEVEL test are all retired.
+    assert "first_observed_at_location <= dr.reported_at" not in text, rel
+    assert "nr.h3_10_index = r.h3_10_index" not in text, rel
+    assert "dr.h3_10_index = r.h3_10_index" not in text, rel
+    assert "r.current_range_meters < dr.range_at_report_meters" not in text, rel
+    assert "r.current_range_meters < %(full)s" not in text, rel
 
 
-def test_the_full_charge_threshold_has_one_definition() -> None:
-    # Two constants for "100%" would be two definitions that drift the first
-    # time the vendor's lookup table does.
-    from src.quality import _soc_lut, compute_battery_percent, full_charge_range_meters
+def test_improperly_parked_is_the_only_non_negative_type() -> None:
+    from src.api_frontend_reports import NON_RELIABILITY_REPORT_TYPES, _REPORT_TYPES
 
-    lut = _soc_lut()
-    full = full_charge_range_meters()
-    assert full == lut[-1]
-    assert compute_battery_percent(full) == 100
-    # The value directly below it IN THE TABLE reads 99%. Asserted against the
-    # table rather than `full - 1`: a range that is not in the table falls
-    # through to linear scaling and rounds to 100 a little below the top, and
-    # the threshold deliberately does not accept that — see
-    # `full_charge_range_meters`'s own note on which way to err.
-    assert compute_battery_percent(lut[-2]) == 99
+    assert NON_RELIABILITY_REPORT_TYPES == ("improperly_parked",)
+    assert fleet_reports.NON_NEGATIVE_REPORT_TYPES == ("improperly_parked",)
+    assert set(fleet_reports.NEGATIVE_REPORT_PRIORITY) | {"improperly_parked"} == set(
+        _REPORT_TYPES)
+    assert "improperly_parked" not in fleet_reports.uncleared_negative_sql(
+        vid="v", current_range="c", now="NOW()")

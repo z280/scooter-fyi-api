@@ -2,7 +2,10 @@
 
 **Status:** Phase 1 implemented in #144, with the owner's 2026-10-09 overrides in #145. **Phase 1b
 (condition checks, §4.4) and Phase 2 (the admin centre, §4.1(5)) implemented together in one PR
-(owner's request, 2026-10-09) — decisions in §4.5.** Phase 3 frontend pending; its contract is
+(owner's request, 2026-10-09) — decisions in §4.5.** **The owner then rewrote how negative
+reports behave (2026-10-09, §4.6): no report hides a scooter; every negative report labels it
+high risk until cleared by a ≥ 100 m move plus a charge rise (or ≥ 100 m for a location report).
+§4.6 overrides §2.2, §2.3, §2.5, §4.1(3)/(4), §4.3 and parts of §4.4/§4.5 wherever they disagree.** Phase 3 frontend pending; its contract is
 `docs/reference/API.md` "Condition checks" and `needs_condition_check`.
 Revised 2026-10-07 against `main` (`e442e2c` api / `5aac9ba` frontend);
 Phase 1 re-verified every API citation against `main` at `044a424` on
@@ -123,6 +126,11 @@ construction hoarding, in a building.
 
 ### 2.2 Reports stand until the device MOVES — MOSTLY ALREADY TRUE
 
+> **Superseded by the owner, 2026-10-09 (§4.6).** Neither branch below survives: a signed-in
+> report no longer clears on a stationary-threshold move, an anonymous one no longer expires
+> after 24 h in its cell (it fades to `unknown`), and every negative type — `inaccessible` and
+> `not_found` included — now drives the tier.
+
 **An earlier revision of this section was wrong, and wrong in the most
 expensive way a plan can be: it proposed as new work something the codebase
 already does, and quoted a predicate that is not the one that matters.** It
@@ -179,6 +187,10 @@ actually remains on this axis is narrower than the original section claimed:
 
 ### 2.3 "Moved" means moved — and the shipped mechanism is better than the one this plan proposed
 
+> **Superseded by the owner, 2026-10-09 (§4.6):** "A move of <100m should not reset any negative
+> reported device, ever." The clearing move is now ≥ 100 m straight-line from the report-time
+> position (`device_reports.vehicle_lat/lon_at_report`, sql/102), not `first_observed_at_location`.
+
 **Also retracted.** The original rule was *"the h3_10 index differs AND the
 device is ≥50 m from the reported point"*, justified by jitter flipping a cell
 index near a boundary. Two things are wrong with it.
@@ -231,6 +243,10 @@ fails today.** That is the regression test for this section, and it is the one
 test in this plan that already has a bug to catch.
 
 ### 2.5 Suppression is its own axis — do NOT overload `reliability_tier`
+
+> **Overridden by the owner, 2026-10-09 (§4.6):** "Persist and flag as high risk should be the
+> only result of any report … all scooters with a negative report should be labeled as 'high
+> risk', not hidden from the map." The tier IS the label; `suppressed` is removed.
 
 The goal is "keep it off the map". The tempting lever is to rate these
 `high_risk`. **Don't.** §1 exists because the app conflates *will it ride* with
@@ -644,6 +660,9 @@ was wrong:
 
 ### 4.3 Phase 1 decisions worth keeping visible
 
+> **Superseded where they conflict by §4.6 (owner, 2026-10-09):** nothing suppresses; anonymous
+> reports fade to `unknown` rather than expiring; a charge rise alone no longer clears.
+
 - **Anonymous reports never suppress.** They keep feeding
   `has_negative_report` for 24 hours in their cell, as before; hiding a
   vehicle from every rider needs an account behind it (risk 2).
@@ -771,8 +790,9 @@ reports in the window.
   stamps `last_reconfirmed_at` / `reconfirm_count` and writes an answer row.
   **A reconfirmation does not restart the hold** (§4.4 as written): a test
   ride that moves the scooter past the stationary threshold clears all its
-  reports by the movement rule, reconfirmed or not. *Open question for the
-  owner — see the PR.*
+  reports by the movement rule, reconfirmed or not. *Answered by the owner,
+  2026-10-09 (§4.6, rule 5e): a reconfirmation RE-BASELINES the report's
+  position and charge at the vehicle's state once the test ride settles.*
 - **Points**: 10 (`condition_check`) on a test-ridden check; +40
   (`condition_check_confirmed`) when the feed confirms; max 50. Withheld
   (reason stored on the check) for **`own_reports_only`** (every report the
@@ -790,9 +810,9 @@ reports in the window.
   before. Either side, not only after, because "Did you do a test ride?" is
   past tense — the ride normally starts before the form is sent. None by
   20 minutes after → `unconfirmed`.
-- **`needs_condition_check`** on `/devices/current`, from the same single
-  pass as `suppressed` (`fleet_reports.suppressions_and_condition_checks`);
-  `null` when that query fails.
+- **`needs_condition_check`** on `/devices/current`: an uncleared
+  condition-type device report (signed in or anonymous) — §4.6; `null`
+  when that query fails.
 - **Reinstatement**: an admin may reinstate a rider-resolved report from
   `/admin/fleet` (stamped `reinstated_at/_by_login/reinstate_reason`); an
   admin's resolution stays final. Points already paid are not clawed back.
@@ -833,6 +853,77 @@ reports in the window.
   (feed leave/rejoin, rental start/end, disabled, a > 50 m non-rental move).
 - **Census** and **export** pages render the Phase 1 data; CSV via
   `/admin/fleet/export.csv`.
+
+### 4.6 The owner's rules for negative reports (2026-10-09) — IMPLEMENTED, and they override
+
+Verbatim:
+
+> "The logic should be move + battery increase, or going off the map and appearing in a new
+> location with a full battery = improved/reset. A move of <100m should not reset any negative
+> reported device, ever. Nor should simply 24h time. Reports of non-rideability should persist
+> until they are verified as resolved by a successful movement and an increase in battery
+> (otherwise indicating servicing)."
+>
+> "Persist and flag as high risk should be the only result of any report. 24h fade can apply
+> for anonymous reports, but they should fade into unknown risk, not likely ridable. But all
+> scooters with a negative report should be labeled as 'high risk', not hidden from the map."
+>
+> Location reports: "A 100 m+ move clears them."
+
+As built (`src/fleet_reports.py`, one SQL builder — `uncleared_negative_sql` /
+`negative_state_sql` — embedded by `/devices/current`, `/h3`, identify, condition checks and the
+admin pages; `tests/test_reliability_sql_mirrored.py` holds every consumer to it):
+
+1. **Nothing hides a scooter.** `suppressed` / `suppressed_reason` / `suppressed_since` are gone
+   from `/devices/current`, identify (`status` is never `suppressed`) and the dossier. In their
+   place: `negative_report_risk` (`high_risk` | `unknown` | null), `negative_report_reason`,
+   `negative_report_reason_detail` (the not_rideable reason), `negative_report_since`. Clients
+   must not hide on them. *Overrides §2.5, §4.1(4), §4.2(2)-(3).* No API-side planner or
+   recommendation path filtered on suppression or high_risk; Phase 3 must drop its
+   suppression exclusion.
+2. **Negative types:** `not_rideable` (any reason), `damaged`, `dead_battery` (rideability);
+   `inaccessible`, `not_found` (location). `improperly_parked` changes no label. Map pins
+   (`negative_reports`) are anonymous rideability reports.
+3. **Signed in** → `high_risk` until cleared; no time expiry.
+4. **Anonymous** → `high_risk` for 24 h, then `unknown` (reliability tier `unknown`, never `ok`)
+   until cleared. *Overrides the 24 h-in-cell expiry of §2.2/§4.1(3).*
+5. **Clearing.** (a) Rideability: ≥ 100 m straight-line from the report-time position **and**
+   a charge rise ≥ 5% of a full charge (`CHARGE_RISE_FRACTION`, kept from Phase 1) over the
+   report-time charge — or off the map (a `device_history` stop closed `absent`, i.e. out of
+   the feed longer than `device_state.ABSENT_STOP_AFTER`) after the report and reappeared
+   ≥ 100 m from the last-seen spot with a **full** battery: ≥ 95%, read as the 95th entry of the
+   feed's 100-step range→percent table (the feed's battery is an integer percent). (b) Location:
+   ≥ 100 m from the report-time position, or off the map and back ≥ 100 m from last-seen; no
+   battery condition. (c) < 100 m never clears; time never clears. (d) Admin resolve and rider
+   condition check ("no longer a problem", test ride = Y) clear, with `resolution_source`.
+   (e) Reconfirmation re-baselines position and charge at the vehicle's state once the test
+   ride settles (window closed, no open rental; `baseline_pending` holds it until then).
+6. **Retired:** the stationary-threshold "moved" clear, the 24 h signed-in/anonymous expiry,
+   the charge-rise-alone clear, and the h3-cell scoping.
+7. **§2.4 stays fixed:** a report on a 100%-charged vehicle stands (it cannot rise; only the
+   off-map path, a location move, or verification clears it).
+
+8. **`latest_report`** (owner, 2026-10-09: "The most recent report should be displayed on the
+   scooter details tile. So like, users know if a ride was reported inaccessible."): on every
+   vehicle in `/devices/current`, the newest uncleared negative report by observed time (then
+   reported time), `{report_type, reason, observed_at, reported_at, anonymous}`, from the same
+   pass as the `negative_report_*` fields. Anonymous reports show while they stand, flagged.
+   `improperly_parked` is excluded and no separate `latest_parking_report` was added: a parking
+   complaint changes no label and tells a rider nothing about whether to walk to the scooter;
+   it is Veo's to act on and is in the admin pages and export. The `/devices/current` ETag now
+   carries a reports fingerprint so a report filed or resolved mid-cycle is not held behind a 304.
+
+Decisions the rules left open:
+- **Report-time position** = `device_state.current_lat/lon` when the report arrives
+  (`vehicle_lat/lon_at_report`, sql/102); older rows are backfilled from the stop the vehicle
+  occupied then, else the reporter's point. With no position, a report cannot clear by moving.
+- **No recorded charge** (reports before sql/100, or filed while the vehicle was out of the
+  feed): a "rise" counts only when the vehicle now reads full (≥ 95%).
+- **Current position** is `device_state.current_lat/lon`, which a rental freezes and its
+  release updates, so a ride in progress does not clear anything until it ends.
+- **Distance** is equirectangular (`geo_distance_m`, sql/102), sub-metre at city scale.
+- **Condition checks** list uncleared device reports, anonymous ones included; map pins have no
+  report to resolve and only clear by the rules.
 
 ---
 

@@ -33,6 +33,63 @@ ALTER TABLE device_reports
     ADD COLUMN IF NOT EXISTS reinstated_by_login  TEXT,
     ADD COLUMN IF NOT EXISTS reinstate_reason     TEXT;
 
+-- HOW A NEGATIVE REPORT CLEARS (owner, 2026-10-09; src/fleet_reports.py):
+-- a >= 100 m straight-line move from where the vehicle was when reported
+-- (plus a charge rise, for a rideability report), or reappearing >= 100 m
+-- away after going off the map (with a full battery, for a rideability
+-- report). That needs the vehicle's position at report time, which
+-- device_reports never stored (lat/lng are the REPORTER's, optional):
+--
+--   vehicle_lat/lon_at_report  device_state.current_lat/lon when the report
+--                              arrived; backfilled below from the stop the
+--                              vehicle was at, else the reporter's point.
+--   baseline_lat/lon, baseline_range_meters, baseline_at
+--                              a reconfirmation ("still a problem" after a
+--                              test ride) re-baselines the report at the
+--                              vehicle's position and charge once the ride
+--                              settles; NULL = use the report-time values.
+--   baseline_pending           TRUE from the reconfirmation until it
+--                              settles: the report cannot clear meanwhile.
+--   baseline_check_id          which check owns the pending baseline.
+ALTER TABLE device_reports
+    ADD COLUMN IF NOT EXISTS vehicle_lat_at_report DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS vehicle_lon_at_report DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS baseline_lat          DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS baseline_lon          DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS baseline_range_meters INTEGER,
+    ADD COLUMN IF NOT EXISTS baseline_at           TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS baseline_pending      BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS baseline_check_id     BIGINT;
+
+-- Backfill: the stop the vehicle occupied when the report was filed.
+-- Idempotent (only NULL rows), so a replay is a no-op.
+UPDATE device_reports dr
+   SET (vehicle_lat_at_report, vehicle_lon_at_report) = (
+        SELECT h.lat, h.lon FROM device_history h
+         WHERE h.vehicle_identifier = dr.vehicle_identifier
+           AND h.snapshot_time <= dr.reported_at
+         ORDER BY h.snapshot_time DESC LIMIT 1)
+ WHERE dr.vehicle_lat_at_report IS NULL
+   AND EXISTS (SELECT 1 FROM device_history h
+                WHERE h.vehicle_identifier = dr.vehicle_identifier
+                  AND h.snapshot_time <= dr.reported_at);
+UPDATE device_reports
+   SET vehicle_lat_at_report = lat, vehicle_lon_at_report = lng
+ WHERE vehicle_lat_at_report IS NULL AND lat IS NOT NULL AND lng IS NOT NULL;
+
+-- Straight-line metres between two points, equirectangular — exact to well
+-- under a metre at city scale, and IMMUTABLE so the planner can inline it.
+-- NULL in, NULL out (callers COALESCE to "not moved").
+CREATE OR REPLACE FUNCTION geo_distance_m(
+    lat1 DOUBLE PRECISION, lon1 DOUBLE PRECISION,
+    lat2 DOUBLE PRECISION, lon2 DOUBLE PRECISION
+) RETURNS DOUBLE PRECISION
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT 6371008.8 * sqrt(
+        power(radians(lat2 - lat1), 2)
+        + power(radians(lon2 - lon1) * cos(radians((lat1 + lat2) / 2)), 2))
+$$;
+
 -- Every resolution written before this migration came from the Phase 1
 -- admin endpoint, so it is an admin's.
 UPDATE device_reports
@@ -124,8 +181,13 @@ CREATE TABLE IF NOT EXISTS device_condition_checks (
     feed_checked_at            TIMESTAMPTZ,
     points_base                INTEGER NOT NULL DEFAULT 0,
     points_confirmed           INTEGER NOT NULL DEFAULT 0,
-    points_withheld            TEXT
+    points_withheld            TEXT,
+    -- When the reconfirmed reports' baselines were settled (NULL until
+    -- then, and for checks that reconfirmed nothing).
+    baseline_settled_at     TIMESTAMPTZ
 );
+ALTER TABLE device_condition_checks
+    ADD COLUMN IF NOT EXISTS baseline_settled_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_condition_checks_vehicle
     ON device_condition_checks (vehicle_identifier, submitted_at DESC);

@@ -27,7 +27,7 @@ from src import (  # noqa: E402
     fleet_reports, points,
 )
 from src.accounts import SessionUser, require_session  # noqa: E402
-from tests.test_fleet_reports_pg import SQL_DIR, _Fleet, _reachable  # noqa: E402
+from tests.test_fleet_reports_pg import FULL, SQL_DIR, _Fleet, _reachable  # noqa: E402
 
 _BUCKETS = ("condition_checks_account", "condition_conditions_account")
 
@@ -39,6 +39,8 @@ class _CheckFleet(_Fleet):
             cur.execute("DELETE FROM device_condition_checks WHERE vehicle_identifier = ANY(%s)",
                         (self.vids,))
             cur.execute("DELETE FROM device_feature_reports WHERE vehicle_identifier = ANY(%s)",
+                        (self.vids,))
+            cur.execute("DELETE FROM device_history WHERE vehicle_identifier = ANY(%s)",
                         (self.vids,))
             cur.execute("DELETE FROM rate_limit_events WHERE bucket = ANY(%s)", (list(_BUCKETS),))
         self.conn.commit()
@@ -68,6 +70,15 @@ class _CheckFleet(_Fleet):
         with self.conn.cursor() as cur:
             cur.execute(f"UPDATE device_state SET {sets} WHERE vehicle_identifier = %s",
                         (*cols.values(), vid))
+        self.conn.commit()
+
+    def stop_at(self, vid: str, arrived: datetime):
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO device_history (vehicle_identifier, snapshot_time, lat, lon, "
+                "spatial_status, device_id_observed) "
+                "VALUES (%s, %s, 39.7392, -104.9903, 'denver_core', 'bike-x')",
+                (vid, arrived))
         self.conn.commit()
 
     def one(self, sql: str, *args):
@@ -174,7 +185,7 @@ def test_the_list_is_the_standing_negative_rideability_reports(fleet):
     inacc = fleet.report(v, "inaccessible", account_id=b)
     nf = fleet.report(v, "not_found", account_id=b)
     fleet.report(v, "improperly_parked", account_id=b)          # never listed
-    fleet.report(v, "damaged", account_id=None)                 # anonymous: never stands
+    anon = fleet.report(v, "damaged", account_id=None)          # anonymous: uncleared too
     resolved = fleet.report(v, "dead_battery", account_id=a)
     with fleet.conn.cursor() as cur:
         cur.execute("UPDATE device_reports SET resolved_at = NOW(), "
@@ -185,7 +196,7 @@ def test_the_list_is_the_standing_negative_rideability_reports(fleet):
     r = rider.get(f"/api/v1/devices/{v}/conditions")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert [c["report_id"] for c in body["conditions"]] == [inacc, nr]
+    assert [c["report_id"] for c in body["conditions"]] == [inacc, nr, anon]
     flat = next(c for c in body["conditions"] if c["report_id"] == nr)
     assert flat["reason"] == "flat_tire" and flat["own_report"] is True
     assert flat["observed_at"].startswith("2099-05-28")
@@ -212,9 +223,9 @@ def test_needs_condition_check_on_devices_current(fleet):
     clean = fleet.vehicle("9300006")
     d = _devices(fleet)
     assert d[hidden]["needs_condition_check"] is True
-    # not_found suppresses but is not asked about: no invitation.
+    # not_found labels high risk but is not asked about: no invitation.
     assert d[only_nf]["needs_condition_check"] is False
-    assert d[only_nf]["suppressed"] is True
+    assert d[only_nf]["reliability_tier"] == "high_risk"
     assert d[parked]["needs_condition_check"] is False
     assert d[clean]["needs_condition_check"] is False
 
@@ -303,7 +314,7 @@ def test_no_test_ride_discards_every_answer(fleet):
     assert fleet.one("SELECT COUNT(*) FROM device_condition_check_answers "
                      "WHERE check_id = %s", body["check_id"])[0] == 0
     assert _ledger(fleet, a) == []
-    assert v in fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)
+    assert v in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
 
 
 # ---------------------------------------------------------------------------
@@ -346,9 +357,9 @@ def test_a_test_ride_resolves_and_reconfirms_with_audit(fleet):
     assert answers == sorted([(fixed, False, "resolved", False),
                               (still, True, "reconfirmed", False),
                               (nf, None, "found", False)])
-    # The reconfirmed report still suppresses; the resolved ones count for nothing.
-    s = fleet_reports.suppressions(fleet.conn.cursor(), fleet.cycle)
-    assert s[v][0] == "damaged"
+    # The reconfirmed report still labels; the resolved ones count for nothing.
+    s = fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
+    assert s[v]["reason"] == "damaged"
     # A rider resolution is distinct from an admin's in the dossier.
     adm = TestClient(_admin_app(admin_acct))
     d = adm.get(f"/api/v1/private/devices/{v}/reports").json()
@@ -373,15 +384,15 @@ def _admin_app(account_id: int) -> FastAPI:
     return app
 
 
-def test_a_resolution_unsuppresses_on_the_next_request(fleet):
+def test_a_resolution_clears_the_label_on_the_next_request(fleet):
     a, b = fleet.account(), fleet.account()
     v = fleet.vehicle("9300014")
     rid = fleet.report(v, "inaccessible", account_id=b)
-    assert _devices(fleet)[v]["suppressed"] is True
+    assert _devices(fleet)[v]["reliability_tier"] == "high_risk"
     assert _check(_rider(fleet, a), v, answers=[(rid, False)],
                   plate="9300014").status_code == 200
     d = _devices(fleet)[v]
-    assert d["suppressed"] is False and d["needs_condition_check"] is False
+    assert d["negative_report_risk"] is None and d["needs_condition_check"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -525,3 +536,82 @@ def test_the_get_is_rate_limited_per_account(fleet, monkeypatch):
 def test_unknown_vehicle_is_a_404(fleet):
     rider = _rider(fleet)
     assert rider.get("/api/v1/devices/00000000000000ff/conditions").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# A reconfirmation re-baselines the report (owner, 2026-10-09)
+# ---------------------------------------------------------------------------
+
+def _baseline(fleet, rid):
+    return fleet.one("SELECT baseline_pending, baseline_lat, baseline_range_meters "
+                     "FROM device_reports WHERE id = %s", rid)
+
+
+def _uncleared(fleet, v):
+    return v in fleet_reports.negative_states(fleet.conn.cursor(), fleet.cycle)
+
+
+def test_a_reconfirmation_rebaselines_after_the_test_ride_settles(fleet):
+    a, b, c = fleet.account(), fleet.account(), fleet.account()
+    now = datetime.now(timezone.utc)
+    v = fleet.vehicle("9300050", range_m=1000)
+    broken = fleet.report(v, "dead_battery", account_id=b, range_at_report=1000)
+    r = _check(_rider(fleet, a), v, answers=[(broken, True)], plate="9300050")
+    assert r.status_code == 200, r.text
+    assert _baseline(fleet, broken)[0] is True
+    # A location report filed after the check follows the ordinary rules.
+    other = fleet.report(v, "inaccessible", account_id=c)
+
+    # The test ride takes it 150 m and Veo happens to swap the battery:
+    # while the baseline is pending the reconfirmed report cannot clear.
+    fleet.move(v, 150, range_m=FULL)
+    ids = set(fleet_reports.standing_report_ids(fleet.conn.cursor(), fleet.cycle, v))
+    assert broken in ids and other not in ids     # the 150 m move cleared the other
+
+    condition_checks.confirm_pending_checks(now + timedelta(minutes=10))
+    assert _baseline(fleet, broken)[0] is True    # window still open
+    # Settled by the cycle whose feed snapshot it reads (the fixture's).
+    condition_checks.confirm_pending_checks(fleet_reports_snap())
+    pending, lat, rng = _baseline(fleet, broken)
+    assert pending is False and rng == FULL
+    assert abs(lat - (39.7392123 + 150 / 111_195.0)) < 1e-9
+    d = _devices(fleet)[v]
+    assert d["reliability_tier"] == "high_risk" and d["negative_report_reason"] == "dead_battery"
+
+    # A later clear needs a NEW 100 m move AND a rise from the new baseline.
+    fleet.move(v, 300, range_m=FULL)              # 150 m on, but no rise past FULL
+    assert _uncleared(fleet, v)
+    fleet.move(v, 200, range_m=FULL)              # 50 m from the baseline
+    assert _uncleared(fleet, v)
+
+
+def test_a_rebaselined_report_clears_on_a_new_move_and_rise(fleet):
+    a, b = fleet.account(), fleet.account()
+    now = datetime.now(timezone.utc)
+    v = fleet.vehicle("9300051", range_m=2000)
+    rid = fleet.report(v, "not_rideable", account_id=b, range_at_report=1000)
+    _check(_rider(fleet, a), v, answers=[(rid, True)], plate="9300051")
+    condition_checks.confirm_pending_checks(fleet_reports_snap())
+    assert _baseline(fleet, rid)[2] == 2000       # re-baselined at the charge then
+    fleet.move(v, 120, range_m=2000 + points_rise() - 2)
+    assert _uncleared(fleet, v)                   # the rise is measured from 2000
+    fleet.move(v, 120, range_m=2000 + points_rise())
+    assert not _uncleared(fleet, v)
+
+
+def points_rise():
+    return fleet_reports.charge_rise_meters()
+
+
+def test_a_rental_still_open_at_window_close_waits_to_settle(fleet):
+    a, b = fleet.account(), fleet.account()
+    now = datetime.now(timezone.utc)
+    v = fleet.vehicle("9300052")
+    rid = fleet.report(v, "dead_battery", account_id=b)
+    _check(_rider(fleet, a), v, answers=[(rid, True)], plate="9300052")
+    fleet.state(v, rental_started_at=now + timedelta(minutes=2))
+    condition_checks.confirm_pending_checks(now + timedelta(minutes=25))
+    assert _baseline(fleet, rid)[0] is True       # still riding: not settled
+    fleet.state(v, rental_started_at=None)
+    condition_checks.confirm_pending_checks(now + timedelta(minutes=31))
+    assert _baseline(fleet, rid)[0] is False

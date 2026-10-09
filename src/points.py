@@ -222,9 +222,9 @@ NAV_DISTANCE_STEP_METERS = NAV_DISTANCE_STEP_KM * 1000
 # value for it.
 #
 # inaccessible (sql/100) is intentionally ABSENT too, for a different reason:
-# a signed-in inaccessible report takes a vehicle off every rider's map
-# (src/fleet_reports.py), and paying for that would pay for griefing — one
-# account suppressing a neighbourhood's fleet for points
+# a signed-in inaccessible report marks a vehicle high risk until it moves
+# 100 m (src/fleet_reports.py), and paying for that would pay for griefing —
+# one account marking a neighbourhood's fleet high risk for points
 # (docs/FLEET_REPORTS_PLAN.md risk 2).
 REPORT_TYPE_POINTS: dict[str, tuple[str, int]] = {
     "not_rideable":      ("report_not_rideable", POINTS_REPORT_NOT_RIDEABLE),

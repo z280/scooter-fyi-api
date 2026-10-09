@@ -786,6 +786,12 @@ drift: `parked_hours`, `battery_reading`, `quality_designation`,
 `metadata.snapshot_time`, never the wall clock, so they do not tick
 between polls of the same cycle.
 
+
+The tag also carries a fingerprint of the negative-report inputs (newest
+report and map-pin ids, latest resolution / reinstatement / reconfirmation /
+re-baseline time), so a report filed or resolved mid-cycle changes the tag at
+once instead of being hidden behind a 304 until the next cycle. An anonymous
+report crossing its 24-hour mark mid-cycle still waits for the next cycle.
 #### Feature property reference
 
 | Field | Type | Description |
@@ -808,11 +814,12 @@ between polls of the same cycle.
 | `range_rank_all_by_type` | string \| null | **Opt-in via `?include=ranks`.** `"x/y"` where `y` is the count of scooters of this form_factor and `x` is this scooter's rank ascending (1 = lowest range). **Ties get the highest position in the tied group**: 20 scooters tied for the top range in a fleet of 100 all show `"100/100"`. |
 | `range_rank_all_devices` | string \| null | **Opt-in via `?include=ranks`.** Same as above but `y` = all eligible scooters across types. |
 | `range_rank_h3_8_peers` / `range_rank_h3_9_peers` / `range_rank_h3_10_peers` | string \| null | **Opt-in via `?include=ranks`.** Range rank within the same h3 cell at the given resolution. A scooter alone in its cell shows `"1/1"`. |
-| `has_negative_report` | bool | `true` when a report that says the vehicle **won't ride** still stands. Two rules, by whether anybody stands behind the report. **Anonymous** (and every map-pin `POST /api/v1/reports` row): filed against this `vehicle_identifier` in this exact `h3_10_index` cell within the last 24 h. **Signed in** (`POST /api/v1/reports/device` with a bearer token): until the vehicle **moves** (its `first_observed_at_location` is later than the report) or its charge **rises** by at least 5% of a full charge over what it read when the report was filed — no clock, no cell. *Until 2026-10 (sql/100) the signed-in rule cleared on any vehicle reading 100%, which made a fully charged scooter unreportable; it now needs a rise.* `improperly_parked` and `inaccessible` reports never count (they say nothing about whether it rides — see `suppressed`), and a report an admin has resolved counts for nothing. |
-| `suppressed` | bool \| null | **Should a rider be sent to this vehicle at all?** `true` when a signed-in, unresolved device report of any type **except `improperly_parked`** still stands under the signed-in rule above (not moved, charge not risen). The client keeps a suppressed vehicle out of the rider's available set and out of route planning — **excluded, not penalised** — and its card says why. **Deliberately separate from `reliability_tier`** (docs/FLEET_REPORTS_PLAN.md §2.5): a fully charged scooter behind a fence rides perfectly, so it is `suppressed` with reason `inaccessible` while its tier says whatever its hardware earns. Anonymous reports never suppress. `improperly_parked` never suppresses — a badly parked scooter is reachable and rideable, and the report is Veo's to act on. Broken parts from feature confirmation (`device_features.poor_condition`) never suppress — the scooter still rides. `null` when the suppression query failed this cycle: **unknown, not "not suppressed"**. |
-| `suppressed_reason` | string \| null | Why, when `suppressed`: the strongest standing report type, in this order — `inaccessible`, `not_found`, `not_rideable`, `damaged`, `dead_battery`. `null` otherwise. Copy for `inaccessible` must discourage retrieval ("on private property — don't go in"). |
-| `suppressed_since` | string \| null | ISO 8601: the oldest still-standing report of `suppressed_reason`'s type — "hidden for this reason since". `null` when not suppressed. |
-| `needs_condition_check` | bool \| null | `true` when the vehicle has at least one **standing negative-rideability report** — a signed-in, unresolved `not_rideable`, `dead_battery`, `damaged` or `inaccessible` report that still holds under the signed-in rule (not moved, charge not risen). The map uses it to **invite** a rider [condition check](#condition-checks--get-apiv1devicesvehicle_identifierconditions-and-post-condition-checks). An invitation, not a verdict: independent of `reliability_tier` and of `suppressed` (a vehicle suppressed only by `not_found` is `false` — nobody standing at it can be asked whether it is missing). `null` when the query failed this cycle. |
+| `has_negative_report` | bool | `true` while an **uncleared negative report** makes this vehicle `high_risk` (owner, 2026-10-09). Negative types: `not_rideable` (any reason), `damaged`, `dead_battery`, `inaccessible`, `not_found` — **not** `improperly_parked`, which changes no label. A **signed-in** report counts until it is **cleared**, with no time limit; an **anonymous** one (and every map-pin `POST /api/v1/reports` row) counts for 24 h and then **fades to `unknown`** — `has_negative_report` goes `false`, `negative_report_risk` reads `"unknown"`, and `reliability_tier` reads `unknown`, **never `ok`**, until it is cleared. **Clearing:** a rideability report (`not_rideable`, `damaged`, `dead_battery`) clears only when the vehicle is **≥ 100 m** (straight line) from where it was when reported **and** its charge has **risen** by ≥ 5% of a full charge over the charge then — or when it went **off the map** (out of the feed longer than the ingest's absence threshold) and **reappeared ≥ 100 m** from where it was last seen with a **full battery** (≥ 95% on the feed's 100-step battery table). A location report (`inaccessible`, `not_found`) clears on a ≥ 100 m move, or on reappearing ≥ 100 m away after going off the map — no battery condition. **A move under 100 m never clears anything, and time never clears.** A report with no recorded charge counts a rise only when the vehicle now reads full. An admin resolve, or a rider [condition check](#condition-checks--get-apiv1devicesvehicle_identifierconditions-and-post-condition-checks) answering "no longer a problem" after a test ride, clears it; "still a problem" re-baselines it. *Until 2026-10-09 a signed-in report cleared on any move past the stationary threshold or on a charge rise alone, and an anonymous one expired after 24 h in its cell.* |
+| `negative_report_risk` | string \| null | What the uncleared negative reports do to the label: `"high_risk"` (a signed-in report, or an anonymous one under 24 h old) or `"unknown"` (only faded anonymous reports). `null` when none stand. **No report hides a scooter** (owner, 2026-10-09: "labeled as 'high risk', not hidden from the map"): clients must **not** drop a vehicle from the map, the available set or a route plan on this or any other report field — it is a label. *Replaces Phase 1's `suppressed` / `suppressed_reason` / `suppressed_since`, which shipped on 2026-10-09 and are gone.* |
+| `negative_report_reason` / `negative_report_reason_detail` | string \| null | The strongest uncleared type among the reports setting the risk, in this order — `inaccessible`, `not_found`, `not_rideable`, `damaged`, `dead_battery` — and, for `not_rideable`, the rider's `reason` (`acceleration`, `flat_tire`, `wheel`, `lighting`, `seat`, `handlebar`, or `null`). For the card's "High risk: reported not rideable (acceleration)". Copy for `inaccessible` must discourage retrieval ("on private property — don't go in"). |
+| `negative_report_since` | string \| null | ISO 8601: the oldest uncleared report of `negative_report_reason`'s type. `null` when none. All four `negative_report_*` fields are `null` (and `needs_condition_check` `null`) if their query failed this cycle — unknown, not "no report"; `has_negative_report` and the tier still come from the payload's own query. |
+| `latest_report` | object \| null | The **most recent** uncleared negative report — newest by `observed_at` (when the rider saw it; `reported_at` when they gave none), not the strongest by priority — for the scooter details tile (owner, 2026-10-09: "so users know if a ride was reported inaccessible"). `{report_type, reason, observed_at, reported_at, anonymous}`: `reason` is the not_rideable reason or `null`; `anonymous` is `true` for a report nobody signed (and for map pins), which still shows while it stands. Never the reporter, never a location. `improperly_parked` is never here (it is not a negative report, and a parking complaint tells a rider nothing about whether to walk to it). `null` when none stands, or when the query failed. Computed in the same pass as the `negative_report_*` fields. |
+| `needs_condition_check` | bool \| null | `true` when the vehicle has at least one **uncleared** `not_rideable`, `dead_battery`, `damaged` or `inaccessible` device report (signed in or anonymous) — the map uses it to **invite** a rider [condition check](#condition-checks--get-apiv1devicesvehicle_identifierconditions-and-post-condition-checks). `false` for a vehicle whose only report is `not_found` (nobody at the scooter can be asked whether it is missing) or a map pin. `null` when the query failed. |
 | `feature_status` | string | How much to trust what we know about this vehicle's crowdsourced equipment: `"needs_features_confirmed"` (nobody has ever reported it — every device starts here), `"needs_review"` (two reports disagreed), or `"up_to_date"`. Always on the wire, never behind an `?include=` token: it is what a client's "☑️ Confirm Features" affordance reads to decide whether it is offering 12, 14 or 6 points, so opting in would mean showing the wrong number. See [`POST /api/v1/reports/device-features`](#post-apiv1reportsdevice-features). |
 | `device_features` | object \| null | `{ bell, cup_holder, phone_holder, basket, poor_condition[] }` — the current consensus. **`null` until something is known about the vehicle**, and each field inside is itself **tri-state: `true` / `false` / `null`** — `false` claims a rider looked and saw nothing, `null` says nobody has answered that question yet. Partial objects are normal: a vehicle known only through a ride-survey basket answer (or the Rover catalog seed) carries `basket` with the other three `null`, and a vehicle confirmed before the basket question existed (sql/058) carries `basket: null`. Filter with `=== true` and the distinction never bites — an unknown feature doesn't satisfy a "must have it" filter, same as an absent one. `poor_condition` lists which of the *present* features are not in good condition (always a subset of the `true` ones; empty means everything works). |
 | `quality_designation` | string | One of `"poor"`, `"acceptable"`, `"good"`, `"great"`, or `"N/A"`. Composite score from range, dwell time, failed-start count, active negative reports, and peer-relative dwell outliers (a dwell-outlier per the rules under `dwell_percentile_hood` costs one extra tier, stacking with the absolute-dwell demerits). `"N/A"` for disabled, reserved, or rangeless devices. See README / src/quality.py for the rule set. |
@@ -1042,9 +1049,11 @@ Only identifiers already in the public devices payload — **never the plate**.
 
 ```json
 { "device_id": "a1b2c3", "vehicle_identifier": "8c4a1f0d2e9b7a35",
-  "status": "suppressed",
-  "suppressed_reason": "inaccessible", "suppressed_since": "2026-10-06T18:02:11+00:00",
-  "open_reports": [ { "report_type": "inaccessible", "reported_at": "2026-10-06T18:02:11+00:00" } ],
+  "status": "on_map",
+  "negative_report_risk": "high_risk", "negative_report_reason": "inaccessible",
+  "negative_report_reason_detail": null, "negative_report_since": "2026-10-06T18:02:11+00:00",
+  "open_reports": [ { "report_type": "inaccessible", "reason": null,
+                      "reported_at": "2026-10-06T18:02:11+00:00", "risk": "high_risk" } ],
   "last_observed_at": "2026-10-09T16:40:00+00:00", "hours_missing": null,
   "last_seen": null, "gone_acknowledged_at": null,
   "public_name": "Lunar 🐸", "vehicle_model_name": "Apollo", "form_factor": "scooter",
@@ -1053,9 +1062,9 @@ Only identifiers already in the public devices payload — **never the plate**.
 
 | Field | Meaning |
 |---|---|
-| `status` | `on_map` — in the current snapshot, nothing hiding it. `suppressed` — in the snapshot, hidden by a standing report (same rule as `/devices/current`'s `suppressed`). `missing` — the feed no longer carries it; `device_id` is `null` (a stale `bike_id` may be another vehicle's now). `gone` — missing, and an admin acknowledged it permanently gone. The fourth reason a rider might not see a vehicle — **filtered** by their own map filters — is the client's to detect: only it knows the filters. |
-| `open_reports` | The signed-in, unresolved reports that still stand, strongest first: `report_type`, `reported_at`. Never the reporter. Present on every status — a missing vehicle reported inaccessible before it vanished still shows it. |
-| `suppressed_reason` / `suppressed_since` | As on `/devices/current`; `null` unless `status` is `suppressed`. |
+| `status` | `on_map` — in the current snapshot; **always**, whatever its reports say (no report hides a scooter, owner 2026-10-09 — `suppressed` is gone). `missing` — the feed no longer carries it; `device_id` is `null` (a stale `bike_id` may be another vehicle's now). `gone` — missing, and an admin acknowledged it permanently gone. The other reason a rider might not see a vehicle — **filtered** by their own map filters — is the client's to detect: only it knows the filters. |
+| `open_reports` | The uncleared negative reports (signed in or anonymous, plus map pins), strongest first: `report_type`, `reason`, `reported_at`, `risk` (`high_risk` / `unknown`). Never the reporter. Present on every status. |
+| `negative_report_risk` / `_reason` / `_reason_detail` / `_since` | As on `/devices/current`, on every status. |
 | `last_observed_at` | When the feed last carried it (the snapshot time for a vehicle in it). |
 | `hours_missing` | `missing` / `gone` only: hours between `last_observed_at` and the current snapshot. |
 | `last_seen` | `missing` / `gone` only: `{lat, lon}` **rounded to 3 decimals (~100 m)** — where we last saw it, a neighbourhood not a doorstep. |
@@ -2392,10 +2401,9 @@ weighs it double in the public aggregates.
 
 `inaccessible` (sql/100) — **the vehicle may be perfectly fine; you cannot
 lawfully or reasonably reach it**: private property, a locked yard, inside a
-fence, in a building. It does **not** feed `has_negative_report` /
-`reliability_tier` (it says nothing about whether it rides), earns **no
-points**, and — signed in — sets `suppressed` on `/devices/current` until the
-vehicle moves. Its coordinates never appear in the public monthly CSV (nor do
+fence, in a building. Like every negative report it makes the vehicle
+`high_risk` until cleared — for a location report, by a ≥ 100 m move (see
+`has_negative_report`) — and it earns **no points**. Its coordinates never appear in the public monthly CSV (nor do
 a `not_found` report's). `inaccessible` is for a scooter you can **see but
 cannot reach**; "it isn't where the map says" is `not_found`.
 Ship the API before the button: an older backend 422s the new type.
@@ -2447,17 +2455,14 @@ resolvable location — your `lat`/`lng`, or the scooter's last known H3
 cell as a fallback. Anonymous reports are still accepted and still count
 in the aggregates; they just return `"points_awarded": 0`.
 
-Reports feed `has_negative_report` and `reliability_tier` on
-`/api/v1/devices/current` — anonymous ones for 24 h in the scooter's cell,
-signed-in ones until the scooter moves or its charge rises (see the
-`has_negative_report` field) — **except `improperly_parked` and
-`inaccessible`**. `improperly_parked` is a parking-compliance signal, not a
-ride-quality one: it still counts in `/reports/summary` and the monthly CSV
-export, but a badly-parked scooter can ride perfectly, so it deliberately
-does **not** flip `has_negative_report` / `reliability_tier`, nor set
-`suppressed`: it is a report to Veo. Every other signed-in report —
-`inaccessible` and `not_found` included — sets `suppressed` while it stands;
-an admin can resolve a report, after which it counts for nothing.
+Reports set `has_negative_report`, `negative_report_*` and
+`reliability_tier` on `/api/v1/devices/current` — signed-in ones as
+`high_risk` until cleared, anonymous ones as `high_risk` for 24 h and then
+`unknown` until cleared (the rules are under `has_negative_report`). **No
+report hides a scooter.** `improperly_parked` is a parking-compliance signal,
+not a ride-quality one: it still counts in `/reports/summary` and the monthly
+CSV export, but it changes **no** label — it is a report to Veo. An admin can
+resolve a report, after which it counts for nothing.
 (The frontend also opens Veo's public Zendesk "improperly parked" form
 pre-filled when a rider files one.)
 
@@ -2634,9 +2639,9 @@ attributed and points are never anonymous). Rate limits, per account:
 `GET` 60/hour, `POST` 20/hour (`429` with `Retry-After`; a refused `POST`
 still spends quota).
 
-**Which reports are asked about.** Standing (signed in, unresolved, not
-moved, charge not risen) `inaccessible`, `not_rideable` (with its `reason`),
-`damaged` and `dead_battery` reports. A standing **`not_found`** is never
+**Which reports are asked about.** Uncleared `inaccessible`, `not_rideable`
+(with its `reason`), `damaged` and `dead_battery` device reports, signed in
+or anonymous (map pins have no report to resolve and are not listed). A standing **`not_found`** is never
 asked — a rider at the scooter has found it — and is resolved automatically
 by a test-ridden check (`auto_resolves`). `improperly_parked` never appears.
 
@@ -2668,7 +2673,7 @@ is the check's proof of presence, so the rider never types the plate twice.
   "feed_window_minutes": 20 }
 ```
 
-`conditions` are in suppression priority (`inaccessible`, `not_rideable`,
+`conditions` are in label priority (`inaccessible`, `not_rideable`,
 `damaged`, `dead_battery`), oldest first within a type. Ask "Still a
 problem? Y/N" for each, showing `observed_at` (when the reporter saw it) and
 `reason`. `own_report` marks the asking rider's own report. `points` says
@@ -2697,13 +2702,14 @@ reporter is never disclosed. `404` for a vehicle we never tracked.
   `still_a_problem: false` **resolves** that report (`resolution_source:
   "rider_check"`, attributed to your account and the check — distinct from
   an admin void); each `true` **reconfirms** it (`last_reconfirmed_at`,
-  `reconfirm_count`; the report keeps holding until the vehicle moves, as
-  before — a reconfirmation does not restart it, and a test ride that moves
-  the scooter clears its reports by the movement rule). Standing
+  `reconfirm_count`) and **re-baselines** it: once the test ride settles
+  (the 20-minute window has closed and no rental is open), the report's
+  baseline position and charge become the vehicle's then, so a later clear
+  needs a **new** ≥ 100 m move (plus a charge rise, for a rideability
+  report) from there; until it settles the report cannot clear. Standing
   `not_found` reports are resolved (`found`). An answer for a report that
-  stopped standing since the `GET` is kept as `stale` and changes nothing.
-  Resolving the last standing report un-suppresses the vehicle on the next
-  request.
+  was cleared since the `GET` is kept as `stale` and changes nothing.
+  Resolving the last uncleared report lifts the label on the next request.
 
 ```json
 { "check_id": 501, "vehicle_identifier": "8c4a1f0d2e9b7a35",
@@ -2981,7 +2987,7 @@ touches.
 **Resolving a report.** `POST /reports/{id}/resolve` with
 `{"resolution": "void: …"}` (1–500 chars) voids or resolves one device
 report: from the next request it counts toward neither
-`has_negative_report` nor `suppressed`, nor the export. → `{id,
+`has_negative_report` nor the reliability label, nor the export. → `{id,
 vehicle_identifier, report_type, reported_at, resolved_at, resolved_by,
 resolution, resolution_source: "admin"}`. A rider's condition check
 resolves through the same write path with `resolution_source:
@@ -3038,11 +3044,12 @@ vehicle). Read-only; **never a location**.
 **One vehicle's dossier data.** `GET /devices/{vehicle_identifier}/reports?limit=200`
 → `{…vehicle, as_of, state: {first_ever_observed_at, last_observed_at,
 parked_since, vehicle_model_name, form_factor, in_feed, current_range_meters} | null,
-suppression: {suppressed, suppressed_reason, suppressed_since},
+negative_report: {risk, reason, reason_detail, since} | null,
 reports: [{id, report_type, reason, remapped_from_reason, observed_at,
 reported_at, signed_in, reporter_account_id, reporter_email,
 range_at_report_meters, moved_since, standing, resolved_at, resolved_by,
 resolution, resolution_source, resolved_by_check_id, last_reconfirmed_at,
+baseline_at, baseline_pending, distance_from_baseline_m,
 reconfirm_count, reinstated_at, reinstated_by, reinstate_reason,
 reporter_public_username}], condition_checks: [{id, account_id,
 public_username, submitted_at, test_ride, proof, reports_resolved,
@@ -3051,7 +3058,7 @@ answers: [{report_id, still_a_problem, outcome, own_report}]}],
 features: {feature_status, present, poor_condition,
 confirmed_at, broken_parts} | null, census: ack}`. `resolved_by` is the
 admin's email, or the GitHub login when resolved from `/admin/fleet`. Newest report first.
-`standing` = counts toward suppression right now. Movement history is
+`standing` = uncleared right now, so it sets the label. Movement history is
 `/devices/{vehicle_identifier}/history`. `404` when nothing knows the vehicle.
 
 ---

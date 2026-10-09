@@ -1095,6 +1095,7 @@ def fleet_reports_queue(
                        COALESCE(dr.resolution_source,
                                 CASE WHEN dr.resolved_at IS NOT NULL THEN 'admin' END),
                        dr.resolution, dr.reconfirm_count,
+                       COALESCE(dr.baseline_at, dr.reported_at), dr.baseline_pending,
                        (SELECT COUNT(*) FROM device_reports d2
                          WHERE d2.vehicle_identifier = dr.vehicle_identifier
                            AND d2.report_type = dr.report_type AND d2.id <> dr.id
@@ -1120,6 +1121,8 @@ def fleet_reports_queue(
         if region and reg != region:
             continue
         parked_since = r[16]
+        anchor, pending = r[21], r[22]
+        r = r[:21] + r[23:]
         rows.append({
             "id": r[0], "vehicle_identifier": r[1],
             "display_name": vehicle_identity.display_name(r[1], r[2]),
@@ -1128,13 +1131,13 @@ def fleet_reports_queue(
             "account_id": r[8], "public_username": r[9],
             "charge_pct_at_report": _pct(r[10]),
             "region": reg,
-            "moved_since": bool(parked_since and parked_since > r[7]),
+            "moved_since": bool(parked_since and parked_since > anchor),
             "resolved_at": r[17], "resolution_source": r[18], "resolution": r[19],
             "reconfirm_count": r[20],
             "near_duplicates": int(r[21] or 0),
             "standing_accounts": int(r[22] or 0),
             "standing": r[0] in standing_ids,
-            "suppressing_type": r[3] in fleet_reports.SUPPRESSION_REASON_PRIORITY,
+            "negative_type": r[3] in fleet_reports.NEGATIVE_REPORT_PRIORITY,
             "signed_in": r[8] is not None,
         })
     if region:
@@ -1228,7 +1231,7 @@ def fleet_reinstate_report(
 
 def _same_spot_clusters(stops: list[dict], reports: list[dict]) -> list[dict]:
     """Group the vehicle's stops that sit within 50 m of each other, and
-    count the stops at each spot that drew a suppressing report. A spot with
+    count the stops at each spot that drew a negative report. A spot with
     reports at two or more SEPARATE stops is "repeatedly hidden at the same
     spot" — the vehicle was moved away and came back to the same yard."""
     from . import fleet_reports
@@ -1237,7 +1240,7 @@ def _same_spot_clusters(stops: list[dict], reports: list[dict]) -> list[dict]:
     for st in stops:
         st["reports"] = [
             r for r in reports
-            if r["report_type"] in fleet_reports.SUPPRESSION_REASON_PRIORITY
+            if r["report_type"] in fleet_reports.NEGATIVE_REPORT_PRIORITY
             and r["_reported_at"] >= st["arrived_at"]
             and (st["departed_at"] is None or r["_reported_at"] < st["departed_at"])
         ]

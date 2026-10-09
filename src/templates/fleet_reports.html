@@ -3,8 +3,9 @@
 {% block content %}
 <h1>Reports queue</h1>
 <p class="muted">As of snapshot {{ as_of | denver_ts }}. <b>Standing</b> = counts toward
-suppression right now (signed in, unresolved, not moved, charge not risen).
-<code>improperly_parked</code> never suppresses. Near-dupes = same vehicle and type within ±30 min.</p>
+the vehicle's label right now (uncleared under the owner's rules: high risk while signed in or
+under 24 h anonymous, then unknown; cleared by a 100 m move plus a charge rise, or 100 m for a location report).
+No report hides a scooter. <code>improperly_parked</code> changes no label. Near-dupes = same vehicle and type within ±30 min.</p>
 {% include "_fleet_flash.html" %}
 
 <form method="get" class="filters">
@@ -46,10 +47,9 @@ suppression right now (signed in, unresolved, not moved, charge not risen).
       <td>{% if r.charge_pct_at_report is not none %}{{ r.charge_pct_at_report }}%{% else %}<span class="muted">charge ?</span>{% endif %}
         {% if r.moved_since %}<br><span class="tag tag-ok">moved since</span>{% endif %}</td>
       <td>{{ r.region or "—" }}</td>
-      <td>{% if r.standing %}<span class="tag tag-bad">{% if r.suppressing_type %}suppressing{% else %}standing{% endif %}</span>
+      <td>{% if r.standing %}<span class="tag tag-bad">uncleared</span>
           {% if r.standing_accounts > 1 %}<br><span class="muted">{{ r.standing_accounts }} accounts</span>{% endif %}
-        {% elif not r.suppressing_type %}<span class="tag">never suppresses</span>
-        {% elif not r.signed_in %}<span class="tag">anonymous: 24 h cell only</span>
+        {% elif not r.negative_type %}<span class="tag">no label</span>
         {% else %}<span class="muted">no</span>{% endif %}
         {% if r.reconfirm_count %}<br><span class="tag tag-warn">reconfirmed ×{{ r.reconfirm_count }}</span>{% endif %}</td>
       <td>{% if r.near_duplicates %}<span class="tag tag-warn">{{ r.near_duplicates }} near-dupe{{ 's' if r.near_duplicates != 1 }}</span>{% else %}—{% endif %}</td>
