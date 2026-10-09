@@ -30,12 +30,31 @@ def _layer_by_type(region_type: str) -> BoundaryLayer | None:
     return None
 
 
+#: The repository's own data/ directory (src/.. /data).
+_REPO_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+def _resolve_layer_path(configured: str) -> Path:
+    """The configured path, or the same file in the repo's data/ directory.
+
+    config.json names boundary files as `/app/data/<file>`, where the image
+    puts them. Outside the container (CI's runner, a local checkout) /app does
+    not exist, every lookup came back empty, and anything that places a point
+    in a region silently returned None. Production is unchanged: the
+    configured path exists there and wins."""
+    path = Path(configured)
+    if path.exists():
+        return path
+    fallback = _REPO_DATA_DIR / path.name
+    return fallback if fallback.exists() else path
+
+
 def _load_layer_geojson(layer: BoundaryLayer) -> dict[str, Any]:
     """Read the layer's GeoJSON file, apply the same filter + naming
     convention as the compute pipeline, and return a clean
     FeatureCollection with `id`, `properties.region_*`, and the original
     geometry."""
-    path = Path(layer.file)
+    path = _resolve_layer_path(layer.file)
     if not path.exists():
         raise FileNotFoundError(f"boundary file missing: {path}")
 
