@@ -283,9 +283,10 @@ def _if_none_match_hit(request: Request, etag: str) -> bool:
     return etag in (t.strip() for t in inm.split(","))
 
 
-def _rental_outcomes() -> dict[str, tuple[int, int, int]] | None:
+def _rental_outcomes() -> dict[str, tuple[int, int, int, int, int]] | None:
     """{vehicle_identifier: (rentals_observed, rentals_no_go,
-    recent_no_go_mask)} for the fleet.
+    recent_no_go_mask, rentals_stayed, rentals_observed_stayed_era)} for the
+    fleet. The last two are sql/098 and are what smart_ride_grade reads.
 
     sql/072. One row per device, two integers - small enough to fetch whole
     rather than join, and fetching it separately keeps the payload SELECT (all
@@ -304,7 +305,7 @@ def _rental_outcomes() -> dict[str, tuple[int, int, int]] | None:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT vehicle_identifier, rentals_observed, rentals_no_go, "
-                    "recent_no_go_mask "
+                    "recent_no_go_mask, rentals_stayed, rentals_observed_stayed_era "
                     # NOT `WHERE rentals_observed > 0`. sql/089 zeroed the
                     # lifetime counters and deliberately kept the mask; filtering
                     # on the counter would hide every vehicle's mask until its
@@ -312,7 +313,8 @@ def _rental_outcomes() -> dict[str, tuple[int, int, int]] | None:
                     # recent_rentals_no_go would read "ok" in the meantime.
                     "FROM device_state "
                     "WHERE rentals_observed > 0 OR recent_no_go_mask <> 0")
-                return {r[0]: (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0))
+                return {r[0]: (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0),
+                               int(r[4] or 0), int(r[5] or 0))
                         for r in cur.fetchall()}
     except Exception:  # noqa: BLE001
         log.warning("rental outcomes unavailable — grades omitted and "
@@ -320,9 +322,9 @@ def _rental_outcomes() -> dict[str, tuple[int, int, int]] | None:
         return None
 
 
-def _outcome(outcomes: dict[str, tuple[int, int, int]] | None,
-             vid: str | None) -> tuple[int, int, int]:
-    return (outcomes or {}).get(vid or "", (0, 0, 0))
+def _outcome(outcomes: dict[str, tuple[int, int, int, int, int]] | None,
+             vid: str | None) -> tuple[int, int, int, int, int]:
+    return (outcomes or {}).get(vid or "", (0, 0, 0, 0, 0))
 
 
 def latest_complete_cycle(cur) -> tuple[Any, datetime]:
@@ -610,7 +612,8 @@ def _devices_current_impl(
     features = []
     for r in rows:
         number_failed_starts = int(r[22]) if r[22] is not None else None
-        rentals_observed, rentals_no_go, recent_mask = _outcome(rental_outcomes, r[5])
+        (rentals_observed, rentals_no_go, recent_mask,
+         rentals_stayed, rentals_stayed_era) = _outcome(rental_outcomes, r[5])
         # sql/087. None for a vehicle device_state has never tracked, like
         # number_failed_starts; 0 for a tracked one with no failed rentals.
         recent_no_go = (recent_rentals_no_go(recent_mask)
@@ -694,7 +697,13 @@ def _devices_current_impl(
             # makes reliability_tier high_risk on its own, so a client that
             # mirrors the tier needs it.
             "recent_rentals_no_go": recent_no_go,
-            "smart_ride_grade": smart_ride_grade(rentals_observed, rentals_no_go),
+            # sql/098 — never left the spot (50 m), over its own window
+            # (rentals_observed_stayed_era, which starts at the sql/098
+            # deploy). The grade reads these two, not the no-go pair: a round
+            # trip back to the rack is a no-go but a ride that worked.
+            "rentals_stayed": rentals_stayed,
+            "rentals_observed_stayed_era": rentals_stayed_era,
+            "smart_ride_grade": smart_ride_grade(rentals_stayed_era, rentals_stayed),
             # sql/073 — a label a rider can say out loud. Derived from the
             # identifier, never stored.
             "public_name": vehicle_identity.public_name(r[5]),
@@ -928,6 +937,12 @@ def fleet_outcomes(request: Request, response: Response) -> Any:
     * `min_rentals_for_rate` with a null `no_go_rate` — a model under the
       floor keeps its counts and loses its percentage, so the client can say
       "not enough rides yet" instead of the model vanishing from the list.
+    * `stayed` / `stayed_rentals` / `stayed_rate` (sql/098) — "never left
+      the spot": never more than `stayed_radius_meters` (50 m) from the
+      unlock point and released there. Its own window, `stayed_window` /
+      `stayed_counted_since` (when sql/098 ran), and its own denominator,
+      because it starts later than the no-go counters. `no_go_rate` is
+      unchanged.
 
     Degrades to zeros rather than 500ing: an empty stats drawer is a worse
     page, a failed request is a broken one.
@@ -939,7 +954,9 @@ def fleet_outcomes(request: Request, response: Response) -> Any:
     # with no known start) can never share an ETag with real data. No comma:
     # _if_none_match_hit splits on them.
     since = (data.get("counted_since_at") or "none").replace(",", "")
-    etag = f'W/"fleet-outcomes:{since}:{data["rentals"]}:{data["no_gos"]}"'
+    stayed_since = (data.get("stayed_counted_since") or "none").replace(",", "")
+    etag = (f'W/"fleet-outcomes:{since}:{data["rentals"]}:{data["no_gos"]}:'
+            f'{stayed_since}:{data["stayed_rentals"]}:{data["stayed"]}"')
     cache = "public, max-age=300"
     if _if_none_match_hit(request, etag):
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": cache})

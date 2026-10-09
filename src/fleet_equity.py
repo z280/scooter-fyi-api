@@ -34,6 +34,13 @@ WHAT THE NUMBER IS, AND IS NOT.
   Neither says why: the vehicle, the app, the weather and a rider changing
   their mind all look the same here.
 
+  `stayed_rate` (sql/098): the share that never left the spot, i.e. never got
+  more than 50 m (`stayed_radius_meters`) from the unlock point and was
+  released there, over `stayed_known` (rentals written since sql/098, which
+  recorded it). Rows from before `stayed_counted_since` hold 0/0, meaning
+  "not recorded", so a window that opens before it is reported over the
+  recorded part only (`stayed_hours_covered`).
+
 UNCERTAINTY. Rentals are not independent draws: they cluster by place (and
 by vehicle). Each rate's 95% interval is therefore CLUSTER-ROBUST, treating
 each unlock-point r9 cell as a cluster (the linearised variance of a ratio
@@ -58,7 +65,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .config import load
-from .fleet_outcomes import MIN_RENTALS_FOR_RATE
+from .fleet_outcomes import (
+    MIN_RENTALS_FOR_RATE, STAYED_COUNTED_SINCE_MIGRATION, STAYED_DEFINITION,
+    STAYED_RADIUS_METERS,
+)
 from .pg import connection
 
 log = logging.getLogger(__name__)
@@ -121,19 +131,25 @@ def _ci(est: tuple[float, float] | None) -> list[float] | None:
 
 
 def _zero() -> dict[str, Any]:
-    return {"rentals": 0, "no_gos": 0, "no_gos_max": 0, "max_known": 0, "cells": {}}
+    return {"rentals": 0, "no_gos": 0, "no_gos_max": 0, "max_known": 0,
+            "stayed": 0, "stayed_known": 0, "cells": {}}
 
 
-def _add(acc: dict[str, Any], cell: int, rentals: int, no_gos: int, no_gos_max: int, max_known: int) -> None:
+def _add(acc: dict[str, Any], cell: int, rentals: int, no_gos: int, no_gos_max: int,
+         max_known: int, stayed: int = 0, stayed_known: int = 0) -> None:
     acc["rentals"] += rentals
     acc["no_gos"] += no_gos
     acc["no_gos_max"] += no_gos_max
     acc["max_known"] += max_known
-    c = acc["cells"].setdefault(cell, [0, 0, 0, 0])
+    acc["stayed"] += stayed
+    acc["stayed_known"] += stayed_known
+    c = acc["cells"].setdefault(cell, [0, 0, 0, 0, 0, 0])
     c[0] += rentals
     c[1] += no_gos
     c[2] += no_gos_max
     c[3] += max_known
+    c[4] += stayed
+    c[5] += stayed_known
 
 
 def _side(acc: dict[str, Any]) -> dict[str, Any]:
@@ -142,6 +158,8 @@ def _side(acc: dict[str, Any]) -> dict[str, Any]:
     cells = acc["cells"].values()
     rated = n >= MIN_RENTALS_FOR_RATE
     rated_max = mk >= MIN_RENTALS_FOR_RATE
+    sk, st = acc["stayed_known"], acc["stayed"]
+    rated_stayed = sk >= MIN_RENTALS_FOR_RATE
     return {
         "rentals": n,
         "cells": len(acc["cells"]),
@@ -152,16 +170,24 @@ def _side(acc: dict[str, Any]) -> dict[str, Any]:
         "never_left_radius": km,
         "never_left_radius_rate": round(km / mk, 4) if rated_max else None,
         "never_left_radius_ci95": _ci(cluster_ratio([(c[2], c[3]) for c in cells])) if rated_max else None,
+        # sql/098: never left the spot (50 m), over the rentals that recorded it.
+        "stayed_known": sk,
+        "stayed": st,
+        "stayed_rate": round(st / sk, 4) if rated_stayed else None,
+        "stayed_ci95": _ci(cluster_ratio([(c[4], c[5]) for c in cells])) if rated_stayed else None,
     }
 
 
-def summarize_areas(rows: list[tuple[str, int, int, int, int, int]]) -> dict[str, Any]:
-    """rows: (equity_area, h3_9, rentals, no_gos, no_gos_max, max_known),
-    summed per (area, cell) over the window. Pure: testable without a database."""
+def summarize_areas(rows: list[tuple]) -> dict[str, Any]:
+    """rows: (equity_area, h3_9, rentals, no_gos, no_gos_max, max_known
+    [, stayed, stayed_known]), summed per (area, cell) over the window; the
+    two sql/098 counts default to 0 (not recorded). Pure: testable without a
+    database."""
     inside, outside = _zero(), _zero()
     excluded = {"unknown_origin": 0, "outside_city": 0, "unrecorded": 0}
     by_area: dict[str, dict[str, Any]] = {}
-    for area, cell, rentals, no_gos, no_gos_max, max_known in rows:
+    for area, cell, rentals, no_gos, no_gos_max, max_known, *more in rows:
+        counts = (rentals, no_gos, no_gos_max, max_known, *(tuple(more) + (0, 0))[:2])
         if area == UNKNOWN:
             excluded["unknown_origin"] += rentals
         elif area == OUTSIDE_CITY:
@@ -169,10 +195,10 @@ def summarize_areas(rows: list[tuple[str, int, int, int, int, int]]) -> dict[str
         elif area == UNRECORDED:
             excluded["unrecorded"] += rentals
         elif area == OUTSIDE:
-            _add(outside, cell, rentals, no_gos, no_gos_max, max_known)
+            _add(outside, cell, *counts)
         else:
-            _add(inside, cell, rentals, no_gos, no_gos_max, max_known)
-            _add(by_area.setdefault(area, _zero()), cell, rentals, no_gos, no_gos_max, max_known)
+            _add(inside, cell, *counts)
+            _add(by_area.setdefault(area, _zero()), cell, *counts)
 
     both = inside["rentals"] >= MIN_RENTALS_FOR_RATE and outside["rentals"] >= MIN_RENTALS_FOR_RATE
     diff = ci = distinguishable = None
@@ -207,7 +233,8 @@ def summarize_areas(rows: list[tuple[str, int, int, int, int, int]]) -> dict[str
 
 
 _SQL = """
-SELECT equity_area, h3_9, SUM(rentals), SUM(no_gos), SUM(no_gos_max), SUM(max_known)
+SELECT equity_area, h3_9, SUM(rentals), SUM(no_gos), SUM(no_gos_max), SUM(max_known),
+       SUM(stayed), SUM(stayed_known)
 FROM rental_outcomes_hourly
 WHERE hour >= %s AND hour < %s AND radius_m = %s
 GROUP BY equity_area, h3_9
@@ -218,6 +245,9 @@ _SQL_SINCE = """
 SELECT MIN(hour) FROM rental_outcomes_hourly
 WHERE radius_m = %s AND equity_area <> 'unrecorded'
 """
+
+# When sql/098 ran, i.e. when `stayed` started being recorded.
+_SQL_STAYED_SINCE = "SELECT applied_at FROM schema_migrations WHERE filename = %s"
 
 
 def summarize(window: str = "7d", *, now: datetime | None = None) -> dict[str, Any]:
@@ -232,15 +262,20 @@ def summarize(window: str = "7d", *, now: datetime | None = None) -> dict[str, A
     radius = round(float(load().device_tracking.stationary_threshold_meters), 2)
     status = "ok"
     since: datetime | None = None
+    stayed_since: datetime | None = None
     try:
         with connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(_SQL, (start, end, radius))
-                rows = [(str(r[0]), int(r[1]), int(r[2]), int(r[3]), int(r[4]), int(r[5]))
+                rows = [(str(r[0]), int(r[1]), int(r[2]), int(r[3]), int(r[4]), int(r[5]),
+                         int(r[6] or 0), int(r[7] or 0))
                         for r in cur.fetchall()]
                 cur.execute(_SQL_SINCE, (radius,))
                 got = cur.fetchone()
                 since = got[0] if got and got[0] else None
+                cur.execute(_SQL_STAYED_SINCE, (STAYED_COUNTED_SINCE_MIGRATION,))
+                got = cur.fetchone()
+                stayed_since = got[0] if got and got[0] else None
         out = summarize_areas(rows)
         if out.pop("_degraded"):
             status = "degraded"
@@ -257,6 +292,13 @@ def summarize(window: str = "7d", *, now: datetime | None = None) -> dict[str, A
     hours_covered = (
         max(0, int((end - covered_from).total_seconds() // 3600)) if covered_from else 0
     )
+    # The same for `stayed`, which started later (sql/098). Whole hours only:
+    # the hour the migration ran is partly recorded, and stayed_known (not the
+    # clock) is what keeps that hour's rate exact.
+    stayed_from = max(start, stayed_since) if stayed_since else None
+    stayed_hours = (
+        max(0, int((end - stayed_from).total_seconds() // 3600)) if stayed_from else 0
+    )
     out.update({
         "status": status,
         "window": window,
@@ -269,6 +311,11 @@ def summarize(window: str = "7d", *, now: datetime | None = None) -> dict[str, A
         "radius_meters": radius,
         "min_rentals_for_rate": MIN_RENTALS_FOR_RATE,
         "definition": "end_displacement",
+        # sql/098: never left the spot.
+        "stayed_counted_since": stayed_since.isoformat() if stayed_since else None,
+        "stayed_hours_covered": min(stayed_hours, days * 24),
+        "stayed_radius_meters": float(STAYED_RADIUS_METERS),
+        "stayed_definition": STAYED_DEFINITION,
         "attribution": "unlock_point",
         "boundary": "official_equity_areas",
         "caveats": CAVEATS,

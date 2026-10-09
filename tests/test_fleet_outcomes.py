@@ -169,9 +169,10 @@ from starlette.requests import Request  # noqa: E402
 
 from src import api_public  # noqa: E402
 
-# (model, rentals, no_gos, vehicles) — the shape of the GROUP BY, verified
-# against a real Postgres `device_state` while this was written.
-_ROWS = [("Cosmo", 1500, 131, 2), ("Rover", 300, 150, 1)]
+# (model, rentals, no_gos, vehicles, stayed_rentals, stayed) — the shape of
+# the GROUP BY, verified against a real Postgres `device_state` while this was
+# written. The last two are sql/098's, over their own (shorter) window.
+_ROWS = [("Cosmo", 1500, 131, 2, 600, 12), ("Rover", 300, 150, 1, 100, 9)]
 
 
 class _FakeCur:
@@ -187,8 +188,11 @@ class _FakeCur:
     def execute(self, sql, params=None):
         self._last = sql
         if "schema_migrations" in sql:
-            # The window's start: when the sql/089 reset ran.
-            assert params == (fleet_outcomes.COUNTED_SINCE_MIGRATION,)
+            # The windows' starts: when the sql/089 reset ran, and when sql/098
+            # started the stayed counter.
+            assert params in ((fleet_outcomes.COUNTED_SINCE_MIGRATION,),
+                              (fleet_outcomes.STAYED_COUNTED_SINCE_MIGRATION,))
+            self._params = params
             return
         assert "device_state" in sql
         # The aggregation belongs in the database: 8k devices must not cross
@@ -197,6 +201,8 @@ class _FakeCur:
 
     def fetchone(self):
         from datetime import datetime, timezone
+        if self._params == (fleet_outcomes.STAYED_COUNTED_SINCE_MIGRATION,):
+            return (datetime(2026, 10, 9, 20, 30, tzinfo=timezone.utc),)
         return (datetime(2026, 10, 7, 18, 0, tzinfo=timezone.utc),)
 
     def fetchall(self):
@@ -291,7 +297,7 @@ class TestTheEndpoint:
         db()
         a = Response()
         api_public.fleet_outcomes(_request(), a)
-        db(rows=[("Cosmo", 1501, 131, 2), ("Rover", 300, 150, 1)])
+        db(rows=[("Cosmo", 1501, 131, 2, 601, 12), ("Rover", 300, 150, 1, 100, 9)])
         b = Response()
         api_public.fleet_outcomes(_request(), b)
         assert a.headers["ETag"] != b.headers["ETag"]
@@ -303,3 +309,68 @@ class TestTheEndpoint:
         r = Response()
         api_public.fleet_outcomes(_request(), r)
         assert "," not in r.headers["ETag"]
+
+
+# --- sql/098: never left the spot -------------------------------------------
+
+def stayed_model(name, rentals, no_gos, stayed_rentals, stayed, vehicles=10):
+    return {**model(name, rentals, no_gos, vehicles),
+            "stayed_rentals": stayed_rentals, "stayed": stayed}
+
+
+class TestNeverLeftTheSpot:
+    def test_is_published_beside_the_no_go_rate_with_its_own_denominator(self):
+        out = fleet_outcomes.summarize_rows(
+            [stayed_model("Cosmo", 3000, 255, 1000, 21)], R,
+            counted_since_at="2026-10-07T18:00:00+00:00",
+            stayed_counted_since="2026-10-09T20:30:00+00:00")
+        # The no-go figure is untouched.
+        assert (out["rentals"], out["no_gos"], out["no_go_rate"]) == (3000, 255, 0.085)
+        assert out["radius_meters"] == R
+        # stayed divides by rentals since ITS counter started, never by the
+        # longer-running rentals_observed.
+        assert (out["stayed_rentals"], out["stayed"], out["stayed_rate"]) == (1000, 21, 0.021)
+        assert out["stayed_radius_meters"] == 50.0
+        assert out["stayed_window"] == "since_stayed_counter"
+        assert out["stayed_counted_since"] == "2026-10-09T20:30:00+00:00"
+        assert out["stayed_counted_since_migration"] == "sql/098"
+        assert out["stayed_definition"] == (
+            "never left the spot: the vehicle never got more than 50 m from where "
+            "it was unlocked, and was released there")
+        (m,) = out["by_model"]
+        assert (m["stayed_rentals"], m["stayed"], m["stayed_rate"]) == (1000, 21, 0.021)
+
+    def test_withholds_the_rate_under_the_floor(self):
+        out = summarize([stayed_model("Cosmo", 5000, 400, FLOOR - 1, 3)])
+        assert out["stayed_rate"] is None and out["stayed"] == 3
+        assert out["no_go_rate"] is not None
+
+    def test_the_radius_is_the_ingest_in_place_circle(self):
+        from src.device_state import IN_PLACE_RADIUS_M
+        assert summarize([])["stayed_radius_meters"] == IN_PLACE_RADIUS_M
+
+    def test_the_named_migration_exists(self):
+        from pathlib import Path
+        sql = Path(__file__).resolve().parents[1] / "sql"
+        assert (sql / fleet_outcomes.STAYED_COUNTED_SINCE_MIGRATION).is_file()
+
+
+class TestTheEndpointStayed:
+    def test_serves_stayed_from_the_database(self, db):
+        db()
+        out = _call()
+        assert (out["stayed_rentals"], out["stayed"]) == (700, 21)
+        assert out["stayed_rate"] == 0.03
+        assert out["stayed_counted_since"] == "2026-10-09T20:30:00+00:00"
+        # The no-go window is still the sql/089 one.
+        assert out["counted_since_at"] == "2026-10-07T18:00:00+00:00"
+
+    def test_the_etag_moves_when_only_stayed_does(self, db):
+        db()
+        a = Response()
+        api_public.fleet_outcomes(_request(), a)
+        db(rows=[("Cosmo", 1500, 131, 2, 600, 13), ("Rover", 300, 150, 1, 100, 9)])
+        b = Response()
+        api_public.fleet_outcomes(_request(), b)
+        assert a.headers["ETag"] != b.headers["ETag"]
+        assert "," not in b.headers["ETag"]

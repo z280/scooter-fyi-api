@@ -62,7 +62,8 @@ def test_in_place_release_with_rotation_is_a_failed_start_that_keeps_dwell(cycle
     assert cur.ran("rental_started_at = NULL")
     # sql/072 counters keep counting exactly as before.
     assert stats.rentals_no_go == 1
-    assert cur.rows_for("rentals_no_go = rentals_no_go + %s") == [(1, _VID)]
+    # (no_go, stayed, vid): an in-place release is also "stayed" (sql/098).
+    assert cur.rows_for("rentals_no_go = rentals_no_go + %s") == [(1, 1, _VID)]
 
 
 def test_in_place_failure_ending_beyond_the_old_16m_still_counts(cycle):

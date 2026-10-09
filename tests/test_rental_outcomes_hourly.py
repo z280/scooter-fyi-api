@@ -28,8 +28,10 @@ def _rollup(cur) -> list[tuple]:
 
 
 # Row layout: (hour, h3_9, model, radius_m, equity_area,
-#              rentals, no_gos, no_gos_max, max_known, origin_unknown)
-COUNTS = slice(5, None)
+#              rentals, no_gos, no_gos_max, max_known, origin_unknown,
+#              stayed, stayed_known)   <- the last two sql/098
+COUNTS = slice(5, 10)
+STAYED = slice(10, 12)
 AREA = 4
 
 LOOKUPS: list[tuple[float, float]] = []
@@ -52,7 +54,7 @@ def _equity_layer(monkeypatch):
 def test_a_rental_that_went_nowhere_is_a_no_go_on_both_definitions(cycle):
     stats, cur = cycle([_device(_north(4), device_id="bike-2")], state=_in_rental(max_m=6.0))
     (row,) = _rollup(cur)
-    assert row == (HOUR, ORIGIN_CELL, "Unknown", R, "EQ_007", 1, 1, 1, 1, 0)
+    assert row == (HOUR, ORIGIN_CELL, "Unknown", R, "EQ_007", 1, 1, 1, 1, 0, 1, 1)
 
 
 def test_a_round_trip_is_an_end_displacement_no_go_but_not_a_maximum_one(cycle):

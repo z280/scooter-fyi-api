@@ -112,6 +112,16 @@ stay, the stop closed at the rental's start is reopened, and no trip_events
 row is written. rentals_observed / rentals_no_go (sql/072) are counted exactly
 as before.
 
+NEVER LEFT THE SPOT (sql/098). Every in-place release, failed start AND blip,
+is also counted in device_state.rentals_stayed and rental_outcomes_hourly.stayed:
+the vehicle never got more than IN_PLACE_RADIUS_M from where it was unlocked
+(final fix included) and was released there. rentals_no_go is untouched and
+still counts round trips (end displacement within the stationary threshold).
+Every release, in place or not, also increments
+rentals_observed_stayed_era (the denominator over the same window) and the
+rollup's stayed_known, so rentals_stayed is always a subset of what is counted
+against it.
+
 The 16 m threshold also turned GPS jitter into trips. A parked vehicle's
 reported fix wanders, and a new fix sticks until the next one, so a 20 m
 jump persists like a real move does. On 2026-09-29 that produced 48,429
@@ -682,6 +692,9 @@ class StateUpdateStats:
     # so a vehicle that sits 30 m off its stored position counts every cycle.
     rentals_failed_start: int = 0
     rentals_blip: int = 0
+    # sql/098: of this cycle's rentals_ended, how many never left the spot
+    # (every in-place release: rentals_failed_start + rentals_blip).
+    rentals_stayed: int = 0
     jitter_held: int = 0
 
 
@@ -780,8 +793,9 @@ def update_for_cycle(
             rental_start_updates: list[tuple] = []   # sql/069
             rental_hold_updates: list[tuple] = []
             rental_outcome_updates: list[tuple] = []  # sql/072
-            # sql/090: (hour, h3_9, model, radius) -> [rentals, no_gos,
-            # no_gos_max, max_known], summed here and upserted once per key.
+            # sql/090: (hour, h3_9, model, radius, area) -> [rentals, no_gos,
+            # no_gos_max, max_known, origin_unknown, stayed, stayed_known]
+            # (the last two sql/098), summed here and upserted once per key.
             outcome_rollup: dict[tuple, list[int]] = {}
             in_place_release_updates: list[tuple] = []  # sql/087
             reopen_stops: list[tuple] = []   # (vid, closed_at, failed_start 0/1)
@@ -887,17 +901,37 @@ def update_for_cycle(
                     continue
 
                 released = prev_rental_started_at is not None
+                # IN-PLACE RELEASE (sql/087), decided here because the
+                # counters below need it too: the rental never left
+                # IN_PLACE_RADIUS_M of its origin and ended inside it. sql/098
+                # counts every one of them as "never left the spot", failed
+                # start and blip alike.
+                in_place = (
+                    released
+                    and prev_rental_max is not None
+                    and float(prev_rental_max) <= IN_PLACE_RADIUS_M
+                    and from_fix <= IN_PLACE_RADIUS_M
+                )
                 if released:
                     stats.rentals_ended += 1
                     # sql/072, unchanged: every release is an observed rental,
                     # and a no-go is one that ended inside the stationary
-                    # threshold of where it was unlocked. smart_ride_grade is
-                    # calibrated on exactly this, so sql/087 does not redefine
-                    # it (it only measures from the unlock fix, see from_fix).
+                    # threshold of where it was unlocked. Published as the
+                    # fleet no-go rate, so neither sql/087 nor sql/098
+                    # redefines it (sql/087 only measures from the unlock fix,
+                    # see from_fix). smart_ride_grade reads `stayed` since
+                    # sql/098.
                     no_go = from_fix <= threshold
-                    rental_outcome_updates.append((1 if no_go else 0, vid))
+                    # sql/098: in_place, NOT no_go. A round trip back to the
+                    # rack is a no-go (above) but left the spot; a 25-50 m
+                    # drop that never got past 50 m stayed but is no no-go.
+                    stayed = in_place
+                    rental_outcome_updates.append(
+                        (1 if no_go else 0, 1 if stayed else 0, vid))
                     if no_go:
                         stats.rentals_no_go += 1
+                    if stayed:
+                        stats.rentals_stayed += 1
                     # sql/090: the same outcome, with when, where and at what
                     # radius. WHERE is the unlock point (last fix before the
                     # rental), so a rental is attributed to the place it was
@@ -942,28 +976,28 @@ def update_for_cycle(
                             float(threshold),
                             equity_area,
                         )
-                        acc = outcome_rollup.setdefault(key, [0, 0, 0, 0, 0])
+                        acc = outcome_rollup.setdefault(key, [0, 0, 0, 0, 0, 0, 0])
                         acc[0] += 1
                         acc[1] += 1 if no_go else 0
                         acc[4] += 1 if origin_unknown else 0
                         if rental_max is not None:
                             acc[3] += 1
                             acc[2] += 1 if rental_max <= threshold else 0
+                        # sql/098. stayed_known counts every rental this code
+                        # writes, so stayed / stayed_known is exact even in
+                        # the hour the column appeared.
+                        acc[5] += 1 if stayed else 0
+                        acc[6] += 1
 
-                # IN-PLACE RELEASE (sql/087). The rental never left
-                # IN_PLACE_RADIUS_M of its origin and ended inside it. The
+                # IN-PLACE RELEASE (sql/087; `in_place` above). The rental never
+                # left IN_PLACE_RADIUS_M of its origin and ended inside it. The
                 # vehicle did not go anywhere, so nothing about its stop
                 # changes: same stored position, same dwell clock, the stop
                 # the rental start closed is reopened, and no trip_events row.
                 # With a rotated bike_id it was an attempt that failed: a
                 # FAILED START. Without one it was a reservation blip and
-                # counts for nothing.
-                in_place = (
-                    released
-                    and prev_rental_max is not None
-                    and float(prev_rental_max) <= IN_PLACE_RADIUS_M
-                    and from_fix <= IN_PLACE_RADIUS_M
-                )
+                # counts for nothing as a failed start (it still counts as
+                # stayed, sql/098, above).
                 if in_place:
                     origin_device_id = prev_origin_device_id or prev_device_id
                     failed = d.device_id != origin_device_id
@@ -1257,7 +1291,9 @@ def update_for_cycle(
                     """
                     UPDATE device_state SET
                         rentals_observed = rentals_observed + 1,
-                        rentals_no_go    = rentals_no_go + %s
+                        rentals_no_go    = rentals_no_go + %s,
+                        rentals_stayed   = rentals_stayed + %s,
+                        rentals_observed_stayed_era = rentals_observed_stayed_era + 1
                     WHERE vehicle_identifier = %s
                     """,
                     rental_outcome_updates,
@@ -1270,14 +1306,17 @@ def update_for_cycle(
                     """
                     INSERT INTO rental_outcomes_hourly
                         (hour, h3_9, model, radius_m, equity_area,
-                         rentals, no_gos, no_gos_max, max_known, origin_unknown)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         rentals, no_gos, no_gos_max, max_known, origin_unknown,
+                         stayed, stayed_known)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (hour, h3_9, model, radius_m, equity_area) DO UPDATE SET
                         rentals    = rental_outcomes_hourly.rentals    + EXCLUDED.rentals,
                         no_gos     = rental_outcomes_hourly.no_gos     + EXCLUDED.no_gos,
                         no_gos_max = rental_outcomes_hourly.no_gos_max + EXCLUDED.no_gos_max,
                         max_known  = rental_outcomes_hourly.max_known  + EXCLUDED.max_known,
-                        origin_unknown = rental_outcomes_hourly.origin_unknown + EXCLUDED.origin_unknown
+                        origin_unknown = rental_outcomes_hourly.origin_unknown + EXCLUDED.origin_unknown,
+                        stayed       = rental_outcomes_hourly.stayed       + EXCLUDED.stayed,
+                        stayed_known = rental_outcomes_hourly.stayed_known + EXCLUDED.stayed_known
                     """,
                     [(*k, *v) for k, v in sorted(outcome_rollup.items())],
                 )
@@ -1446,11 +1485,11 @@ def update_for_cycle(
     log.info(
         "device_state cycle=%s: new=%d moved=%d failed_starts=%d stationary=%d "
         "skipped=%d jitter_held=%d rentals(started=%d held=%d ended=%d no_go=%d "
-        "failed_start=%d blip=%d) stops(closed_absent=%d reopened=%d)",
+        "failed_start=%d blip=%d stayed=%d) stops(closed_absent=%d reopened=%d)",
         cycle_id, stats.new_devices, stats.moved, stats.failed_starts,
         stats.stationary, stats.skipped_no_identifier, stats.jitter_held,
         stats.rentals_started, stats.rentals_held, stats.rentals_ended,
         stats.rentals_no_go, stats.rentals_failed_start, stats.rentals_blip,
-        stats.stops_closed_absent, stats.stops_reopened,
+        stats.rentals_stayed, stats.stops_closed_absent, stats.stops_reopened,
     )
     return stats
