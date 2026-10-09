@@ -466,15 +466,21 @@ contradiction.
    that is suppressed, missing or gone — those are the cases it exists for — so
    it reads `device_state` directly rather than the `/devices/current` feed.
 
-   **Session-required and rate-limited, and for a stronger reason than the scan
-   endpoint.** This maps a plate to a `vehicle_identifier`, which is precisely
-   the mapping the salt exists to withhold. Open or unmetered, it is a
-   plate-enumeration oracle that inverts the privacy model for the whole fleet
-   in one script. Copy `api_qr.py`'s shape: `require_session` plus `enforce` on
-   an account bucket at 20/hour. Somebody will argue it should be open because
-   the plate is printed on the scooter in public — the answer is that a plate
-   is public *one scooter at a time, to someone standing next to it*, and this
-   endpoint would be public *all at once, to someone who is not in Denver*.
+   **Access rule: superseded by the owner's decision of 2026-10-08.** This
+   section originally required a session and an account bucket at 20/hour, on
+   the argument that a public plate → `vehicle_identifier` mapping is a fleet
+   enumeration oracle. The owner chose the opposite, and it is live: the
+   plate lookup `GET /api/v1/vehicles/resolve?plate=` (scooter-fyi-api#134) is
+   **public, rate-limited to 30/min per IP**, returns `device_id` +
+   `vehicle_identifier` and never the plate, answers 404 when no vehicle or
+   more than one carries the plate, and is redacted from the access log. That
+   is what lets a signed-out rider scan a sticker or open a `?ride=plate:`
+   link (denver-scooter-fyi#120). **Build this endpoint to the same rule** —
+   public, per-IP limited, never echoing the plate — or extend
+   `/vehicles/resolve` itself to read `device_state` for suppressed, missing
+   and gone vehicles rather than adding a second plate oracle with a
+   different policy. The forward direction (vehicle → plate) stays
+   signed-in only (`GET /api/v1/vehicles/plates`).
 
 7. **Census endpoints and pages** (§2.8) — newest arrivals by
    `first_ever_observed_at DESC`; missing by `last_observed_at` older than a
