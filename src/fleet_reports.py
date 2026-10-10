@@ -42,9 +42,10 @@ HOW A REPORT CLEARS (`uncleared_negative_sql`):
     and reappeared >= 100 m from where it was last seen with a FULL battery
     (>= FULL_BATTERY_PERCENT, 95%);
     OR it is >= 100 m from where it was reported AND was SERVICED after the
-    report — its charge rose by charge_rise_meters() between two readings at
-    any point since (device_state.last_serviced_at, sql/104), so a swap
-    followed by rides back down still counts; OR, for a LEGACY report (filed
+    report — it read full (95%) parked after reading <= 50% parked since its
+    last full reading (device_state.last_serviced_at, sql/104 + sql/105), so a
+    swap followed by rides back down still counts, and a ride's rebound does
+    not; OR, for a LEGACY report (filed
     before BATTERY_CAPTURE_SINCE with no charge recorded, so no rise can be
     measured and no history exists), it has made LEGACY_CLEAR_MOVES (3) moves
     of >= 100 m since the report;
@@ -155,6 +156,13 @@ BATTERY_CAPTURE_SINCE = "2026-10-09 03:43:18+00"
 #: 2026-10-10: "3+ moves of 100 m").
 LEGACY_CLEAR_MOVES = 3
 
+#: Servicing (device_state.last_serviced_at, sql/105) is reading FULL after
+#: reading at or below this, parked, since the last full reading. A ride's
+#: sag-and-rebound is up to ~25% of a full charge and never ends above the
+#: pre-ride charge, so it cannot pass from here to full; a swap or a charge
+#: does.
+SERVICE_FROM_PERCENT = 50
+
 #: The default missing threshold, in hours (§2.8).
 DEFAULT_MISSING_HOURS = 72
 
@@ -169,6 +177,14 @@ def charge_rise_meters() -> int:
     """Metres of range a vehicle must gain over its baseline for the gain to
     count as servicing. Derived from the one definition of a full charge."""
     return int(round(full_charge_range_meters() * CHARGE_RISE_FRACTION))
+
+
+def service_from_meters() -> int:
+    """current_range_meters at SERVICE_FROM_PERCENT, from the same table."""
+    from .quality import _soc_lut
+
+    lut = _soc_lut()
+    return int(lut[round(SERVICE_FROM_PERCENT / 100 * (len(lut) - 1))])
 
 
 def full_battery_meters() -> int:
