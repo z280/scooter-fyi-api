@@ -15,3 +15,8 @@ os.environ.setdefault("POSTGRES_PASSWORD", "test")
 os.environ.setdefault("POSTGRES_DB", "test")
 # Deterministic salt for hash_plate() — tests assert exact output.
 os.environ.setdefault("VEHICLE_IDENTIFIER_SALT", "pytest-fixed-salt")
+# The precomputed map-payload cache (src/payload_cache.py) is off: fake-DB
+# fixtures reuse one cycle_id with different rows, and a cached body would
+# leak between tests. Off, every request builds fresh and nothing touches the
+# payload_cache table; tests/test_payload_cache.py turns it on locally.
+os.environ.setdefault("PAYLOAD_CACHE", "0")

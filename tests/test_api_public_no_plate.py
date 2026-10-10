@@ -19,6 +19,7 @@ from fastapi import Response
 from starlette.requests import Request
 
 from src import api_public
+from tests.payload_json import decoded
 
 
 def _request(headers: dict[str, str] | None = None) -> Request:
@@ -39,7 +40,7 @@ def _call(**kwargs):
         bbox=None, include=None,
     )
     defaults.update(kwargs)
-    return api_public.devices_current(_request(), Response(), **defaults)
+    return decoded(api_public.devices_current(_request(), Response(), **defaults))
 
 _CYCLE_ID = uuid.UUID("8f3a2d10-1234-4abc-8def-0123456789ab")
 _SNAP = datetime(2026, 7, 5, 14, 30, tzinfo=timezone.utc)

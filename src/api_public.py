@@ -30,7 +30,7 @@ from .fleet_equity import WINDOWS as EQUITY_WINDOWS
 from .fleet_equity import summarize as fleet_equity_summary
 from .fleet_outcomes import summarize as fleet_outcomes_summary
 from .pg import connection
-from . import battery_model, fleet_reports, vehicle_identity
+from . import battery_model, fleet_reports, payload_cache, vehicle_identity
 from .quality import (
     dwell_percentile_wire,
     smart_ride_grade,
@@ -416,137 +416,45 @@ def latest_complete_cycle(cur) -> tuple[Any, datetime]:
     return row[0], row[1]
 
 
-def _devices_current_impl(
-    request: Request,
-    response: Response,
-    *,
-    form_factor: str | None,
-    spatial_status: str | None,
-    include_outliers: bool,
-    bbox: str | None,
-    include: str | None,
-    include_plate: bool = False,
-    resource: str = "devices",
-    cache_header: str = _DEVICES_CACHE_HEADER,
-    viewed_by: str | None = None,
-) -> Any:
-    """Shared builder for the public `/api/v1/devices/current` and the
-    session-gated `/api/v1/user/devices/current`.
+def _devices_filter(cycle_id: Any, form_factor: str | None, spatial_status: str | None,
+                    include_outliers: bool,
+                    bbox_vals: tuple[float, float, float, float] | None,
+                    ) -> tuple[list[str], list[Any]]:
+    """The WHERE predicates and their params for the devices payload."""
+    # Build the filter. All predicates prefix `r.` so they compose
+    # with the EXISTS subquery on negative_reports below.
+    where = ["r.cycle_id = %s"]
+    params: list[Any] = [cycle_id]
 
-    ``include_plate`` adds the admin-only private fields — raw
-    ``vehicle_plate``, ``first_ever_observed_at``, and the observed max
-    range — that used to live behind `/api/v1/private/devices/current`. It
-    is NEVER derived from a query param (that would let anyone opt in); the
-    caller decides it from the authenticated session.
-    """
-    tokens: set[str] = set()
-    if include:
-        tokens = {t.strip() for t in include.split(",") if t.strip()}
-        unknown = tokens.difference(_INCLUDE_TOKENS)
-        if unknown:
-            raise HTTPException(
-                400,
-                detail=(
-                    f"unknown include token(s): {', '.join(sorted(unknown))}. "
-                    f"Valid: {', '.join(_INCLUDE_TOKENS)}"
-                ),
-            )
-    # Resolve which cycle to use
+    # Outlier handling: explicit spatial_status overrides include_outliers
+    if spatial_status:
+        where.append("r.spatial_status = %s")
+        params.append(spatial_status)
+    elif not include_outliers:
+        where.append("r.spatial_status = 'denver_core'")
+
+    if form_factor:
+        where.append("r.form_factor = %s")
+        params.append(form_factor)
+
+    if bbox_vals:
+        min_lon, min_lat, max_lon, max_lat = bbox_vals
+        where.append(
+            "r.longitude BETWEEN %s AND %s AND r.latitude BETWEEN %s AND %s"
+        )
+        params.extend([min_lon, max_lon, min_lat, max_lat])
+
+    return where, params
+
+
+def _build_device_features(cycle_id: Any, snapshot_time: datetime,
+                           where: list[str], params: list[Any]) -> list[dict[str, Any]]:
+    """Every feature for one cycle with EVERY optional field group present
+    (h3, ranks and the admin-only plate fields). Callers never send this
+    as is: _project_features strips what the request did not ask for, so one
+    build serves every variant (src/payload_cache.py warms three from one)."""
     with connection() as conn:
         with conn.cursor() as cur:
-            cycle_id, snapshot_time = latest_complete_cycle(cur)
-
-            # Validate the bbox up front — before the 304 short-circuit — so
-            # a malformed bbox always 400s even when the ETag matches.
-            bbox_vals: tuple[float, float, float, float] | None = None
-            if bbox:
-                parts = bbox.split(",")
-                if len(parts) != 4:
-                    raise HTTPException(400, detail="bbox must be 4 comma-separated numbers")
-                try:
-                    bbox_vals = (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
-                except ValueError as e:
-                    raise HTTPException(400, detail=f"bbox parse error: {e}")
-
-            # Weak, cycle-keyed ETag: the 90 s poll loop revalidates for
-            # free until a new cycle lands (~every 10 min). Weak because the
-            # body is not a pure function of the cycle: has_negative_report
-            # uses a wall-clock NOW() - 24h window and sees reports filed
-            # mid-cycle (so do the negative-report fields, and an admin resolving a
-            # report), and the device_state columns (failed starts, dwell
-            # start, rental outcomes/grade, confirmed features) are joined
-            # live — the next cycle's ingest updates them a little before
-            # that cycle is marked complete, and feature confirmations land
-            # any time. A 304 defers any of that by at most one cycle. The
-            # dwell/battery tiers themselves no longer drift: quality,
-            # reliability, parked_hours and battery_reading all read
-            # snapshot_time, not the wall clock.
-            # The ETag must vary with EVERY input that changes the body: the
-            # include tokens AND the filters
-            # (form_factor / spatial_status / include_outliers / bbox), or a
-            # client reusing a tag across filtered requests gets a 304 for a
-            # different representation.
-            # include_plate is part of the key so an admin's plate-bearing
-            # body can never be handed back to a non-admin via a shared 304
-            # (and the /user endpoint is served `private` anyway).
-            # `viewed_by` (the authenticated email) is part of the key so an
-            # admin's plate-bearing body can never be served to a different
-            # user via a shared/conditional cache hit — belt-and-suspenders
-            # alongside the per-response Vary: Authorization below.
-            filter_key = "|".join((
-                "+".join(sorted(tokens)),
-                form_factor or "",
-                spatial_status or "",
-                "1" if include_outliers else "0",
-                ",".join(repr(v) for v in bbox_vals) if bbox_vals else "",
-                "plate" if include_plate else "",
-                viewed_by or "",
-            ))
-            # Negative-report inputs change mid-cycle (a report filed or
-            # resolved), and the label/latest_report fields read them live,
-            # so they are in the tag too (fleet_reports.reports_stamp).
-            try:
-                stamp = fleet_reports.reports_stamp(cur)
-            except Exception:  # noqa: BLE001 — a tag without it is just weaker
-                stamp = ""
-            etag = f'W/"{resource}:{cycle_id}:{stamp}:{filter_key}"'
-            # Authenticated responses vary by the bearer and (for admins) can
-            # carry raw plates — a private cache must key on Authorization and
-            # never silently reuse across tokens within a freshness window.
-            extra_headers = {"Vary": "Authorization"} if viewed_by is not None else {}
-            if _if_none_match_hit(request, etag):
-                return Response(
-                    status_code=304,
-                    headers={"ETag": etag, "Cache-Control": cache_header, **extra_headers},
-                )
-            response.headers["ETag"] = etag
-            response.headers["Cache-Control"] = cache_header
-            for k, v in extra_headers.items():
-                response.headers[k] = v
-
-            # Build the filter. All predicates prefix `r.` so they compose
-            # with the EXISTS subquery on negative_reports below.
-            where = ["r.cycle_id = %s"]
-            params: list[Any] = [cycle_id]
-
-            # Outlier handling: explicit spatial_status overrides include_outliers
-            if spatial_status:
-                where.append("r.spatial_status = %s")
-                params.append(spatial_status)
-            elif not include_outliers:
-                where.append("r.spatial_status = 'denver_core'")
-
-            if form_factor:
-                where.append("r.form_factor = %s")
-                params.append(form_factor)
-
-            if bbox_vals:
-                min_lon, min_lat, max_lon, max_lat = bbox_vals
-                where.append(
-                    "r.longitude BETWEEN %s AND %s AND r.latitude BETWEEN %s AND %s"
-                )
-                params.extend([min_lon, max_lon, min_lat, max_lat])
-
             # has_negative_report — the owner's rules of 2026-10-09, built
             # ONCE in src/fleet_reports.py (uncleared_negative_sql) and used by
             # every consumer. Column 20 carries the vehicle's negative-report
@@ -597,7 +505,6 @@ def _devices_current_impl(
             # inlines its constants, so the filter params bind in order.
             cur.execute(sql, params)
             rows = cur.fetchall()
-
     # Peer-relative dwell stats are computed over the FULL denver_core
     # fleet (own query + per-cycle cache in src/dwell_stats.py), never the
     # filtered subset — a bbox request must not shrink anyone's peer set.
@@ -769,26 +676,26 @@ def _devices_current_impl(
             "feature_status": r[30] or FEATURE_STATUS_NEEDS_CONFIRMED,
             "device_features": feature_payload(r[31], r[32], r[33], r[34], r[35]),
         }
-        if "h3" in tokens:
-            # String-encoded (canonical h3 hex form): the raw 64-bit ints
-            # exceed JS MAX_SAFE_INTEGER and silently lose precision in
-            # JSON.parse.
-            properties["h3_8_index"] = h3.int_to_str(int(r[10])) if r[10] is not None else None
-            properties["h3_9_index"] = h3.int_to_str(int(r[11])) if r[11] is not None else None
-            properties["h3_10_index"] = h3.int_to_str(int(r[12])) if r[12] is not None else None
-        if "ranks" in tokens:
-            for name, value in zip(_RANK_FIELDS, r[13:20]):
-                properties[name] = value
-        if include_plate:
-            # Admin-only private fields (retired /private/devices/current).
-            properties["vehicle_plate"] = r[26]
-            # "Lunar 🐸 928" — the suffix is what is printed on the scooter, so
-            # it rides with the plate's own permission and never appears on the
-            # public payload (see src/vehicle_identity.py).
-            properties["display_name"] = vehicle_identity.display_name(r[5], r[26])
-            properties["first_ever_observed_at"] = r[27].isoformat() if r[27] else None
-            properties["max_observed_range_meters"] = r[28]
-            properties["max_observed_range_at"] = r[29].isoformat() if r[29] else None
+        # h3 fields: projected off unless ?include=h3.
+        # String-encoded (canonical h3 hex form): the raw 64-bit ints
+        # exceed JS MAX_SAFE_INTEGER and silently lose precision in
+        # JSON.parse.
+        properties["h3_8_index"] = h3.int_to_str(int(r[10])) if r[10] is not None else None
+        properties["h3_9_index"] = h3.int_to_str(int(r[11])) if r[11] is not None else None
+        properties["h3_10_index"] = h3.int_to_str(int(r[12])) if r[12] is not None else None
+        # Rank fields: projected off unless ?include=ranks.
+        for name, value in zip(_RANK_FIELDS, r[13:20]):
+            properties[name] = value
+        # Admin-only private fields (retired /private/devices/current):
+        # projected off unless include_plate, which the session decides.
+        properties["vehicle_plate"] = r[26]
+        # "Lunar 🐸 928" — the suffix is what is printed on the scooter, so
+        # it rides with the plate's own permission and never appears on the
+        # public payload (see src/vehicle_identity.py).
+        properties["display_name"] = vehicle_identity.display_name(r[5], r[26])
+        properties["first_ever_observed_at"] = r[27].isoformat() if r[27] else None
+        properties["max_observed_range_meters"] = r[28]
+        properties["max_observed_range_at"] = r[29].isoformat() if r[29] else None
         features.append({
             "type": "Feature",
             "id": r[0],
@@ -796,10 +703,232 @@ def _devices_current_impl(
             "properties": properties,
         })
 
+    return features
+
+
+_H3_FIELDS = ("h3_8_index", "h3_9_index", "h3_10_index")
+# The admin-only fields _build_device_features adds; emitted ONLY under
+# include_plate (an admin session on /user/devices/current).
+_PLATE_FIELDS = ("vehicle_plate", "display_name", "first_ever_observed_at",
+                 "max_observed_range_meters", "max_observed_range_at")
+
+
+def _project_features(features: list[dict[str, Any]], tokens: set[str],
+                      include_plate: bool) -> list[dict[str, Any]]:
+    """A full build narrowed to one request's field groups. The raw plate
+    leaves here only when include_plate, which only the session decides."""
+    drop: set[str] = set()
+    if "h3" not in tokens:
+        drop.update(_H3_FIELDS)
+    if "ranks" not in tokens:
+        drop.update(_RANK_FIELDS)
+    if not include_plate:
+        drop.update(_PLATE_FIELDS)
+    if not drop:
+        return features
+    return [{**f, "properties": {k: v for k, v in f["properties"].items()
+                                 if k not in drop}}
+            for f in features]
+
+
+def _devices_cache_key(tokens: set[str] | frozenset[str], form_factor: str | None,
+                       spatial_status: str | None, include_outliers: bool,
+                       include_plate: bool) -> str:
+    """Every input that changes the devices FEATURES — never the viewer, so
+    a non-admin's signed-in feed shares the public entry and only the small
+    per-caller metadata differs (see payload_cache's "open" gzip)."""
+    return "devices|" + "|".join((
+        "+".join(sorted(tokens)),
+        form_factor or "",
+        spatial_status or "",
+        "1" if include_outliers else "0",
+        "plate" if include_plate else "",
+    ))
+
+
+def _devices_entry(key: str, cycle_id: Any, snapshot_time: datetime, stamp: str,
+                   full: list[dict[str, Any]], tokens: set[str] | frozenset[str],
+                   include_plate: bool) -> payload_cache.Entry:
+    features = _project_features(full, set(tokens), include_plate)
+    return payload_cache.make_entry(
+        key, cycle_id, stamp,
+        b'{"type":"FeatureCollection","features":' + payload_cache.dumps(features),
+        {"snapshot_time": snapshot_time.isoformat(), "device_count": len(features)})
+
+
+# The variants the frontend requests (denver-scooter-fyi src/main.ts
+# fetchIncludes): the map with h3+ranks, the lean ride-mode feed, and the
+# admin's plate-bearing map. Warmed from ONE build per cycle/report change.
+_WARM_VARIANTS: tuple[tuple[frozenset[str], bool], ...] = (
+    (frozenset({"h3", "ranks"}), False),
+    (frozenset(), False),
+    (frozenset({"h3", "ranks"}), True),
+)
+
+
+def warm_devices() -> None:
+    """Warmer hook (payload_cache.register_warmer): bring the hot variants up
+    to the newest cycle and report stamp. Two cheap queries when current."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cycle_id, snapshot_time = latest_complete_cycle(cur)
+            try:
+                stamp = fleet_reports.reports_stamp(cur)
+            except Exception:  # noqa: BLE001 — same fallback as the route
+                stamp = ""
+    stale = [(tokens, plate) for tokens, plate in _WARM_VARIANTS
+             if not ((e := payload_cache.peek(
+                 _devices_cache_key(tokens, None, None, False, plate)))
+                 and e.fresh_for(cycle_id, stamp))]
+    if not stale:
+        return
+    where, params = _devices_filter(cycle_id, None, None, False, None)
+    full: list[dict[str, Any]] = []
+
+    for tokens, plate in stale:
+        key = _devices_cache_key(tokens, None, None, False, plate)
+
+        def _build(key=key, tokens=tokens, plate=plate) -> payload_cache.Entry:
+            if not full:
+                full.extend(_build_device_features(cycle_id, snapshot_time, where, params))
+            return _devices_entry(key, cycle_id, snapshot_time, stamp, full, tokens, plate)
+
+        payload_cache.get_or_build(key, cycle_id, stamp, _build)
+
+
+payload_cache.register_warmer(warm_devices)
+
+
+def _devices_current_impl(
+    request: Request,
+    response: Response,
+    *,
+    form_factor: str | None,
+    spatial_status: str | None,
+    include_outliers: bool,
+    bbox: str | None,
+    include: str | None,
+    include_plate: bool = False,
+    resource: str = "devices",
+    cache_header: str = _DEVICES_CACHE_HEADER,
+    viewed_by: str | None = None,
+) -> Any:
+    """Shared builder for the public `/api/v1/devices/current` and the
+    session-gated `/api/v1/user/devices/current`.
+
+    ``include_plate`` adds the admin-only private fields — raw
+    ``vehicle_plate``, ``first_ever_observed_at``, and the observed max
+    range — that used to live behind `/api/v1/private/devices/current`. It
+    is NEVER derived from a query param (that would let anyone opt in); the
+    caller decides it from the authenticated session.
+    """
+    tokens: set[str] = set()
+    if include:
+        tokens = {t.strip() for t in include.split(",") if t.strip()}
+        unknown = tokens.difference(_INCLUDE_TOKENS)
+        if unknown:
+            raise HTTPException(
+                400,
+                detail=(
+                    f"unknown include token(s): {', '.join(sorted(unknown))}. "
+                    f"Valid: {', '.join(_INCLUDE_TOKENS)}"
+                ),
+            )
+    # Resolve which cycle to use
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cycle_id, snapshot_time = latest_complete_cycle(cur)
+
+            # Validate the bbox up front — before the 304 short-circuit — so
+            # a malformed bbox always 400s even when the ETag matches.
+            bbox_vals: tuple[float, float, float, float] | None = None
+            if bbox:
+                parts = bbox.split(",")
+                if len(parts) != 4:
+                    raise HTTPException(400, detail="bbox must be 4 comma-separated numbers")
+                try:
+                    bbox_vals = (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
+                except ValueError as e:
+                    raise HTTPException(400, detail=f"bbox parse error: {e}")
+
+            # Weak, cycle-keyed ETag: the 90 s poll loop revalidates for
+            # free until a new cycle lands (~every 10 min). Weak because the
+            # body is not a pure function of the cycle: has_negative_report
+            # uses a wall-clock NOW() - 24h window and sees reports filed
+            # mid-cycle (so do the negative-report fields, and an admin resolving a
+            # report), and the device_state columns (failed starts, dwell
+            # start, rental outcomes/grade, confirmed features) are joined
+            # live — the next cycle's ingest updates them a little before
+            # that cycle is marked complete, and feature confirmations land
+            # any time. A 304 defers any of that by at most one cycle. The
+            # dwell/battery tiers themselves no longer drift: quality,
+            # reliability, parked_hours and battery_reading all read
+            # snapshot_time, not the wall clock.
+            # The ETag must vary with EVERY input that changes the body: the
+            # include tokens AND the filters
+            # (form_factor / spatial_status / include_outliers / bbox), or a
+            # client reusing a tag across filtered requests gets a 304 for a
+            # different representation.
+            # include_plate is part of the key so an admin's plate-bearing
+            # body can never be handed back to a non-admin via a shared 304
+            # (and the /user endpoint is served `private` anyway).
+            # `viewed_by` (the authenticated email) is part of the key so an
+            # admin's plate-bearing body can never be served to a different
+            # user via a shared/conditional cache hit — belt-and-suspenders
+            # alongside the per-response Vary: Authorization below.
+            filter_key = "|".join((
+                "+".join(sorted(tokens)),
+                form_factor or "",
+                spatial_status or "",
+                "1" if include_outliers else "0",
+                ",".join(repr(v) for v in bbox_vals) if bbox_vals else "",
+                "plate" if include_plate else "",
+                viewed_by or "",
+            ))
+            # Negative-report inputs change mid-cycle (a report filed or
+            # resolved), and the label/latest_report fields read them live,
+            # so they are in the tag too (fleet_reports.reports_stamp).
+            try:
+                stamp = fleet_reports.reports_stamp(cur)
+            except Exception:  # noqa: BLE001 — a tag without it is just weaker
+                stamp = ""
+            etag = f'W/"{resource}:{cycle_id}:{stamp}:{filter_key}"'
+            # Authenticated responses vary by the bearer and (for admins) can
+            # carry raw plates — a private cache must key on Authorization and
+            # never silently reuse across tokens within a freshness window.
+            extra_headers = {"Vary": "Authorization"} if viewed_by is not None else {}
+            if _if_none_match_hit(request, etag):
+                return Response(
+                    status_code=304,
+                    headers={"ETag": etag, "Cache-Control": cache_header, **extra_headers},
+                )
+            where, params = _devices_filter(cycle_id, form_factor, spatial_status,
+                                            include_outliers, bbox_vals)
+
+    # The body is served from the precomputed cache (src/payload_cache.py)
+    # unless the request is bbox-filtered (unbounded variants; built per
+    # request). The cache key is every input that changes the FEATURES —
+    # never the viewer: a non-admin's signed-in feed shares the public
+    # entry, and only the small metadata suffix below is per caller.
+    cache_key = _devices_cache_key(tokens, form_factor, spatial_status,
+                                   include_outliers, include_plate)
+
+    def _build() -> payload_cache.Entry:
+        return _devices_entry(
+            cache_key, cycle_id, snapshot_time, stamp,
+            _build_device_features(cycle_id, snapshot_time, where, params),
+            tokens, include_plate)
+
+    entry = _build() if bbox_vals else payload_cache.get_or_build(
+        cache_key, cycle_id, stamp, _build)
+
+    # While the next cycle is being built a request may get the previous
+    # entry: the tag and metadata then name THAT cycle, never the newer one.
+    etag = f'W/"{resource}:{entry.cycle_id}:{entry.stamp}:{filter_key}"'
     metadata: dict[str, Any] = {
-        "cycle_id": str(cycle_id),
-        "snapshot_time": snapshot_time.isoformat(),
-        "device_count": len(features),
+        "cycle_id": entry.cycle_id,
+        "snapshot_time": entry.meta["snapshot_time"],
+        "device_count": entry.meta["device_count"],
         "filters": {
             "form_factor": form_factor,
             "spatial_status": spatial_status,
@@ -811,11 +940,18 @@ def _devices_current_impl(
     if viewed_by is not None:
         metadata["viewed_by"] = viewed_by
         metadata["admin"] = include_plate
-    return {
-        "type": "FeatureCollection",
-        "metadata": metadata,
-        "features": features,
-    }
+    gz = payload_cache.assemble(
+        entry, b',"metadata":' + payload_cache.dumps(metadata) + b"}")
+    body, enc_headers = payload_cache.gzip_response_body(
+        gz, request.headers.get("accept-encoding"))
+    vary = ", ".join(v for v in (enc_headers.pop("Vary", None),
+                                 extra_headers.get("Vary")) if v)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": cache_header,
+                 **enc_headers, "Vary": vary},
+    )
 
 
 @router.get("/api/v1/devices/current")

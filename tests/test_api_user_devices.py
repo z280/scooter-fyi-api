@@ -17,6 +17,7 @@ from fastapi import Response
 from starlette.requests import Request
 
 from src import accounts, api_public, api_user
+from tests.payload_json import decoded
 from src.accounts import SessionUser
 
 _CYCLE_ID = uuid.UUID("8f3a2d10-1234-4abc-8def-0123456789ab")
@@ -120,9 +121,13 @@ def _allowlist(monkeypatch):
     monkeypatch.setattr(accounts, "admin_emails", lambda: _ADMINS)
 
 
-def _call(*, email="rider@example.com", method="magic_link", headers=None, response=None):
+def _call(*, email="rider@example.com", method="magic_link", headers=None):
+    return decoded(_raw(email=email, method=method, headers=headers))
+
+
+def _raw(*, email="rider@example.com", method="magic_link", headers=None):
     return api_user.user_devices_current(
-        _request(headers), response or Response(), user=_user(email, method),
+        _request(headers), Response(), user=_user(email, method),
         form_factor=None, spatial_status=None, include_outliers=False,
         bbox=None, include=None,
     )
@@ -167,30 +172,27 @@ def test_email_match_is_case_insensitive(_fake_db):
 
 
 def test_admin_and_non_admin_get_distinct_etags(_fake_db):
-    r_admin, r_plain = Response(), Response()
-    _call(email="z@neill.io", response=r_admin)
-    _call(email="rider@example.com", response=r_plain)
+    r_admin = _raw(email="z@neill.io")
+    r_plain = _raw(email="rider@example.com")
     assert r_admin.headers["etag"] != r_plain.headers["etag"]
     # Per-user response must not be shared-cached, must revalidate, and must
     # vary by bearer so one token's (plate-bearing) body can't be reused for
     # another.
     assert r_admin.headers["cache-control"] == "private, no-cache"
-    assert r_admin.headers["vary"] == "Authorization"
+    assert "Authorization" in r_admin.headers["vary"]
 
 
 def test_etag_is_per_user(_fake_db):
     """Two users at the SAME admin level still get different ETags (identity
     is folded into the key), so no cross-user 304 reuse even if a cache
     mishandles Vary. Both non-admin here, so only the email differs."""
-    r1, r2 = Response(), Response()
-    _call(email="a@example.com", response=r1)
-    _call(email="b@example.com", response=r2)
+    r1 = _raw(email="a@example.com")
+    r2 = _raw(email="b@example.com")
     assert r1.headers["etag"] != r2.headers["etag"]
 
 
 def test_user_endpoint_304_on_revalidation(_fake_db):
-    resp = Response()
-    _call(email="rider@example.com", response=resp)
+    resp = _raw(email="rider@example.com")
     etag = resp.headers["etag"]
     assert "user-devices" in etag
     out = _call(email="rider@example.com", headers={"If-None-Match": etag})
