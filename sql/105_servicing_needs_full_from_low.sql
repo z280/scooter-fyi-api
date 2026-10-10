@@ -11,11 +11,13 @@
 -- among them is lost; the next one is recorded correctly). None of them had
 -- cleared a report: the only standing report (#44) still read high risk.
 --
+-- range_low_since_full is deliberately NOT seeded. last_range_meters may be
+-- a reading taken mid-ride (sag), which the rule exists to ignore; a seed from
+-- it could let a later parked 80% -> full read as servicing (zneill-agent,
+-- #151). It starts NULL and is set by the next parked, non-reserved reading.
+--
 -- REPLAY SAFETY: re-executed by the _pg fixtures before each test writes its
--- own rows; IF NOT EXISTS, and the seed only touches NULLs.
+-- own rows; IF NOT EXISTS.
 ALTER TABLE device_state ADD COLUMN IF NOT EXISTS range_low_since_full INTEGER;
 
 UPDATE device_state SET last_serviced_at = NULL WHERE last_serviced_at IS NOT NULL;
-
-UPDATE device_state SET range_low_since_full = last_range_meters
- WHERE range_low_since_full IS NULL AND last_range_meters IS NOT NULL;

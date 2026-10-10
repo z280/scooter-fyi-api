@@ -126,3 +126,27 @@ def test_max_observed_range_still_records_only_a_new_peak(pg):
         cur.execute("SELECT max_observed_range_meters, max_observed_range_at FROM device_state "
                     "WHERE vehicle_identifier = %s", (_vid(1),))
         assert cur.fetchone() == (30000, t0)
+
+
+def test_after_the_migration_a_mid_ride_low_cannot_seed_servicing(pg):
+    """zneill-agent (#151): a vehicle whose last reading before sql/105 was a
+    ride's sag (in rental, 5 km) must not have that low carried over — a
+    later parked 80% -> full is not servicing."""
+    from pathlib import Path
+
+    with pg.cursor() as cur:
+        cur.execute(
+            "INSERT INTO device_state (vehicle_identifier, current_device_id, current_lat, "
+            "current_lon, first_observed_at_location, first_ever_observed_at, last_observed_at, "
+            "rental_started_at, last_range_meters) VALUES (%s, 'bike-1', %s, %s, %s, %s, %s, %s, 5000)",
+            (_vid(1), _dev(1).lat, _dev(1).lon, _T0, _T0, _T0, _T0))
+        cur.execute((Path(__file__).resolve().parents[1]
+                     / "sql" / "105_servicing_needs_full_from_low.sql").read_text())
+        cur.execute("SELECT range_low_since_full FROM device_state WHERE vehicle_identifier = %s",
+                    (_vid(1),))
+        assert cur.fetchone()[0] is None
+    pg.commit()
+    feed = _Feed(pg)
+    feed(int(FULL * 0.8))                                 # released, parked at 80%
+    feed(FULL)
+    assert _serviced(pg) is None
