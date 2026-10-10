@@ -16,7 +16,10 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from . import accounts, auth, campaigns, job_runs, parking_response, vehicle_identity
+from . import (
+    accounts, auth, campaigns, fleet_admin_queries, job_runs, parking_response,
+    vehicle_identity,
+)
 from .cli import COMMANDS
 from .pg import connection
 
@@ -960,12 +963,15 @@ def campaigns_archive(
 # public username. (Admins' own emails appear where an admin acted through
 # the account-session API, as on /admin/admins.)
 
-_FLEET_PAGE_SIZE = 50
-_REGION_LAYER = "neighborhood"
-#: The region filter is applied in Python (a report's region is a
-#: point-in-polygon on its own coordinates), over at most this many of the
-#: newest matching rows.
-_REGION_SCAN_LIMIT = 5000
+# The queue's and reporters' reads live in src/fleet_admin_queries.py, which
+# the in-app console's JSON endpoints read too. These names stay as aliases
+# because the templates and tests reach for them.
+_FLEET_PAGE_SIZE = fleet_admin_queries.PAGE_SIZE
+_REGION_SCAN_LIMIT = fleet_admin_queries.REGION_SCAN_LIMIT
+_region_of = fleet_admin_queries.region_of
+_region_names = fleet_admin_queries.region_names
+_report_point = fleet_admin_queries.report_point
+_pct = fleet_admin_queries.charge_pct
 
 
 def _fleet_redirect(path: str, **params: Any) -> RedirectResponse:
@@ -980,50 +986,6 @@ def _safe_next(next_url: str | None, default: str) -> str:
     if next_url and next_url.startswith("/admin/fleet") and "//" not in next_url:
         return next_url
     return default
-
-
-def _region_of(lat: float | None, lon: float | None) -> str | None:
-    from . import geo
-
-    if lat is None or lon is None:
-        return None
-    try:
-        return geo.region_for_point(_REGION_LAYER, float(lon), float(lat))
-    except Exception:  # noqa: BLE001 — a missing layer must not break the page
-        return None
-
-
-def _region_names() -> list[str]:
-    from . import geo
-
-    try:
-        return sorted(geo.region_names(_REGION_LAYER))
-    except Exception:  # noqa: BLE001
-        return []
-
-
-def _report_point(lat, lng, h3_10, ds_lat, ds_lon) -> tuple[float | None, float | None]:
-    if lat is not None and lng is not None:
-        return float(lat), float(lng)
-    if h3_10 is not None:
-        import h3
-
-        try:
-            c = h3.cell_to_latlng(h3.int_to_str(int(h3_10)))
-            return float(c[0]), float(c[1])
-        except Exception:  # noqa: BLE001 — a bad stored cell is just "no point"
-            pass
-    if ds_lat is not None and ds_lon is not None:
-        return float(ds_lat), float(ds_lon)
-    return None, None
-
-
-def _pct(range_m) -> int | None:
-    from .quality import full_charge_range_meters
-
-    if range_m is None:
-        return None
-    return int(round(100 * float(range_m) / full_charge_range_meters()))
 
 
 @router.get("", include_in_schema=False)
@@ -1054,103 +1016,16 @@ def fleet_reports_queue(
     status: str | None = Query(None, pattern="^(open|resolved)?$"),
     page: int = Query(0, ge=0),
 ):
-    from . import fleet_reports
-    from .api_frontend_reports import NOT_RIDEABLE_REASONS, _REPORT_TYPES
-    from .api_public import latest_complete_cycle
-
-    where = ["TRUE"]
-    params: list[Any] = []
-    if report_type:
-        where.append("dr.report_type = %s")
-        params.append(report_type)
-    if reason:
-        if reason == "unspecified":
-            where.append("dr.report_type = 'not_rideable' AND dr.reason IS NULL")
-        else:
-            where.append("dr.reason = %s")
-            params.append(reason)
-    if status == "open":
-        where.append("dr.resolved_at IS NULL")
-    elif status == "resolved":
-        where.append("dr.resolved_at IS NOT NULL")
     with connection() as conn:
         with conn.cursor() as cur:
-            cycle_id, snap = latest_complete_cycle(cur)
-            standing_ids = fleet_reports.standing_report_ids_all(cur, cycle_id)
-            if standing == "yes":
-                where.append("dr.id = ANY(%s)")
-                params.append(list(standing_ids))
-            elif standing == "no":
-                where.append("NOT (dr.id = ANY(%s))")
-                params.append(list(standing_ids))
-            limit = _REGION_SCAN_LIMIT if region else _FLEET_PAGE_SIZE + 1
-            offset = 0 if region else page * _FLEET_PAGE_SIZE
-            cur.execute(
-                f"""
-                SELECT dr.id, dr.vehicle_identifier, ds.vehicle_plate, dr.report_type,
-                       dr.reason, dr.submitted_reason, dr.observed_at, dr.reported_at,
-                       dr.account_id, acc.public_username, dr.range_at_report_meters,
-                       dr.lat, dr.lng, dr.h3_10_index, ds.current_lat, ds.current_lon,
-                       ds.first_observed_at_location, dr.resolved_at,
-                       COALESCE(dr.resolution_source,
-                                CASE WHEN dr.resolved_at IS NOT NULL THEN 'admin' END),
-                       dr.resolution, dr.reconfirm_count,
-                       COALESCE(dr.baseline_at, dr.reported_at), dr.baseline_pending,
-                       (SELECT COUNT(*) FROM device_reports d2
-                         WHERE d2.vehicle_identifier = dr.vehicle_identifier
-                           AND d2.report_type = dr.report_type AND d2.id <> dr.id
-                           AND d2.reported_at BETWEEN dr.reported_at - INTERVAL '30 minutes'
-                                                  AND dr.reported_at + INTERVAL '30 minutes'),
-                       (SELECT COUNT(DISTINCT d3.account_id) FROM device_reports d3
-                         WHERE d3.vehicle_identifier = dr.vehicle_identifier
-                           AND d3.id = ANY(%s))
-                  FROM device_reports dr
-                  LEFT JOIN device_state ds ON ds.vehicle_identifier = dr.vehicle_identifier
-                  LEFT JOIN accounts acc ON acc.id = dr.account_id
-                 WHERE {" AND ".join(where)}
-                 ORDER BY dr.reported_at DESC, dr.id DESC
-                 LIMIT %s OFFSET %s
-                """,
-                [list(standing_ids), *params, limit, offset],
-            )
-            raw = cur.fetchall()
-    rows = []
-    for r in raw:
-        lat, lon = _report_point(r[11], r[12], r[13], r[14], r[15])
-        reg = _region_of(lat, lon)
-        if region and reg != region:
-            continue
-        parked_since = r[16]
-        anchor, pending = r[21], r[22]
-        r = r[:21] + r[23:]
-        rows.append({
-            "id": r[0], "vehicle_identifier": r[1],
-            "display_name": vehicle_identity.display_name(r[1], r[2]),
-            "report_type": r[3], "reason": r[4], "submitted_reason": r[5],
-            "observed_at": r[6], "reported_at": r[7],
-            "account_id": r[8], "public_username": r[9],
-            "charge_pct_at_report": _pct(r[10]),
-            "region": reg,
-            "moved_since": bool(parked_since and parked_since > anchor),
-            "resolved_at": r[17], "resolution_source": r[18], "resolution": r[19],
-            "reconfirm_count": r[20],
-            "near_duplicates": int(r[21] or 0),
-            "standing_accounts": int(r[22] or 0),
-            "standing": r[0] in standing_ids,
-            "negative_type": r[3] in fleet_reports.NEGATIVE_REPORT_PRIORITY,
-            "signed_in": r[8] is not None,
-        })
-    if region:
-        start = page * _FLEET_PAGE_SIZE
-        has_next = len(rows) > start + _FLEET_PAGE_SIZE
-        rows = rows[start:start + _FLEET_PAGE_SIZE]
-    else:
-        has_next = len(rows) > _FLEET_PAGE_SIZE
-        rows = rows[:_FLEET_PAGE_SIZE]
+            q = fleet_admin_queries.reports_queue(
+                cur, report_type=report_type, reason=reason, region=region,
+                standing=standing, status=status, page=page)
     return _render(
-        "fleet_reports.html", user=user, rows=rows, as_of=snap, page=page,
-        has_next=has_next, report_types=_REPORT_TYPES,
-        reasons=tuple(NOT_RIDEABLE_REASONS) + ("unspecified",),
+        "fleet_reports.html", user=user, rows=q["rows"], as_of=q["as_of"],
+        page=q["page"], has_next=q["has_next"],
+        report_types=fleet_admin_queries.report_types(),
+        reasons=fleet_admin_queries.reason_options(),
         regions=_region_names(),
         f={"report_type": report_type or "", "reason": reason or "",
            "region": region or "", "standing": standing or "", "status": status or ""},
@@ -1368,138 +1243,12 @@ def fleet_reporters(
     with rider condition-check resolutions alongside (plan §4.4: an account
     resolving reports nobody else's rides corroborate is the same signal as
     one filing them). Account id + public username only."""
-    from datetime import timedelta, timezone
-
-    from .api_frontend_reports import _REPORT_TYPES
-
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    type_cols = ", ".join(
-        f"COUNT(*) FILTER (WHERE dr.report_type = '{t}')" for t in _REPORT_TYPES)
-    detail = None
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                WITH rep AS (
-                    SELECT dr.account_id,
-                           COUNT(*) AS reports,
-                           COUNT(DISTINCT dr.vehicle_identifier) AS vehicles,
-                           COUNT(DISTINCT dr.h3_10_index) AS cells,
-                           COUNT(DISTINCT (dr.reported_at AT TIME ZONE 'America/Denver')::date) AS days_active,
-                           COUNT(DISTINCT EXTRACT(HOUR FROM dr.reported_at AT TIME ZONE 'America/Denver')) AS hours_of_day,
-                           MIN(dr.reported_at) AS first_at, MAX(dr.reported_at) AS last_at,
-                           COUNT(*) FILTER (WHERE dr.resolution_source = 'admin'
-                                              OR (dr.resolved_at IS NOT NULL
-                                                  AND dr.resolution_source IS NULL)) AS voided,
-                           COUNT(*) FILTER (WHERE dr.resolution_source = 'rider_check') AS rider_resolved,
-                           {type_cols}
-                      FROM device_reports dr
-                     WHERE dr.account_id IS NOT NULL AND dr.reported_at >= %(since)s
-                     GROUP BY dr.account_id
-                ), chk AS (
-                    SELECT c.account_id,
-                           COUNT(*) AS checks,
-                           COUNT(*) FILTER (WHERE NOT c.test_ride) AS no_ride_checks,
-                           SUM(c.reports_resolved) AS resolutions,
-                           SUM(c.reports_reconfirmed) AS reconfirmations,
-                           COUNT(*) FILTER (WHERE c.feed_status = 'confirmed') AS feed_confirmed,
-                           COUNT(*) FILTER (WHERE c.feed_status = 'unconfirmed') AS feed_unconfirmed
-                      FROM device_condition_checks c
-                     WHERE c.account_id IS NOT NULL AND c.submitted_at >= %(since)s
-                     GROUP BY c.account_id
-                )
-                SELECT COALESCE(rep.account_id, chk.account_id) AS aid,
-                       a.public_username, rep.*, chk.*
-                  FROM rep FULL OUTER JOIN chk ON chk.account_id = rep.account_id
-                  LEFT JOIN accounts a ON a.id = COALESCE(rep.account_id, chk.account_id)
-                 ORDER BY COALESCE(rep.reports, 0) + COALESCE(chk.resolutions, 0) DESC
-                 LIMIT 500
-                """,
-                {"since": since},
-            )
-            cols = [c.name for c in cur.description]
-            rows = []
-            n_types = len(_REPORT_TYPES)
-            for r in cur.fetchall():
-                rec = dict(zip(cols, r))
-                # rep.* puts the type counts right after `rider_resolved`.
-                idx = cols.index("rider_resolved") + 1
-                rec["by_type"] = dict(zip(_REPORT_TYPES, r[idx:idx + n_types]))
-                rows.append(rec)
-            if account_id is not None:
-                cur.execute(
-                    """
-                    SELECT dr.id, dr.vehicle_identifier, dr.report_type, dr.reason,
-                           dr.reported_at, dr.resolved_at,
-                           COALESCE(dr.resolution_source,
-                                    CASE WHEN dr.resolved_at IS NOT NULL THEN 'admin' END),
-                           dr.h3_10_index
-                      FROM device_reports dr
-                     WHERE dr.account_id = %s AND dr.reported_at >= %s
-                     ORDER BY dr.reported_at DESC LIMIT 300
-                    """,
-                    (account_id, since),
-                )
-                reps = cur.fetchall()
-                cur.execute(
-                    """
-                    SELECT EXTRACT(HOUR FROM reported_at AT TIME ZONE 'America/Denver')::int,
-                           COUNT(*)
-                      FROM device_reports
-                     WHERE account_id = %s AND reported_at >= %s
-                     GROUP BY 1 ORDER BY 1
-                    """,
-                    (account_id, since),
-                )
-                by_hour = dict(cur.fetchall())
-                cur.execute(
-                    """
-                    SELECT c.id, c.vehicle_identifier, c.submitted_at, c.test_ride,
-                           c.reports_resolved, c.reports_reconfirmed, c.feed_status,
-                           c.points_base + c.points_confirmed, c.points_withheld
-                      FROM device_condition_checks c
-                     WHERE c.account_id = %s AND c.submitted_at >= %s
-                     ORDER BY c.submitted_at DESC LIMIT 300
-                    """,
-                    (account_id, since),
-                )
-                checks = cur.fetchall()
-                cur.execute("SELECT public_username FROM accounts WHERE id = %s",
-                            (account_id,))
-                urow = cur.fetchone()
-                import h3
-
-                cells: dict[str, int] = {}
-                for rr in reps:
-                    if rr[7] is not None:
-                        # Spread at resolution 8 (~0.7 km²): enough to see a
-                        # cluster, too coarse to name an address.
-                        try:
-                            c8 = h3.cell_to_parent(h3.int_to_str(int(rr[7])), 8)
-                        except Exception:  # noqa: BLE001
-                            c8 = "invalid-cell"
-                        cells[c8] = cells.get(c8, 0) + 1
-                detail = {
-                    "account_id": account_id,
-                    "public_username": urow[0] if urow else None,
-                    "reports": [
-                        {"id": x[0], "vehicle_identifier": x[1],
-                         "display_name": vehicle_identity.public_name(x[1]),
-                         "report_type": x[2], "reason": x[3], "reported_at": x[4],
-                         "resolved_at": x[5], "resolution_source": x[6]}
-                        for x in reps],
-                    "by_hour": [(h, by_hour.get(h, 0)) for h in range(24)],
-                    "cells": sorted(cells.items(), key=lambda kv: -kv[1]),
-                    "checks": [
-                        {"id": x[0], "vehicle_identifier": x[1],
-                         "display_name": vehicle_identity.public_name(x[1]),
-                         "submitted_at": x[2], "test_ride": x[3], "resolved": x[4],
-                         "reconfirmed": x[5], "feed_status": x[6], "points": x[7],
-                         "withheld": x[8]}
-                        for x in checks],
-                }
-    return _render("fleet_reporters.html", user=user, rows=rows, days=days,
-                   report_types=_REPORT_TYPES, detail=detail)
+            q = fleet_admin_queries.reporters(cur, days=days, account_id=account_id)
+    return _render("fleet_reporters.html", user=user, rows=q["rows"], days=q["days"],
+                   report_types=fleet_admin_queries.report_types(),
+                   detail=q["detail"])
 
 
 # --- 5. SMS watch -----------------------------------------------------------

@@ -925,6 +925,51 @@ Decisions the rules left open:
 - **Condition checks** list uncleared device reports, anonymous ones included; map pins have no
   report to resolve and only clear by the rules.
 
+### 4.7 Phase 2b — the same pages, in the app (2026-10-10)
+
+The in-app admin console (frontend `src/admin-console.ts`) renders Fleet
+inside the SPA. It reaches the **account-session** `/api/v1/private/*` door,
+not the GitHub-OAuth one, so Phase 2's pages are unchanged and stay the
+operator's full-desk surface; the console is the one you have on you.
+
+Most of it needed no new API: census (all three lists plus ack / unack /
+note), report resolve, the device dossier and the export were already Phase 1
+endpoints the frontend had simply never called. Four gaps did
+(`src/api_fleet_admin.py`):
+
+| | |
+|---|---|
+| `GET /api/v1/private/reports/queue` | The queue, same five filters, 50 a page, `has_next` rather than a total. Carries its own filter vocabularies so the console builds its controls in one request, and `scan_limited` so a region answer can say when older reports went unscanned |
+| `POST /api/v1/private/reports/{id}/reinstate` | 409 on an admin's own resolution, as the page does |
+| `GET /api/v1/private/fleet/reporters` | Volume, spread and condition checks; `detail` for one account |
+| `GET/POST/DELETE /api/v1/private/fleet/watches` | List, start, stop |
+
+**ONE IMPLEMENTATION.** The queue's and the reporter view's reads moved out
+of the Jinja routes into `src/fleet_admin_queries.py`, which both surfaces
+now call, and `tests/test_fleet_admin_json_pg.py` asserts they answer
+identically from the same fixture — row for row, for each filter. Parity
+alone cannot catch a bug *inside* the shared function, so the same file also
+states each filter's effect absolutely.
+
+**Two deliberate differences from the page.**
+
+- **A watch here only ever texts the signed-in admin's own verified phone.**
+  The page takes a recipient email; the endpoint takes none. Starting SMS to
+  a colleague's phone is not something one person should be able to do to
+  another from a phone screen, and the page still exists for the rare case
+  it is wanted.
+- **Reinstatement is attributed to the account** (`reinstated_by`, sql/106),
+  mirroring `resolved_by` / `resolved_by_login`. sql/102 gave reinstatement
+  only a login column, because only the portal could do it. Both capacities
+  now have somewhere to go, filled by the one write path
+  (`fleet_reports.reinstate_report`), and an email is never written to
+  either.
+
+**Scheduler edit is not moving, ever.** Nothing on a phone should be able to
+change pipeline cadence.
+
+---
+
 ---
 
 ## 5. Tests
