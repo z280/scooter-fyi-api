@@ -52,6 +52,7 @@ from .api_user import router as user_router
 from .api_vehicle_plates import router as vehicle_plates_router
 from .api_fleet_reports import router as fleet_reports_router
 from . import log_redaction
+from . import payload_cache
 from . import request_metrics
 from .config import load, session_https_only, session_secret
 from .pg import run_migrations
@@ -84,7 +85,12 @@ async def lifespan(app: FastAPI):
     )
     metrics_stop = asyncio.Event()
     metrics_task = asyncio.create_task(request_metrics.flush_loop(metrics_stop))
+    # Rebuilds the map payloads (/devices/current, /h3/aggregates) as each
+    # cycle lands, so riders are served precomputed bytes (src/payload_cache.py).
+    warmer_stop = payload_cache.start_warmer()
     yield
+    if warmer_stop is not None:
+        warmer_stop.set()
     metrics_stop.set()
     await metrics_task
     try:

@@ -18,6 +18,7 @@ from fastapi import HTTPException, Response
 from starlette.requests import Request
 
 from src import api_public
+from tests.payload_json import decoded
 from src.quality import DwellPeerStats, compute_battery_percent
 
 _CYCLE_ID = uuid.UUID("8f3a2d10-1234-4abc-8def-0123456789ab")
@@ -134,7 +135,7 @@ def _call(headers=None, **kwargs):
         bbox=None, include=None,
     )
     defaults.update(kwargs)
-    return api_public.devices_current(_request(headers), Response(), **defaults)
+    return decoded(api_public.devices_current(_request(headers), Response(), **defaults))
 
 
 # ---------- lean default + ?include= opt-ins ---------------------------------
@@ -339,9 +340,8 @@ def test_battery_percent_edge_cases():
 
 # ---------- ETag / 304 --------------------------------------------------------
 def test_etag_set_and_304_on_revalidation(_fake_db):
-    resp = Response()
-    api_public.devices_current(
-        _request(), resp,
+    resp = api_public.devices_current(
+        _request(), Response(),
         form_factor=None, spatial_status=None, include_outliers=False,
         bbox=None, include=None,
     )
@@ -356,14 +356,13 @@ def test_etag_set_and_304_on_revalidation(_fake_db):
 
 
 def test_etag_varies_by_include_tokens(_fake_db):
-    r1, r2 = Response(), Response()
-    api_public.devices_current(
-        _request(), r1,
+    r1 = api_public.devices_current(
+        _request(), Response(),
         form_factor=None, spatial_status=None, include_outliers=False,
         bbox=None, include=None,
     )
-    api_public.devices_current(
-        _request(), r2,
+    r2 = api_public.devices_current(
+        _request(), Response(),
         form_factor=None, spatial_status=None, include_outliers=False,
         bbox=None, include="ranks",
     )
@@ -383,8 +382,7 @@ def test_etag_varies_by_filters(_fake_db):
     ]
     tags = set()
     for v in variants:
-        resp = Response()
-        api_public.devices_current(_request(), resp, **v)
+        resp = api_public.devices_current(_request(), Response(), **v)
         tags.add(resp.headers["etag"])
     assert len(tags) == len(variants), "each filter combination needs a distinct ETag"
 
@@ -392,9 +390,8 @@ def test_etag_varies_by_filters(_fake_db):
 def test_invalid_bbox_400s_even_when_etag_matches(_fake_db):
     """bbox is validated BEFORE the 304 short-circuit."""
     # First get a valid ETag for the default query.
-    resp = Response()
-    api_public.devices_current(
-        _request(), resp,
+    resp = api_public.devices_current(
+        _request(), Response(),
         form_factor=None, spatial_status=None, include_outliers=False,
         bbox=None, include=None,
     )

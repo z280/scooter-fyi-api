@@ -40,7 +40,7 @@ from typing import Any
 import h3
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
-from . import fleet_reports
+from . import fleet_reports, payload_cache
 from .api_public import _if_none_match_hit
 from .dwell_stats import stats_for_cycle
 from .pg import connection
@@ -89,13 +89,10 @@ def _negative_states_at(cycle_id, snapshot_time):
         return None
 
 
-@router.get("/api/v1/h3/aggregates")
-def h3_aggregates(
-    request: Request,
-    response: Response,
-    res: int = Query(..., ge=8, le=10, description="H3 resolution: 8, 9, or 10"),
-) -> Any:
-    """Per-cell aggregates at the requested H3 resolution."""
+_RESOLUTIONS = (8, 9, 10)
+
+
+def _latest_cycle() -> tuple[Any, datetime]:
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -109,42 +106,32 @@ def h3_aggregates(
                 """
             )
             row = cur.fetchone()
-            if not row:
-                raise HTTPException(503, detail="no completed cycles yet")
-            cycle_id, snapshot_time = row[0], row[1]
+    if not row:
+        raise HTTPException(503, detail="no completed cycles yet")
+    return row[0], row[1]
 
-            etag = f'W/"h3agg:{res}:{cycle_id}"'
-            if _if_none_match_hit(request, etag):
-                return Response(
-                    status_code=304,
-                    headers={"ETag": etag, "Cache-Control": _CACHE_HEADER},
-                )
-            response.headers["ETag"] = etag
-            response.headers["Cache-Control"] = _CACHE_HEADER
 
-            # res is validated to 8..10 above, so the interpolated column
-            # name is one of h3_8_index / h3_9_index / h3_10_index.
+def _build_payloads(cycle_id, snapshot_time) -> dict[int, dict[str, Any]]:
+    """The /h3 payload for EVERY resolution from one pass: the device read,
+    the report-state pass, dwell stats and the per-vehicle reliability tier
+    do not depend on the resolution — only the cell a vehicle lands in does —
+    so building all three together costs about what one used to."""
+    with connection() as conn:
+        with conn.cursor() as cur:
             cur.execute(
-                f"""
-                SELECT r.h3_{res}_index, r.vehicle_identifier,
+                """
+                SELECT r.h3_8_index, r.h3_9_index, r.h3_10_index,
+                       r.vehicle_identifier,
                        r.is_disabled, r.is_reserved,
                        r.current_range_meters, r.max_range_meters_for_type,
                        ds.number_failed_starts, ds.first_observed_at_location,
-                       ds.recent_no_go_mask,
-                       -- Placeholder: the state comes from ONE pass over the
-                       -- builder below (fleet_reports.negative_states, bounded
-                       -- by this cycle's snapshot), not a per-row subquery,
-                       -- which cost ~2-3 s per request (2026-10-09).
-                       NULL AS has_negative_report
+                       ds.recent_no_go_mask
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
                 WHERE r.cycle_id = %(cycle)s
                   AND r.spatial_status = 'denver_core'
                 """,
-                {
-                    "cycle": cycle_id,
-                    "snap": snapshot_time,
-                },
+                {"cycle": cycle_id},
             )
             device_rows = cur.fetchall()
 
@@ -170,18 +157,16 @@ def h3_aggregates(
     dwell_stats = stats_for_cycle(cycle_id, snapshot_time)
     negative_by = _negative_states_at(cycle_id, snapshot_time)
 
-    cells: dict[str, _CellAccum] = {}
+    cells: dict[int, dict[str, _CellAccum]] = {res: {} for res in _RESOLUTIONS}
 
-    def _cell(key: str) -> _CellAccum:
-        acc = cells.get(key)
+    def _cell(res: int, key: str) -> _CellAccum:
+        acc = cells[res].get(key)
         if acc is None:
-            acc = cells[key] = _CellAccum()
+            acc = cells[res][key] = _CellAccum()
         return acc
 
-    for (h3_idx, vid, is_disabled, is_reserved, range_m, max_range_m,
-         failed_starts, first_obs, recent_mask, _placeholder) in device_rows:
-        if h3_idx is None:
-            continue
+    for (h3_8, h3_9, h3_10, vid, is_disabled, is_reserved, range_m, max_range_m,
+         failed_starts, first_obs, recent_mask) in device_rows:
         if negative_by is None:
             # The pass failed: we cannot say any vehicle is unreported, and a
             # reported scooter must never read likely-rideable (owner rule).
@@ -190,8 +175,6 @@ def h3_aggregates(
             entry = negative_by.get(vid)
             has_neg = (None if not entry else
                        "high" if entry.get("risk") == fleet_reports.RISK_HIGH else "unknown")
-        acc = _cell(h3.int_to_str(int(h3_idx)))
-        acc.devices += 1
 
         fs = int(failed_starts) if failed_starts is not None else None
         dstat = dwell_stats.get(vid)
@@ -202,7 +185,7 @@ def h3_aggregates(
             is_reserved=is_reserved,
             number_failed_starts=fs,
             first_observed_at_location=first_obs,
-            has_negative_report=has_neg is True or has_neg == "high",
+            has_negative_report=has_neg == "high",
             is_dwell_outlier=is_outlier,
             now=snapshot_time,
         )
@@ -211,7 +194,7 @@ def h3_aggregates(
             number_failed_starts=fs,
             first_observed_at_location=first_obs,
             quality_designation=quality,
-            has_negative_report=has_neg is True or has_neg == "high",
+            has_negative_report=has_neg == "high",
             has_faded_negative_report=has_neg == "unknown",
             is_dwell_outlier=is_outlier,
             peer_median_dwell_hours=dstat.peer_median_hours if dstat else None,
@@ -219,42 +202,129 @@ def h3_aggregates(
             now=snapshot_time,
             recent_rentals_no_go=recent_rentals_no_go(recent_mask),
         )
-        if tier == "high_risk":
-            acc.high_risk += 1
+        dwell_h = ((snapshot_time - first_obs).total_seconds() / 3600.0
+                   if first_obs is not None else None)
 
-        if battery is not None:
-            acc.battery_sum += battery
-            acc.battery_n += 1
-
-        if first_obs is not None:
-            acc.dwell_sum += (snapshot_time - first_obs).total_seconds() / 3600.0
-            acc.dwell_n += 1
+        for res, h3_idx in zip(_RESOLUTIONS, (h3_8, h3_9, h3_10)):
+            if h3_idx is None:
+                continue
+            acc = _cell(res, h3.int_to_str(int(h3_idx)))
+            acc.devices += 1
+            if tier == "high_risk":
+                acc.high_risk += 1
+            if battery is not None:
+                acc.battery_sum += battery
+                acc.battery_n += 1
+            if dwell_h is not None:
+                acc.dwell_sum += dwell_h
+                acc.dwell_n += 1
 
     for detected_at, from_lat, from_lon in trip_rows:
-        acc = _cell(h3.latlng_to_cell(float(from_lat), float(from_lon), res))
-        acc.trips += 1
         hour = detected_at.replace(minute=0, second=0, microsecond=0)
-        acc.hourly[hour] = acc.hourly.get(hour, 0) + 1
+        for res in _RESOLUTIONS:
+            acc = _cell(res, h3.latlng_to_cell(float(from_lat), float(from_lon), res))
+            acc.trips += 1
+            acc.hourly[hour] = acc.hourly.get(hour, 0) + 1
 
     return {
-        "res": res,
-        "cycle_id": str(cycle_id),
-        "snapshot_time": snapshot_time.isoformat(),
-        "cells": {
-            key: {
-                "device_count": acc.devices,
-                "trips_started_24h": acc.trips,
-                "starts_per_hour_peak": max(acc.hourly.values(), default=0),
-                "avg_battery_percent": (
-                    round(acc.battery_sum / acc.battery_n) if acc.battery_n else None
-                ),
-                "risk_share": (
-                    round(acc.high_risk / acc.devices, 2) if acc.devices else None
-                ),
-                "avg_dwell_hours": (
-                    round(acc.dwell_sum / acc.dwell_n, 1) if acc.dwell_n else None
-                ),
-            }
-            for key, acc in cells.items()
-        },
+        res: {
+            "res": res,
+            "cycle_id": str(cycle_id),
+            "snapshot_time": snapshot_time.isoformat(),
+            "cells": {
+                key: {
+                    "device_count": acc.devices,
+                    "trips_started_24h": acc.trips,
+                    "starts_per_hour_peak": max(acc.hourly.values(), default=0),
+                    "avg_battery_percent": (
+                        round(acc.battery_sum / acc.battery_n) if acc.battery_n else None
+                    ),
+                    "risk_share": (
+                        round(acc.high_risk / acc.devices, 2) if acc.devices else None
+                    ),
+                    "avg_dwell_hours": (
+                        round(acc.dwell_sum / acc.dwell_n, 1) if acc.dwell_n else None
+                    ),
+                }
+                for key, acc in cells[res].items()
+            },
+        }
+        for res in _RESOLUTIONS
     }
+
+
+def _key(res: int) -> str:
+    return f"h3|{res}"
+
+
+def _ensure_cycle(cycle_id, snapshot_time, want: int) -> payload_cache.Entry:
+    """The cached entry for `want` at this cycle. A build makes all three
+    resolutions, so the other two are stored alongside rather than rebuilt
+    when a rider switches cell size."""
+    built: dict[int, payload_cache.Entry] = {}
+
+    def _build_all() -> None:
+        for res, body in _build_payloads(cycle_id, snapshot_time).items():
+            built[res] = payload_cache.make_entry(
+                _key(res), cycle_id, "", payload_cache.dumps(body))
+
+    def _build(res: int):
+        def _inner() -> payload_cache.Entry:
+            if not built:
+                _build_all()
+            return built[res]
+        return _inner
+
+    entry = payload_cache.get_or_build(_key(want), cycle_id, "", _build(want),
+                                       lock_key="h3")
+    if built:
+        for res in _RESOLUTIONS:
+            if res != want:
+                payload_cache.get_or_build(_key(res), cycle_id, "", _build(res),
+                                           lock_key="h3")
+    return entry
+
+
+def warm() -> None:
+    """Warmer hook (payload_cache.register_warmer): keep all three
+    resolutions current. Two indexed queries when they already are."""
+    cycle_id, snapshot_time = _latest_cycle()
+    entry = payload_cache.peek(_key(9))
+    if entry is not None and entry.fresh_for(cycle_id, ""):
+        return
+    _ensure_cycle(cycle_id, snapshot_time, 9)
+
+
+payload_cache.register_warmer(warm)
+
+
+@router.get("/api/v1/h3/aggregates")
+def h3_aggregates(
+    request: Request,
+    response: Response,
+    res: int = Query(..., ge=8, le=10, description="H3 resolution: 8, 9, or 10"),
+) -> Any:
+    """Per-cell aggregates at the requested H3 resolution.
+
+    Served from the precomputed cache (src/payload_cache.py): built once per
+    cycle, gzip-compressed once, so a request is a lookup, not a rebuild."""
+    cycle_id, snapshot_time = _latest_cycle()
+
+    etag = f'W/"h3agg:{res}:{cycle_id}"'
+    if _if_none_match_hit(request, etag):
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Cache-Control": _CACHE_HEADER},
+        )
+
+    entry = _ensure_cycle(cycle_id, snapshot_time, res)
+    # A build in progress may hand back the previous cycle's entry; its tag
+    # then names that cycle, so the next poll fetches the new one.
+    etag = f'W/"h3agg:{res}:{entry.cycle_id}"'
+    body, enc_headers = payload_cache.gzip_response_body(
+        payload_cache.assemble(entry), request.headers.get("accept-encoding"))
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": _CACHE_HEADER, **enc_headers},
+    )

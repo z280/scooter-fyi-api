@@ -8,6 +8,8 @@ string cell keys, and the cycle-keyed ETag/304 flow.
 
 from __future__ import annotations
 
+import gzip
+import json
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -78,10 +80,11 @@ class _FakeCursor:
 
     def fetchall(self):
         if "raw_telemetry_points" in self._last_sql:
-            import re
-
-            res = int(re.search(r"h3_(\d+)_index,", self._last_sql).group(1))
-            return [(_reindex(r[0], res),) + r[1:] for r in _DEVICE_ROWS]
+            # One read serves every resolution (h3_8/9/10 columns), and the
+            # report state now comes from fleet_reports.negative_states, so
+            # the fixture's trailing has_negative_report flag is not a column.
+            return [(_reindex(r[0], 8), _reindex(r[0], 9), _reindex(r[0], 10))
+                    + r[1:-1] for r in _DEVICE_ROWS]
         if "trip_events" in self._last_sql:
             return _TRIP_ROWS
         raise AssertionError(f"unexpected fetchall for: {self._last_sql[:80]}")
@@ -144,8 +147,20 @@ def _request(headers: dict[str, str] | None = None) -> Request:
     })
 
 
-def _call(res: int = 9, headers=None):
+def _raw(res: int = 9, headers=None):
     return api_h3.h3_aggregates(_request(headers), Response(), res=res)
+
+
+def _call(res: int = 9, headers=None):
+    """The decoded JSON body (the route returns precomputed gzip bytes); a 304
+    comes back as the Response itself."""
+    out = _raw(res, headers)
+    if out.status_code == 304:
+        return out
+    body = out.body
+    if out.headers.get("content-encoding") == "gzip":
+        body = gzip.decompress(body)
+    return json.loads(body)
 
 
 def test_cell_keys_are_h3_strings(_fake_db):
@@ -195,8 +210,8 @@ def test_payload_is_cycle_deterministic(_fake_db):
 
 
 def test_etag_and_304(_fake_db):
-    resp = Response()
-    api_h3.h3_aggregates(_request(), resp, res=9)
+    resp = _raw(headers={"Accept-Encoding": "gzip"})
+    assert resp.headers["content-encoding"] == "gzip"
     etag = resp.headers["etag"]
     assert str(_CYCLE_ID) in etag and ":9:" in etag
     assert resp.headers["cache-control"] == "public, max-age=600"
@@ -206,8 +221,8 @@ def test_etag_and_304(_fake_db):
     assert out.status_code == 304
 
     # A different resolution must NOT revalidate against the res-9 tag.
-    out8 = _call(res=8, headers={"If-None-Match": etag})
-    assert not isinstance(out8, Response)
+    out8 = _raw(res=8, headers={"If-None-Match": etag})
+    assert out8.status_code == 200
 
 
 def test_dwell_outlier_feeds_risk_share(_fake_db, monkeypatch):
