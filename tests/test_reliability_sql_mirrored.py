@@ -45,6 +45,10 @@ CLAUSES = (
     "WHERE n.pending OR NOT",
     "AND dr.resolved_at IS NULL",
     f"INTERVAL '{fleet_reports.ANONYMOUS_HIGH_RISK_HOURS} hours'",
+    # sql/104: servicing in the history, and the legacy 3-move clear.
+    "ds.last_serviced_at > n.base_at",
+    f"n.reported_at < TIMESTAMPTZ '{fleet_reports.BATTERY_CAPTURE_SINCE}'",
+    f"LIMIT {fleet_reports.LEGACY_CLEAR_MOVES}) mv) >= {fleet_reports.LEGACY_CLEAR_MOVES}",
 )
 
 

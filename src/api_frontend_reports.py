@@ -101,8 +101,10 @@ _ACCEPTED_REPORT_TYPES = _REPORT_TYPES + tuple(_DEPRECATED_REPORT_TYPE_ALIASES)
 #     CLEARED — no time limit;
 #   * an ANONYMOUS one (and every map-pin `negative_reports` row) is high risk
 #     for 24 hours, then fades to UNKNOWN — never back to "ok" — until cleared;
-#   * a rideability report clears on a >= 100 m move AND a charge rise, or on
-#     reappearing >= 100 m away with a full battery after going off the map; a
+#   * a rideability report clears on a >= 100 m move AND a charge rise (now,
+#     or servicing seen at any reading since the report — sql/104), or on
+#     reappearing >= 100 m away with a full battery after going off the map
+#     (a report filed before charge capture: 3 moves of >= 100 m); a
 #     location report (inaccessible, not_found) on a >= 100 m move or an
 #     off-the-map reappearance >= 100 m away; a move under 100 m never clears,
 #     and neither does time;
