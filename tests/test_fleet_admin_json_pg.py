@@ -499,6 +499,45 @@ def test_the_watch_list_matches_the_page(fleet):
     assert ids_json, "the watch just started must be listed"
 
 
+def test_one_admin_cannot_stop_another_admins_watch(fleet):
+    """The other half of "a watch only texts your own phone": if an admin
+    cannot sign a colleague's phone up, they must not be able to cancel what
+    that colleague signed up for either. `admin_watch.unsubscribe` filters on
+    id alone unless an account is named, so the scoping lives in the route and
+    is worth a test of its own."""
+    v = fleet.vehicle("9500035")
+    theirs_id, _ = theirs = fleet.admin_account()
+    mine = fleet.admin_account()
+    started = _json_client(theirs).post(
+        "/api/v1/private/fleet/watches",
+        json={"vehicle_identifier": v, "consent": True})
+    wid = started.json()["id"]
+
+    # 404, not 403: whose phone a watch texts is not this caller's business.
+    assert _json_client(mine).delete(f"/api/v1/private/fleet/watches/{wid}").status_code == 404
+    assert fleet.one("SELECT ended_at FROM admin_device_watches WHERE id = %s", wid)[0] is None
+
+    # The owner still can.
+    assert _json_client(theirs).delete(
+        f"/api/v1/private/fleet/watches/{wid}").status_code == 200
+    assert fleet.one("SELECT ended_reason, ended_by_login FROM admin_device_watches "
+                     "WHERE id = %s", wid) == ("unsubscribed", f"account:{theirs_id}")
+
+
+def test_the_portal_keeps_its_administrator_wide_reach(fleet):
+    # Deliberately NOT scoped there: the pages are the full desk, and an
+    # operator at one may need to stop a watch for a colleague who went home.
+    v = fleet.vehicle("9500036")
+    theirs = fleet.admin_account()
+    wid = _json_client(theirs).post(
+        "/api/v1/private/fleet/watches",
+        json={"vehicle_identifier": v, "consent": True}).json()["id"]
+    r = _page_client().post(f"/admin/fleet/watches/{wid}/unsubscribe", headers=_ORIGIN)
+    assert r.status_code == 303 and "stopped" in r.headers["location"]
+    assert fleet.one("SELECT ended_by_login FROM admin_device_watches WHERE id = %s",
+                     wid)[0] == "octo-admin"
+
+
 def test_someone_elses_watch_is_listed_but_not_marked_mine(fleet):
     v = fleet.vehicle("9500034")
     theirs = fleet.admin_account()

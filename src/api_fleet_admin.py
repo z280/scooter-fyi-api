@@ -347,11 +347,19 @@ def stop_watch(
     watch_id: int = Path(..., ge=1),
     user: SessionUser = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Stop a live watch. 404 when there is no live watch with that id —
-    including one that already expired, which is the same outcome by a
-    different route. Idempotent in effect: a second call 404s rather than
-    pretending to stop it twice."""
-    if not admin_watch.unsubscribe(watch_id, login=_acting_login(user)):
-        raise HTTPException(404, "no live watch with that id")
+    """Stop a live watch on THIS admin's own phone.
+
+    Scoped to the signed-in account, which is the other half of the rule that
+    `start_watch` states: if an admin cannot sign a colleague's phone up, they
+    should not be able to cancel the alerts that colleague signed up for
+    either. Someone else's live watch answers 404 — the same answer as a watch
+    that never existed, because whose phone a watch texts is not this caller's
+    business.
+
+    404 also covers a watch that already expired, and makes a second call
+    404 rather than pretending to stop it twice."""
+    if not admin_watch.unsubscribe(watch_id, login=_acting_login(user),
+                                   account_id=user.account_id):
+        raise HTTPException(404, "no live watch with that id on your account")
     log.info("admin watch %d stopped by admin_account=%d", watch_id, user.account_id)
     return {"id": watch_id, "stopped": True}

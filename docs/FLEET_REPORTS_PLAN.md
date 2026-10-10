@@ -957,7 +957,13 @@ states each filter's effect absolutely.
   The page takes a recipient email; the endpoint takes none. Starting SMS to
   a colleague's phone is not something one person should be able to do to
   another from a phone screen, and the page still exists for the rare case
-  it is wanted.
+  it is wanted. **Stopping is scoped the same way:**
+  `DELETE /api/v1/private/fleet/watches/{id}` answers 404 for a watch on
+  another account — the same answer as one that never existed, because whose
+  phone a watch texts is not the caller's business. (`admin_watch.unsubscribe`
+  filters on id alone unless an account is named; the pages name none and keep
+  their administrator-wide reach deliberately, since an operator at the full
+  desk may need to stop a watch for a colleague who has gone home.)
 - **Reinstatement is attributed to the account** (`reinstated_by`, sql/106),
   mirroring `resolved_by` / `resolved_by_login`. sql/102 gave reinstatement
   only a login column, because only the portal could do it. Both capacities
