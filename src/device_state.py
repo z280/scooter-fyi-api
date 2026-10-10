@@ -233,7 +233,7 @@ from typing import Any, Iterable
 
 from . import device_features
 from .config import load
-from .fleet_reports import charge_rise_meters
+from .fleet_reports import full_battery_meters, service_from_meters
 from .geo import distance_meters as _distance_meters
 from .geo import region_for_point as _region_for_point
 from .ingest import TaggedDevice, _h3_cells
@@ -753,7 +753,8 @@ def update_for_cycle(
                        first_observed_at_location, number_failed_starts,
                        first_ever_observed_at, rental_started_at, last_observed_at,
                        rental_max_distance_m, rental_origin_device_id,
-                       last_fix_lat, last_fix_lon, last_range_meters
+                       last_fix_lat, last_fix_lon, last_range_meters,
+                       range_low_since_full
                 FROM device_state
                 WHERE vehicle_identifier = ANY(%s)
                 FOR UPDATE
@@ -846,7 +847,7 @@ def update_for_cycle(
                 (prev_device_id, prev_lat, prev_lon, prev_first_seen, prev_fs,
                  _ever, prev_rental_started_at, prev_last_seen,
                  prev_rental_max, prev_origin_device_id,
-                 prev_fix_lat, prev_fix_lon, _last_range) = prior[vid]
+                 prev_fix_lat, prev_fix_lon, _last_range, _low) = prior[vid]
 
                 if prev_lat is None or prev_lon is None:
                     distance = float("inf")
@@ -1167,30 +1168,48 @@ def update_for_cycle(
                     new_state_rows,
                 )
 
-            # Charge tracker (sql/011 + sql/104), one batch UPDATE for every
-            # vehicle whose reported charge CHANGED since we last saw it — the
-            # range is frozen while a vehicle sits (99.4% of parked 2-minute
-            # steps), so this is a few hundred rows a cycle, not the fleet.
+            # Charge tracker (sql/011, sql/104, sql/105), one batch UPDATE for
+            # every vehicle whose reported charge CHANGED since we last saw it
+            # — the range is frozen while a vehicle sits (99.4% of parked
+            # 2-minute steps), so this is a few hundred rows a cycle.
             #   * max_observed_range_{meters,at}: bumped only when strictly
             #     higher, stamping when the peak was set;
-            #   * last_serviced_at: a rise of at least
-            #     fleet_reports.charge_rise_meters() (5% of a full charge) over
-            #     the last reading is a swap or a charge — servicing. It is
-            #     compared with the OLD last_range_meters (SET expressions read
-            #     the row as it was), and holds across an absence, so coming
-            #     back on the map with more charge counts too. Negative
-            #     reports clear on servicing after the report plus a 100 m
-            #     move (fleet_reports.uncleared_negative_sql);
-            #   * last_range_meters: the reading itself.
+            #   * last_serviced_at: the vehicle reads FULL
+            #     (fleet_reports.full_battery_meters(), 95%) while parked,
+            #     after reading at or below fleet_reports.service_from_meters()
+            #     (50%) parked since it was last full. NOT "any rise between
+            #     two readings": the range sags under load during a ride and
+            #     climbs back for minutes after it, by up to ~25% of a full
+            #     charge, so a rise alone fired on most rides (sql/105). A
+            #     rebound never exceeds the pre-ride charge, so it can only
+            #     reach full from a full start — and a full start never read
+            #     <= 50% parked. Reserved / in-rental readings are ignored for
+            #     both. Kept across an absence, so coming back full counts;
+            #   * range_low_since_full: the lowest parked reading since the
+            #     last full one (reset to the reading when it is full);
+            #   * last_range_meters: the reading itself (the change filter).
             # NEW devices were inserted above with NULLs and are seeded here.
-            rise = charge_rise_meters()
-            range_updates = [
-                (d.current_range_meters, snapshot_time, rise, d.vehicle_identifier)
-                for d in eligible
-                if d.current_range_meters is not None
-                and (d.vehicle_identifier not in prior
-                     or prior[d.vehicle_identifier][12] != d.current_range_meters)
-            ]
+            full_m = full_battery_meters()
+            low_m = service_from_meters()
+            range_updates: list[dict] = []
+            for d in eligible:
+                r = d.current_range_meters
+                if r is None:
+                    continue
+                p = prior.get(d.vehicle_identifier)
+                if p is not None and p[12] == r:
+                    continue
+                low = p[13] if p is not None else None
+                in_rental = bool(d.is_reserved) or (p is not None and p[6] is not None)
+                serviced = False
+                if not in_rental:
+                    if r >= full_m:
+                        serviced = low is not None and low <= low_m
+                        low = r
+                    else:
+                        low = r if low is None else min(low, r)
+                range_updates.append({"r": r, "t": snapshot_time, "low": low,
+                                      "svc": serviced, "v": d.vehicle_identifier})
             if range_updates:
                 cur.executemany(
                     """
@@ -1203,14 +1222,13 @@ def update_for_cycle(
                             WHEN max_observed_range_meters IS NULL
                               OR %(r)s > max_observed_range_meters
                             THEN %(r)s ELSE max_observed_range_meters END,
-                        last_serviced_at = CASE
-                            WHEN last_range_meters IS NOT NULL
-                             AND %(r)s >= last_range_meters + %(rise)s
+                        last_serviced_at = CASE WHEN %(svc)s
                             THEN %(t)s ELSE last_serviced_at END,
+                        range_low_since_full = %(low)s,
                         last_range_meters = %(r)s
                     WHERE vehicle_identifier = %(v)s
                     """,
-                    [{"r": r, "t": t, "rise": k, "v": v} for r, t, k, v in range_updates],
+                    range_updates,
                 )
 
             if moved_updates:

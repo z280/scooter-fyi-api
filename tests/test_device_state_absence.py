@@ -75,7 +75,8 @@ class _FakeCursor:
                      s["first_ever_observed_at"], s["rental_started_at"],
                      s["last_observed_at"], s.get("rental_max_distance_m"),
                      s.get("rental_origin_device_id"), s.get("last_fix_lat"),
-                     s.get("last_fix_lon"), s.get("last_range_meters"))]
+                     s.get("last_fix_lon"), s.get("last_range_meters"),
+                     s.get("range_low_since_full"))]
         return []
 
     def fetchone(self):

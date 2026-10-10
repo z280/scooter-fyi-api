@@ -1,7 +1,8 @@
-"""sql/104 against real Postgres: ingest stamps device_state.last_serviced_at
-when a vehicle's charge rises by at least fleet_reports.charge_rise_meters()
-between two readings (a swap or a charge), including across an absence, and
-keeps max_observed_range_* behaving as before.
+"""sql/104 + sql/105 against real Postgres: ingest stamps
+device_state.last_serviced_at when a vehicle reads FULL (95%) while parked
+after reading <= 50% parked since its last full reading — a swap or a charge
+— and NOT on a ride's sag-and-rebound, which is what sql/104's "any 5% rise"
+rule fired on (46 vehicles in its first live cycle, one a real swap).
 
 SKIPS unless VEO_TEST_PG_DSN points at a reachable, migratable database.
 Shares tests/test_ghost_stops_pg.py's fixture.
@@ -16,12 +17,15 @@ import pytest
 
 pytest.importorskip("psycopg")
 
-from src.fleet_reports import charge_rise_meters  # noqa: E402
+from src.fleet_reports import full_battery_meters, service_from_meters  # noqa: E402
+from src.quality import full_charge_range_meters  # noqa: E402
 from tests.test_ghost_stops_pg import (  # noqa: E402,F401  (pg is a fixture)
     _T0, _dev, _observe, _vid, pg,
 )
 
-RISE = charge_rise_meters()
+FULL = full_charge_range_meters()
+FULL95 = full_battery_meters()
+LOW = service_from_meters()
 
 
 @pytest.fixture(autouse=True)
@@ -38,50 +42,87 @@ def _leave_no_future_cycles(pg):
     pg.commit()
 
 
-def _at_range(rng):
-    return dataclasses.replace(_dev(1), current_range_meters=rng)
+class _Feed:
+    def __init__(self, conn):
+        self.conn, self.t = conn, _T0
+
+    def __call__(self, rng, *, reserved=None, gap=timedelta(minutes=2)):
+        self.t += gap
+        _observe(self.conn, self.t, [dataclasses.replace(
+            _dev(1), current_range_meters=rng, is_reserved=reserved)])
+        return self.t
 
 
-def _row(conn):
+def _serviced(conn):
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT last_range_meters, last_serviced_at, max_observed_range_meters, "
-            "max_observed_range_at FROM device_state WHERE vehicle_identifier = %s", (_vid(1),))
-        return cur.fetchone()
+        cur.execute("SELECT last_serviced_at FROM device_state WHERE vehicle_identifier = %s",
+                    (_vid(1),))
+        return cur.fetchone()[0]
 
 
-def test_a_rise_of_the_threshold_is_servicing_and_a_smaller_one_is_not(pg):
-    t = _T0
-    _observe(pg, t, [_at_range(20000)])
-    assert _row(pg)[:2] == (20000, None)                   # first reading seeds, no service
-    t += timedelta(minutes=2)
-    _observe(pg, t, [_at_range(20000 + RISE - 1)])
-    assert _row(pg)[:2] == (20000 + RISE - 1, None)        # under the threshold
-    t += timedelta(minutes=2)
-    _observe(pg, t, [_at_range(20000 + RISE - 1 + RISE)])
-    assert _row(pg)[1] == t                                # a swap
-    serviced = t
-    t += timedelta(minutes=2)
-    _observe(pg, t, [_at_range(9000)])                     # ridden down
-    last_range, last_serviced, max_rng, _max_at = _row(pg)
-    assert (last_range, last_serviced) == (9000, serviced)  # servicing is kept
-    assert max_rng == 20000 + 2 * RISE - 1
+def test_a_swap_from_low_to_full_is_servicing(pg):
+    feed = _Feed(pg)
+    feed(8753)
+    assert _serviced(pg) is None
+    t = feed(FULL)                                        # 8.7 km -> 45.3 km, parked
+    assert _serviced(pg) == t
+    feed(9000, reserved=True)
+    feed(12000)                                           # ridden down afterwards
+    assert _serviced(pg) == t                             # the stamp is kept
 
 
-def test_coming_back_on_the_map_with_more_charge_counts(pg):
-    t = _T0
-    _observe(pg, t, [_at_range(5000)])
-    t += timedelta(hours=30)                               # gone a day, back charged
-    _observe(pg, t, [_at_range(40000)])
-    assert _row(pg)[1] == t
+def test_a_rides_sag_and_rebound_is_not_servicing(pg):
+    """Real feed shape (2026-10-10): 21947 parked, sag to 7514 under load,
+    then 11231 -> 17876 parked as it recovers."""
+    feed = _Feed(pg)
+    feed(21947)
+    for r in (10153, 8479, 11231, 7514):
+        feed(r, reserved=True)
+    feed(11231)
+    feed(17876)
+    assert _serviced(pg) is None
+
+
+def test_a_full_vehicle_ridden_and_rebounding_to_full_is_not_servicing(pg):
+    feed = _Feed(pg)
+    feed(FULL)
+    for r in (43105, 41287, 38000):
+        feed(r, reserved=True)
+    feed(39000)                                           # parked sag, above 50%
+    feed(FULL)
+    assert _serviced(pg) is None
+
+
+def test_a_charge_that_stops_short_of_full_is_not_servicing(pg):
+    feed = _Feed(pg)
+    feed(LOW - 1000)
+    feed(FULL95 - 1)
+    assert _serviced(pg) is None
+    t = feed(FULL95)
+    assert _serviced(pg) == t
+
+
+def test_a_low_reading_only_while_reserved_does_not_count(pg):
+    feed = _Feed(pg)
+    feed(FULL - 3000)
+    feed(5000, reserved=True)                             # sag under load
+    feed(FULL)
+    assert _serviced(pg) is None
+
+
+def test_coming_back_on_the_map_full_counts(pg):
+    feed = _Feed(pg)
+    feed(5000)
+    t = feed(FULL, gap=timedelta(hours=30))               # gone a day, back full
+    assert _serviced(pg) == t
 
 
 def test_max_observed_range_still_records_only_a_new_peak(pg):
-    t0 = _T0
-    _observe(pg, t0, [_at_range(30000)])
-    _observe(pg, t0 + timedelta(minutes=2), [_at_range(10000)])
-    _observe(pg, t0 + timedelta(minutes=4), [_at_range(25000)])
-    _, _, max_rng, max_at = _row(pg)
-    assert (max_rng, max_at) == (30000, t0)
-    _observe(pg, t0 + timedelta(minutes=6), [_at_range(31000)])
-    assert _row(pg)[2:] == (31000, t0 + timedelta(minutes=6))
+    feed = _Feed(pg)
+    t0 = feed(30000)
+    feed(10000)
+    feed(25000)
+    with pg.cursor() as cur:
+        cur.execute("SELECT max_observed_range_meters, max_observed_range_at FROM device_state "
+                    "WHERE vehicle_identifier = %s", (_vid(1),))
+        assert cur.fetchone() == (30000, t0)
