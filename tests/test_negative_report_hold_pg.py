@@ -327,3 +327,102 @@ def test_improperly_parked_changes_no_label(pg):
     _report(pg, account_id=_account(pg), report_type="improperly_parked")
     _report(pg, account_id=None, at=NOW - timedelta(hours=1), report_type="improperly_parked")
     assert _state(pg) is None
+
+
+# ---------------------------------------------------------------------------
+# Servicing in the history (sql/104) and legacy reports (owner, 2026-10-10)
+# ---------------------------------------------------------------------------
+
+def _serviced(conn, at):
+    with conn.cursor() as cur:
+        cur.execute("UPDATE device_state SET last_serviced_at = %s WHERE vehicle_identifier = %s",
+                    (at, VID))
+    conn.commit()
+
+
+def _moves(conn, n, *, since, metres=150):
+    with conn.cursor() as cur:
+        for i in range(n):
+            cur.execute(
+                "INSERT INTO trip_events (vehicle_identifier, detected_at, from_lat, from_lon, "
+                "to_lat, to_lon, distance_meters) VALUES (%s, %s, 0, 0, 0, 0, %s)",
+                (VID, since + timedelta(hours=i + 1), metres))
+    conn.commit()
+
+
+@pytest.fixture()
+def trips(pg):
+    yield pg
+    with pg.cursor() as cur:
+        cur.execute("DELETE FROM trip_events WHERE vehicle_identifier = %s", (VID,))
+    pg.commit()
+
+
+def test_servicing_since_the_report_plus_a_move_clears_even_after_riding_down(pg):
+    """Swapped to full after the report, then ridden back below the charge at
+    report time: the snapshot shows no rise, the history does."""
+    _report(pg, account_id=_account(pg), range_at_report=HALF)
+    _at(pg, north(150))
+    assert _state(pg, range_meters=HALF - 3000) == "high"
+    _serviced(pg, NOW - timedelta(days=1))
+    assert _state(pg, range_meters=HALF - 3000) is None
+
+
+def test_servicing_needs_the_move_and_must_follow_the_report(pg):
+    _report(pg, account_id=_account(pg), at=NOW - timedelta(days=3))
+    _at(pg, north(90))
+    _serviced(pg, NOW - timedelta(days=1))
+    assert _state(pg) == "high"                       # under 100 m: never
+    _at(pg, north(150))
+    _serviced(pg, NOW - timedelta(days=4))            # before the report
+    assert _state(pg) == "high"
+
+
+def test_servicing_counts_from_a_rebaseline_not_the_original_report(pg):
+    b = north(500)
+    _report(pg, account_id=_account(pg), baseline_lat=b[0], baseline_lon=b[1],
+            baseline_range_meters=HALF, baseline_at=NOW - timedelta(hours=2))
+    _at(pg, north(150, of=b))
+    _serviced(pg, NOW - timedelta(hours=5))           # before "still a problem"
+    assert _state(pg) == "high"
+    _serviced(pg, NOW - timedelta(hours=1))
+    assert _state(pg) is None
+
+
+def test_a_legacy_report_clears_after_three_100m_moves(trips):
+    pg = trips
+    at = NOW - timedelta(days=30)                     # NOW is before charge capture
+    _report(pg, account_id=_account(pg), at=at, range_at_report=None)
+    _at(pg, A)
+    _moves(pg, 2, since=at)
+    _moves(pg, 5, since=at, metres=90)                # short moves never count
+    _moves(pg, 3, since=at - timedelta(days=10))      # moves before the report don't
+    assert _state(pg) == "high"
+    _moves(pg, 1, since=at + timedelta(days=1))
+    assert _state(pg) is None
+
+
+def test_the_three_move_rule_is_only_for_legacy_reports(trips):
+    """Filed after charge capture, or with a charge recorded: the normal
+    rules apply, however much the vehicle has moved."""
+    pg = trips
+    after = datetime(2026, 10, 9, 4, 0, tzinfo=timezone.utc)
+    now = after + timedelta(days=2)
+    _report(pg, account_id=_account(pg), at=after, range_at_report=None)
+    _at(pg, A)
+    _moves(pg, 5, since=after)
+    sql = f"""
+        SELECT {negative_state_sql(vid="r.vehicle_identifier",
+                                   current_range="r.current_range_meters", now="%(now)s")}
+          FROM (SELECT %(vid)s::text AS vehicle_identifier, %(range)s::int AS current_range_meters) r
+          LEFT JOIN device_state ds USING (vehicle_identifier)"""
+    with pg.cursor() as cur:
+        cur.execute(sql, {"now": now, "vid": VID, "range": HALF})
+        assert cur.fetchone()[0] == "high"
+    with pg.cursor() as cur:
+        cur.execute("DELETE FROM device_reports WHERE vehicle_identifier = %s", (VID,))
+    pg.commit()
+    before = NOW - timedelta(days=30)
+    _report(pg, account_id=_account(pg), at=before, range_at_report=HALF)
+    _moves(pg, 5, since=before)
+    assert _state(pg) == "high"                       # a charge was recorded

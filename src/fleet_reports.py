@@ -41,6 +41,13 @@ HOW A REPORT CLEARS (`uncleared_negative_sql`):
     the feed longer than device_state.ABSENT_STOP_AFTER) after the report
     and reappeared >= 100 m from where it was last seen with a FULL battery
     (>= FULL_BATTERY_PERCENT, 95%);
+    OR it is >= 100 m from where it was reported AND was SERVICED after the
+    report — its charge rose by charge_rise_meters() between two readings at
+    any point since (device_state.last_serviced_at, sql/104), so a swap
+    followed by rides back down still counts; OR, for a LEGACY report (filed
+    before BATTERY_CAPTURE_SINCE with no charge recorded, so no rise can be
+    measured and no history exists), it has made LEGACY_CLEAR_MOVES (3) moves
+    of >= 100 m since the report;
   * location: >= 100 m from where it was reported, or reappeared >= 100 m
     from its last-seen spot after going off the map. No battery condition;
   * a move under 100 m never clears anything, and time never clears;
@@ -137,6 +144,17 @@ CHARGE_RISE_FRACTION = 0.05
 #: is the table's 95% entry, not a guess at a range.
 FULL_BATTERY_PERCENT = 95
 
+#: When the charge at report time started being recorded: sql/100 was
+#: applied in production at this instant. A report filed before it with no
+#: charge (and no re-baseline since) is a LEGACY report.
+BATTERY_CAPTURE_SINCE = "2026-10-09 03:43:18+00"
+
+#: A legacy report has no charge to measure a rise from, and no battery
+#: history exists from before sql/104, so it clears once the vehicle has made
+#: this many moves of at least CLEAR_MOVE_METERS since the report (owner,
+#: 2026-10-10: "3+ moves of 100 m").
+LEGACY_CLEAR_MOVES = 3
+
 #: The default missing threshold, in hours (§2.8).
 DEFAULT_MISSING_HOURS = 72
 
@@ -198,6 +216,19 @@ def uncleared_negative_sql(*, vid: str, current_range: str, now: str,
     rose = (f"COALESCE({current_range} >= n.base_range + {rise} "
             f"OR (n.base_range IS NULL AND {current_range} >= {full}), FALSE)")
     is_full = f"COALESCE({current_range} >= {full}, FALSE)"
+    # sql/104: servicing seen in the history since the report (or since its
+    # re-baseline), not just a higher charge right now.
+    serviced = (f"COALESCE(ds.last_serviced_at > n.base_at "
+                f"AND ds.last_serviced_at <= {now}, FALSE)")
+    legacy_moves = f"""(n.base_range IS NULL
+                AND n.reported_at < TIMESTAMPTZ '{BATTERY_CAPTURE_SINCE}'
+                AND (SELECT COUNT(*) FROM (
+                        SELECT 1 FROM trip_events t
+                         WHERE t.vehicle_identifier = {vid}
+                           AND t.detected_at > n.base_at
+                           AND t.detected_at <= {now}
+                           AND t.distance_meters >= {m}
+                         LIMIT {LEGACY_CLEAR_MOVES}) mv) >= {LEGACY_CLEAR_MOVES})"""
     off_map = f"""EXISTS (
                 SELECT 1 FROM device_history h
                  WHERE h.vehicle_identifier = {vid}
@@ -233,7 +264,9 @@ def uncleared_negative_sql(*, vid: str, current_range: str, now: str,
           ) n
          WHERE n.pending OR NOT (
                CASE WHEN n.report_type IN {_in(RIDEABILITY_REPORT_TYPES)}
-                    THEN ({moved} AND {rose}) OR ({is_full} AND {off_map})
+                    THEN ({moved} AND ({rose} OR {serviced}))
+                         OR ({is_full} AND {off_map})
+                         OR {legacy_moves}
                     ELSE {moved} OR {off_map}
                END)"""
 

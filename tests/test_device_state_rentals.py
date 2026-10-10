@@ -92,6 +92,7 @@ class _FakeCursor:
             self.state.get("rental_max_distance_m"),
             self.state.get("rental_origin_device_id"),
             self.state.get("last_fix_lat"), self.state.get("last_fix_lon"),
+            self.state.get("last_range_meters"),   # sql/104
         )]
 
     def fetchone(self):
