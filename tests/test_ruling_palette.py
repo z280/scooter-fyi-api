@@ -1,10 +1,12 @@
 """The palette generator (scripts/gen_ruling_palette.py).
 
-The generated colours live in sql/044 as literals, so this does NOT test
-what shipped — tests/test_profile_identity_pg.py does that, against the
-seeded table. What this covers is the generator staying correct, so that
+The generated colours live in sql/107 as literals (sql/044 before it, for
+the v1 palette that migration retires), so this does NOT test what
+shipped — tests/test_profile_identity_pg.py does that, against the seeded
+table. What this covers is the generator staying correct, so that
 regenerating (to extend the palette, say) can't quietly produce colours
-outside sRGB or duplicates that ON CONFLICT would swallow.
+outside sRGB, duplicates that ON CONFLICT would swallow, or a colour the
+map already uses for something that means something.
 """
 
 from __future__ import annotations
@@ -22,15 +24,18 @@ gen = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(gen)
 
 
-def test_builds_at_least_128_distinct_colours():
-    rows = gen.build()
-    assert len(rows) >= 128
+def test_builds_enough_distinct_colours():
+    """Smaller than v1's 128 on purpose (see sql/107) — but still far more
+    (fill, border) pairs than there are riders, and every entry distinct."""
+    rows, _dropped = gen.build()
+    assert len(rows) >= 64
     assert len({r[0] for r in rows}) == len(rows), "duplicate hex"
     assert len({r[1] for r in rows}) == len(rows), "duplicate name"
 
 
 def test_every_colour_is_lowercase_six_digit_hex():
-    for hex_value, _name, _family, _order in gen.build():
+    rows, _dropped = gen.build()
+    for hex_value, _name, _family, _step, _order in rows:
         assert len(hex_value) == 7 and hex_value[0] == "#"
         assert hex_value[1:] == hex_value[1:].lower()
         int(hex_value[1:], 16)  # raises if not hex
@@ -38,9 +43,55 @@ def test_every_colour_is_lowercase_six_digit_hex():
 
 def test_sort_order_is_dense_and_unique():
     """sort_order drives picker layout; a gap or a repeat would render the
-    palette in a jumbled order for no visible reason."""
-    orders = sorted(r[3] for r in gen.build())
+    palette in a jumbled order for no visible reason. Dropped candidates
+    must not leave holes — the counter advances per KEPT row."""
+    rows, _dropped = gen.build()
+    orders = sorted(r[4] for r in rows)
     assert orders == list(range(len(orders)))
+
+
+def test_lightness_step_matches_the_name():
+    rows, _dropped = gen.build()
+    for _hex, name, _family, step, _order in rows:
+        assert name.endswith(f"-{step}")
+
+
+# ---------- the conflict filter --------------------------------------------
+
+def test_no_colour_reads_as_a_map_feature():
+    """The point of the filter: nothing in the shipped palette sits within
+    CONFLICT_DISTANCE of a colour the map already uses to MEAN something
+    (a no-ride zone, an equity area, the ride trail)."""
+    rows, _dropped = gen.build()
+    for hex_value, name, _family, _step, _order in rows:
+        distance, reserved, why = gen.nearest_reserved(hex_value)
+        assert distance >= gen.CONFLICT_DISTANCE, (
+            f"{name} ({hex_value}) is {distance:.3f} from {reserved} — {why}"
+        )
+
+
+def test_the_filter_drops_something_but_not_a_whole_family():
+    """A threshold that drops nothing is not filtering; one that empties a
+    family has stopped being a filter and started being a redesign. Each
+    family must keep at least the two entries the assigner's fill/border
+    rule needs."""
+    rows, dropped = gen.build()
+    assert dropped, "no candidate conflicts — has the threshold gone to zero?"
+    kept: dict[str, int] = {}
+    for _hex, _name, family, _step, _order in rows:
+        kept[family] = kept.get(family, 0) + 1
+    assert set(kept) == {f for f, _hue in gen.HUE_FAMILIES}
+    assert min(kept.values()) >= 2
+
+
+def test_reserved_colours_are_their_own_nearest_match():
+    """Guards the OKLab round trip the filter measures in: feeding a
+    reserved colour back in must come out at distance ~0 from itself, or
+    every distance in the filter is meaningless."""
+    for hex_value, _why in gen.RESERVED_COLORS:
+        distance, reserved, _ = gen.nearest_reserved(hex_value)
+        assert reserved == hex_value
+        assert distance == pytest.approx(0.0, abs=1e-9)
 
 
 def test_fitted_chroma_always_lands_inside_srgb():

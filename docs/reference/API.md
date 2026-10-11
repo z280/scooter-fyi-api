@@ -2108,34 +2108,57 @@ The curated word lists, for building a username picker. Bearer required
 ### Ruling colours
 
 Your territory on the leaderboard map is drawn with a **fill** and an
-**inner border**, both chosen from a curated 128-colour palette. How
+**inner border**, both chosen from a curated 74-colour palette. How
 strongly the fill is painted is not yours to choose: every claimed
 territory renders at the same opacity, so a hexagon's shade says who holds
 it and nothing else.
 
+**You already have colours.** Every account is given a pair matched to its
+username emoji the moment it is named — a 🐸 rules in green, a 🦉 in amber
+— so nothing has to be picked for a territory to look like yours. The
+picker changes a suggestion; it does not fill in a blank.
+
 ```json
 {
-  "ruling_colors": [ { "hex": "#c53637", "name": "red-500", "hue_family": "red" }, … ],
-  "taken_pairs": [ { "fill": "#c53637", "border": "#026fd7" } ]
+  "ruling_colors": [
+    { "hex": "#f93534", "name": "red-500", "hue_family": "red", "retired": false }, …
+  ],
+  "taken_pairs": [ { "fill": "#f93534", "border": "#3bacff" } ]
 }
 ```
 
 Rules, all enforced by the database:
 
-* **The (fill, border) PAIR is globally unique** — 128 × 127 = 16 256
-  claims. You may share a fill with another rider, or share a border, but
-  not both. Adjacent territories can therefore never render identically.
+* **The (fill, border) PAIR is globally unique** — 74 × 73 = 5 402 claims.
+  You may share a fill with another rider, or share a border, but not
+  both. Adjacent territories can therefore never render identically.
 * **Fill and border must differ**, and are set **together** — send both,
-  or send both as `null` to clear and release your claim.
+  or send both as `null` to clear and release your claim. Clearing
+  releases the pair; it does not make you uncoloured forever — the
+  emoji-matched suggestion is offered again next time it is assigned.
 * To leave the map entirely, set `show_in_leaderboards: false`.
 
 `taken_pairs` lets a picker grey out unavailable combinations instead of
 discovering them by `409` on save. It lists pairs only — never which
 account holds one.
 
+#### Retired colours
+
+The palette was replaced once (sql/107). The previous 128 colours are
+still **valid to hold** — riders claimed them — but they are no longer
+**offered**: ten of them sat close enough to a no-ride zone, an equity
+area or the ride trail to read as a map feature rather than as somebody's
+territory, and the rest were a generation of muddier, lower-chroma colours
+that the map could not tell apart.
+
+So `GET /api/v1/ruling-colors` returns the 74 current colours **plus any
+retired colour you yourself hold**, flagged `"retired": true`. No other
+rider's retired colours appear. Saving one you already hold is fine;
+saving one you don't is a `400`.
+
 | Status | When |
 |---|---|
-| `400` | one-sided colour update, fill equal to border, or a value not on the curated list |
+| `400` | one-sided colour update, fill equal to border, a value not on the curated list, or a retired colour you don't already hold |
 | `409` | that exact (fill, border) pair is already claimed |
 
 > **`ruling_alpha` was removed** (`sql/085`). It was a per-rider fill

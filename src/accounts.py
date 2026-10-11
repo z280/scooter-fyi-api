@@ -386,6 +386,28 @@ def _username_taken(cur, candidate: str) -> bool:
     return cur.fetchone() is not None
 
 
+def assign_ruling_colors(cur, account_id: int) -> bool:
+    """Give an account the leaderboard-map colours its username emoji
+    suggests — 🐸 green, 🦉 amber — if it has none yet. True if it set a
+    pair, False if there was nothing to do.
+
+    One line because the choosing is sql/107's `assign_ruling_colors()`,
+    not Python's: the candidate ordering is a join across the palette,
+    the hue wheel and every pair already claimed, and the pair-uniqueness
+    race is settled with the same advisory lock assign_public_username
+    takes for usernames. See that migration's header for the rule.
+
+    NEVER overwrites. An account that picked its own colours, or already
+    got these, is left alone by the function itself, so callers do not
+    have to check first. Called from assign_public_username (every new
+    account, the moment it has an emoji to match) and from the
+    `backfill_ruling_colors` CLI command (anything that slipped past,
+    including an account created before sql/107 shipped).
+    """
+    cur.execute("SELECT assign_ruling_colors(%s)", (account_id,))
+    return bool(cur.fetchone()[0])
+
+
 def assign_public_username(cur, account_id: int, *, max_attempts: int = _USERNAME_MAX_ATTEMPTS) -> str:
     """Generate-and-persist a globally-unique RANDOM public_username.
     Shared by upsert_account() (brand-new accounts) and the
@@ -418,6 +440,7 @@ def assign_public_username(cur, account_id: int, *, max_attempts: int = _USERNAM
             "UPDATE accounts SET username_adjective = %s, username_emoji = %s WHERE id = %s",
             (adjective, emoji, account_id),
         )
+        assign_ruling_colors(cur, account_id)
         return candidate
     raise RuntimeError(
         f"assign_public_username: no free word pair found for account "

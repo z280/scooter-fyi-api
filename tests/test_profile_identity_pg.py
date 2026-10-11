@@ -1,9 +1,11 @@
 """Postgres-backed coverage for royalty titles, ruling colours and the
-generated display_name (sql/044).
+generated display_name (sql/044), and for the v2 palette, the retirement
+of v1 and the emoji-matched auto-assignment on top of them (sql/107).
 
 Everything here depends on schema the app cannot fake: FK membership in
-the curated lists, the unique index over the (fill, border) PAIR, and a
-GENERATED column. See tests/test_user_preferences_pg.py for the fixture
+the curated lists, the unique index over the (fill, border) PAIR, a
+GENERATED column, and a plpgsql function whose whole job is to choose
+against live data. See tests/test_user_preferences_pg.py for the fixture
 contract — same VEO_TEST_PG_DSN rules, same warning about production.
 """
 
@@ -26,11 +28,18 @@ from src.accounts import SessionUser, require_session, upsert_account  # noqa: E
 SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 _TEST_EMAIL_LIKE = "pgtest-identity-%@example.com"
 
-# Two arbitrary palette entries, taken from the generated seed. Named here
-# rather than SELECTed so a test failure points at a colour, not a query.
-_RED = "#c53637"     # red-500
-_BLUE = "#026fd7"    # blue-500
-_GREEN = "#008a23"   # green-500
+# Three arbitrary SELECTABLE palette entries, taken from sql/107's v2
+# seed. Named here rather than SELECTed so a test failure points at a
+# colour, not a query. They must stay selectable: a retired colour is
+# refused on save (src/api_profile.py:_reject_retired_colours), which is
+# what _V1_RETIRED below is for.
+_RED = "#f93534"     # red-500
+_BLUE = "#3bacff"    # blue-600
+_GREEN = "#27a900"   # green-500
+
+# One of sql/044's colours that sql/107 retired — still a row in
+# ruling_colors (riders hold these), no longer offered or claimable.
+_V1_RETIRED = "#c53637"   # v1's red-500
 
 
 def _reachable(dsn: str) -> bool:
@@ -100,16 +109,52 @@ def _client(pg_conn) -> tuple[TestClient, int]:
 # ---------------------------------------------------------------------------
 # Palette integrity
 # ---------------------------------------------------------------------------
-def test_palette_has_at_least_128_distinct_colours(pg_conn):
-    """The operator asked for at least 128 options. A duplicate hex would
-    silently shorten the palette via ON CONFLICT DO NOTHING, so distinctness
-    is asserted, not assumed."""
+def test_palette_entries_are_distinct(pg_conn):
+    """A duplicate hex would silently shorten the palette via ON CONFLICT,
+    so distinctness is asserted, not assumed.
+
+    Hex over the WHOLE table — it is the primary key and the thing riders
+    hold. Names only within the offered palette: v1 and v2 both have a
+    'red-500' (different colours, a generation apart), which is fine
+    because a picker only ever shows one generation plus whatever the
+    caller holds, and src/api_lexicon.py flags that exception as
+    `retired`."""
     with pg_conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*), COUNT(DISTINCT hex), COUNT(DISTINCT name) FROM ruling_colors")
-        total, distinct_hex, distinct_name = cur.fetchone()
-    assert total >= 128, f"palette has only {total} colours"
-    assert distinct_hex == total, "palette contains duplicate hex values"
-    assert distinct_name == total, "palette contains duplicate names"
+        cur.execute("SELECT COUNT(*), COUNT(DISTINCT hex) FROM ruling_colors")
+        total, distinct_hex = cur.fetchone()
+        assert distinct_hex == total, "palette contains duplicate hex values"
+        cur.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT name) FROM ruling_colors WHERE selectable"
+        )
+        offered, distinct_name = cur.fetchone()
+    assert distinct_name == offered, "offered palette contains duplicate names"
+
+
+def test_the_offered_palette_is_v2_only(pg_conn):
+    """sql/107 retires sql/044's 128 and offers its own. Both halves
+    matter: too few selectable colours and the picker is bare, any v1
+    colour left selectable and the conflict filter was for nothing."""
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM ruling_colors WHERE selectable")
+        assert cur.fetchone()[0] == 74
+        cur.execute(
+            "SELECT COUNT(*) FROM ruling_colors WHERE selectable AND hex = %s",
+            (_V1_RETIRED,),
+        )
+        assert cur.fetchone()[0] == 0
+
+
+def test_every_offered_colour_belongs_to_an_offered_hue_family(pg_conn):
+    """The assigner walks the hue wheel to find a fallback family; a
+    selectable colour in a retired family would be a destination it never
+    reaches, and a family it reaches with nothing in it."""
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT c.hue_family FROM ruling_colors c "
+            "  JOIN ruling_hue_families f ON f.family = c.hue_family "
+            " WHERE c.selectable AND NOT f.selectable"
+        )
+        assert cur.fetchall() == []
 
 
 def test_every_palette_colour_is_lowercase_six_digit_hex(pg_conn):
@@ -287,7 +332,10 @@ def test_a_stale_client_sending_ruling_alpha_is_ignored_not_refused(pg_conn, alp
 def test_ruling_colors_endpoint_reports_claimed_pairs(pg_conn):
     c, _ = _client(pg_conn)
     before = c.get("/api/v1/ruling-colors").json()
-    assert len(before["ruling_colors"]) >= 128
+    # The offered palette, not the whole table: v1's retired colours are
+    # still rows, and this caller holds none of them.
+    assert len(before["ruling_colors"]) == 74
+    assert all(not col["retired"] for col in before["ruling_colors"])
     assert {"fill": _RED, "border": _BLUE} not in before["taken_pairs"]
 
     c.put("/api/v1/profile", json={"ruling_color": _RED, "ruling_border_color": _BLUE})
@@ -312,3 +360,174 @@ def test_royalty_titles_endpoint_lists_and_searches(pg_conn):
     found = c.get("/api/v1/royalty-titles/search", params={"q": "highness"}).json()
     assert "His Highness" in found["royalty_titles"]
     assert all("highness" in t.lower() for t in found["royalty_titles"])
+
+
+# ---------------------------------------------------------------------------
+# Retired colours (sql/107)
+# ---------------------------------------------------------------------------
+def test_a_retired_colour_is_refused(pg_conn):
+    """v1's colours are still valid rows — riders hold them — but they are
+    no longer claimable: ten of the 128 sit close enough to a zone fill or
+    the ride trail to read as a map feature."""
+    c, _ = _client(pg_conn)
+    r = c.put("/api/v1/profile", json={
+        "ruling_color": _V1_RETIRED, "ruling_border_color": _BLUE,
+    })
+    assert r.status_code == 400
+    assert "no longer offered" in r.json()["detail"]
+
+
+def test_a_retired_colour_you_already_hold_is_still_saveable(pg_conn):
+    """The exception that makes the rule liveable: a v1 holder changing
+    only their border (or taking a title) must not be told their own fill
+    is invalid."""
+    c, account_id = _client(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE accounts SET ruling_color = %s, ruling_border_color = %s "
+            "WHERE id = %s",
+            (_V1_RETIRED, _BLUE, account_id),
+        )
+    pg_conn.commit()
+
+    r = c.put("/api/v1/profile", json={
+        "ruling_color": _V1_RETIRED, "ruling_border_color": _GREEN,
+    })
+    assert r.status_code == 200
+    assert r.json()["ruling_color"] == _V1_RETIRED
+
+
+def test_the_picker_offers_back_a_retired_colour_you_hold(pg_conn):
+    """...and GET /api/v1/ruling-colors has to include it, or the editor
+    renders a grid with a hole where the rider's own colour should be."""
+    c, account_id = _client(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE accounts SET ruling_color = %s, ruling_border_color = %s "
+            "WHERE id = %s",
+            (_V1_RETIRED, _BLUE, account_id),
+        )
+    pg_conn.commit()
+
+    colors = c.get("/api/v1/ruling-colors").json()["ruling_colors"]
+    mine = [col for col in colors if col["hex"] == _V1_RETIRED]
+    assert mine and mine[0]["retired"] is True
+    assert len(colors) == 75  # the 74 offered, plus the one held
+
+
+# ---------------------------------------------------------------------------
+# Automatic colours (sql/107's assign_ruling_colors)
+# ---------------------------------------------------------------------------
+def _colours_of(pg_conn, account_id: int) -> tuple[str | None, str | None]:
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT ruling_color, ruling_border_color FROM accounts WHERE id = %s",
+            (account_id,),
+        )
+        return cur.fetchone()
+
+
+def test_a_new_account_is_coloured_the_moment_it_is_named(pg_conn):
+    """upsert_account mints a username; assign_public_username hands the
+    account the colours that emoji suggests. Nobody renders as a grey
+    ghost waiting to discover the profile editor."""
+    _c, account_id = _client(pg_conn)
+    fill, border = _colours_of(pg_conn, account_id)
+    assert fill and border and fill != border
+
+
+def test_the_fill_matches_the_emoji_s_hue_family(pg_conn):
+    """🐸 rules in green, 🦉 in amber. Asserted against the mapping rather
+    than a fixed hex so extending the palette doesn't break the test."""
+    _c, account_id = _client(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT n.hue_family, f.hue_family, b.hue_family
+              FROM accounts a
+              JOIN emoji_nouns n ON n.emoji = a.username_emoji
+              JOIN ruling_colors f ON f.hex = a.ruling_color
+              JOIN ruling_colors b ON b.hex = a.ruling_border_color
+             WHERE a.id = %s
+            """,
+            (account_id,),
+        )
+        wanted, fill_family, _border_family = cur.fetchone()
+    # With one account in play nothing has been claimed ahead of it, so it
+    # gets its first choice. (Under contention the assigner widens to the
+    # neighbouring family — that is what test_colours_stay_unique covers.)
+    assert fill_family == wanted
+
+
+def test_the_border_is_darker_than_the_fill(pg_conn):
+    """A border lighter than its fill reads as a halo, not an edge."""
+    _c, account_id = _client(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT f.lightness_step, b.lightness_step FROM accounts a "
+            "  JOIN ruling_colors f ON f.hex = a.ruling_color "
+            "  JOIN ruling_colors b ON b.hex = a.ruling_border_color "
+            " WHERE a.id = %s",
+            (account_id,),
+        )
+        fill_step, border_step = cur.fetchone()
+    assert border_step <= fill_step - 200
+
+
+def test_every_assigned_colour_is_one_that_is_still_offered(pg_conn):
+    """The assigner must never hand out a retired colour — the whole point
+    of retiring them is that they read as a map feature."""
+    _c, account_id = _client(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT f.selectable, b.selectable FROM accounts a "
+            "  JOIN ruling_colors f ON f.hex = a.ruling_color "
+            "  JOIN ruling_colors b ON b.hex = a.ruling_border_color "
+            " WHERE a.id = %s",
+            (account_id,),
+        )
+        assert cur.fetchone() == (True, True)
+
+
+def test_colours_stay_unique_across_many_assignments(pg_conn):
+    """accounts_ruling_pair_key is the constraint; the assigner filtering
+    taken pairs and re-checking under an advisory lock is what keeps it
+    from ever firing. Twenty accounts is well past the point where the
+    same-family pairs for a popular hue run out."""
+    ids = [_client(pg_conn)[1] for _ in range(20)]
+    pairs = [_colours_of(pg_conn, account_id) for account_id in ids]
+    assert all(fill and border for fill, border in pairs)
+    assert len(set(pairs)) == len(pairs)
+
+
+def test_the_assigner_never_overwrites_a_claim(pg_conn):
+    c, account_id = _client(pg_conn)
+    c.put("/api/v1/profile", json={"ruling_color": _RED, "ruling_border_color": _BLUE})
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT assign_ruling_colors(%s)", (account_id,))
+        assert cur.fetchone()[0] is False
+    assert _colours_of(pg_conn, account_id) == (_RED, _BLUE)
+
+
+def test_an_account_with_no_emoji_is_left_alone(pg_conn):
+    """The suggestion comes from the username; an account that has not got
+    one yet (pre-sql/025, never backfilled) has nothing to match on."""
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO accounts (email) VALUES (%s) RETURNING id",
+            (f"pgtest-identity-{uuid.uuid4()}@example.com",),
+        )
+        account_id = cur.fetchone()[0]
+        cur.execute("SELECT assign_ruling_colors(%s)", (account_id,))
+        assert cur.fetchone()[0] is False
+    pg_conn.commit()
+    assert _colours_of(pg_conn, account_id) == (None, None)
+
+
+def test_every_emoji_has_a_hue_family(pg_conn):
+    """An unmapped emoji still gets colours (the assigner hashes it), but
+    they are a stable accident rather than a match — so the seed list is
+    expected to be complete."""
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT emoji FROM emoji_nouns WHERE hue_family IS NULL")
+        assert cur.fetchall() == []

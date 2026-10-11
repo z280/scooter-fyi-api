@@ -38,6 +38,7 @@ Available commands:
                       Dry-run unless --apply. Runbook:
                       docs/reference/account_deletion.md.
     backfill_public_usernames
+    backfill_ruling_colors
                       One-time: assign a public_username to every account
                       created before sql/025 (idempotent — already-
                       assigned accounts are skipped).
@@ -481,6 +482,46 @@ def backfill_public_usernames() -> dict:
             assigned += 1
     log.info("backfill_public_usernames: assigned=%d", assigned)
     return {"assigned": assigned}
+
+
+def backfill_ruling_colors() -> dict:
+    """Give leaderboard-map colours to every account that has a username
+    emoji but no colour pair — the emoji-matched suggestion from
+    sql/107's assign_ruling_colors(). Idempotent: an account that has
+    colours (picked or suggested) is skipped by the function itself, so
+    this is safe to re-run and safe to schedule.
+    `python -m src.cli backfill_ruling_colors`.
+
+    sql/107 already backfilled everyone who existed when it ran, and
+    src/accounts.py:assign_public_username colours every account created
+    since. This is the sweep for the gap between those two — accounts
+    created after the migration applied and before the code deployed —
+    and the way to re-suggest for riders who cleared their colours.
+
+    Commits per-row for the same reason backfill_public_usernames does:
+    assign_ruling_colors takes a short advisory lock per candidate pair,
+    and a long transaction would hold every one of them while live
+    sign-ups wait.
+    """
+    from .accounts import assign_ruling_colors
+
+    assigned = 0
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM accounts "
+                "WHERE ruling_color IS NULL AND ruling_border_color IS NULL "
+                "  AND username_emoji IS NOT NULL "
+                "ORDER BY id"
+            )
+            ids = [r[0] for r in cur.fetchall()]
+        for account_id in ids:
+            with conn.cursor() as cur:
+                if assign_ruling_colors(cur, account_id):
+                    assigned += 1
+            conn.commit()
+    log.info("backfill_ruling_colors: assigned=%d of %d candidates", assigned, len(ids))
+    return {"assigned": assigned, "candidates": len(ids)}
 
 
 def expire_stale_watches() -> dict:
@@ -1064,6 +1105,7 @@ COMMANDS = {
     "cleanup_ride_screenshots": cleanup_ride_screenshots,
     "cleanup_model_report_photos": cleanup_model_report_photos,
     "backfill_public_usernames": backfill_public_usernames,
+    "backfill_ruling_colors": backfill_ruling_colors,
     "expire_stale_watches":  expire_stale_watches,
     "expire_stale_off_feed_rides": expire_stale_off_feed_rides,
     "fetch_map_pbf":         _cli_fetch_map_pbf,
