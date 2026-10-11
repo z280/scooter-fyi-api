@@ -317,16 +317,20 @@ def backfill_depot_visits() -> dict[str, int]:
                  WHERE h.vehicle_identifier IN (
                         SELECT DISTINCT vehicle_identifier FROM device_history WHERE {inside})
                  ORDER BY h.vehicle_identifier, h.snapshot_time""")
-        wc = write.cursor()
+        pending: list[dict[str, Any]] = []
         cv, run, prev = None, None, None
         for v, t, dep, lat, lon, why, model in rc:
             if v != cv:
                 if run:
-                    _write_backfilled_visit(wc, run, stats)
+                    pending.append(run)
                 if cv is not None:
+                    # One short transaction per vehicle: ingest's depot pass
+                    # updates open visits every cycle, and holding these rows
+                    # across many vehicles deadlocked with it (2026-10-11).
+                    _flush_vehicle(write, pending, stats)
+                    pending = []
                     stats["vehicles"] += 1
                     if stats["vehicles"] % 250 == 0:
-                        write.commit()
                         log.info("backfill_depot_visits: %d vehicles, %d visits, %d replaced",
                                  stats["vehicles"], stats["visits"], stats["replaced"])
                 cv, run, prev = v, None, None
@@ -343,17 +347,39 @@ def backfill_depot_visits() -> dict[str, int]:
             else:
                 if run:
                     run.update(out=t, dlat=lat, dlon=lon)
-                    _write_backfilled_visit(wc, run, stats)
+                    pending.append(run)
                     run = None
                 prev = (t, dep, lat, lon, why)
         if run:
-            _write_backfilled_visit(wc, run, stats)
+            pending.append(run)
         if cv is not None:
+            _flush_vehicle(write, pending, stats)
             stats["vehicles"] += 1
         rc.close()
-        write.commit()
     log.info("backfill_depot_visits: done %s", stats)
     return stats
+
+
+def _flush_vehicle(conn, visits: list[dict[str, Any]], stats: dict[str, int]) -> None:
+    """Write one vehicle's visits in their own transaction, retrying once if
+    it loses a deadlock to the ingest's depot pass (rerunnable anyway)."""
+    import psycopg
+
+    if not visits:
+        return
+    for attempt in (1, 2):
+        before = dict(stats)
+        try:
+            with conn.cursor() as cur:
+                for r in visits:
+                    _write_backfilled_visit(cur, r, stats)
+            conn.commit()
+            return
+        except psycopg.errors.DeadlockDetected:
+            conn.rollback()
+            stats.update(before)
+            if attempt == 2:
+                raise
 
 
 def _write_backfilled_visit(cur, r: dict[str, Any], stats: dict[str, int]) -> None:
