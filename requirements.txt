@@ -1,28 +1,35 @@
-fastapi==0.115.5
-uvicorn[standard]==0.32.1
-psycopg[binary,pool]==3.2.3
-duckdb==1.1.3
-httpx==0.27.2
-pydantic==2.9.2
-jinja2==3.1.4
-authlib==1.3.2
+# Pins refreshed 2026-10-11. They had drifted far enough behind the versions
+# a current `pip install` resolves that tests passed in CI and failed on a
+# developer's machine, which is worse than either outcome on its own: the
+# fastapi gap alone broke a route-mounting assertion, because modern fastapi
+# fills app.routes lazily and only app.openapi()["paths"] sees included
+# routers (tests/test_retired_routes.py, tests/test_vehicle_plates.py).
+# Verified by the full suite under python 3.11 — the Dockerfile's base.
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+psycopg[binary,pool]==3.3.6
+duckdb==1.5.6
+httpx==0.28.1
+pydantic==2.14.0
+jinja2==3.1.6
+authlib==1.8.0
 itsdangerous==2.2.0
-python-multipart==0.0.12
-sentry-sdk[fastapi]==2.18.0
-boto3==1.35.65
-pyarrow==18.1.0
+python-multipart==0.0.32
+sentry-sdk[fastapi]==2.71.0
+boto3==1.43.111
+pyarrow==26.0.0
 # Ordinary least squares in src/battery_model.py:train(). A DIRECT dependency:
 # battery_model used to claim numpy was "available via pyarrow", but pyarrow
-# made numpy optional in 16.0 and does not install it at 18.1.0, so
+# made numpy optional in 16.0 and has not installed it since, so
 # train_battery_model raised ModuleNotFoundError on every weekly run.
-numpy==2.2.6
-h3==4.1.2
+numpy==2.4.6
+h3==4.5.0
 # Fernet, for encrypting riders' saved places at rest (src/place_crypto.py).
 # A saved place is where somebody lives, and the rows it sits in end up in
 # dumps, backups and read replicas — volume encryption protects a stolen disk
 # and none of those. Hand-rolling AES-GCM instead is how nonce reuse happens.
-cryptography==44.0.0
-pillow==11.0.0
+cryptography==50.0.2
+pillow==12.3.0
 # QR codes for campaign links (/admin/campaigns/<code>/qr.png|svg in
 # src/api_admin.py). Pure Python, no deps; writes PNG and SVG itself, so
 # it doesn't ride on pillow.

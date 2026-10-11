@@ -426,7 +426,13 @@ def test_access_log_filter_redacts_the_plate():
 
 
 def test_routes_are_mounted_by_the_app():
+    """Read from the OpenAPI schema, not app.routes: FastAPI wraps included
+    routers lazily, so walking app.routes yields _IncludedRouter objects with
+    no .path, and this asserted against a set of Nones — failing even though
+    both routes were mounted. Same reason as tests/test_retired_routes.py.
+    """
     from src.main import app
-    paths = {getattr(r, "path", None) for r in app.routes}
+
+    paths = set(app.openapi()["paths"])
     assert "/api/v1/vehicles/plates" in paths
     assert "/api/v1/vehicles/resolve" in paths
