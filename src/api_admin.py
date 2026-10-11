@@ -1336,7 +1336,7 @@ def fleet_census(
         data = api_fleet_reports.census_arrivals(user=None, limit=limit, offset=offset)
     elif which == "missing":
         data = api_fleet_reports.census_missing(user=None, hours=hours, order="asc",
-                                                limit=limit, offset=offset)
+                                                limit=limit, offset=offset, kind="all")
     else:
         data = api_fleet_reports.census_gone(user=None, limit=limit, offset=offset)
     return _render("fleet_census.html", user=user, data=data, which=which,

@@ -84,7 +84,7 @@ class _FakeCursor:
             # report state now comes from fleet_reports.negative_states, so
             # the fixture's trailing has_negative_report flag is not a column.
             return [(_reindex(r[0], 8), _reindex(r[0], 9), _reindex(r[0], 10))
-                    + r[1:-1] for r in _DEVICE_ROWS]
+                    + r[1:-1] + (None, None) for r in _DEVICE_ROWS]
         if "trip_events" in self._last_sql:
             return _TRIP_ROWS
         raise AssertionError(f"unexpected fetchall for: {self._last_sql[:80]}")

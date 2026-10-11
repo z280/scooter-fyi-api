@@ -426,3 +426,53 @@ def test_the_three_move_rule_is_only_for_legacy_reports(trips):
     _report(pg, account_id=_account(pg), at=before, range_at_report=HALF)
     _moves(pg, 5, since=before)
     assert _state(pg) == "high"                       # a charge was recorded
+
+
+# ---------------------------------------------------------------------------
+# sql/107: a completed depot visit clears (plan D1); the settled reading
+# ---------------------------------------------------------------------------
+
+def _depot_visit(conn, entered, exited):
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO depot_visits (vehicle_identifier, depot_id, entered_at, exited_at) "
+                    "VALUES (%s, 'veo-denver-federal-72nd', %s, %s)", (VID, entered, exited))
+    conn.commit()
+
+
+@pytest.fixture()
+def visits(pg):
+    yield pg
+    with pg.cursor() as cur:
+        cur.execute("DELETE FROM depot_visits WHERE vehicle_identifier = %s", (VID,))
+    pg.commit()
+
+
+@pytest.mark.parametrize("report_type", ["not_rideable", "inaccessible"])
+def test_a_completed_depot_visit_after_the_report_clears_it(visits, report_type):
+    pg = visits
+    _report(pg, account_id=_account(pg), report_type=report_type, at=NOW - timedelta(days=3))
+    _at(pg, A)                                           # back where it was
+    _depot_visit(pg, NOW - timedelta(days=4), NOW - timedelta(days=3, hours=1))  # before
+    assert _state(pg) == "high"
+    _depot_visit(pg, NOW - timedelta(days=2), None)      # still inside
+    assert _state(pg) == "high"
+    with pg.cursor() as cur:
+        cur.execute("UPDATE depot_visits SET exited_at = %s WHERE exited_at IS NULL",
+                    (NOW - timedelta(hours=5),))
+    pg.commit()
+    assert _state(pg) is None
+
+
+def test_the_settled_reading_counts_as_the_charge_while_settling(pg):
+    _report(pg, account_id=_account(pg), range_at_report=HALF)
+    _at(pg, north(150))
+    with pg.cursor() as cur:
+        cur.execute("UPDATE device_state SET settled_range_meters = %s, settling_until = %s "
+                    "WHERE vehicle_identifier = %s", (HALF + RISE, NOW + timedelta(minutes=10), VID))
+    pg.commit()
+    assert _state(pg, range_meters=HALF - 4000) is None     # sagging now, settled shows the rise
+    with pg.cursor() as cur:
+        cur.execute("UPDATE device_state SET settling_until = %s WHERE vehicle_identifier = %s",
+                    (NOW - timedelta(minutes=1), VID))
+    pg.commit()
+    assert _state(pg, range_meters=HALF - 4000) == "high"   # window over: the reading stands

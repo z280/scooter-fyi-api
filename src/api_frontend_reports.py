@@ -372,12 +372,19 @@ def submit_device_report(
                     reason, submitted_reason, range_at_report_meters,
                     vehicle_lat_at_report, vehicle_lon_at_report
                 ) VALUES (%s, %s, COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, (
-                    SELECT r.current_range_meters
-                      FROM raw_telemetry_points r
-                     WHERE r.vehicle_identifier = %s
-                       AND r.snapshot_time >= NOW() - INTERVAL '1 hour'
-                     ORDER BY r.snapshot_time DESC
-                     LIMIT 1
+                    -- sql/107: within SETTLE_MINUTES of a rental ending the
+                    -- feed's reading is still climbing back from the ride's
+                    -- sag; the settled reading is the charge to record.
+                    SELECT CASE WHEN ds.settling_until > NOW()
+                                THEN GREATEST(ds.settled_range_meters, x.rng)
+                                ELSE x.rng END
+                      FROM (SELECT r.vehicle_identifier, r.current_range_meters AS rng
+                              FROM raw_telemetry_points r
+                             WHERE r.vehicle_identifier = %s
+                               AND r.snapshot_time >= NOW() - INTERVAL '1 hour'
+                             ORDER BY r.snapshot_time DESC
+                             LIMIT 1) x
+                      LEFT JOIN device_state ds USING (vehicle_identifier)
                 ),
                 -- Where the VEHICLE was (sql/102): the baseline a 100 m
                 -- clearing move is measured from (src/fleet_reports.py).

@@ -49,6 +49,8 @@ HOW A REPORT CLEARS (`uncleared_negative_sql`):
     before BATTERY_CAPTURE_SINCE with no charge recorded, so no rise can be
     measured and no history exists), it has made LEGACY_CLEAR_MOVES (3) moves
     of >= 100 m since the report;
+  * any type: a DEPOT VISIT that began after the report (or its re-baseline)
+    and has ended (depot_visits, sql/107; plan D1);
   * location: >= 100 m from where it was reported, or reappeared >= 100 m
     from its last-seen spot after going off the map. No battery condition;
   * a move under 100 m never clears anything, and time never clears;
@@ -226,6 +228,12 @@ def uncleared_negative_sql(*, vid: str, current_range: str, now: str,
     """
     m = CLEAR_MOVE_METERS
     rise = charge_rise_meters()
+    # sql/107: for SETTLE_MINUTES after a rental ends the reading is still
+    # climbing back from the ride's sag; the settled reading (the highest
+    # parked one since the release) is the vehicle's charge.
+    current_range = (f"COALESCE(CASE WHEN ds.settling_until > {now} "
+                     f"THEN GREATEST(ds.settled_range_meters, {current_range}) END, "
+                     f"{current_range})")
     full = full_battery_meters()
     moved = (f"COALESCE(geo_distance_m(n.base_lat, n.base_lon, "
              f"ds.current_lat, ds.current_lon) >= {m}, FALSE)")
@@ -252,6 +260,14 @@ def uncleared_negative_sql(*, vid: str, current_range: str, now: str,
                    AND h.departed_at >= n.base_at
                    AND ds.last_observed_at > h.departed_at
                    AND geo_distance_m(h.lat, h.lon, ds.current_lat, ds.current_lon) >= {m})"""
+    # Plan D1 (sql/107): a depot visit that began after the report (or its
+    # re-baseline) and has ended — the vehicle was taken in and brought back.
+    depot_visit = f"""EXISTS (
+                SELECT 1 FROM depot_visits dv
+                 WHERE dv.vehicle_identifier = {vid}
+                   AND dv.entered_at > n.base_at
+                   AND dv.exited_at IS NOT NULL
+                   AND dv.exited_at <= {now})"""
     pins = f"""
           UNION ALL
           SELECT 'negative_reports', nr.id, 'not_rideable', NULL::text, nr.reported_at,
@@ -279,6 +295,7 @@ def uncleared_negative_sql(*, vid: str, current_range: str, now: str,
              {dr_filter}{pins}
           ) n
          WHERE n.pending OR NOT (
+               {depot_visit} OR
                CASE WHEN n.report_type IN {_in(RIDEABILITY_REPORT_TYPES)}
                     THEN ({moved} AND ({rose} OR {serviced}))
                          OR ({is_full} AND {off_map})

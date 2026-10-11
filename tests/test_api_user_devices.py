@@ -46,6 +46,7 @@ _ROW = (
     True,           # 33 has_phone_holder
     [],             # 34 features_poor_condition
     False,          # 35 has_basket (sql/058)
+    None, None,                   # 36-37 settled_range_meters, settling_until (sql/107)
 )
 
 _PLATE_FIELDS = (

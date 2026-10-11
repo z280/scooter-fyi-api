@@ -20,6 +20,7 @@ from . import (
     dibs_watch,
     ingest,
     ride_watch,
+    servicing,
     transmit,
 )
 from .pg import connection
@@ -161,6 +162,15 @@ def run_once() -> str | None:
             device_state.update_for_cycle(cycle_id, snapshot_time, corrected_devices)
         except Exception as e:  # noqa: BLE001
             log.exception("device_state update failed for cycle %s", cycle_id)
+            capture_exception(e)
+
+        # Depot visits (docs/SERVICING_PLAN.md 1b): open a visit for a
+        # vehicle newly inside a depot, close it when it is seen outside.
+        # Derived from the same devices, isolated like the layers below.
+        try:
+            servicing.update_depot_visits(cycle_id, snapshot_time, corrected_devices)
+        except Exception as e:  # noqa: BLE001
+            log.exception("depot visits update failed for cycle %s", cycle_id)
             capture_exception(e)
 
         # Rider-declared ride watches (item 5): detect a watched scooter

@@ -40,7 +40,7 @@ from typing import Any
 import h3
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
-from . import fleet_reports, payload_cache
+from . import fleet_reports, payload_cache, servicing
 from .api_public import _if_none_match_hit
 from .dwell_stats import stats_for_cycle
 from .pg import connection
@@ -125,7 +125,8 @@ def _build_payloads(cycle_id, snapshot_time) -> dict[int, dict[str, Any]]:
                        r.is_disabled, r.is_reserved,
                        r.current_range_meters, r.max_range_meters_for_type,
                        ds.number_failed_starts, ds.first_observed_at_location,
-                       ds.recent_no_go_mask
+                       ds.recent_no_go_mask,
+                       ds.settled_range_meters, ds.settling_until
                 FROM raw_telemetry_points r
                 LEFT JOIN device_state ds USING (vehicle_identifier)
                 WHERE r.cycle_id = %(cycle)s
@@ -166,7 +167,9 @@ def _build_payloads(cycle_id, snapshot_time) -> dict[int, dict[str, Any]]:
         return acc
 
     for (h3_8, h3_9, h3_10, vid, is_disabled, is_reserved, range_m, max_range_m,
-         failed_starts, first_obs, recent_mask) in device_rows:
+         failed_starts, first_obs, recent_mask, settled, settling_until) in device_rows:
+        # sql/107: the settled reading, as /devices/current uses.
+        range_m = servicing.settled_range(range_m, settled, settling_until, snapshot_time)
         if negative_by is None:
             # The pass failed: we cannot say any vehicle is unreported, and a
             # reported scooter must never read likely-rideable (owner rule).

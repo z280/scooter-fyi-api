@@ -35,7 +35,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 
-from . import condition_checks, fleet_reports, vehicle_identity
+from . import condition_checks, fleet_reports, servicing, vehicle_identity
 from .accounts import SessionUser, require_admin
 from .api_public import latest_complete_cycle
 from .pg import connection
@@ -159,11 +159,18 @@ def census_missing(
         "asc", description="asc = longest-missing first (the plan's order)"),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    kind: Literal["all", "missing", "hidden_low_battery", "at_depot"] = Query(
+        "all", description="absence_kind filter (docs/SERVICING_PLAN.md 1d)"),
 ) -> dict[str, Any]:
     """Vehicles whose `last_observed_at` is at least `hours` before the
     current snapshot, spanning back indefinitely. Acknowledged-gone vehicles
-    are on /gone instead; a note without an acknowledgement rides along."""
+    are on /gone instead; a note without an acknowledgement rides along.
+
+    Each carries an `absence_kind` (sql/107): `at_depot` (last seen inside an
+    operator depot), `hidden_low_battery` (last reading <= 8%: most likely
+    hidden by the operator until a swap) or `missing`."""
     direction = "ASC" if order == "asc" else "DESC"
+    kind_sql = servicing.absence_kind_sql()
     with connection() as conn:
         with conn.cursor() as cur:
             _cycle, snap = latest_complete_cycle(cur)
@@ -173,28 +180,33 @@ def census_missing(
                    AND (a.status IS NULL OR a.status <> 'gone')
             """
             cur.execute(
-                f"SELECT COUNT(*) FROM device_state ds {_ACK_JOINS} {where}",
+                f"SELECT {kind_sql}, COUNT(*) FROM device_state ds {_ACK_JOINS} {where} GROUP BY 1",
                 {"cutoff": cutoff},
             )
-            total = int(cur.fetchone()[0])
+            by_kind = {k: int(n) for k, n in cur.fetchall()}
+            if kind != "all":
+                where += f" AND {kind_sql} = %(kind)s"
+            total = sum(by_kind.values()) if kind == "all" else by_kind.get(kind, 0)
             cur.execute(
                 f"""
                 SELECT ds.vehicle_identifier, ds.vehicle_plate,
                        ds.last_observed_at, ds.first_ever_observed_at,
                        ds.current_lat, ds.current_lon,
                        ds.current_vehicle_model_name, ds.current_form_factor,
-                       {_ACK_COLUMNS}
+                       {_ACK_COLUMNS}, {kind_sql}
                   FROM device_state ds
                   {_ACK_JOINS}
                   {where}
                  ORDER BY ds.last_observed_at {direction}, ds.vehicle_identifier
                  LIMIT %(limit)s OFFSET %(offset)s
                 """,
-                {"cutoff": cutoff, "limit": limit, "offset": offset},
+                {"cutoff": cutoff, "limit": limit, "offset": offset, "kind": kind},
             )
             rows = cur.fetchall()
             out = _envelope(cur, snap, hours=hours, order=order, total=total,
                             limit=limit, offset=offset)
+            out["by_kind"] = {k: by_kind.get(k, 0)
+                              for k in ("missing", "hidden_low_battery", "at_depot")}
     out["devices"] = [
         {
             **_vehicle(r[0], r[1]),
@@ -206,6 +218,7 @@ def census_missing(
             "vehicle_model_name": r[6],
             "form_factor": r[7],
             "ack": _ack(r[8:15], r[2]),
+            "absence_kind": r[15],
         }
         for r in rows
     ]
