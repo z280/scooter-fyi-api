@@ -118,11 +118,19 @@ def search_royalty_titles(
 
 @router.get("/api/v1/ruling-colors")
 def list_ruling_colors(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
-    """The curated leaderboard-map palette, plus the pairs already claimed.
+    """The offerable leaderboard-map palette, plus the pairs already claimed.
+
+    Offerable means `selectable` (sql/107's v2 palette) PLUS whichever of
+    the caller's own two colours are retired. sql/044's 128 colours are
+    still held by riders who claimed them and are still valid in the
+    column — they are simply no longer handed out — so a v1 holder
+    opening the picker has to find their current colour in the grid. Any
+    other rider's retired colour stays out: this is a picker, not an
+    archive.
 
     `taken_pairs` exists so a picker can grey out unavailable combinations
     instead of discovering them by 409 on save. It is bounded by the number
-    of accounts that have chosen colours — NOT by the 16 256 possible
+    of accounts that have chosen colours — NOT by the 5 402 possible
     pairs — so it stays small no matter how large the palette gets.
 
     Which accounts hold which pair is deliberately NOT exposed: the
@@ -133,7 +141,18 @@ def list_ruling_colors(user: SessionUser = Depends(require_session)) -> dict[str
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT hex, name, hue_family FROM ruling_colors ORDER BY sort_order"
+                """
+                SELECT c.hex, c.name, c.hue_family, c.selectable
+                  FROM ruling_colors c
+                 WHERE c.selectable
+                    OR c.hex IN (
+                        SELECT a.ruling_color FROM accounts a WHERE a.id = %s
+                        UNION ALL
+                        SELECT a.ruling_border_color FROM accounts a WHERE a.id = %s
+                    )
+                 ORDER BY c.selectable DESC, c.sort_order
+                """,
+                (user.account_id, user.account_id),
             )
             colors = cur.fetchall()
             cur.execute(
@@ -143,8 +162,12 @@ def list_ruling_colors(user: SessionUser = Depends(require_session)) -> dict[str
             taken = cur.fetchall()
     return {
         "ruling_colors": [
-            {"hex": hex_value, "name": name, "hue_family": family}
-            for hex_value, name, family in colors
+            # `retired` rather than `selectable`: it is only ever true for
+            # the caller's own colours, and the picker's job with one is to
+            # say "yours, but no longer offered", not to re-offer it.
+            {"hex": hex_value, "name": name, "hue_family": family,
+             "retired": not selectable}
+            for hex_value, name, family, selectable in colors
         ],
         "taken_pairs": [
             {"fill": fill, "border": border} for fill, border in taken

@@ -12,6 +12,7 @@ import pytest
 from src.accounts import (
     InvalidUsernameChoice,
     assign_public_username,
+    assign_ruling_colors,
     choose_public_username,
     format_public_username,
     generate_public_username,
@@ -89,6 +90,22 @@ def test_assign_public_username_gives_up_after_max_attempts():
     ])
     with pytest.raises(RuntimeError):
         assign_public_username(cur, account_id=7, max_attempts=2)
+
+
+def test_assign_public_username_does_not_touch_ruling_colours():
+    """Colours are dealt where accounts are CREATED (upsert_account), not
+    where they are named. A rider re-rolling their username goes through
+    here too, and that is not an occasion to re-colour anything."""
+    cur = _FakeCursor([("brave",), ("🦉",), None])
+    assign_public_username(cur, account_id=7)
+    assert not [sql for sql, _ in cur.executed if "assign_ruling_colors" in sql]
+
+
+# ---------- assign_ruling_colors -------------------------------------------
+
+def test_assign_ruling_colors_reports_what_the_function_returned():
+    assert assign_ruling_colors(_FakeCursor([(True,)]), 7) is True
+    assert assign_ruling_colors(_FakeCursor([(False,)]), 7) is False
 
 
 # ---------- choose_public_username (explicit rider choice) -----------------

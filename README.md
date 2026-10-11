@@ -132,7 +132,7 @@ keeps steady-state RAM near zero, which matters because the host (ovh3,
 │   ├── check_migration_numbers.py  CI lint: no two sql/NNN_ files share a number
 │   ├── migrate-state.sh        one-off host move of volumes/state (docs/reference/MIGRATION.md)
 │   ├── analyze_range_signal.py range-signal analysis against the R2 archive
-│   └── gen_ruling_palette.py   provenance for sql/044's 128-colour palette
+│   └── gen_ruling_palette.py   provenance for sql/107's 74-colour palette
 ├── docker/photon/Dockerfile    the Photon geocoding sidecar (pinned + sha256-verified
 │                               official jar; the index itself ships from R2)
 ├── docs/                       plans (active at top level, plus implemented/ and
@@ -661,7 +661,7 @@ two gates in this system (`sql/036_decommercialize.sql`).
 | `GET /api/v1/adjectives/search?q=…` | Partial word match on the adjective list |
 | `GET /api/v1/royalty-titles` | Curated titles that can prefix a public username |
 | `GET /api/v1/royalty-titles/search?q=…` | Partial match on the title list |
-| `GET /api/v1/ruling-colors` | The 128-colour leaderboard palette + already-claimed (fill, border) pairs |
+| `GET /api/v1/ruling-colors` | The 74-colour leaderboard palette (plus any retired colour you hold) + already-claimed (fill, border) pairs |
 | `GET /api/v1/user/devices/current` | Signed-in device map feed; adds plate/admin fields for admin-allowlisted sessions |
 | `GET /api/v1/vehicles/plates?device_ids=…` | `{plates: {device_id: plate}, as_of}` for ≤50 ids in the current snapshot (replaces the browser's direct Veo GBFS fetch) |
 | `POST /api/v1/reports/discount` | Missed-discount evidence, optional receipt upload. Multipart carrying any receipt-claim field is an **equity receipt claim** (below) |
@@ -1045,7 +1045,7 @@ schedule; the rest are by hand. Defined in `src/cli.py`.
 | Routing + geocoding assets | `fetch_map_pbf`, `refresh_routing_graph`, `fetch_photon_index`, `refresh_photon_index`, `refresh_address_points` |
 | Retention | `cleanup_receipts`, `cleanup_ride_screenshots`, `cleanup_model_report_photos`, `cleanup_job_runs`, `cleanup_telemetry`, `sweep_orphan_images [--apply] [--force]` (unreferenced user images, 7-day grace; weekly) |
 | Messaging | `poll_comms_replies` |
-| Accounts + admin | `admin list` / `admin add <email>` / `admin remove <email>`, `backfill_public_usernames`, `delete_account --account-id N [--apply]` ([runbook](docs/reference/account_deletion.md)) |
+| Accounts + admin | `admin list` / `admin add <email>` / `admin remove <email>`, `backfill_public_usernames`, `backfill_ruling_colors`, `delete_account --account-id N [--apply]` ([runbook](docs/reference/account_deletion.md)) |
 | Schema + repair | `migrate`, `close_ghost_stops [--dry-run] [YYYY-MM-DD ...]` (one-off) |
 
 ## Operating tips

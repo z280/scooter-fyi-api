@@ -38,6 +38,7 @@ Available commands:
                       Dry-run unless --apply. Runbook:
                       docs/reference/account_deletion.md.
     backfill_public_usernames
+    backfill_ruling_colors
                       One-time: assign a public_username to every account
                       created before sql/025 (idempotent — already-
                       assigned accounts are skipped).
@@ -481,6 +482,59 @@ def backfill_public_usernames() -> dict:
             assigned += 1
     log.info("backfill_public_usernames: assigned=%d", assigned)
     return {"assigned": assigned}
+
+
+def backfill_ruling_colors() -> dict:
+    """Deal leaderboard-map colours to every account that hasn't got a
+    current pair — no colours at all, or colours naming one of the
+    v1 entries sql/107 retired. Idempotent: an account already on the
+    live palette is skipped by the function itself, so this is safe to
+    re-run and safe to schedule.
+    `python -m src.cli backfill_ruling_colors`.
+
+    sql/107 already dealt to everyone who existed when it ran, and
+    src/accounts.py:upsert_account colours every account created since.
+    This is the sweep for the gap between those two — accounts created
+    after the migration applied and before the code deployed — and the
+    way to pick up a rider who cleared their colours.
+
+    The WHERE clause mirrors the migration's and is only a prefilter: it
+    keeps the loop from calling the function once per account in the
+    table. assign_ruling_colors re-checks each account itself, so a row
+    that stops qualifying between the SELECT and its turn is a no-op,
+    not a mistake.
+
+    Commits per-row for the same reason backfill_public_usernames does:
+    assign_ruling_colors takes a short advisory lock per candidate pair,
+    and a long transaction would hold every one of them while live
+    sign-ups wait.
+    """
+    from .accounts import assign_ruling_colors
+
+    assigned = 0
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id
+                  FROM accounts a
+                  LEFT JOIN ruling_colors f ON f.hex = a.ruling_color
+                  LEFT JOIN ruling_colors b ON b.hex = a.ruling_border_color
+                 WHERE a.ruling_color IS NULL
+                    OR a.ruling_border_color IS NULL
+                    OR NOT f.selectable
+                    OR NOT b.selectable
+                 ORDER BY a.id
+                """
+            )
+            ids = [r[0] for r in cur.fetchall()]
+        for account_id in ids:
+            with conn.cursor() as cur:
+                if assign_ruling_colors(cur, account_id):
+                    assigned += 1
+            conn.commit()
+    log.info("backfill_ruling_colors: assigned=%d of %d candidates", assigned, len(ids))
+    return {"assigned": assigned, "candidates": len(ids)}
 
 
 def expire_stale_watches() -> dict:
@@ -1085,6 +1139,7 @@ COMMANDS = {
     "cleanup_ride_screenshots": cleanup_ride_screenshots,
     "cleanup_model_report_photos": cleanup_model_report_photos,
     "backfill_public_usernames": backfill_public_usernames,
+    "backfill_ruling_colors": backfill_ruling_colors,
     "expire_stale_watches":  expire_stale_watches,
     "expire_stale_off_feed_rides": expire_stale_off_feed_rides,
     "fetch_map_pbf":         _cli_fetch_map_pbf,

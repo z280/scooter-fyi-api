@@ -327,6 +327,45 @@ def get_profile(user: SessionUser = Depends(require_session)) -> dict[str, Any]:
             return _profile_payload(cur, user)
 
 
+def _reject_retired_colours(cur, account_id: int, colours: tuple[str, str]) -> None:
+    """Keep a rider from claiming a colour sql/107 retired.
+
+    The FK only says a hex is IN `ruling_colors`, and v1's 128 are still
+    rows there — they have to be, since riders hold them. What they are
+    not is choosable: ten of them sit close enough to a zone fill, the
+    equity overlay or the ride trail to read as a map feature rather than
+    as somebody's territory, which is the whole reason v2 exists.
+
+    The one exception is a colour this account ALREADY holds. A v1 holder
+    re-saving to change only the other half, or to take a title, must not
+    be told their own colour is invalid — and GET /api/v1/ruling-colors
+    offers it back to them for exactly that reason.
+    """
+    cur.execute(
+        """
+        SELECT c.hex
+          FROM ruling_colors c
+         WHERE c.hex = ANY(%s)
+           AND NOT c.selectable
+           AND c.hex NOT IN (
+               SELECT a.ruling_color FROM accounts a WHERE a.id = %s
+               UNION ALL
+               SELECT a.ruling_border_color FROM accounts a WHERE a.id = %s
+           )
+         ORDER BY c.hex
+        """,
+        (list(colours), account_id, account_id),
+    )
+    retired = [r[0] for r in cur.fetchall()]
+    if retired:
+        raise HTTPException(
+            400,
+            f"{', '.join(retired)} is no longer offered — it reads as a map "
+            "feature rather than as a territory. See GET /api/v1/ruling-colors "
+            "for the current palette.",
+        )
+
+
 @router.put("/api/v1/profile")
 def put_profile(
     user: SessionUser = Depends(require_session),
@@ -522,6 +561,12 @@ def put_profile(
                         400,
                         "the border colour must differ from the fill colour — "
                         "a border in the fill's own colour isn't visible",
+                    )
+                if payload.ruling_color is not None:
+                    _reject_retired_colours(
+                        cur,
+                        user.account_id,
+                        (payload.ruling_color, payload.ruling_border_color),
                     )
                 sets.append("ruling_color = %s")
                 params.append(payload.ruling_color)
