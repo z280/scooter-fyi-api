@@ -388,6 +388,72 @@ def _negative_report_fields(by: dict[str, dict[str, Any]] | None, vid: str | Non
     }
 
 
+def _depot_exits(now: datetime) -> dict[str, tuple[datetime, datetime]]:
+    """{vehicle_identifier: (entered_at, exited_at)} of each vehicle's newest
+    depot visit that ended in the last 30 days (sql/107). {} on failure: the
+    fields it feeds are nice-to-haves, never worth a 500."""
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT ON (vehicle_identifier) vehicle_identifier, entered_at, "
+                    "exited_at FROM depot_visits WHERE exited_at IS NOT NULL "
+                    "AND exited_at > %s - INTERVAL '30 days' AND exited_at <= %s "
+                    "ORDER BY vehicle_identifier, exited_at DESC", (now, now))
+                return {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    except Exception:  # noqa: BLE001
+        log.warning("depot visits unavailable — service fields omitted this cycle")
+        return {}
+
+
+def _service_fields(last_serviced_at: datetime | None, parked_since: datetime | None,
+                    battery_percent: int | None,
+                    depot: tuple[datetime, datetime] | None,
+                    now: datetime) -> dict[str, Any]:
+    """Plan D2-D4. `fresh_battery`: serviced in the last FRESH_BATTERY_HOURS,
+    not moved since (parked here since at most 10 minutes after the swap, so a
+    van relocation in the same visit still counts), and reading at least
+    FRESH_BATTERY_PERCENT. `hide_risk`: low enough that the operator is about
+    to hide it for a swap. `back_from_shop_at`: a depot stay of at least
+    BACK_FROM_SHOP_MIN_HOURS that ended in the last BACK_FROM_SHOP_SHOW_DAYS."""
+    fresh = bool(
+        last_serviced_at is not None
+        and now - last_serviced_at <= timedelta(hours=servicing.FRESH_BATTERY_HOURS)
+        and parked_since is not None
+        and parked_since <= last_serviced_at + timedelta(minutes=10)
+        and battery_percent is not None
+        and battery_percent >= servicing.FRESH_BATTERY_PERCENT)
+    back = None
+    if depot is not None:
+        entered, exited = depot
+        if (exited - entered >= timedelta(hours=servicing.BACK_FROM_SHOP_MIN_HOURS)
+                and now - exited <= timedelta(days=servicing.BACK_FROM_SHOP_SHOW_DAYS)):
+            back = exited
+    return {
+        "last_serviced_at": last_serviced_at.isoformat() if last_serviced_at else None,
+        "fresh_battery": fresh,
+        "hide_risk": (battery_percent is not None
+                      and battery_percent <= servicing.HIDE_RISK_PERCENT),
+        "back_from_shop_at": back.isoformat() if back else None,
+        "back_from_shop_hours": (round((back - depot[0]).total_seconds() / 3600)
+                                 if back and depot else None),
+    }
+
+
+def _serviced_since(latest_report: dict[str, Any], last_serviced_at: datetime | None,
+                    depot: tuple[datetime, datetime] | None) -> str | None:
+    """The newest servicing after the report was filed: a swap
+    (last_serviced_at) or a completed depot visit that began after it."""
+    try:
+        filed = datetime.fromisoformat(latest_report["reported_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    after = [t for t in (last_serviced_at,) if t is not None and t > filed]
+    if depot is not None and depot[0] > filed:
+        after.append(depot[1])
+    return max(after).isoformat() if after else None
+
+
 def _outcome(outcomes: dict[str, tuple[int, int, int, int, int]] | None,
              vid: str | None) -> tuple[int, int, int, int, int]:
     return (outcomes or {}).get(vid or "", (0, 0, 0, 0, 0))
@@ -498,7 +564,9 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
                 "       ds.has_basket, "
                 # sql/107, appended for the same reason: the settled reading
                 # (r[36]) and until when it applies (r[37]).
-                "       ds.settled_range_meters, ds.settling_until "
+                "       ds.settled_range_meters, ds.settling_until, "
+                # r[38]: the last servicing (docs/SERVICING_PLAN.md 2a).
+                "       ds.last_serviced_at "
                 "FROM raw_telemetry_points r "
                 "LEFT JOIN device_state ds USING (vehicle_identifier) "
                 f"WHERE {' AND '.join(where)} "
@@ -524,6 +592,10 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
     # rental_outcomes: the payload SELECT is read positionally. None means
     # "unknown this cycle" and is emitted as null, never as "no report".
     negative_by = _negative_states(cycle_id)
+
+    # The newest completed depot visit per vehicle (sql/107), for "back from
+    # the shop" and "serviced since this report". Separate, like the two above.
+    depot_exits = _depot_exits(snapshot_time)
 
     # The RAW vehicle_plate is emitted ONLY when include_plate is set — i.e.
     # from /api/v1/user/devices/current for an admin session. On the public
@@ -645,6 +717,8 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
             # rideable (acceleration)" line. needs_condition_check invites a
             # rider condition check (Phase 1b).
             **_negative_report_fields(negative_by, r[5], _state_for(negative_by, r[5])),
+            # docs/SERVICING_PLAN.md 2a: what the servicing log tells a rider.
+            **_service_fields(r[38], r[23], battery_percent, depot_exits.get(r[5]), now_utc),
             # sql/072 — the one reliability signal that survived validation:
             # a vehicle's no-go rate persists at r=+0.275 across weeks, and
             # the worst 10% of vehicles carry 32.4% of all failures.
@@ -689,6 +763,12 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
             "feature_status": r[30] or FEATURE_STATUS_NEEDS_CONFIRMED,
             "device_features": feature_payload(r[31], r[32], r[33], r[34], r[35]),
         }
+        # "Serviced Oct 10, after this report" (plan 2a): the swap or completed
+        # depot visit after the newest report, for a report that still stands.
+        lr = properties.get("latest_report")
+        if lr:
+            properties["latest_report"] = {
+                **lr, "serviced_since": _serviced_since(lr, r[38], depot_exits.get(r[5]))}
         # h3 fields: projected off unless ?include=h3.
         # String-encoded (canonical h3 hex form): the raw 64-bit ints
         # exceed JS MAX_SAFE_INTEGER and silently lose precision in
@@ -1085,6 +1165,32 @@ def equity_estimate(
 # ---------------------------------------------------------------------------
 # Rider stats: did the rental go anywhere?
 # ---------------------------------------------------------------------------
+@router.get("/api/v1/fleet/service")
+def fleet_service(request: Request, window: str = "28d") -> Any:
+    """How the operator services the fleet (docs/SERVICING_PLAN.md 2b):
+    in-field battery swaps (count, where, when, battery at swap), how long
+    vehicles sit empty before a swap inside vs outside Denver's Equity Areas,
+    depot visits (stays, by model, by month) and the effective fleet. Built
+    once per cycle and served precomputed. See src/fleet_service.py."""
+    from . import fleet_service as fs
+
+    if window not in fs.WINDOWS:
+        raise HTTPException(400, f"window must be one of {sorted(fs.WINDOWS)}")
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cycle_id, snapshot_time = latest_complete_cycle(cur)
+    entry = payload_cache.get_or_build(
+        f"fleet-service|{window}", cycle_id, "",
+        lambda: payload_cache.make_entry(
+            f"fleet-service|{window}", cycle_id, "",
+            payload_cache.dumps(fs.summarize(window, snapshot_time))))
+    body, enc = payload_cache.gzip_response_body(
+        payload_cache.assemble(entry), request.headers.get("accept-encoding"))
+    return Response(content=body, media_type="application/json",
+                    headers={"Cache-Control": "public, max-age=600",
+                             "ETag": f'W/"fleet-service:{window}:{entry.cycle_id}"', **enc})
+
+
 @router.get("/api/v1/fleet/outcomes/equity")
 def fleet_outcomes_equity(response: Response, window: str = "7d") -> Any:
     """Share of rentals that ended where they began, inside vs outside the

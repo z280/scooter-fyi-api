@@ -27,7 +27,8 @@ failure (quota, outage) drops that one alert — an admin watch is a nudge,
 not a ledger — and the next change texts again.
 
 WHAT COUNTS AS A CHANGE. Leaving / rejoining the feed, a rental starting /
-ending (`is_reserved`), `is_disabled` flipping, and a move of more than
+ending (`is_reserved`), `is_disabled` flipping, servicing (a swap or charge,
+entering or leaving a depot; sql/106), and a move of more than
 MOVE_RADIUS_M while not in a rental (positions during a rental are the
 rider's, and would text every two minutes). The first cycle after
 subscribing records the baseline silently.
@@ -110,6 +111,36 @@ def changes(prev: dict[str, Any], now: Observed) -> list[str]:
                 > MOVE_RADIUS_M):
             d = distance_meters(prev["lat"], prev["lon"], now.lat, now.lon)
             out.append(f"moved {int(round(d))} m")
+    return out
+
+
+def servicing_changes(cur, vids: list[str], snapshot_time: datetime) -> dict[str, list[str]]:
+    """Servicing seen THIS cycle for the watched vehicles (sql/106): a swap or
+    charge, and entering or leaving a depot. Read after device_state and the
+    depot-visit pass wrote them in the same cycle (src/cycle.py order)."""
+    from .quality import compute_battery_percent
+
+    out: dict[str, list[str]] = {}
+    if not vids:
+        return out
+    cur.execute(
+        "SELECT vehicle_identifier, low_range_meters, full_range_meters, in_place "
+        "FROM service_events WHERE observed_at = %s AND vehicle_identifier = ANY(%s)",
+        (snapshot_time, vids))
+    for vid, low, full, in_place in cur.fetchall():
+        lo, hi = compute_battery_percent(low), compute_battery_percent(full)
+        where = "" if in_place is None else (" in place" if in_place else " after a move")
+        out.setdefault(vid, []).append(f"got a fresh battery{where} ({lo}% to {hi}%)")
+    cur.execute(
+        "SELECT vehicle_identifier, entered_at, exited_at FROM depot_visits "
+        "WHERE (entered_at = %s OR exited_at = %s) AND vehicle_identifier = ANY(%s)",
+        (snapshot_time, snapshot_time, vids))
+    for vid, entered, exited in cur.fetchall():
+        if exited == snapshot_time:
+            hours = (exited - entered).total_seconds() / 3600
+            out.setdefault(vid, []).append(f"is back from the depot after {hours:.0f} h")
+        else:
+            out.setdefault(vid, []).append("was taken into the depot")
     return out
 
 
@@ -303,6 +334,12 @@ def watch_for_cycle(snapshot_time: datetime, devices: Iterable[TaggedDevice]) ->
                 """
             )
             rows = cur.fetchall()
+            try:
+                serviced = servicing_changes(cur, [r[1] for r in rows], snapshot_time)
+            except Exception:  # noqa: BLE001 — a missing extra must not stop the watch
+                log.warning("admin_watch: servicing changes unavailable this cycle")
+                conn.rollback()
+                serviced = {}
         conn.commit()
     stats["live"] = len(rows)
     for (wid, vid, in_feed, reserved, disabled, lat, lon, sent, phone, verified,
@@ -323,6 +360,8 @@ def watch_for_cycle(snapshot_time: datetime, devices: Iterable[TaggedDevice]) ->
         prev = {"in_feed": in_feed, "reserved": reserved, "disabled": disabled,
                 "lat": lat, "lon": lon}
         what = changes(prev, now)
+        if in_feed is not None:            # not on the silent baseline cycle
+            what += serviced.get(vid, [])
         # Positions are only the baseline while NOT in a rental, so the
         # release point is compared with where it was parked.
         keep_pos = now.reserved or not now.in_feed

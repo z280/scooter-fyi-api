@@ -45,6 +45,20 @@
 <p>Re-filed decoys: {% for k, n in data.problem_reports.remapped.items() %}{{ k }} {{ n }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
 <p class="muted">{{ data.problem_reports.definition }}</p>
 
+{% if data.service %}{% set sv = data.service %}
+<h2>Servicing</h2>
+<p>{{ sv.swaps.count }} battery swaps ({{ sv.swaps.per_day }} a day), {{ (sv.swaps.share_in_place * 100) | round | int if sv.swaps.share_in_place is not none else "—" }}% where the vehicle sat.
+  Time sitting empty before a swap (median): Equity Areas {{ sv.swap_wait.equity_areas.median_hours if sv.swap_wait.equity_areas else "—" }} h,
+  rest of Denver {{ sv.swap_wait.rest_of_denver.median_hours if sv.swap_wait.rest_of_denver else "—" }} h.</p>
+<p>Depot: {{ sv.depot.visits }} visits, median stay {{ sv.depot.median_stay_hours or "—" }} h.
+  Fleet: {{ sv.fleet.on_street_24h }} on the street in the last 24 h; {{ sv.fleet.inside_depot }} inside the depot ({{ sv.fleet.inside_depot_30d_plus }} for 30+ days).</p>
+<table>
+  <thead><tr><th>model</th><th>depot visits</th><th>median stay h</th><th>share 3+ days</th></tr></thead>
+  <tbody>{% for m in sv.depot.by_model %}<tr><td>{{ m.model }}</td><td>{{ m.visits }}</td><td>{{ m.median_stay_hours }}</td><td>{{ m.share_3_days_plus }}</td></tr>{% endfor %}</tbody>
+</table>
+<ul class="muted">{% for c in sv.caveats %}<li>{{ c }}</li>{% endfor %}</ul>
+{% endif %}
+
 <h2>Inaccessible vehicles</h2>
 <table>
   <thead><tr><th>vehicle</th><th>first / last report</th><th>reports</th><th>accounts</th><th>in feed</th><th>days since first</th><th>still unmoved</th></tr></thead>

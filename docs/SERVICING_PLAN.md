@@ -22,7 +22,7 @@ The owner said "do all this". Where a choice remained, the recommended option is
 | D2 | "Fresh battery" | Serviced within the last **12 h**, **not rented since**, and reading **≥ 80%**. |
 | D3 | "Back from the shop" | A depot stay of **≥ 72 h** that ended within the last **7 days**. |
 | D4 | "About to be hidden" warning | Settled battery **≤ 8%**. Veo hides vehicles at about 4–5%, and a rider needs time to get there. |
-| D5 | Rider alerts | Opt-in per dib or watch, over the existing comms SMS path: "fresh battery" and "back on the street". No new channel. |
+| D5 | Rider alerts | **Revised in Phase 2:** rider watches are deliberately short-lived (a dib ≤ 25 min, the scooter you just rode for a few hours) so the app cannot be used to follow a vehicle parked outside someone's home. A long-lived "back on the street" alert would break that. So riders get **in-app** alerts inside those existing watches (the client reads `last_serviced_at` / `fresh_battery`), and the operator-style events — serviced, taken into the depot, back from the depot — go to the **admin SMS watch**. |
 | D6 | Publish effective fleet size in Stats | **Yes,** with its caveat in the payload (as fleet_equity does). |
 
 ## Phase 1: Data foundation (API, one PR)

@@ -173,6 +173,7 @@ def test_public_and_signed_in_non_admin_share_one_entry(cache, monkeypatch):
     monkeypatch.setattr(api_public, "connection", _conn)
     monkeypatch.setattr(api_public, "stats_for_cycle", lambda c, s: {})
     monkeypatch.setattr(api_public, "_negative_states", lambda c: {})
+    monkeypatch.setattr(api_public, "_depot_exits", lambda now: {})
     monkeypatch.setattr(api_public, "_build_device_features", counting)
     from fastapi import Response
     from tests.payload_json import decoded

@@ -38,6 +38,7 @@ _ROW = (
     None,                         # 34 features_poor_condition
     None,                         # 35 has_basket
     None, None,                   # 36-37 settled_range_meters, settling_until (sql/107)
+    None,                         # 38 last_serviced_at (sql/107)
 )
 
 
@@ -80,6 +81,7 @@ def client(monkeypatch):
     # The negative-report pass ran and found nothing (a failed pass reads every
     # vehicle "unknown", which is not what these route tests are about).
     monkeypatch.setattr(api_public, "_negative_states", lambda cycle_id: {})
+    monkeypatch.setattr(api_public, "_depot_exits", lambda now: {})
     app = FastAPI()
     app.include_router(api_public.router)
     return TestClient(app)

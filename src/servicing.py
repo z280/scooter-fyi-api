@@ -298,7 +298,7 @@ def backfill_depot_visits(batch_vehicles: int = 500) -> dict[str, int]:
     rerun adds nothing and ingest-written visits are kept."""
     from .device_state import _equity_area_of
 
-    stats = {"vehicles": 0, "visits": 0}
+    stats = {"vehicles": 0, "visits": 0, "replaced": 0}
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(f"""SELECT DISTINCT vehicle_identifier FROM device_history
@@ -340,6 +340,16 @@ def backfill_depot_visits(batch_vehicles: int = 500) -> dict[str, int]:
                 if run:
                     visits.append(run)
                 for r in visits:
+                    # A vehicle already inside when ingest started tracking
+                    # depots got a visit opened at THAT cycle, not when it
+                    # really arrived. The history knows better: the backfilled
+                    # visit replaces any ingest visit that began inside it.
+                    cur.execute(
+                        "DELETE FROM depot_visits WHERE vehicle_identifier = %s "
+                        "AND source = 'ingest' AND entered_at > %s "
+                        "AND (%s::timestamptz IS NULL OR entered_at < %s)",
+                        (r["v"], r["in"], r["out"], r["out"]))
+                    stats["replaced"] = stats.get("replaced", 0) + cur.rowcount
                     cur.execute(
                         """
                         INSERT INTO depot_visits (vehicle_identifier, depot_id, entered_at,
@@ -480,7 +490,55 @@ def backfill_service_events(max_files: int | None = None) -> dict[str, Any]:
         finally:
             os.remove(local)
         stats["files"] += 1
+    # The archive ends where the hot raw_telemetry_points buffer begins, and
+    # ingest only started logging at the sql/107 deploy: replay the buffer
+    # between the last archived reading and the first ingest-written event,
+    # carrying the same per-vehicle state, so the log has no hole.
+    stats["raw"] = _replay_raw_buffer(states, prev_res, last_seen,
+                                      max(last_seen.values(), default=None),
+                                      ABSENT_STOP_AFTER)
+    stats["inserted"] += stats["raw"]["inserted"]
     return stats
+
+
+def _replay_raw_buffer(states: dict[str, ChargeState], prev_res: dict[str, bool],
+                       last_seen: dict[str, datetime], after: datetime | None,
+                       absent_after: timedelta, until: datetime | None = None,
+                       ) -> dict[str, int]:
+    out = {"rows": 0, "events": 0, "inserted": 0}
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MIN(observed_at) FROM service_events WHERE source = 'ingest'")
+            until = cur.fetchone()[0] or until or datetime.now(timezone.utc)
+        rc = conn.cursor(name="servicing_raw_replay")
+        rc.itersize = 50_000
+        rc.execute(
+            """SELECT r.vehicle_identifier, m.snapshot_time, r.current_range_meters,
+                      COALESCE(r.is_reserved, FALSE), r.latitude, r.longitude,
+                      r.vehicle_model_name, r.h3_9_index
+                 FROM raw_telemetry_points r JOIN snapshot_metadata_core m USING (cycle_id)
+                WHERE r.vehicle_identifier IS NOT NULL
+                  AND (%(after)s::timestamptz IS NULL OR m.snapshot_time > %(after)s)
+                  AND m.snapshot_time < %(until)s
+                ORDER BY r.vehicle_identifier, m.snapshot_time""",
+            {"after": after, "until": until})
+        events: list[dict[str, Any]] = []
+        while True:
+            batch = rc.fetchmany(50_000)
+            if not batch:
+                break
+            out["rows"] += len(batch)
+            events.extend(replay_charge(batch, states, prev_res, last_seen, absent_after))
+        rc.close()
+        conn.commit()
+        with conn.cursor() as cur:
+            for e in events:
+                cur.execute(INSERT_SERVICE_EVENT, e)
+                out["inserted"] += cur.rowcount
+        conn.commit()
+    out["events"] = len(events)
+    log.info("backfill_service_events: raw buffer %s: %s", after, out)
+    return out
 
 
 # ---------------------------------------------------------------------------
