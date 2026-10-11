@@ -372,7 +372,7 @@ def submit_device_report(
                     reason, submitted_reason, range_at_report_meters,
                     vehicle_lat_at_report, vehicle_lon_at_report
                 ) VALUES (%s, %s, COALESCE(%s, NOW()), %s, %s, %s, %s, %s, %s, %s, %s, (
-                    -- sql/106: within SETTLE_MINUTES of a rental ending the
+                    -- sql/107: within SETTLE_MINUTES of a rental ending the
                     -- feed's reading is still climbing back from the ride's
                     -- sag; the settled reading is the charge to record.
                     SELECT CASE WHEN ds.settling_until > NOW()

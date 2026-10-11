@@ -50,7 +50,7 @@ HOW A REPORT CLEARS (`uncleared_negative_sql`):
     measured and no history exists), it has made LEGACY_CLEAR_MOVES (3) moves
     of >= 100 m since the report;
   * any type: a DEPOT VISIT that began after the report (or its re-baseline)
-    and has ended (depot_visits, sql/106; plan D1);
+    and has ended (depot_visits, sql/107; plan D1);
   * location: >= 100 m from where it was reported, or reappeared >= 100 m
     from its last-seen spot after going off the map. No battery condition;
   * a move under 100 m never clears anything, and time never clears;
@@ -228,7 +228,7 @@ def uncleared_negative_sql(*, vid: str, current_range: str, now: str,
     """
     m = CLEAR_MOVE_METERS
     rise = charge_rise_meters()
-    # sql/106: for SETTLE_MINUTES after a rental ends the reading is still
+    # sql/107: for SETTLE_MINUTES after a rental ends the reading is still
     # climbing back from the ride's sag; the settled reading (the highest
     # parked one since the release) is the vehicle's charge.
     current_range = (f"COALESCE(CASE WHEN ds.settling_until > {now} "
@@ -260,7 +260,7 @@ def uncleared_negative_sql(*, vid: str, current_range: str, now: str,
                    AND h.departed_at >= n.base_at
                    AND ds.last_observed_at > h.departed_at
                    AND geo_distance_m(h.lat, h.lon, ds.current_lat, ds.current_lon) >= {m})"""
-    # Plan D1 (sql/106): a depot visit that began after the report (or its
+    # Plan D1 (sql/107): a depot visit that began after the report (or its
     # re-baseline) and has ended — the vehicle was taken in and brought back.
     depot_visit = f"""EXISTS (
                 SELECT 1 FROM depot_visits dv

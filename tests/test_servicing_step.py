@@ -1,4 +1,4 @@
-"""src/servicing.step — the one charge rule (sql/105 + sql/106) — as a pure
+"""src/servicing.step — the one charge rule (sql/105 + sql/107) — as a pure
 function: swaps, rebounds, the settled reading, and the archive replay that
 shares it."""
 

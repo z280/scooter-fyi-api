@@ -94,7 +94,7 @@ class _FakeCursor:
             self.state.get("last_fix_lat"), self.state.get("last_fix_lon"),
             self.state.get("last_range_meters"),   # sql/104
             self.state.get("range_low_since_full"),  # sql/105
-            None, None, None, None, None,  # sql/106 low point + settled
+            None, None, None, None, None,  # sql/107 low point + settled
         )]
 
     def fetchone(self):

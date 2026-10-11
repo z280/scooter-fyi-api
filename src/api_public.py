@@ -496,7 +496,7 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
                 # three presence columns so every positional index below
                 # stays where it was.
                 "       ds.has_basket, "
-                # sql/106, appended for the same reason: the settled reading
+                # sql/107, appended for the same reason: the settled reading
                 # (r[36]) and until when it applies (r[37]).
                 "       ds.settled_range_meters, ds.settling_until "
                 "FROM raw_telemetry_points r "
@@ -561,7 +561,7 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
         # still derives its own from current_range_meters internally — same
         # input, same LUT, same answer — so this is about one shared value
         # here, not about the call count across quality.py.
-        # sql/106: within SETTLE_MINUTES of a rental ending, the feed's range
+        # sql/107: within SETTLE_MINUTES of a rental ending, the feed's range
         # is still climbing back from the ride's sag (by up to ~25% of a full
         # charge); the settled reading is the vehicle's charge. Everything
         # derived from the charge — battery_percent, the range estimate, the
@@ -613,7 +613,7 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
             "current_range_meters": r[8],
             "battery_percent": battery_percent,
             # True while the reading is still recovering from a ride's sag and
-            # battery_percent shows the settled value instead (sql/106).
+            # battery_percent shows the settled value instead (sql/107).
             "battery_settling": battery_settling,
             # A distance is the question a rider actually has; the percentage
             # is the least trustworthy number the feed publishes. See

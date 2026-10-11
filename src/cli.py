@@ -713,7 +713,7 @@ def _cli_backfill_battery_trips() -> dict:
 
 # ---------------------------------------------------------------------------
 # Servicing (docs/SERVICING_PLAN.md 1b, 1f). Run by hand once after the
-# sql/106 deploy; both are idempotent. The archive replay is memory-heavy like
+# sql/107 deploy; both are idempotent. The archive replay is memory-heavy like
 # backfill_battery_trips: raise the scheduler's limit first.
 # ---------------------------------------------------------------------------
 def _cli_backfill_depot_visits() -> dict:

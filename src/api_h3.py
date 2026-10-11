@@ -168,7 +168,7 @@ def _build_payloads(cycle_id, snapshot_time) -> dict[int, dict[str, Any]]:
 
     for (h3_8, h3_9, h3_10, vid, is_disabled, is_reserved, range_m, max_range_m,
          failed_starts, first_obs, recent_mask, settled, settling_until) in device_rows:
-        # sql/106: the settled reading, as /devices/current uses.
+        # sql/107: the settled reading, as /devices/current uses.
         range_m = servicing.settled_range(range_m, settled, settling_until, snapshot_time)
         if negative_by is None:
             # The pass failed: we cannot say any vehicle is unreported, and a

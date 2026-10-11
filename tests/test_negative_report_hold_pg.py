@@ -429,7 +429,7 @@ def test_the_three_move_rule_is_only_for_legacy_reports(trips):
 
 
 # ---------------------------------------------------------------------------
-# sql/106: a completed depot visit clears (plan D1); the settled reading
+# sql/107: a completed depot visit clears (plan D1); the settled reading
 # ---------------------------------------------------------------------------
 
 def _depot_visit(conn, entered, exited):

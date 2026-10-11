@@ -698,7 +698,7 @@ class StateUpdateStats:
     # (every in-place release: rentals_failed_start + rentals_blip).
     rentals_stayed: int = 0
     jitter_held: int = 0
-    serviced: int = 0         # sql/106 service_events rows written
+    serviced: int = 0         # sql/107 service_events rows written
 
 
 def update_for_cycle(
@@ -1171,7 +1171,7 @@ def update_for_cycle(
                     new_state_rows,
                 )
 
-            # Charge tracker (sql/011, sql/104-106), applied per reading by
+            # Charge tracker (sql/011, sql/104, 105, 107), applied per reading by
             # servicing.step — the ONE charge rule, shared with the archive
             # backfill. Written only for vehicles whose charge state changed
             # (the range is frozen while a vehicle sits, 99.4% of parked

@@ -77,7 +77,7 @@ class _FakeCursor:
                      s.get("rental_origin_device_id"), s.get("last_fix_lat"),
                      s.get("last_fix_lon"), s.get("last_range_meters"),
                      s.get("range_low_since_full"),
-                     None, None, None, None, None)]  # sql/106 low point + settled
+                     None, None, None, None, None)]  # sql/107 low point + settled
         return []
 
     def fetchone(self):

@@ -166,7 +166,7 @@ def census_missing(
     current snapshot, spanning back indefinitely. Acknowledged-gone vehicles
     are on /gone instead; a note without an acknowledgement rides along.
 
-    Each carries an `absence_kind` (sql/106): `at_depot` (last seen inside an
+    Each carries an `absence_kind` (sql/107): `at_depot` (last seen inside an
     operator depot), `hidden_low_battery` (last reading <= 8%: most likely
     hidden by the operator until a swap) or `missing`."""
     direction = "ASC" if order == "asc" else "DESC"

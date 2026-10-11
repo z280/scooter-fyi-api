@@ -27,7 +27,7 @@ The owner said "do all this". Where a choice remained, the recommended option is
 
 ## Phase 1: Data foundation (API, one PR)
 
-### 1a. Servicing log: `service_events` (sql/106)
+### 1a. Servicing log: `service_events` (sql/107)
 
 - **When a row is written:** one per servicing, written by ingest at the moment it stamps `device_state.last_serviced_at`. The rule is #151's: full after a parked low ≤ 50% since the last full reading.
 - **Columns:**
@@ -40,7 +40,7 @@ The owner said "do all this". Where a choice remained, the recommended option is
 - **device_state additions:** `range_low_at`, `range_low_lat`, `range_low_lon`. They are set with `range_low_since_full`, so the low's time and place are known when the full reading lands.
 - **Retention:** kept indefinitely. About 2,500 rows a day, roughly 1 M rows a year.
 
-### 1b. Depot visits: `depot_visits` (sql/106)
+### 1b. Depot visits: `depot_visits` (sql/107)
 
 - **Depots** are listed in `data/depots.json`: id, name, lat, lon, radius 200 m. One entry today, the discovered depot. Stops drop off sharply beyond 200 m; there are street stops in the 500 m and 1.1 km rings, so the radius must stay tight.
 - **Ingest writes visits:**
