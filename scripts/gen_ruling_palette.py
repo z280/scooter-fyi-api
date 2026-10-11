@@ -281,9 +281,10 @@ def main() -> None:
             )
         seen[hex_value] = name
 
-    # Every family must keep at least two steps: the auto-assigner
+    # Every family must keep at least two steps. The auto-assigner
     # (sql/107's assign_ruling_colors) pairs a fill with a darker border
-    # from the SAME family, and a one-entry family cannot do that.
+    # and prefers one from the same family, and a one-entry family can
+    # offer neither a fill with a darker sibling nor that sibling.
     per_family: dict[str, int] = {}
     for _hex, _name, family, _step, _order in rows:
         per_family[family] = per_family.get(family, 0) + 1

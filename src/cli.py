@@ -485,18 +485,24 @@ def backfill_public_usernames() -> dict:
 
 
 def backfill_ruling_colors() -> dict:
-    """Give leaderboard-map colours to every account that has a username
-    emoji but no colour pair — the emoji-matched suggestion from
-    sql/107's assign_ruling_colors(). Idempotent: an account that has
-    colours (picked or suggested) is skipped by the function itself, so
-    this is safe to re-run and safe to schedule.
+    """Deal leaderboard-map colours to every account that hasn't got a
+    current pair — no colours at all, or colours naming one of the
+    v1 entries sql/107 retired. Idempotent: an account already on the
+    live palette is skipped by the function itself, so this is safe to
+    re-run and safe to schedule.
     `python -m src.cli backfill_ruling_colors`.
 
-    sql/107 already backfilled everyone who existed when it ran, and
-    src/accounts.py:assign_public_username colours every account created
-    since. This is the sweep for the gap between those two — accounts
-    created after the migration applied and before the code deployed —
-    and the way to re-suggest for riders who cleared their colours.
+    sql/107 already dealt to everyone who existed when it ran, and
+    src/accounts.py:upsert_account colours every account created since.
+    This is the sweep for the gap between those two — accounts created
+    after the migration applied and before the code deployed — and the
+    way to pick up a rider who cleared their colours.
+
+    The WHERE clause mirrors the migration's and is only a prefilter: it
+    keeps the loop from calling the function once per account in the
+    table. assign_ruling_colors re-checks each account itself, so a row
+    that stops qualifying between the SELECT and its turn is a no-op,
+    not a mistake.
 
     Commits per-row for the same reason backfill_public_usernames does:
     assign_ruling_colors takes a short advisory lock per candidate pair,
@@ -509,10 +515,17 @@ def backfill_ruling_colors() -> dict:
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM accounts "
-                "WHERE ruling_color IS NULL AND ruling_border_color IS NULL "
-                "  AND username_emoji IS NOT NULL "
-                "ORDER BY id"
+                """
+                SELECT a.id
+                  FROM accounts a
+                  LEFT JOIN ruling_colors f ON f.hex = a.ruling_color
+                  LEFT JOIN ruling_colors b ON b.hex = a.ruling_border_color
+                 WHERE a.ruling_color IS NULL
+                    OR a.ruling_border_color IS NULL
+                    OR NOT f.selectable
+                    OR NOT b.selectable
+                 ORDER BY a.id
+                """
             )
             ids = [r[0] for r in cur.fetchall()]
         for account_id in ids:

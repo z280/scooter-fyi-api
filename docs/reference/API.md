@@ -2113,10 +2113,11 @@ strongly the fill is painted is not yours to choose: every claimed
 territory renders at the same opacity, so a hexagon's shade says who holds
 it and nothing else.
 
-**You already have colours.** Every account is given a pair matched to its
-username emoji the moment it is named — a 🐸 rules in green, a 🦉 in amber
-— so nothing has to be picked for a territory to look like yours. The
-picker changes a suggestion; it does not fill in a blank.
+**You already have colours.** Every account is dealt a pair when it is
+created, so nothing has to be picked for a territory to look like yours.
+The picker changes a suggestion; it does not fill in a blank. Pairs are
+dealt from the least-used part of the palette, which keeps the map evenly
+coloured and makes neighbouring territories likely to contrast.
 
 ```json
 {
@@ -2134,8 +2135,8 @@ Rules, all enforced by the database:
   both. Adjacent territories can therefore never render identically.
 * **Fill and border must differ**, and are set **together** — send both,
   or send both as `null` to clear and release your claim. Clearing
-  releases the pair; it does not make you uncoloured forever — the
-  emoji-matched suggestion is offered again next time it is assigned.
+  releases the pair; it does not make you uncoloured forever — a fresh
+  pair is dealt the next time the sweep runs.
 * To leave the map entirely, set `show_in_leaderboards: false`.
 
 `taken_pairs` lets a picker grey out unavailable combinations instead of
@@ -2155,6 +2156,12 @@ So `GET /api/v1/ruling-colors` returns the 74 current colours **plus any
 retired colour you yourself hold**, flagged `"retired": true`. No other
 rider's retired colours appear. Saving one you already hold is fine;
 saving one you don't is a `400`.
+
+Holding one is temporary either way: anybody still on a retired colour —
+including riders who picked it by hand — is dealt a current pair the next
+time the sweep runs, and their old pair goes back in the pool. The
+`retired` flag exists for the window in between, so the editor shows a
+rider their own fill rather than a hole where it used to be.
 
 | Status | When |
 |---|---|

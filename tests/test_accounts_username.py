@@ -57,18 +57,17 @@ def test_format_leaves_an_already_capitalized_adjective_alone():
 # ---------- assign_public_username (random) --------------------------------
 
 def test_assign_public_username_persists_first_free_candidate():
-    # word draw, emoji draw, lock (no fetch), "is it taken?" -> None
-    # (free), then assign_ruling_colors' one SELECT.
-    cur = _FakeCursor([("brave",), ("🦉",), None, (True,)])
+    # word draw, emoji draw, lock (no fetch), "is it taken?" -> None (free).
+    cur = _FakeCursor([("brave",), ("🦉",), None])
     result = assign_public_username(cur, account_id=7)
     assert result == "Brave 🦉"
-    write_sql, write_params = cur.executed[-2]
-    assert "UPDATE accounts SET username_adjective" in write_sql
-    assert write_params == ("brave", "🦉", 7)
+    last_sql, last_params = cur.executed[-1]
+    assert "UPDATE accounts SET username_adjective" in last_sql
+    assert last_params == ("brave", "🦉", 7)
 
 
 def test_assign_public_username_takes_an_advisory_lock_per_candidate():
-    cur = _FakeCursor([("brave",), ("🦉",), None, (True,)])
+    cur = _FakeCursor([("brave",), ("🦉",), None])
     assign_public_username(cur, account_id=7)
     lock_calls = [sql for sql, _ in cur.executed if "pg_advisory_xact_lock" in sql]
     assert len(lock_calls) == 1
@@ -79,7 +78,7 @@ def test_assign_public_username_retries_on_taken_candidate():
     # 2nd candidate "bold"+fox: SELECT finds nothing -> free.
     cur = _FakeCursor([
         ("brave",), ("🦉",), (1,),
-        ("bold",), ("🦊",), None, (True,),
+        ("bold",), ("🦊",), None,
     ])
     assert assign_public_username(cur, account_id=7) == "Bold 🦊"
 
@@ -93,16 +92,13 @@ def test_assign_public_username_gives_up_after_max_attempts():
         assign_public_username(cur, account_id=7, max_attempts=2)
 
 
-def test_assign_public_username_also_claims_ruling_colors():
-    """A new account is never left grey: the same call that names it hands
-    it the colours sql/107 matches to the emoji it just drew."""
-    cur = _FakeCursor([("brave",), ("🦉",), None, (True,)])
+def test_assign_public_username_does_not_touch_ruling_colours():
+    """Colours are dealt where accounts are CREATED (upsert_account), not
+    where they are named. A rider re-rolling their username goes through
+    here too, and that is not an occasion to re-colour anything."""
+    cur = _FakeCursor([("brave",), ("🦉",), None])
     assign_public_username(cur, account_id=7)
-    colour_calls = [
-        (sql, params) for sql, params in cur.executed
-        if "assign_ruling_colors" in sql
-    ]
-    assert colour_calls == [("SELECT assign_ruling_colors(%s)", (7,))]
+    assert not [sql for sql, _ in cur.executed if "assign_ruling_colors" in sql]
 
 
 # ---------- assign_ruling_colors -------------------------------------------

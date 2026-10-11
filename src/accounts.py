@@ -387,22 +387,25 @@ def _username_taken(cur, candidate: str) -> bool:
 
 
 def assign_ruling_colors(cur, account_id: int) -> bool:
-    """Give an account the leaderboard-map colours its username emoji
-    suggests — 🐸 green, 🦉 amber — if it has none yet. True if it set a
-    pair, False if there was nothing to do.
+    """Deal an account a leaderboard-map colour pair if it hasn't got a
+    current one. True if it wrote one, False if there was nothing to do.
 
     One line because the choosing is sql/107's `assign_ruling_colors()`,
     not Python's: the candidate ordering is a join across the palette,
-    the hue wheel and every pair already claimed, and the pair-uniqueness
-    race is settled with the same advisory lock assign_public_username
-    takes for usernames. See that migration's header for the rule.
+    the hue wheel and every pair already claimed, settled against the
+    live usage histogram so the map stays evenly coloured, and the
+    pair-uniqueness race is handled with the same advisory lock
+    assign_public_username takes for usernames. See that migration's
+    header for the rule.
 
-    NEVER overwrites. An account that picked its own colours, or already
-    got these, is left alone by the function itself, so callers do not
-    have to check first. Called from assign_public_username (every new
-    account, the moment it has an emoji to match) and from the
-    `backfill_ruling_colors` CLI command (anything that slipped past,
-    including an account created before sql/107 shipped).
+    "Hasn't got a current one" means no pair, or a pair naming a colour
+    sql/107 retired — the function works that out itself, so no caller
+    has to. An account already on the live palette is left alone.
+
+    Called from upsert_account / upsert_account_by_phone (every new
+    account) and from the `backfill_ruling_colors` CLI command (anything
+    that slipped past, including an account created before sql/107
+    shipped, and any rider still on a retired colour).
     """
     cur.execute("SELECT assign_ruling_colors(%s)", (account_id,))
     return bool(cur.fetchone()[0])
@@ -440,7 +443,6 @@ def assign_public_username(cur, account_id: int, *, max_attempts: int = _USERNAM
             "UPDATE accounts SET username_adjective = %s, username_emoji = %s WHERE id = %s",
             (adjective, emoji, account_id),
         )
-        assign_ruling_colors(cur, account_id)
         return candidate
     raise RuntimeError(
         f"assign_public_username: no free word pair found for account "
@@ -517,6 +519,7 @@ def upsert_account(cur, email: str) -> int:
     account_id = int(account_id)
     if inserted:
         assign_public_username(cur, account_id)
+        assign_ruling_colors(cur, account_id)
     return account_id
 
 
@@ -667,6 +670,7 @@ def upsert_account_by_phone(cur, phone: str) -> int:
     )
     account_id = int(cur.fetchone()[0])
     assign_public_username(cur, account_id)
+    assign_ruling_colors(cur, account_id)
     return account_id
 
 

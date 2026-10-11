@@ -1,6 +1,6 @@
 """Postgres-backed coverage for royalty titles, ruling colours and the
 generated display_name (sql/044), and for the v2 palette, the retirement
-of v1 and the emoji-matched auto-assignment on top of them (sql/107).
+of v1 and the balanced auto-assignment on top of them (sql/107).
 
 Everything here depends on schema the app cannot fake: FK membership in
 the curated lists, the unique index over the (fill, border) PAIR, a
@@ -39,7 +39,8 @@ _GREEN = "#27a900"   # green-500
 
 # One of sql/044's colours that sql/107 retired — still a row in
 # ruling_colors (riders hold these), no longer offered or claimable.
-_V1_RETIRED = "#c53637"   # v1's red-500
+_V1_RETIRED = "#c53637"          # v1's red-500
+_V1_RETIRED_BORDER = "#003167"   # v1's blue-800
 
 
 def _reachable(dsn: str) -> bool:
@@ -427,80 +428,86 @@ def _colours_of(pg_conn, account_id: int) -> tuple[str | None, str | None]:
         return cur.fetchone()
 
 
-def test_a_new_account_is_coloured_the_moment_it_is_named(pg_conn):
-    """upsert_account mints a username; assign_public_username hands the
-    account the colours that emoji suggests. Nobody renders as a grey
-    ghost waiting to discover the profile editor."""
-    _c, account_id = _client(pg_conn)
-    fill, border = _colours_of(pg_conn, account_id)
-    assert fill and border and fill != border
-
-
-def test_the_fill_matches_the_emoji_s_hue_family(pg_conn):
-    """🐸 rules in green, 🦉 in amber. Asserted against the mapping rather
-    than a fixed hex so extending the palette doesn't break the test."""
-    _c, account_id = _client(pg_conn)
+def _palette_of(pg_conn, account_id: int) -> tuple:
+    """(fill family, fill step, border family, border step, both selectable)."""
     with pg_conn.cursor() as cur:
         cur.execute(
             """
-            SELECT n.hue_family, f.hue_family, b.hue_family
+            SELECT f.hue_family, f.lightness_step,
+                   b.hue_family, b.lightness_step,
+                   (f.selectable AND b.selectable)
               FROM accounts a
-              JOIN emoji_nouns n ON n.emoji = a.username_emoji
               JOIN ruling_colors f ON f.hex = a.ruling_color
               JOIN ruling_colors b ON b.hex = a.ruling_border_color
              WHERE a.id = %s
             """,
             (account_id,),
         )
-        wanted, fill_family, _border_family = cur.fetchone()
-    # With one account in play nothing has been claimed ahead of it, so it
-    # gets its first choice. (Under contention the assigner widens to the
-    # neighbouring family — that is what test_colours_stay_unique covers.)
-    assert fill_family == wanted
+        return cur.fetchone()
+
+
+def test_a_new_account_is_coloured_the_moment_it_is_created(pg_conn):
+    """upsert_account deals a pair. Nobody renders as a grey ghost waiting
+    to discover the profile editor."""
+    _c, account_id = _client(pg_conn)
+    fill, border = _colours_of(pg_conn, account_id)
+    assert fill and border and fill != border
 
 
 def test_the_border_is_darker_than_the_fill(pg_conn):
     """A border lighter than its fill reads as a halo, not an edge."""
     _c, account_id = _client(pg_conn)
-    with pg_conn.cursor() as cur:
-        cur.execute(
-            "SELECT f.lightness_step, b.lightness_step FROM accounts a "
-            "  JOIN ruling_colors f ON f.hex = a.ruling_color "
-            "  JOIN ruling_colors b ON b.hex = a.ruling_border_color "
-            " WHERE a.id = %s",
-            (account_id,),
-        )
-        fill_step, border_step = cur.fetchone()
-    assert border_step <= fill_step - 200
+    _ff, fill_step, _bf, border_step, _ok = _palette_of(pg_conn, account_id)
+    assert border_step < fill_step
 
 
-def test_every_assigned_colour_is_one_that_is_still_offered(pg_conn):
+def test_every_dealt_colour_is_one_that_is_still_offered(pg_conn):
     """The assigner must never hand out a retired colour — the whole point
-    of retiring them is that they read as a map feature."""
+    of retiring them is that they read as a map feature or wash out."""
     _c, account_id = _client(pg_conn)
+    assert _palette_of(pg_conn, account_id)[4] is True
+
+
+def test_dealing_spreads_riders_evenly_across_the_hue_wheel(pg_conn):
+    """The property that replaced emoji matching. Two full rounds of the
+    14 families: if the assigner is drawing from the thinnest part of the
+    histogram, every family is used and none is used twice as often as
+    another."""
+    for _ in range(28):
+        _client(pg_conn)
     with pg_conn.cursor() as cur:
         cur.execute(
-            "SELECT f.selectable, b.selectable FROM accounts a "
-            "  JOIN ruling_colors f ON f.hex = a.ruling_color "
-            "  JOIN ruling_colors b ON b.hex = a.ruling_border_color "
-            " WHERE a.id = %s",
-            (account_id,),
+            "SELECT c.hue_family, count(*) FROM accounts a "
+            "  JOIN ruling_colors c ON c.hex = a.ruling_color "
+            " WHERE c.selectable GROUP BY 1"
         )
-        assert cur.fetchone() == (True, True)
+        counts = dict(cur.fetchall())
+    assert len(counts) == 14, f"only {len(counts)} families used: {counts}"
+    assert max(counts.values()) - min(counts.values()) <= 1, counts
+
+
+def test_consecutive_signups_do_not_land_in_the_same_family(pg_conn):
+    """The reason balance is worth having: neighbouring territories, which
+    on a city map tend to be neighbouring sign-ups, contrast."""
+    families = []
+    for _ in range(6):
+        _c, account_id = _client(pg_conn)
+        families.append(_palette_of(pg_conn, account_id)[0])
+    assert len(set(families)) == len(families), families
 
 
 def test_colours_stay_unique_across_many_assignments(pg_conn):
     """accounts_ruling_pair_key is the constraint; the assigner filtering
     taken pairs and re-checking under an advisory lock is what keeps it
-    from ever firing. Twenty accounts is well past the point where the
-    same-family pairs for a popular hue run out."""
+    from ever firing."""
     ids = [_client(pg_conn)[1] for _ in range(20)]
     pairs = [_colours_of(pg_conn, account_id) for account_id in ids]
     assert all(fill and border for fill, border in pairs)
     assert len(set(pairs)) == len(pairs)
 
 
-def test_the_assigner_never_overwrites_a_claim(pg_conn):
+def test_the_assigner_leaves_a_current_pair_alone(pg_conn):
+    """A rider who picked colours from the live palette keeps them."""
     c, account_id = _client(pg_conn)
     c.put("/api/v1/profile", json={"ruling_color": _RED, "ruling_border_color": _BLUE})
     with pg_conn.cursor() as cur:
@@ -509,25 +516,61 @@ def test_the_assigner_never_overwrites_a_claim(pg_conn):
     assert _colours_of(pg_conn, account_id) == (_RED, _BLUE)
 
 
-def test_an_account_with_no_emoji_is_left_alone(pg_conn):
-    """The suggestion comes from the username; an account that has not got
-    one yet (pre-sql/025, never backfilled) has nothing to match on."""
+def test_a_rider_on_a_retired_colour_is_dealt_a_new_one(pg_conn):
+    """The operator's call (2026-10-11): a retired colour is retired for a
+    reason — it washes out, or it reads as a zone — so holding one is not
+    a state anybody stays in, however they got there."""
+    _c, account_id = _client(pg_conn)
     with pg_conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO accounts (email) VALUES (%s) RETURNING id",
-            (f"pgtest-identity-{uuid.uuid4()}@example.com",),
+            "UPDATE accounts SET ruling_color = %s, ruling_border_color = %s "
+            "WHERE id = %s",
+            (_V1_RETIRED, _V1_RETIRED_BORDER, account_id),
         )
-        account_id = cur.fetchone()[0]
         cur.execute("SELECT assign_ruling_colors(%s)", (account_id,))
-        assert cur.fetchone()[0] is False
+        assert cur.fetchone()[0] is True
     pg_conn.commit()
-    assert _colours_of(pg_conn, account_id) == (None, None)
+    assert _colours_of(pg_conn, account_id) != (_V1_RETIRED, _V1_RETIRED_BORDER)
+    assert _palette_of(pg_conn, account_id)[4] is True
 
 
-def test_every_emoji_has_a_hue_family(pg_conn):
-    """An unmapped emoji still gets colours (the assigner hashes it), but
-    they are a stable accident rather than a match — so the seed list is
-    expected to be complete."""
+def test_a_half_retired_pair_is_dealt_a_new_one_too(pg_conn):
+    """Only reachable by hand, but "one of your colours is fine" is not a
+    state worth having a branch for — the check counts both halves."""
+    _c, account_id = _client(pg_conn)
     with pg_conn.cursor() as cur:
-        cur.execute("SELECT emoji FROM emoji_nouns WHERE hue_family IS NULL")
-        assert cur.fetchall() == []
+        cur.execute(
+            "UPDATE accounts SET ruling_color = %s, ruling_border_color = %s "
+            "WHERE id = %s",
+            (_V1_RETIRED, _BLUE, account_id),
+        )
+        cur.execute("SELECT assign_ruling_colors(%s)", (account_id,))
+        assert cur.fetchone()[0] is True
+    pg_conn.commit()
+    assert _palette_of(pg_conn, account_id)[4] is True
+
+
+def test_dealing_releases_the_retired_pair(pg_conn):
+    """The old claim goes back in the pool in the same statement, so a
+    reassignment never strands a pair."""
+    _c, account_id = _client(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE accounts SET ruling_color = %s, ruling_border_color = %s "
+            "WHERE id = %s",
+            (_V1_RETIRED, _V1_RETIRED_BORDER, account_id),
+        )
+        cur.execute("SELECT assign_ruling_colors(%s)", (account_id,))
+        cur.execute(
+            "SELECT count(*) FROM accounts WHERE ruling_color = %s "
+            "  AND ruling_border_color = %s",
+            (_V1_RETIRED, _V1_RETIRED_BORDER),
+        )
+        assert cur.fetchone()[0] == 0
+    pg_conn.commit()
+
+
+def test_an_unknown_account_is_not_an_error(pg_conn):
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT assign_ruling_colors(%s)", (-1,))
+        assert cur.fetchone()[0] is False

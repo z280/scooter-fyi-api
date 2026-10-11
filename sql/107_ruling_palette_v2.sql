@@ -1,11 +1,10 @@
 -- Ruling palette v2: a palette worth claiming, colours that cannot be
--- mistaken for a map feature, and an automatic claim for every rider who
--- never picked one.
+-- mistaken for a map feature, and a current colour pair for every rider.
 --
--- Three changes, one migration, because they only make sense together:
--- the auto-assigner needs an emoji -> hue mapping, the mapping needs hue
--- families to be a thing the database knows about, and handing every
--- account a colour is only an improvement if the colours are good.
+-- Two changes, one migration, because neither is much use alone: dealing
+-- everyone a colour is only an improvement if the colours are good, and
+-- replacing the palette is only finished when nobody is left holding the
+-- old one.
 --
 -- 1. WHY V1 WASN'T GOOD ENOUGH
 -- ----------------------------
@@ -43,59 +42,70 @@
 -- So the generator measures every candidate against those frontend
 -- colours in OKLab and drops anything within 0.055 of one: ten entries,
 -- almost exactly one per map feature, which is what a calibrated
--- threshold looks like. Dropping rather than dimming because
--- this has to hold for the BORDER too: borders render fully opaque
--- (leaderboard.ts) against zone outlines that are also fully opaque, so
--- there is no opacity left to hide behind.
+-- threshold looks like. Dropping rather than dimming because this has to
+-- hold for the BORDER too: borders render fully opaque (leaderboard.ts)
+-- against zone outlines that are also fully opaque, so there is no
+-- opacity left to hide behind.
 --
--- 3. V1'S COLOURS ARE RETIRED, NOT DELETED
--- ----------------------------------------
--- `accounts.ruling_color` references `ruling_colors(hex)`, and riders
--- hold v1 colours today. Deleting the rows would break the FK; silently
--- recolouring those riders would take away a claim they made. So
--- `ruling_colors` grows a `selectable` flag: v1's 128 go FALSE (still
--- valid to hold, no longer offered), v2's 74 go TRUE. The picker shows
--- the selectable ones plus whatever the caller already holds
--- (src/api_lexicon.py), so a v1 holder sees their own colour in the grid
--- instead of a hole where it used to be.
+-- 3. V1'S COLOURS ARE RETIRED, NOT DELETED -- AND NOBODY KEEPS ONE
+-- -----------------------------------------------------------------
+-- `accounts.ruling_color` references `ruling_colors(hex)`, so deleting
+-- v1's rows would break the FK. They stay as rows, flagged
+-- `selectable = FALSE`: valid values, never offered again.
 --
--- 4. EVERY RIDER GETS COLOURS, MATCHED TO THEIR EMOJI
--- ---------------------------------------------------
+-- Riders holding one do NOT keep it. Every account on a retired colour is
+-- dealt a current pair by the backfill at the bottom of this file,
+-- including riders who chose theirs by hand (operator's call, 2026-10-11).
+-- The reasoning is that a retired colour is retired for a reason -- it
+-- washes out, or it reads as a zone -- and leaving a rider on one to
+-- honour a choice they made against a worse palette keeps the exact
+-- problem this migration exists to fix. The pair they held is released
+-- in the same statement, so nothing is stranded.
+--
+-- src/api_lexicon.py still hands a caller back a retired colour they
+-- hold, and src/api_profile.py still accepts it on save. That is not a
+-- contradiction: between this migration and the sweep that catches
+-- accounts created in the gap, a rider can be holding one, and an editor
+-- that renders a hole where their fill should be is worse than one that
+-- shows it and says it is on the way out.
+--
+-- 4. EVERY RIDER HAS COLOURS, AND THE MAP USES ALL OF THEM
+-- ---------------------------------------------------------
 -- An uncoloured leader rendered as a grey ghost (leaderboard.ts's
 -- UNCLAIMED_FILL_OPACITY), which is the least interesting thing a held
 -- hexagon can look like, and the fix was buried two screens into the
--- profile editor. Now the colours come from the username the rider
--- already has: a 🐸 rules in green, a 🦉 in amber, a 🍇 in purple.
+-- profile editor. Now a pair is dealt at sign-up and nobody has to find
+-- it.
 --
--- `emoji_nouns.hue_family` is that mapping, one curated row per emoji
--- (see sql/025 for why curated lists and not inference), and
--- `assign_ruling_colors()` turns it into a free (fill, border) pair. It
--- is a SUGGESTION made concrete, not a lock: the rider can still open the
--- picker and claim anything, and clearing their colours releases the pair
--- exactly as before.
---
--- The assigner never overwrites. It fires for an account whose pair is
--- (NULL, NULL) -- the backfill at the bottom of this file for existing
--- riders, src/accounts.py:assign_public_username for new ones -- and
--- returns FALSE without touching anything otherwise.
+-- `assign_ruling_colors()` deals the LEAST-USED colour, not a colour
+-- derived from anything about the rider. An earlier draft of this
+-- migration matched the fill to the rider's username emoji -- a 🐸 ruling
+-- in green, a 🦉 in amber. It was a nice idea and the histogram killed
+-- it: 51 of sql/025's 181 nouns are brown or yellow animals and foods, so
+-- 28% of riders queued for one family of five colours while cyan sat
+-- unused, and the overflow logic that absorbed it was most of the
+-- function. Dealing from the thinnest part of the histogram instead
+-- spreads riders evenly across hues by construction, needs no curated
+-- 181-row mapping to maintain, and -- because consecutive sign-ups land
+-- in different families -- makes neighbouring territories MORE likely to
+-- contrast, which is the property the map actually wants.
 
 -- ---------------------------------------------------------------------
 -- Hue families, as a table
 -- ---------------------------------------------------------------------
 -- v1 kept `hue_family` as a free TEXT column on ruling_colors, which was
--- fine while it only grouped a picker. Two things now read it: the emoji
--- mapping (which must name a family that exists) and the assigner's
--- fallback (which must know that amber is next to orange and nowhere
--- near blue). Both need the WHEEL, so the wheel is stored -- as the OKLCH
--- hue angle the generator used, which is the same number that decides
--- what a colour looks like.
+-- fine while it only grouped a picker. The assigner now reads it twice:
+-- to balance across families rather than across raw colours (hue is what
+-- the eye counts), and to pick a border from the nearest family when the
+-- fill's own is out of darker shades. The second needs the WHEEL, so the
+-- wheel is stored -- as the OKLCH hue angle the generator used, which is
+-- the same number that decides what a colour looks like.
 CREATE TABLE IF NOT EXISTS ruling_hue_families (
     family       TEXT PRIMARY KEY,
     hue_degrees  INTEGER NOT NULL
                  CHECK (hue_degrees >= 0 AND hue_degrees < 360),
-    -- FALSE for a family v2 no longer generates. Its colours survive for
-    -- the riders holding them (see 3 in the header); nothing new lands in
-    -- it, and the assigner never falls back into it.
+    -- FALSE for a family v2 no longer generates. Its colours survive as
+    -- rows (see 3 in the header); nothing new lands in it.
     selectable   BOOLEAN NOT NULL DEFAULT TRUE
 );
 
@@ -126,6 +136,11 @@ ON CONFLICT (family) DO UPDATE SET
 -- ---------------------------------------------------------------------
 -- ruling_colors grows a step and a retirement flag
 -- ---------------------------------------------------------------------
+-- Added nullable, then defaulted, backfilled and tightened, so the whole
+-- block is a no-op on replay whichever state it finds the column in --
+-- ADD COLUMN IF NOT EXISTS skips an existing column INCLUDING its
+-- default, so the default cannot ride along on the ADD.
+--
 -- The DEFAULT on lightness_step is not for new colours -- the generator
 -- emits the column, and every row below names it. It is there so sql/044
 -- can be REPLAYED against a database that already has this migration
@@ -135,10 +150,6 @@ ON CONFLICT (family) DO UPDATE SET
 -- without a default the replay fails on a row it was never going to
 -- write. 500 is the middle step, and it is only ever seen by a tuple on
 -- its way to being thrown away.
--- Added nullable, then defaulted, backfilled and tightened, so the whole
--- block is a no-op on replay whichever state it finds the column in --
--- ADD COLUMN IF NOT EXISTS skips an existing column INCLUDING its
--- default, so the default cannot ride along on the ADD.
 ALTER TABLE ruling_colors
     ADD COLUMN IF NOT EXISTS lightness_step INTEGER,
     ADD COLUMN IF NOT EXISTS selectable     BOOLEAN NOT NULL DEFAULT TRUE;
@@ -146,10 +157,10 @@ ALTER TABLE ruling_colors
 ALTER TABLE ruling_colors ALTER COLUMN lightness_step SET DEFAULT 500;
 
 -- The step is in every name already ('red-500'); lifting it into a column
--- is what lets the assigner say "a fill, and a border at least two steps
--- darker" without parsing strings in a hot loop. v1's 128 rows predate
--- the column and arrived on the DEFAULT, so read their real step back out
--- of the name they already carry.
+-- is what lets the assigner say "a border darker than its fill" without
+-- parsing strings in a hot loop. v1's 128 rows predate the column and
+-- arrived on the DEFAULT, so read their real step back out of the name
+-- they already carry.
 UPDATE ruling_colors
    SET lightness_step = split_part(name, '-', 2)::INTEGER
  WHERE lightness_step IS DISTINCT FROM split_part(name, '-', 2)::INTEGER;
@@ -182,212 +193,11 @@ END $$;
 CREATE INDEX IF NOT EXISTS ruling_colors_selectable_idx
     ON ruling_colors (sort_order) WHERE selectable;
 
-
--- ---------------------------------------------------------------------
--- emoji_nouns -> hue family
--- ---------------------------------------------------------------------
--- One row per emoji in sql/025's list, by what the glyph actually looks
--- like: 🐸 green, 🦉 amber, 🍇 purple, 🦩 rose. Hand-written for the same
--- reason the noun list is hand-written -- there is no rule that gets
--- 🧩 right -- and NULLable so a future emoji can land before anyone has
--- decided what colour it is (assign_ruling_colors falls back to a stable
--- hash of the emoji, so an unmapped one still gets a consistent colour
--- rather than no colour).
---
--- The distribution is lopsided on purpose: 51 of 181 nouns are amber,
--- because a great many animals and foods are brown or yellow. The
--- assigner's family fallback (below) is what absorbs that, not a
--- flattened mapping that would put 🐶 in cyan to even out a histogram.
-ALTER TABLE emoji_nouns
-    ADD COLUMN IF NOT EXISTS hue_family TEXT REFERENCES ruling_hue_families(family);
-
-UPDATE emoji_nouns AS n
-   SET hue_family = v.family
-  FROM (VALUES
-    ('🐶', 'amber'),
-    ('🐱', 'amber'),
-    ('🦊', 'orange'),
-    ('🐼', 'indigo'),
-    ('🦁', 'amber'),
-    ('🐯', 'orange'),
-    ('🐨', 'violet'),
-    ('🐻', 'amber'),
-    ('🐷', 'rose'),
-    ('🐮', 'rose'),
-    ('🐴', 'amber'),
-    ('🦄', 'magenta'),
-    ('🦓', 'indigo'),
-    ('🦌', 'amber'),
-    ('🐘', 'violet'),
-    ('🦒', 'amber'),
-    ('🦛', 'purple'),
-    ('🦏', 'violet'),
-    ('🐵', 'amber'),
-    ('🦍', 'indigo'),
-    ('🦘', 'amber'),
-    ('🐑', 'lime'),
-    ('🐐', 'amber'),
-    ('🐫', 'amber'),
-    ('🦙', 'amber'),
-    ('🐰', 'rose'),
-    ('🦔', 'amber'),
-    ('🦇', 'purple'),
-    ('🐀', 'violet'),
-    ('🐭', 'violet'),
-    ('🐹', 'amber'),
-    ('🐺', 'indigo'),
-    ('🦦', 'amber'),
-    ('🦨', 'indigo'),
-    ('🦡', 'indigo'),
-    ('🦥', 'lime'),
-    ('🦝', 'violet'),
-    ('🐿️', 'orange'),
-    ('🦬', 'amber'),
-    ('🐔', 'red'),
-    ('🐓', 'red'),
-    ('🐤', 'amber'),
-    ('🐧', 'indigo'),
-    ('🦅', 'amber'),
-    ('🦆', 'amber'),
-    ('🦉', 'amber'),
-    ('🦩', 'rose'),
-    ('🦚', 'teal'),
-    ('🦜', 'green'),
-    ('🦢', 'cyan'),
-    ('🦃', 'red'),
-    ('🦤', 'lime'),
-    ('🐳', 'blue'),
-    ('🐬', 'cyan'),
-    ('🦈', 'blue'),
-    ('🐟', 'cyan'),
-    ('🐠', 'orange'),
-    ('🐡', 'amber'),
-    ('🐙', 'magenta'),
-    ('🦑', 'rose'),
-    ('🦐', 'orange'),
-    ('🦞', 'red'),
-    ('🦀', 'red'),
-    ('🦭', 'indigo'),
-    ('🐢', 'green'),
-    ('🐌', 'amber'),
-    ('🐸', 'green'),
-    ('🐝', 'amber'),
-    ('🦋', 'violet'),
-    ('🐞', 'red'),
-    ('🐜', 'indigo'),
-    ('🕷️', 'indigo'),
-    ('🦗', 'emerald'),
-    ('🪲', 'teal'),
-    ('🪱', 'rose'),
-    ('🦟', 'violet'),
-    ('🐉', 'green'),
-    ('🦕', 'green'),
-    ('🦖', 'emerald'),
-    ('🌲', 'green'),
-    ('🌴', 'emerald'),
-    ('🌵', 'green'),
-    ('🌱', 'lime'),
-    ('🌿', 'emerald'),
-    ('🍀', 'green'),
-    ('🌻', 'amber'),
-    ('🌷', 'rose'),
-    ('🌹', 'red'),
-    ('🌺', 'magenta'),
-    ('🌸', 'rose'),
-    ('🍄', 'red'),
-    ('🌰', 'amber'),
-    ('🍁', 'orange'),
-    ('🍃', 'lime'),
-    ('🌙', 'amber'),
-    ('🌈', 'magenta'),
-    ('🚀', 'indigo'),
-    ('🪐', 'amber'),
-    ('⭐', 'amber'),
-    ('🍎', 'red'),
-    ('🍐', 'lime'),
-    ('🍊', 'orange'),
-    ('🍋', 'amber'),
-    ('🍉', 'red'),
-    ('🍇', 'purple'),
-    ('🍓', 'red'),
-    ('🍒', 'red'),
-    ('🍍', 'amber'),
-    ('🥭', 'orange'),
-    ('🥥', 'amber'),
-    ('🥝', 'lime'),
-    ('🍅', 'red'),
-    ('🥕', 'orange'),
-    ('🌽', 'amber'),
-    ('🥔', 'amber'),
-    ('🍞', 'amber'),
-    ('🥐', 'amber'),
-    ('🥨', 'orange'),
-    ('🧀', 'amber'),
-    ('🥞', 'amber'),
-    ('🍯', 'amber'),
-    ('🍪', 'orange'),
-    ('🧁', 'rose'),
-    ('🍩', 'rose'),
-    ('🍦', 'rose'),
-    ('🍕', 'orange'),
-    ('🌮', 'orange'),
-    ('🍿', 'amber'),
-    ('🍬', 'rose'),
-    ('🍭', 'magenta'),
-    ('🍫', 'orange'),
-    ('🎈', 'red'),
-    ('🎁', 'red'),
-    ('🪁', 'cyan'),
-    ('⚓', 'indigo'),
-    ('🧭', 'indigo'),
-    ('🔑', 'amber'),
-    ('🏮', 'red'),
-    ('💡', 'amber'),
-    ('🔭', 'indigo'),
-    ('🧲', 'red'),
-    ('💎', 'cyan'),
-    ('👑', 'amber'),
-    ('🏆', 'amber'),
-    ('🏅', 'amber'),
-    ('🥁', 'red'),
-    ('🎸', 'orange'),
-    ('🎺', 'amber'),
-    ('🎻', 'orange'),
-    ('🪕', 'amber'),
-    ('🎨', 'magenta'),
-    ('🎭', 'purple'),
-    ('🎪', 'red'),
-    ('🎡', 'magenta'),
-    ('🎢', 'blue'),
-    ('🧩', 'orange'),
-    ('🪀', 'red'),
-    ('🪃', 'orange'),
-    ('🎯', 'red'),
-    ('🧸', 'orange'),
-    ('🪆', 'red'),
-    ('🕯️', 'amber'),
-    ('📚', 'emerald'),
-    ('📖', 'blue'),
-    ('✏️', 'amber'),
-    ('🖊️', 'indigo'),
-    ('🔔', 'amber'),
-    ('🎵', 'indigo'),
-    ('🎶', 'indigo'),
-    ('🌊', 'blue'),
-    ('🏔️', 'indigo'),
-    ('🏝️', 'teal'),
-    ('🗻', 'indigo'),
-    ('🌋', 'red'),
-    ('🧊', 'cyan'),
-    ('🔥', 'orange'),
-    ('💧', 'cyan'),
-    ('🍂', 'orange'),
-    ('🐦', 'blue'),
-    ('🐕', 'amber'),
-    ('🐈', 'amber')
-  ) AS v(emoji, family)
- WHERE n.emoji = v.emoji
-   AND n.hue_family IS DISTINCT FROM v.family;
+-- The assigner counts how many accounts hold each fill, on every call.
+-- Without this that is a sequential scan of accounts per assignment, and
+-- the backfill below does one per rider.
+CREATE INDEX IF NOT EXISTS accounts_ruling_color_idx
+    ON accounts (ruling_color) WHERE ruling_color IS NOT NULL;
 
 -- ---------------------------------------------------------------------
 -- The v2 palette
@@ -490,36 +300,47 @@ ON CONFLICT (hex) DO UPDATE SET
 -- ---------------------------------------------------------------------
 -- The assigner
 -- ---------------------------------------------------------------------
--- Give one account a free (fill, border) pair matched to its username
--- emoji. Returns TRUE if it set one, FALSE if there was nothing to do
--- (no emoji yet, colours already claimed) or nothing free to give.
+-- Deal one account a current (fill, border) pair. Returns TRUE if it
+-- wrote one, FALSE if the account already has a pair from the live
+-- palette (or does not exist, or the palette is exhausted).
 --
--- WHAT "MATCHED" MEANS
---   fill   -- the emoji's hue family, one of the four lighter steps. The
+-- WHO IT TOUCHES
+-- An account needs dealing if its pair is NULL, or if either half is a
+-- retired colour. "Already fine" is the only case it declines, so the
+-- same function serves sign-up, the backfill below, and the CLI sweep
+-- without any of them having to work out which case they are in.
+--
+-- WHAT IT DEALS
+--   fill   -- the least-used colour in the least-used hue family. The
 --             fill is what a rider sees from across the map at 55%
---             opacity, so it is the half that has to carry the hue.
---   border -- at least two lightness steps darker than the fill,
---             preferring the same family and then the nearest one. A
---             deeper shade of the fill reads as one considered choice;
---             a random contrasting hue reads as a bug.
+--             opacity, so it is the half the histogram is kept flat on,
+--             and it is counted per FAMILY first because hue is what the
+--             eye tallies: fourteen roughly equal bands of colour beats
+--             seventy-four equal colours that clump into five hues.
+--   border -- darker than the fill, preferring two lightness steps of
+--             contrast and then the nearest hue family. A deeper shade
+--             of the fill reads as one considered choice; a lighter
+--             border reads as a halo, and a random contrasting hue reads
+--             as a bug.
 --
--- WHY IT WIDENS RATHER THAN FAILS
--- Families are not evenly populated (51 of 181 emoji are amber) and each
--- holds ~5 colours. Same-family pairs alone would run out after twenty
--- amber riders. So the candidate set is every selectable fill, ORDERED
--- by how far its family sits from the emoji's around the hue wheel: an
--- amber rider gets amber until amber is gone, then orange, then lime --
--- never blue while a warm colour is free. 1 542 pairs satisfy the
--- fill/border rule (the hand picker's 74 x 73 = 5 402 is the wider
--- figure, since a rider choosing by hand is not held to it), and
--- returning FALSE once they are gone is correct: an uncoloured account
--- still renders (leaderboard.ts draws it as a ghost) and the rider can
--- still pick by hand.
+-- A consequence worth naming so it is not read as a bug: the 13 colours
+-- at the darkest step are never dealt as a FILL, because nothing is
+-- darker than them to border with. They are border-only, which leaves 61
+-- fills to spread riders over. The hand picker still offers all 74 for
+-- either half.
 --
--- The deterministic hash in the ORDER BY is what keeps two riders with
--- the same emoji from queueing for the same pair in the same order --
--- without it every 🦉 would try amber-500/amber-300 first and the second
--- one would walk the whole list.
+-- Balancing on usage rather than on anything about the rider is what
+-- makes consecutive sign-ups land in different families, which is the
+-- same thing as saying neighbouring territories tend to contrast. See 4
+-- in the header for the emoji-matched version this replaced and why the
+-- histogram killed it.
+--
+-- TWO TIERS. 2 270 pairs satisfy "border darker than fill"; the full
+-- space is 74 x 73 = 5 402, which is what the hand picker allows. The
+-- first query draws from the handsome 2 270. Only if every one of those
+-- is claimed does the second draw from the rest -- an ugly pair beats
+-- leaving a rider grey, and a rider who dislikes theirs can open the
+-- picker, which is more choice than the tier-1 case has.
 --
 -- CONCURRENCY. accounts_ruling_pair_key (sql/044) makes a lost race a
 -- UNIQUE violation, which would abort the caller's whole transaction --
@@ -533,62 +354,101 @@ RETURNS BOOLEAN
 LANGUAGE plpgsql
 AS $fn$
 DECLARE
-    v_emoji  TEXT;
-    v_hue    INTEGER;
-    v_pair   RECORD;
+    v_fill    TEXT;
+    v_border  TEXT;
+    v_current INTEGER;
+    v_pair    RECORD;
 BEGIN
     -- FOR UPDATE so two callers for the same account serialize here
-    -- rather than both deciding it needs colours.
-    SELECT username_emoji INTO v_emoji
-      FROM accounts
-     WHERE id = p_account_id
-       AND ruling_color IS NULL
-       AND ruling_border_color IS NULL
+    -- rather than both deciding it needs dealing.
+    SELECT a.ruling_color, a.ruling_border_color INTO v_fill, v_border
+      FROM accounts a
+     WHERE a.id = p_account_id
        FOR UPDATE;
-    IF NOT FOUND OR v_emoji IS NULL THEN
+    IF NOT FOUND THEN
         RETURN FALSE;
     END IF;
 
-    SELECT f.hue_degrees INTO v_hue
-      FROM emoji_nouns n
-      JOIN ruling_hue_families f ON f.family = n.hue_family
-     WHERE n.emoji = v_emoji;
-
-    -- An emoji nobody has assigned a family to yet: pick an angle from a
-    -- stable hash of the emoji itself. Still deterministic, still gives
-    -- every 🫧 the same hue -- just not a chosen one.
-    IF v_hue IS NULL THEN
-        v_hue := abs(hashtextextended(v_emoji, 0) % 360);
+    -- Both halves present AND both still offered: nothing to do. Counted
+    -- rather than checked twice so a half-retired pair (possible only by
+    -- hand) is treated as needing a deal, like any other stale pair.
+    IF v_fill IS NOT NULL AND v_border IS NOT NULL THEN
+        SELECT count(*) INTO v_current
+          FROM ruling_colors c
+         WHERE c.hex IN (v_fill, v_border) AND c.selectable;
+        IF v_current = 2 THEN
+            RETURN FALSE;
+        END IF;
     END IF;
 
     FOR v_pair IN
+        WITH fill_uses AS (
+            SELECT c.hex, c.hue_family, c.lightness_step,
+                   count(a.id) AS uses
+              FROM ruling_colors c
+              LEFT JOIN accounts a ON a.ruling_color = c.hex
+             WHERE c.selectable
+             GROUP BY c.hex, c.hue_family, c.lightness_step
+        ),
+        family_uses AS (
+            SELECT hue_family, sum(uses) AS uses
+              FROM fill_uses GROUP BY hue_family
+        )
         SELECT fill.hex AS fill, brd.hex AS border
-          FROM ruling_colors fill
-          JOIN ruling_hue_families fam ON fam.family = fill.hue_family
+          FROM fill_uses fill
+          JOIN family_uses fam ON fam.hue_family = fill.hue_family
+          JOIN ruling_hue_families ffam ON ffam.family = fill.hue_family
           JOIN ruling_colors brd
             ON brd.selectable
-           AND brd.lightness_step <= fill.lightness_step - 200
+           AND brd.lightness_step < fill.lightness_step
           JOIN ruling_hue_families bfam ON bfam.family = brd.hue_family
-         WHERE fill.selectable
-           AND fill.lightness_step >= 500
-           AND NOT EXISTS (
-               SELECT 1 FROM accounts a
-                WHERE a.ruling_color = fill.hex
-                  AND a.ruling_border_color = brd.hex
-           )
+         WHERE NOT EXISTS (
+                   SELECT 1 FROM accounts a
+                    WHERE a.ruling_color = fill.hex
+                      AND a.ruling_border_color = brd.hex
+               )
          ORDER BY
+           fam.uses,                       -- thinnest hue band first
+           fill.uses,                      -- then thinnest colour in it
+           (fill.lightness_step - brd.lightness_step) < 200,  -- real contrast first
            -- Angular distance around the wheel, so 350 deg and 10 deg are
            -- neighbours rather than opposites.
-           LEAST(abs(fam.hue_degrees - v_hue), 360 - abs(fam.hue_degrees - v_hue)),
-           -- Then how far the BORDER's family sits from the fill's, which
-           -- is 0 for the deeper-shade-of-the-same-hue case and grows from
-           -- there. A family can run dry of same-family pairs quickly
-           -- (orange keeps four colours after the conflict filter, so four
-           -- pairs); when it does, the next-best border is the neighbouring
-           -- hue, not whatever the hash happens to surface.
-           LEAST(abs(bfam.hue_degrees - fam.hue_degrees),
-                 360 - abs(bfam.hue_degrees - fam.hue_degrees)),
+           LEAST(abs(bfam.hue_degrees - ffam.hue_degrees),
+                 360 - abs(bfam.hue_degrees - ffam.hue_degrees)),
+           -- Breaks the remaining tie differently per account, so two
+           -- riders dealt in the same instant do not walk the same list.
            hashtextextended(p_account_id::TEXT || fill.hex || brd.hex, 0)
+         LIMIT 16
+    LOOP
+        PERFORM pg_advisory_xact_lock(
+            hashtextextended('ruling_pair:' || v_pair.fill || '|' || v_pair.border, 0)
+        );
+        IF NOT EXISTS (
+            SELECT 1 FROM accounts a
+             WHERE a.ruling_color = v_pair.fill
+               AND a.ruling_border_color = v_pair.border
+        ) THEN
+            UPDATE accounts
+               SET ruling_color = v_pair.fill,
+                   ruling_border_color = v_pair.border
+             WHERE id = p_account_id;
+            RETURN TRUE;
+        END IF;
+    END LOOP;
+
+    -- Tier 2: every darker-border pair is claimed. Take any free pair at
+    -- all rather than returning FALSE and leaving this rider grey.
+    FOR v_pair IN
+        SELECT fill.hex AS fill, brd.hex AS border
+          FROM ruling_colors fill
+          JOIN ruling_colors brd ON brd.selectable AND brd.hex <> fill.hex
+         WHERE fill.selectable
+           AND NOT EXISTS (
+                   SELECT 1 FROM accounts a
+                    WHERE a.ruling_color = fill.hex
+                      AND a.ruling_border_color = brd.hex
+               )
+         ORDER BY hashtextextended(p_account_id::TEXT || fill.hex || brd.hex, 0)
          LIMIT 16
     LOOP
         PERFORM pg_advisory_xact_lock(
@@ -614,14 +474,19 @@ $fn$;
 -- ---------------------------------------------------------------------
 -- Backfill
 -- ---------------------------------------------------------------------
--- Every rider who has a username but never picked colours. Ordered by id
--- so a replay of this directory (the _pg fixtures do one per test) builds
--- the same database twice.
+-- Everyone with no pair, and everyone still on a retired colour. Ordered
+-- by id so a replay of this directory (the _pg fixtures do one per test)
+-- builds the same database twice.
+--
+-- The function re-reads each account's state, so the ORDER BY is the
+-- only thing this loop decides; and because it deals from the live
+-- histogram, each account is placed against the colours the ones before
+-- it just took.
 --
 -- In one statement rather than the usual per-row CLI backfill because
 -- this runs inside the migration's transaction anyway -- there is no
 -- commit to interleave -- and the whole point is that nobody is left
--- grey the moment this deploys.
+-- grey, or left on a washed-out colour, the moment this deploys.
 -- `python -m src.cli backfill_ruling_colors` exists for the accounts
 -- created between this migration and the code that calls the assigner.
 DO $$
@@ -630,15 +495,19 @@ DECLARE
     v_count   INTEGER := 0;
 BEGIN
     FOR v_id IN
-        SELECT id FROM accounts
-         WHERE ruling_color IS NULL
-           AND ruling_border_color IS NULL
-           AND username_emoji IS NOT NULL
-         ORDER BY id
+        SELECT a.id
+          FROM accounts a
+          LEFT JOIN ruling_colors f ON f.hex = a.ruling_color
+          LEFT JOIN ruling_colors b ON b.hex = a.ruling_border_color
+         WHERE a.ruling_color IS NULL
+            OR a.ruling_border_color IS NULL
+            OR NOT f.selectable
+            OR NOT b.selectable
+         ORDER BY a.id
     LOOP
         IF assign_ruling_colors(v_id) THEN
             v_count := v_count + 1;
         END IF;
     END LOOP;
-    RAISE NOTICE 'sql/107: assigned ruling colours to % account(s)', v_count;
+    RAISE NOTICE 'sql/107: dealt ruling colours to % account(s)', v_count;
 END $$;
