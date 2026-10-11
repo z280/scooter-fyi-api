@@ -9,7 +9,8 @@
 {% if which == "missing" %}
 <form method="get" class="filters"><input type="hidden" name="list" value="missing" />
   absent at least <input name="hours" value="{{ hours }}" size="4" /> hours <button type="submit">go</button>
-  {% if data.total is defined %}<span class="muted">{{ data.total }} vehicles</span>{% endif %}</form>
+  {% if data.total is defined %}<span class="muted">{{ data.total }} vehicles</span>{% endif %}
+  {% if data.by_kind %}<span class="muted"> · {{ data.by_kind.missing }} missing, {{ data.by_kind.hidden_low_battery }} hidden at low battery, {{ data.by_kind.at_depot }} at the depot</span>{% endif %}</form>
 {% endif %}
 {% set back = "/admin/fleet/census?list=" ~ which ~ ("&hours=" ~ hours if which == "missing" else "") %}
 <table>
@@ -20,7 +21,7 @@
       <td>{{ v.vehicle_model_name or "—" }}</td>
       <td>{{ v.first_ever_observed_at | denver_ts }}</td><td>{{ v.last_observed_at | denver_ts }}</td>
       {% if which != "arrivals" %}
-      <td>{{ v.hours_missing }}</td>
+      <td>{{ v.hours_missing }}{% if v.absence_kind == "at_depot" %} <span class="tag">at depot</span>{% elif v.absence_kind == "hidden_low_battery" %} <span class="tag">hidden, low battery</span>{% endif %}</td>
       <td>{% if v.ack %}{{ v.ack.status }}{% if v.ack.reappeared %} <span class="tag tag-warn">reappeared</span>{% endif %}
           {% if v.ack.acknowledged_by %}<br>by {{ v.ack.acknowledged_by }} {{ v.ack.acknowledged_at | denver_ts }}{% endif %}
           {% if v.ack.note %}<br>note: {{ v.ack.note }}{% endif %}{% else %}—{% endif %}</td>

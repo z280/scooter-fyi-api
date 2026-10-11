@@ -1,0 +1,13 @@
+{
+  "_comment": "Operator depots, found in the feed (docs/SERVICING_PLAN.md 1b). A vehicle inside a geofence is at the depot: its stops there are one depot visit. Keep radius tight: street parking sits 500 m and 1.1 km away. New entries come from `python -m src.cli discover_depots` after a human look.",
+  "depots": [
+    {
+      "id": "veo-denver-federal-72nd",
+      "name": "Veo depot (Federal Blvd & W 72nd Ave)",
+      "lat": 39.8135,
+      "lon": -105.0185,
+      "radius_m": 200,
+      "found": "2026-10-10: 99% of 380k depot-area stops fall inside 200 m; 7,157 vehicles since 2026-05-31"
+    }
+  ]
+}

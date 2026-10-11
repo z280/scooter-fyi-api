@@ -49,6 +49,9 @@ CLAUSES = (
     "ds.last_serviced_at > n.base_at",
     f"n.reported_at < TIMESTAMPTZ '{fleet_reports.BATTERY_CAPTURE_SINCE}'",
     f"LIMIT {fleet_reports.LEGACY_CLEAR_MOVES}) mv) >= {fleet_reports.LEGACY_CLEAR_MOVES}",
+    # sql/106: the settled reading, and a completed depot visit (plan D1).
+    "THEN GREATEST(ds.settled_range_meters,",
+    "AND dv.entered_at > n.base_at AND dv.exited_at IS NOT NULL",
 )
 
 

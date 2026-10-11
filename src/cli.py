@@ -712,6 +712,27 @@ def _cli_backfill_battery_trips() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Servicing (docs/SERVICING_PLAN.md 1b, 1f). Run by hand once after the
+# sql/106 deploy; both are idempotent. The archive replay is memory-heavy like
+# backfill_battery_trips: raise the scheduler's limit first.
+# ---------------------------------------------------------------------------
+def _cli_backfill_depot_visits() -> dict:
+    from .servicing import backfill_depot_visits
+    return backfill_depot_visits()
+
+
+def _cli_backfill_service_events() -> dict:
+    from .servicing import backfill_service_events
+    return backfill_service_events()
+
+
+def _cli_discover_depots() -> dict:
+    """Report-only: candidate depots for a human to add to data/depots.json."""
+    from .servicing import discover_depots
+    return {"candidates": discover_depots()}
+
+
+# ---------------------------------------------------------------------------
 # H3 r8 cell universe (docs/implemented/FEATURE_PLAN_2026-07.md §11 / docs/implemented/PLAN_RIDE_MODE_API.md
 # phase A4). Cron: `15 9 * * 1 python -m src.cli refresh_area_universe`.
 # ---------------------------------------------------------------------------
@@ -1074,6 +1095,9 @@ COMMANDS = {
     "extract_battery_trips": _cli_extract_battery_trips,
     "train_battery_model":   _cli_train_battery_model,
     "backfill_battery_trips": _cli_backfill_battery_trips,
+    "backfill_depot_visits": _cli_backfill_depot_visits,
+    "backfill_service_events": _cli_backfill_service_events,
+    "discover_depots":       _cli_discover_depots,
     "poll_comms_replies":    poll_comms_replies,
     "deidentify_donations":  deidentify_donations,
     "scrub_award_locations": scrub_award_locations,

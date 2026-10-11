@@ -30,7 +30,7 @@ from .fleet_equity import WINDOWS as EQUITY_WINDOWS
 from .fleet_equity import summarize as fleet_equity_summary
 from .fleet_outcomes import summarize as fleet_outcomes_summary
 from .pg import connection
-from . import battery_model, fleet_reports, payload_cache, vehicle_identity
+from . import battery_model, fleet_reports, payload_cache, servicing, vehicle_identity
 from .quality import (
     dwell_percentile_wire,
     smart_ride_grade,
@@ -495,7 +495,10 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
                 # sql/058, appended rather than slotted in next to the other
                 # three presence columns so every positional index below
                 # stays where it was.
-                "       ds.has_basket "
+                "       ds.has_basket, "
+                # sql/106, appended for the same reason: the settled reading
+                # (r[36]) and until when it applies (r[37]).
+                "       ds.settled_range_meters, ds.settling_until "
                 "FROM raw_telemetry_points r "
                 "LEFT JOIN device_state ds USING (vehicle_identifier) "
                 f"WHERE {' AND '.join(where)} "
@@ -558,11 +561,18 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
         # still derives its own from current_range_meters internally — same
         # input, same LUT, same answer — so this is about one shared value
         # here, not about the call count across quality.py.
-        battery_percent = compute_battery_percent(r[8])
+        # sql/106: within SETTLE_MINUTES of a rental ending, the feed's range
+        # is still climbing back from the ride's sag (by up to ~25% of a full
+        # charge); the settled reading is the vehicle's charge. Everything
+        # derived from the charge — battery_percent, the range estimate, the
+        # quality tier — reads it. current_range_meters stays the feed's own.
+        rng = servicing.settled_range(r[8], r[36], r[37], now_utc)
+        battery_settling = rng is not None and r[8] is not None and rng > r[8]
+        battery_percent = compute_battery_percent(rng)
         dstat = dwell_stats.get(r[5])
         is_dwell_outlier = bool(dstat and dstat.is_outlier)
         quality = compute_quality_designation(
-            current_range_meters=r[8],
+            current_range_meters=rng,
             is_disabled=r[6],
             is_reserved=r[7],
             number_failed_starts=number_failed_starts,
@@ -602,6 +612,9 @@ def _build_device_features(cycle_id: Any, snapshot_time: datetime,
             "is_reserved": r[7],
             "current_range_meters": r[8],
             "battery_percent": battery_percent,
+            # True while the reading is still recovering from a ride's sag and
+            # battery_percent shows the settled value instead (sql/106).
+            "battery_settling": battery_settling,
             # A distance is the question a rider actually has; the percentage
             # is the least trustworthy number the feed publishes. See
             # battery_model.OBSERVED_METERS_PER_SOC_POINT - measured from the

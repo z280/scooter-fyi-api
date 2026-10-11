@@ -36,8 +36,8 @@ def _leave_no_future_cycles(pg):
     yield
     pg.rollback()
     with pg.cursor() as cur:
-        for t in ("trip_events", "device_history", "device_state",
-                  "snapshot_metadata_core", "device_state_processed_cycles"):
+        for t in ("trip_events", "device_history", "device_state", "snapshot_metadata_core",
+                  "device_state_processed_cycles", "service_events"):
             cur.execute(f"DELETE FROM {t}")
     pg.commit()
 

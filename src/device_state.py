@@ -233,6 +233,7 @@ from typing import Any, Iterable
 
 from . import device_features
 from .config import load
+from . import servicing
 from .fleet_reports import full_battery_meters, service_from_meters
 from .geo import distance_meters as _distance_meters
 from .geo import region_for_point as _region_for_point
@@ -697,6 +698,7 @@ class StateUpdateStats:
     # (every in-place release: rentals_failed_start + rentals_blip).
     rentals_stayed: int = 0
     jitter_held: int = 0
+    serviced: int = 0         # sql/106 service_events rows written
 
 
 def update_for_cycle(
@@ -754,7 +756,8 @@ def update_for_cycle(
                        first_ever_observed_at, rental_started_at, last_observed_at,
                        rental_max_distance_m, rental_origin_device_id,
                        last_fix_lat, last_fix_lon, last_range_meters,
-                       range_low_since_full
+                       range_low_since_full, range_low_at, range_low_lat,
+                       range_low_lon, settled_range_meters, settling_until
                 FROM device_state
                 WHERE vehicle_identifier = ANY(%s)
                 FOR UPDATE
@@ -847,7 +850,7 @@ def update_for_cycle(
                 (prev_device_id, prev_lat, prev_lon, prev_first_seen, prev_fs,
                  _ever, prev_rental_started_at, prev_last_seen,
                  prev_rental_max, prev_origin_device_id,
-                 prev_fix_lat, prev_fix_lon, _last_range, _low) = prior[vid]
+                 prev_fix_lat, prev_fix_lon, *_charge) = prior[vid]
 
                 if prev_lat is None or prev_lon is None:
                     distance = float("inf")
@@ -1168,48 +1171,50 @@ def update_for_cycle(
                     new_state_rows,
                 )
 
-            # Charge tracker (sql/011, sql/104, sql/105), one batch UPDATE for
-            # every vehicle whose reported charge CHANGED since we last saw it
-            # — the range is frozen while a vehicle sits (99.4% of parked
-            # 2-minute steps), so this is a few hundred rows a cycle.
+            # Charge tracker (sql/011, sql/104-106), applied per reading by
+            # servicing.step — the ONE charge rule, shared with the archive
+            # backfill. Written only for vehicles whose charge state changed
+            # (the range is frozen while a vehicle sits, 99.4% of parked
+            # 2-minute steps), so a few hundred rows a cycle:
             #   * max_observed_range_{meters,at}: bumped only when strictly
             #     higher, stamping when the peak was set;
-            #   * last_serviced_at: the vehicle reads FULL
-            #     (fleet_reports.full_battery_meters(), 95%) while parked,
-            #     after reading at or below fleet_reports.service_from_meters()
-            #     (50%) parked since it was last full. NOT "any rise between
-            #     two readings": the range sags under load during a ride and
-            #     climbs back for minutes after it, by up to ~25% of a full
-            #     charge, so a rise alone fired on most rides (sql/105). A
-            #     rebound never exceeds the pre-ride charge, so it can only
-            #     reach full from a full start — and a full start never read
-            #     <= 50% parked. Reserved / in-rental readings are ignored for
-            #     both. Kept across an absence, so coming back full counts;
-            #   * range_low_since_full: the lowest parked reading since the
-            #     last full one (reset to the reading when it is full);
-            #   * last_range_meters: the reading itself (the change filter).
+            #   * last_serviced_at + a service_events row: FULL (95%) while
+            #     parked after a parked low <= 50% since the last full reading
+            #     (never "any rise": a ride's sag-and-rebound is up to ~25%);
+            #   * range_low_since_full / _at / _lat / _lon: that low, and where;
+            #   * settled_range_meters / settling_until: for SETTLE_MINUTES
+            #     after a rental ends, the highest parked reading since.
             # NEW devices were inserted above with NULLs and are seeded here.
             full_m = full_battery_meters()
             low_m = service_from_meters()
             range_updates: list[dict] = []
+            service_rows: list[dict] = []
             for d in eligible:
                 r = d.current_range_meters
                 if r is None:
                     continue
                 p = prior.get(d.vehicle_identifier)
-                if p is not None and p[12] == r:
+                before = (servicing.ChargeState(*p[12:19]) if p is not None
+                          else servicing.ChargeState())
+                after, hit = servicing.step(
+                    before, r=r, t=snapshot_time, lat=d.lat, lon=d.lon,
+                    reserved=bool(d.is_reserved),
+                    in_rental_before=p is not None and p[6] is not None,
+                    full_m=full_m, low_m=low_m)
+                if hit is not None:
+                    service_rows.append(servicing.service_event_row(
+                        d.vehicle_identifier, hit, cycle_id=cycle_id,
+                        h3_9=d.h3_9_index, model=d.vehicle_model_name,
+                        after_absence=(p is not None and p[7] is not None
+                                       and p[7] < snapshot_time - ABSENT_STOP_AFTER)))
+                if after == before and p is not None:
                     continue
-                low = p[13] if p is not None else None
-                in_rental = bool(d.is_reserved) or (p is not None and p[6] is not None)
-                serviced = False
-                if not in_rental:
-                    if r >= full_m:
-                        serviced = low is not None and low <= low_m
-                        low = r
-                    else:
-                        low = r if low is None else min(low, r)
-                range_updates.append({"r": r, "t": snapshot_time, "low": low,
-                                      "svc": serviced, "v": d.vehicle_identifier})
+                range_updates.append({
+                    "r": r, "t": snapshot_time, "svc": hit is not None,
+                    "low": after.low, "low_at": after.low_at,
+                    "low_lat": after.low_lat, "low_lon": after.low_lon,
+                    "settled": after.settled, "until": after.settling_until,
+                    "v": d.vehicle_identifier})
             if range_updates:
                 cur.executemany(
                     """
@@ -1225,11 +1230,19 @@ def update_for_cycle(
                         last_serviced_at = CASE WHEN %(svc)s
                             THEN %(t)s ELSE last_serviced_at END,
                         range_low_since_full = %(low)s,
+                        range_low_at = %(low_at)s,
+                        range_low_lat = %(low_lat)s,
+                        range_low_lon = %(low_lon)s,
+                        settled_range_meters = %(settled)s,
+                        settling_until = %(until)s,
                         last_range_meters = %(r)s
                     WHERE vehicle_identifier = %(v)s
                     """,
                     range_updates,
                 )
+            if service_rows:
+                cur.executemany(servicing.INSERT_SERVICE_EVENT, service_rows)
+                stats.serviced = len(service_rows)
 
             if moved_updates:
                 cur.executemany(

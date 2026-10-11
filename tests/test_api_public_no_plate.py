@@ -82,6 +82,7 @@ _ROW = (
     None, None, None,             # 31-33 has_bell/cup_holder/phone_holder
     None,                         # 34 features_poor_condition
     None,                         # 35 has_basket
+    None, None,                   # 36-37 settled_range_meters, settling_until (sql/106)
 )
 
 
