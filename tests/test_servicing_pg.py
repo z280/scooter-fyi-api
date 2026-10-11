@@ -274,3 +274,26 @@ def test_backfill_keeps_an_ingest_visit_that_began_a_cycle_earlier(pg):
     before = _one(pg, "SELECT entered_at FROM depot_visits")[0]
     assert servicing.backfill_depot_visits()["visits"] == 0
     assert _one(pg, "SELECT COUNT(*), MIN(entered_at), MIN(source) FROM depot_visits") == (1, before, "ingest")
+
+
+def test_an_ingest_visit_at_another_depot_does_not_swallow_the_next_one(pg, monkeypatch):
+    """zneill-agent (#156): left depot A, entered depot B within 30 minutes.
+    The A visit (ingest) must not stop the backfill from writing the B one."""
+    from src import depots
+
+    a = depots.depots()[0]
+    b = {**a, "id": "test-depot-b", "lat": STREET_B[0], "lon": STREET_B[1]}
+    monkeypatch.setattr(depots, "depots", lambda: (a, b))
+    feed = _Feed(pg)
+    feed(5000)
+    feed(6000, at=DEPOT, gap=timedelta(hours=1))
+    left_a = feed(6000, at=_SPOT, gap=timedelta(minutes=10))
+    into_b = feed(6000, at=STREET_B, gap=timedelta(minutes=10))
+    with pg.cursor() as cur:                     # keep A (ingest); forget B
+        cur.execute("DELETE FROM depot_visits WHERE depot_id = 'test-depot-b'")
+    pg.commit()
+    assert _one(pg, "SELECT exited_at FROM depot_visits WHERE depot_id = %s", a["id"])[0] == left_a
+    stats = servicing.backfill_depot_visits()
+    assert stats["visits"] == 1
+    assert _one(pg, "SELECT entered_at, source FROM depot_visits WHERE depot_id = 'test-depot-b'") == (
+        into_b, "backfill")

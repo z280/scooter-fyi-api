@@ -398,10 +398,14 @@ def _write_backfilled_visit(cur, r: dict[str, Any], stats: dict[str, int]) -> No
     # ...and the reverse: ingest saw it inside a cycle or two BEFORE the
     # history's stop opened there (the stop opens when the move is confirmed),
     # so ingest's earlier entered_at is the better one. Keep it.
+    # Only the SAME stay counts: same depot, began at most 30 minutes before,
+    # and still open at the moment the history's stop opened (a vehicle that
+    # left depot A and entered depot B in that window is a new visit).
     cur.execute(
         "SELECT 1 FROM depot_visits WHERE vehicle_identifier = %s AND source = 'ingest' "
-        "AND entered_at <= %s AND entered_at >= %s - INTERVAL '30 minutes'",
-        (r["v"], r["in"], r["in"]))
+        "AND depot_id = %s AND entered_at <= %s AND entered_at >= %s - INTERVAL '30 minutes' "
+        "AND (exited_at IS NULL OR exited_at > %s)",
+        (r["v"], r["depot"], r["in"], r["in"], r["in"]))
     if cur.fetchone():
         return
     cur.execute(
