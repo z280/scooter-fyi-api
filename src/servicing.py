@@ -292,85 +292,98 @@ def effective_fleet(cur, now: datetime) -> dict[str, Any]:
 # Backfills (plan 1f) — idempotent; run once by hand after deploy
 # ---------------------------------------------------------------------------
 
-def backfill_depot_visits(batch_vehicles: int = 500) -> dict[str, int]:
+def backfill_depot_visits() -> dict[str, int]:
     """Depot visits from device_history (2026-05-31 onward): consecutive
     stops inside a depot are one visit. Keyed by (vehicle, entered_at), so a
-    rerun adds nothing and ingest-written visits are kept."""
+    rerun adds nothing and ingest-written visits are kept.
+
+    STREAMED through one server-side cursor in (vehicle, time) order, with
+    writes on a second connection committed every few hundred vehicles: the
+    first version fetched per batch of vehicles and grew ~0.35 MB per vehicle
+    until the scheduler container was OOM-killed (2026-10-11)."""
+    stats = {"vehicles": 0, "visits": 0, "replaced": 0}
+    inside = depots.sql_inside("lat", "lon")
+    with connection() as read, connection() as write:
+        # Reads and writes on SEPARATE connections: the named cursor lives in
+        # the read transaction, and only the write side commits. (WITH HOLD
+        # would survive a shared commit, but makes Postgres materialise the
+        # whole remaining result at the first commit.)
+        rc = read.cursor(name="depot_visit_backfill")
+        rc.itersize = 20_000
+        rc.execute(
+            f"""SELECT h.vehicle_identifier, h.snapshot_time, h.departed_at, h.lat, h.lon,
+                       h.departure_reason, h.vehicle_model_name
+                  FROM device_history h
+                 WHERE h.vehicle_identifier IN (
+                        SELECT DISTINCT vehicle_identifier FROM device_history WHERE {inside})
+                 ORDER BY h.vehicle_identifier, h.snapshot_time""")
+        wc = write.cursor()
+        cv, run, prev = None, None, None
+        for v, t, dep, lat, lon, why, model in rc:
+            if v != cv:
+                if run:
+                    _write_backfilled_visit(wc, run, stats)
+                if cv is not None:
+                    stats["vehicles"] += 1
+                    if stats["vehicles"] % 250 == 0:
+                        write.commit()
+                        log.info("backfill_depot_visits: %d vehicles, %d visits, %d replaced",
+                                 stats["vehicles"], stats["visits"], stats["replaced"])
+                cv, run, prev = v, None, None
+            where = depots.depot_at(lat, lon)
+            if where:
+                if run is None:
+                    run = {"v": v, "depot": where, "in": t, "last": dep or t, "model": model,
+                           "out": None, "dlat": None, "dlon": None,
+                           "pt": (prev[1] or prev[0]) if prev else None,
+                           "plat": prev[2] if prev else None, "plon": prev[3] if prev else None,
+                           "dark": (prev[4] == "absent") if prev else None}
+                else:
+                    run["last"] = dep or t
+            else:
+                if run:
+                    run.update(out=t, dlat=lat, dlon=lon)
+                    _write_backfilled_visit(wc, run, stats)
+                    run = None
+                prev = (t, dep, lat, lon, why)
+        if run:
+            _write_backfilled_visit(wc, run, stats)
+        if cv is not None:
+            stats["vehicles"] += 1
+        rc.close()
+        write.commit()
+    log.info("backfill_depot_visits: done %s", stats)
+    return stats
+
+
+def _write_backfilled_visit(cur, r: dict[str, Any], stats: dict[str, int]) -> None:
     from .device_state import _equity_area_of
 
-    stats = {"vehicles": 0, "visits": 0, "replaced": 0}
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(f"""SELECT DISTINCT vehicle_identifier FROM device_history
-                             WHERE {depots.sql_inside('lat', 'lon')}""")
-            vids = [r[0] for r in cur.fetchall()]
-        for i in range(0, len(vids), batch_vehicles):
-            chunk = vids[i:i + batch_vehicles]
-            with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT vehicle_identifier, snapshot_time, departed_at, lat, lon,
-                              departure_reason, vehicle_model_name
-                         FROM device_history WHERE vehicle_identifier = ANY(%s)
-                        ORDER BY vehicle_identifier, snapshot_time""", (chunk,))
-                rows = cur.fetchall()
-                visits = []
-                cv, run, prev = None, None, None
-                for v, t, dep, lat, lon, why, model in rows:
-                    if v != cv:
-                        if run:
-                            visits.append(run)
-                        cv, run, prev = v, None, None
-                    inside = depots.depot_at(lat, lon)
-                    if inside:
-                        if run is None:
-                            run = {"v": v, "depot": inside, "in": t, "last": dep or t,
-                                   "model": model, "out": None, "dlat": None, "dlon": None,
-                                   "pt": (prev[2] or prev[1]) if prev else None,
-                                   "plat": prev[3] if prev else None,
-                                   "plon": prev[4] if prev else None,
-                                   "dark": (prev[5] == "absent") if prev else None}
-                        else:
-                            run["last"] = dep or t
-                    else:
-                        if run:
-                            run.update(out=t, dlat=lat, dlon=lon)
-                            visits.append(run)
-                            run = None
-                        prev = (v, t, dep, lat, lon, why)
-                if run:
-                    visits.append(run)
-                for r in visits:
-                    # A vehicle already inside when ingest started tracking
-                    # depots got a visit opened at THAT cycle, not when it
-                    # really arrived. The history knows better: the backfilled
-                    # visit replaces any ingest visit that began inside it.
-                    cur.execute(
-                        "DELETE FROM depot_visits WHERE vehicle_identifier = %s "
-                        "AND source = 'ingest' AND entered_at > %s "
-                        "AND (%s::timestamptz IS NULL OR entered_at < %s)",
-                        (r["v"], r["in"], r["out"], r["out"]))
-                    stats["replaced"] = stats.get("replaced", 0) + cur.rowcount
-                    cur.execute(
-                        """
-                        INSERT INTO depot_visits (vehicle_identifier, depot_id, entered_at,
-                            last_inside_at, exited_at, picked_up_at, pickup_lat, pickup_lon,
-                            pickup_equity_area, went_dark_first, deploy_lat, deploy_lon,
-                            deploy_equity_area, vehicle_model_name, source)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'backfill')
-                        ON CONFLICT (vehicle_identifier, entered_at) DO NOTHING
-                        """,
-                        (r["v"], r["depot"], r["in"], r["last"], r["out"], r["pt"],
-                         r["plat"], r["plon"],
-                         _equity_area_of(float(r["plon"]), float(r["plat"])) if r["plat"] is not None else None,
-                         r["dark"], r["dlat"], r["dlon"],
-                         _equity_area_of(float(r["dlon"]), float(r["dlat"])) if r["dlat"] is not None else None,
-                         r["model"]))
-                    stats["visits"] += cur.rowcount
-            conn.commit()
-            stats["vehicles"] += len(chunk)
-            log.info("backfill_depot_visits: %d/%d vehicles, %d visits",
-                     stats["vehicles"], len(vids), stats["visits"])
-    return stats
+    # A vehicle already inside when ingest started tracking depots got a
+    # visit opened at THAT cycle, not when it really arrived. The history
+    # knows better: the backfilled visit replaces any ingest visit that began
+    # inside it.
+    cur.execute(
+        "DELETE FROM depot_visits WHERE vehicle_identifier = %s "
+        "AND source = 'ingest' AND entered_at > %s "
+        "AND (%s::timestamptz IS NULL OR entered_at < %s)",
+        (r["v"], r["in"], r["out"], r["out"]))
+    stats["replaced"] += cur.rowcount
+    cur.execute(
+        """
+        INSERT INTO depot_visits (vehicle_identifier, depot_id, entered_at,
+            last_inside_at, exited_at, picked_up_at, pickup_lat, pickup_lon,
+            pickup_equity_area, went_dark_first, deploy_lat, deploy_lon,
+            deploy_equity_area, vehicle_model_name, source)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'backfill')
+        ON CONFLICT (vehicle_identifier, entered_at) DO NOTHING
+        """,
+        (r["v"], r["depot"], r["in"], r["last"], r["out"], r["pt"], r["plat"], r["plon"],
+         _equity_area_of(float(r["plon"]), float(r["plat"])) if r["plat"] is not None else None,
+         r["dark"], r["dlat"], r["dlon"],
+         _equity_area_of(float(r["dlon"]), float(r["dlat"])) if r["dlat"] is not None else None,
+         r["model"]))
+    stats["visits"] += cur.rowcount
 
 
 def replay_charge(rows: Iterable[tuple], states: dict[str, ChargeState],

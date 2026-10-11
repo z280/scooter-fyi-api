@@ -31,9 +31,16 @@ STREET_B = (39.7400, -104.9900)
 def _wired(pg, monkeypatch):
     from contextlib import contextmanager
 
+    import os
+
+    import psycopg
+
     @contextmanager
     def _conn():
-        yield pg
+        # A real connection per call, as the pool gives in production: the
+        # depot backfill reads on one and commits on another.
+        with psycopg.connect(os.environ["VEO_TEST_PG_DSN"]) as c:
+            yield c
 
     monkeypatch.setattr(servicing, "connection", _conn)
     _wipe(pg)                      # the shared fixture does not know these tables
