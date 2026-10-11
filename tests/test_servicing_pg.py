@@ -31,9 +31,16 @@ STREET_B = (39.7400, -104.9900)
 def _wired(pg, monkeypatch):
     from contextlib import contextmanager
 
+    import os
+
+    import psycopg
+
     @contextmanager
     def _conn():
-        yield pg
+        # A real connection per call, as the pool gives in production: the
+        # depot backfill reads on one and commits on another.
+        with psycopg.connect(os.environ["VEO_TEST_PG_DSN"]) as c:
+            yield c
 
     monkeypatch.setattr(servicing, "connection", _conn)
     _wipe(pg)                      # the shared fixture does not know these tables
@@ -253,3 +260,40 @@ def test_the_raw_buffer_replay_stops_where_ingest_started(pg):
                              until=t_full + timedelta(hours=1))   # the fixture lives in 2031
     assert out["rows"] == 2 and out["inserted"] == 1
     assert _one(pg, "SELECT observed_at, source FROM service_events") == (t_full, "backfill")
+
+
+def test_backfill_keeps_an_ingest_visit_that_began_a_cycle_earlier(pg):
+    """Ingest saw the vehicle inside one cycle before the history's stop
+    opened there: the ingest visit stands, no duplicate is added."""
+    feed = _Feed(pg)
+    feed(5000)
+    feed(6000, at=DEPOT, gap=timedelta(hours=1))
+    with pg.cursor() as cur:
+        cur.execute("UPDATE depot_visits SET entered_at = entered_at - INTERVAL '2 minutes'")
+    pg.commit()
+    before = _one(pg, "SELECT entered_at FROM depot_visits")[0]
+    assert servicing.backfill_depot_visits()["visits"] == 0
+    assert _one(pg, "SELECT COUNT(*), MIN(entered_at), MIN(source) FROM depot_visits") == (1, before, "ingest")
+
+
+def test_an_ingest_visit_at_another_depot_does_not_swallow_the_next_one(pg, monkeypatch):
+    """zneill-agent (#156): left depot A, entered depot B within 30 minutes.
+    The A visit (ingest) must not stop the backfill from writing the B one."""
+    from src import depots
+
+    a = depots.depots()[0]
+    b = {**a, "id": "test-depot-b", "lat": STREET_B[0], "lon": STREET_B[1]}
+    monkeypatch.setattr(depots, "depots", lambda: (a, b))
+    feed = _Feed(pg)
+    feed(5000)
+    feed(6000, at=DEPOT, gap=timedelta(hours=1))
+    left_a = feed(6000, at=_SPOT, gap=timedelta(minutes=10))
+    into_b = feed(6000, at=STREET_B, gap=timedelta(minutes=10))
+    with pg.cursor() as cur:                     # keep A (ingest); forget B
+        cur.execute("DELETE FROM depot_visits WHERE depot_id = 'test-depot-b'")
+    pg.commit()
+    assert _one(pg, "SELECT exited_at FROM depot_visits WHERE depot_id = %s", a["id"])[0] == left_a
+    stats = servicing.backfill_depot_visits()
+    assert stats["visits"] == 1
+    assert _one(pg, "SELECT entered_at, source FROM depot_visits WHERE depot_id = 'test-depot-b'") == (
+        into_b, "backfill")
