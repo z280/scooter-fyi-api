@@ -83,6 +83,7 @@ _ROW = (
     None,                         # 34 features_poor_condition
     None,                         # 35 has_basket
     None, None,                   # 36-37 settled_range_meters, settling_until (sql/107)
+    None,                         # 38 last_serviced_at (sql/107)
 )
 
 

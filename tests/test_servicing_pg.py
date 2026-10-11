@@ -153,3 +153,48 @@ def test_census_absence_kind(pg, pos, rng, kind):
     got = _one(pg, f"SELECT {servicing.absence_kind_sql()} FROM device_state ds "
                    "WHERE ds.vehicle_identifier = %s", _vid(1))[0]
     assert got == kind
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: the admin watch's servicing events, the /fleet/service summary
+# ---------------------------------------------------------------------------
+
+def test_admin_watch_names_this_cycles_servicing(pg):
+    from src import admin_watch
+
+    feed = _Feed(pg)
+    feed(4000)
+    t = feed(FULL)
+    from src.quality import compute_battery_percent
+
+    with pg.cursor() as cur:
+        assert admin_watch.servicing_changes(cur, [_vid(1)], t) == {
+            _vid(1): [f"got a fresh battery in place ({compute_battery_percent(4000)}% to 100%)"]}
+    entered = feed(FULL, at=DEPOT, gap=timedelta(hours=1))
+    with pg.cursor() as cur:
+        assert admin_watch.servicing_changes(cur, [_vid(1)], entered) == {
+            _vid(1): ["was taken into the depot"]}
+    out = feed(FULL, at=STREET_B, gap=timedelta(hours=30))
+    with pg.cursor() as cur:
+        assert admin_watch.servicing_changes(cur, [_vid(1)], out) == {
+            _vid(1): ["is back from the depot after 30 h"]}
+
+
+def test_fleet_service_summary(pg, monkeypatch):
+    from src import fleet_service
+
+    monkeypatch.setattr(fleet_service, "connection", servicing.connection)
+    feed = _Feed(pg)
+    feed(2000)                                    # waits empty in Denver
+    feed(2000, gap=timedelta(hours=3))
+    feed(FULL)
+    feed(FULL, at=DEPOT, gap=timedelta(hours=1))
+    feed(FULL, at=STREET_B, gap=timedelta(hours=80))
+    out = fleet_service.summarize("28d", feed.t)
+    assert out["swaps"]["count"] == 1 and out["swaps"]["share_in_place"] == 1.0
+    wait = out["swap_wait"]
+    groups = [g for g in ("equity_areas", "rest_of_denver") if wait[g]]
+    assert len(groups) == 1 and wait[groups[0]]["median_hours"] == pytest.approx(3.0, abs=0.1)
+    assert out["depot"]["visits"] == 1 and out["depot"]["stay"]["3_to_7d"] == 1
+    assert out["fleet"]["inside_depot"] == 0
+    assert out["caveats"]

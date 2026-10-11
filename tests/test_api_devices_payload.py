@@ -53,6 +53,7 @@ _ROW = (
     None,                         # 34 features_poor_condition
     None,                         # 35 has_basket
     None, None,                   # 36-37 settled_range_meters, settling_until (sql/107)
+    None,                         # 38 last_serviced_at (sql/107)
 )
 
 _RANK_FIELDS = (
@@ -107,6 +108,7 @@ def _fake_db(monkeypatch):
     # a FAILED pass now (correctly) reads every vehicle "unknown". These tests
     # mean "the pass ran and found no reports".
     monkeypatch.setattr(api_public, "_negative_states", lambda cycle_id: {})
+    monkeypatch.setattr(api_public, "_depot_exits", lambda now: {})
     monkeypatch.setattr(
         api_public, "stats_for_cycle",
         lambda cycle_id, snapshot_time: {

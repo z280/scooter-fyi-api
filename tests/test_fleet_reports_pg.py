@@ -355,7 +355,8 @@ def test_latest_report_is_the_newest_uncleared_one_not_the_strongest(fleet):
     assert lr == {"report_type": "not_rideable", "reason": "flat_tire",
                   "observed_at": (SNAP - timedelta(hours=5)).isoformat(),
                   "reported_at": (SNAP - timedelta(hours=3)).isoformat(),
-                  "anonymous": True}                              # parking excluded
+                  "anonymous": True,                              # parking excluded
+                  "serviced_since": None}                         # sql/107, none since
     # A cleared report drops out; the next newest takes its place.
     with fleet.conn.cursor() as cur:
         cur.execute("UPDATE device_reports SET resolved_at = NOW(), resolution_source = "

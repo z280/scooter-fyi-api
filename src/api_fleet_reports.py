@@ -520,6 +520,25 @@ def _summary_rows(data: dict[str, Any]) -> list[tuple[str, int, str]]:
         rows.append((f"not_rideable_reason_{r['reason']}", r["reports"], ""))
     for decoy, n in problems["remapped"].items():
         rows.append((f"remapped_from_{decoy}", n, ""))
+    svc = data.get("service")
+    if svc:
+        sw, wait, dep, fl = svc["swaps"], svc["swap_wait"], svc["depot"], svc["fleet"]
+        rows += [
+            ("battery_swaps", sw["count"], ""),
+            ("battery_swaps_per_day", sw["per_day"], ""),
+            ("battery_swaps_share_in_place", sw["share_in_place"], ""),
+            ("swap_wait_median_hours_equity_areas",
+             (wait["equity_areas"] or {}).get("median_hours"), ""),
+            ("swap_wait_median_hours_rest_of_denver",
+             (wait["rest_of_denver"] or {}).get("median_hours"), ""),
+            ("depot_visits", dep["visits"], ""),
+            ("depot_median_stay_hours", dep["median_stay_hours"], ""),
+            ("fleet_on_street_24h", fl["on_street_24h"], ""),
+            ("fleet_inside_depot", fl["inside_depot"], ""),
+            ("fleet_inside_depot_30d_plus", fl["inside_depot_30d_plus"], ""),
+        ]
+        rows += [("depot_share_3_days_plus", m["share_3_days_plus"], m["model"])
+                 for m in dep["by_model"]]
     return rows
 
 
@@ -549,6 +568,13 @@ def reports_export(
                 unmoved_days=unmoved_days)
             parts = fleet_reports.broken_parts_summary(cur, since=since, until=snap)
             problems = fleet_reports.reasons_summary(cur, since=since, until=snap)
+    # docs/SERVICING_PLAN.md 2d: how the fleet is serviced, same window.
+    from . import fleet_service
+    try:
+        service = fleet_service.summarize(f"{window_days}d", snap, days=window_days)
+    except Exception:  # noqa: BLE001 — the report numbers stand on their own
+        log.warning("reports export: servicing summary unavailable")
+        service = None
     data = {
         "as_of": _iso(snap),
         "window": {"days": window_days, "from": _iso(since), "to": _iso(snap)},
@@ -556,6 +582,7 @@ def reports_export(
         "inaccessible": inacc,
         "broken_parts": parts,
         "problem_reports": problems,
+        "service": service,
     }
     if format == "json":
         return data
