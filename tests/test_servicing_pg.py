@@ -44,6 +44,7 @@ def _wired(pg, monkeypatch):
 
 def _wipe(conn):
     with conn.cursor() as cur:
+        cur.execute("DELETE FROM raw_telemetry_points WHERE vehicle_identifier LIKE '9e0%%'")
         for t in ("trip_events", "device_history", "device_state", "snapshot_metadata_core",
                   "device_state_processed_cycles", "service_events", "depot_visits"):
             cur.execute(f"DELETE FROM {t}")
@@ -198,3 +199,57 @@ def test_fleet_service_summary(pg, monkeypatch):
     assert out["depot"]["visits"] == 1 and out["depot"]["stay"]["3_to_7d"] == 1
     assert out["fleet"]["inside_depot"] == 0
     assert out["caveats"]
+
+
+def test_backfill_replaces_a_visit_ingest_opened_late(pg):
+    """A vehicle already inside the depot when sql/107 deployed: ingest opens a
+    visit at the first cycle it sees it, the backfill knows when it really
+    arrived and replaces it, and ingest then closes the backfilled one."""
+    feed = _Feed(pg)
+    feed(5000)
+    arrived = feed(6000, at=DEPOT, gap=timedelta(hours=1))
+    with pg.cursor() as cur:                     # pretend ingest saw it only later
+        cur.execute("DELETE FROM depot_visits")
+    pg.commit()
+    late = feed(FULL, at=DEPOT_JITTER, gap=timedelta(hours=5))
+    assert _one(pg, "SELECT entered_at, source FROM depot_visits") == (late, "ingest")
+    with pg.cursor() as cur:                     # the "already inside" visit was not opened
+        cur.execute("DELETE FROM depot_visits")
+        cur.execute("INSERT INTO depot_visits (vehicle_identifier, depot_id, entered_at) "
+                    "VALUES (%s, 'veo-denver-federal-72nd', %s)", (_vid(1), late))
+    pg.commit()
+    stats = servicing.backfill_depot_visits()
+    assert stats["replaced"] == 1 and stats["visits"] == 1
+    assert _one(pg, "SELECT entered_at, exited_at, source FROM depot_visits") == (arrived, None, "backfill")
+    out = feed(FULL, at=STREET_B, gap=timedelta(hours=2))
+    assert _one(pg, "SELECT entered_at, exited_at FROM depot_visits") == (arrived, out)
+
+
+def test_the_raw_buffer_replay_stops_where_ingest_started(pg):
+    """The tail of backfill_service_events: replay raw_telemetry_points after
+    the archive, up to the first ingest-written event, without duplicating it."""
+    feed = _Feed(pg)
+    feed(3000)
+    t_full = feed(FULL)
+    # raw_telemetry_points is not written by _observe; seed the two readings
+    from src.servicing import _replay_raw_buffer
+    with pg.cursor() as cur:
+        cur.execute("SELECT cycle_id, snapshot_time FROM snapshot_metadata_core ORDER BY snapshot_time")
+        cycles = cur.fetchall()
+        for (cid, t), rng in zip(cycles, (3000, FULL)):
+            cur.execute("INSERT INTO raw_telemetry_points (cycle_id, snapshot_time, device_id, "
+                        "form_factor, spatial_status, vehicle_identifier, latitude, longitude, "
+                        "current_range_meters, is_reserved) "
+                        "VALUES (%s, %s, 'bike-1', 'scooter', 'denver_core', %s, %s, %s, %s, FALSE)",
+                        (cid, t, _vid(1), _SPOT[0], _SPOT[1], rng))
+    pg.commit()
+    assert _one(pg, "SELECT COUNT(*) FROM service_events")[0] == 1          # ingest's
+    out = _replay_raw_buffer({}, {}, {}, None, timedelta(hours=1))
+    assert out["rows"] == 1 and out["inserted"] == 0                       # stops before ingest's event
+    with pg.cursor() as cur:
+        cur.execute("DELETE FROM service_events")
+    pg.commit()
+    out = _replay_raw_buffer({}, {}, {}, None, timedelta(hours=1),
+                             until=t_full + timedelta(hours=1))   # the fixture lives in 2031
+    assert out["rows"] == 2 and out["inserted"] == 1
+    assert _one(pg, "SELECT observed_at, source FROM service_events") == (t_full, "backfill")
