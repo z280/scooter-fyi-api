@@ -22,8 +22,8 @@ from fastapi.testclient import TestClient
 psycopg = pytest.importorskip("psycopg")
 
 from src import (  # noqa: E402
-    accounts, admin_watch, api_admin, api_fleet_reports, api_public, auth,
-    condition_checks, dwell_stats,
+    accounts, admin_watch, api_admin, api_fleet_admin, api_fleet_reports,
+    api_public, auth, condition_checks, dwell_stats,
 )
 from src.comms import OptedOut  # noqa: E402
 from src.ingest import TaggedDevice  # noqa: E402
@@ -107,8 +107,8 @@ def fleet(monkeypatch):
         with psycopg.connect(dsn) as c:
             yield c
 
-    for mod in (api_admin, api_fleet_reports, api_public, admin_watch, condition_checks,
-                dwell_stats, accounts):
+    for mod in (api_admin, api_fleet_admin, api_fleet_reports, api_public, admin_watch,
+                condition_checks, dwell_stats, accounts):
         monkeypatch.setattr(mod, "connection", _per_request_connection)
     dwell_stats._cache.clear()
     sent: list[dict] = []

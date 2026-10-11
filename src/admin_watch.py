@@ -205,13 +205,26 @@ def subscribe(*, vehicle_identifier: str, account_email: str, login: str,
     return {"id": int(watch_id), "expires_at": expires_at}
 
 
-def unsubscribe(watch_id: int, *, login: str) -> bool:
+def unsubscribe(watch_id: int, *, login: str, account_id: int | None = None) -> bool:
+    """End a live watch. False when there is no live watch to end.
+
+    `account_id` scopes the update to the watch on THAT account's phone, and
+    the account-session API passes it so one admin cannot stop a watch texting
+    another admin's phone. The /admin pages pass nothing and keep their
+    administrator-wide reach: that surface is the full desk, and an operator
+    sitting at it may need to stop a watch for a colleague who has gone home.
+    """
+    where = "WHERE id = %s AND ended_at IS NULL"
+    params: list[Any] = [END_UNSUBSCRIBED, login, watch_id]
+    if account_id is not None:
+        where += " AND account_id = %s"
+        params.append(account_id)
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE admin_device_watches SET ended_at = NOW(), ended_reason = %s, "
-                "ended_by_login = %s WHERE id = %s AND ended_at IS NULL",
-                (END_UNSUBSCRIBED, login, watch_id),
+                f"ended_by_login = %s {where}",
+                params,
             )
             changed = cur.rowcount
         conn.commit()

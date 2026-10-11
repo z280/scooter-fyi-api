@@ -502,14 +502,20 @@ class NotRiderResolved(Exception):
     """Only a rider-check resolution can be reinstated."""
 
 
-def reinstate_report(cur, report_id: int, *, login: str, reason: str) -> None:
+def reinstate_report(cur, report_id: int, *, reason: str,
+                     login: str | None = None, account_id: int | None = None) -> None:
     """Undo a RIDER's resolution (plan §4.4, "Griefing controls"): a false
     "no longer a problem" un-hides a vehicle, and an admin can put the
     report back. An ADMIN's resolution is final and is refused. The rider's
     answer stays in device_condition_check_answers, and who reinstated it
     and why is stamped on the report, so the history is not erased.
     Points already paid for the check are not clawed back (the ledger is
-    append-only)."""
+    append-only).
+
+    Attributed in whichever capacity the admin acted, exactly as
+    `resolve_report` is: `account_id` when they came through the in-app
+    console (an account session), `login` when they came through the /admin
+    pages (a GitHub session with no rider account)."""
     cur.execute(
         """
         UPDATE device_reports
@@ -517,11 +523,11 @@ def reinstate_report(cur, report_id: int, *, login: str, reason: str) -> None:
                resolution_source = NULL, resolved_by_login = NULL,
                resolved_by_check_id = NULL,
                reinstated_at = NOW(), reinstated_by_login = %s,
-               reinstate_reason = %s
+               reinstated_by = %s, reinstate_reason = %s
          WHERE id = %s AND resolution_source = %s
         RETURNING id
         """,
-        (login, reason, report_id, RESOLUTION_SOURCE_RIDER_CHECK),
+        (login, account_id, reason, report_id, RESOLUTION_SOURCE_RIDER_CHECK),
     )
     if cur.fetchone() is not None:
         return

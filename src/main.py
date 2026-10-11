@@ -50,6 +50,7 @@ from .api_tracked_rides import router as tracked_rides_router
 from .api_route import router as route_router
 from .api_user import router as user_router
 from .api_vehicle_plates import router as vehicle_plates_router
+from .api_fleet_admin import router as fleet_admin_router
 from .api_fleet_reports import router as fleet_reports_router
 from . import log_redaction
 from . import payload_cache
@@ -141,6 +142,7 @@ app.include_router(vehicle_plates_router)
 app.include_router(admin_router)
 app.include_router(private_router)
 app.include_router(fleet_reports_router)
+app.include_router(fleet_admin_router)
 app.include_router(reports_router)
 app.include_router(auth_router)
 app.include_router(profile_router)
