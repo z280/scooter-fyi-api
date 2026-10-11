@@ -260,3 +260,17 @@ def test_the_raw_buffer_replay_stops_where_ingest_started(pg):
                              until=t_full + timedelta(hours=1))   # the fixture lives in 2031
     assert out["rows"] == 2 and out["inserted"] == 1
     assert _one(pg, "SELECT observed_at, source FROM service_events") == (t_full, "backfill")
+
+
+def test_backfill_keeps_an_ingest_visit_that_began_a_cycle_earlier(pg):
+    """Ingest saw the vehicle inside one cycle before the history's stop
+    opened there: the ingest visit stands, no duplicate is added."""
+    feed = _Feed(pg)
+    feed(5000)
+    feed(6000, at=DEPOT, gap=timedelta(hours=1))
+    with pg.cursor() as cur:
+        cur.execute("UPDATE depot_visits SET entered_at = entered_at - INTERVAL '2 minutes'")
+    pg.commit()
+    before = _one(pg, "SELECT entered_at FROM depot_visits")[0]
+    assert servicing.backfill_depot_visits()["visits"] == 0
+    assert _one(pg, "SELECT COUNT(*), MIN(entered_at), MIN(source) FROM depot_visits") == (1, before, "ingest")

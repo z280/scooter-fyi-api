@@ -395,6 +395,15 @@ def _write_backfilled_visit(cur, r: dict[str, Any], stats: dict[str, int]) -> No
         "AND (%s::timestamptz IS NULL OR entered_at < %s)",
         (r["v"], r["in"], r["out"], r["out"]))
     stats["replaced"] += cur.rowcount
+    # ...and the reverse: ingest saw it inside a cycle or two BEFORE the
+    # history's stop opened there (the stop opens when the move is confirmed),
+    # so ingest's earlier entered_at is the better one. Keep it.
+    cur.execute(
+        "SELECT 1 FROM depot_visits WHERE vehicle_identifier = %s AND source = 'ingest' "
+        "AND entered_at <= %s AND entered_at >= %s - INTERVAL '30 minutes'",
+        (r["v"], r["in"], r["in"]))
+    if cur.fetchone():
+        return
     cur.execute(
         """
         INSERT INTO depot_visits (vehicle_identifier, depot_id, entered_at,
